@@ -69,6 +69,11 @@ endif()
 # MuPDF will be wired in during Phase 1 (Document core). Deliberately omitted
 # here to keep Phase 0 build time small and isolate bootstrap failures.
 
+# --- litepdf-cli (console demo / benchmark harness) -----------------------
+add_executable(litepdf-cli src/cli/main.cpp)
+litepdf_apply_flags(litepdf-cli)
+target_link_libraries(litepdf-cli PRIVATE litepdf_core)
+
 # --- Tests ----------------------------------------------------------------
 include(CTest)
 if(BUILD_TESTING)
