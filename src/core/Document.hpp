@@ -14,7 +14,10 @@
 
 // Forward-declare fz_context so this header can expose clone_context() without
 // pulling in <mupdf/fitz.h>. The PIMPL stays MuPDF-free for public consumers.
-// Must match MuPDF's declaration exactly: `typedef struct fz_context fz_context;`
+// In C++ a bare struct-tag forward declaration is compatible with MuPDF's
+// `typedef struct fz_context fz_context;` — the struct tag and typedef name
+// can coexist in the same TU without conflict. We use this simpler form so
+// Document.hpp stays free of MuPDF headers (PIMPL discipline).
 struct fz_context;
 
 namespace litepdf::core {

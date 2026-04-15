@@ -113,6 +113,11 @@ struct RenderEngine::Impl {
             if (impl->cache) {
                 fz_pixmap* cached = impl->cache->get_pixmap(req.page_num, req.scale);
                 if (cached) {
+                    // D3: L1-hit fast path still honors late cancellation before callback.
+                    if (canceled && canceled->load()) {
+                        fz_drop_pixmap(ctx, cached);
+                        continue;
+                    }
                     if (req.on_complete) req.on_complete(cached, ctx);
                     else fz_drop_pixmap(ctx, cached);
                     continue;  // skip MuPDF work entirely

@@ -3,6 +3,7 @@
 #include "core/RenderEngine.hpp"
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -32,12 +33,23 @@ TEST_CASE("RenderEngine runs higher-priority tasks before lower", "[core][render
     };
 
     // Gate: hold the worker with a slow P0 so we can stack priorities.
+    std::mutex gate_m;
+    std::condition_variable gate_cv;
+    bool gate_entered = false;
     engine.submit({99, 0, 1.0f, [&](fz_pixmap* p, fz_context* ctx){
+        {
+            std::lock_guard<std::mutex> g(gate_m);
+            gate_entered = true;
+            gate_cv.notify_all();
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         { std::lock_guard<std::mutex> g(m); order.push_back(99); }
         if (p) fz_drop_pixmap(ctx, p);
     }});
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    {
+        std::unique_lock<std::mutex> lk(gate_m);
+        gate_cv.wait(lk, [&]{ return gate_entered; });
+    }
 
     // Now stack P2, P0, P1 — expect P0 first, then P1, then P2.
     push(2, 2);
@@ -62,12 +74,23 @@ TEST_CASE("RenderEngine runs same-priority tasks in FIFO order", "[core][render]
     std::mutex m;
 
     // Gate
+    std::mutex gate_m;
+    std::condition_variable gate_cv;
+    bool gate_entered = false;
     engine.submit({99, 0, 1.0f, [&](fz_pixmap* p, fz_context* ctx){
+        {
+            std::lock_guard<std::mutex> g(gate_m);
+            gate_entered = true;
+            gate_cv.notify_all();
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         { std::lock_guard<std::mutex> g(m); order.push_back(99); }
         if (p) fz_drop_pixmap(ctx, p);
     }});
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    {
+        std::unique_lock<std::mutex> lk(gate_m);
+        gate_cv.wait(lk, [&]{ return gate_entered; });
+    }
 
     // 4 tasks all at P1, submitted A,B,C,D — expect FIFO
     for (int tag : {10, 20, 30, 40}) {

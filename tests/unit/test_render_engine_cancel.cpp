@@ -3,6 +3,8 @@
 #include "core/RenderEngine.hpp"
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 
 // Task 7 post-review: callbacks that hit the callback path must drop the
@@ -20,11 +22,22 @@ TEST_CASE("RenderEngine::cancel before worker picks up skips callback", "[core][
     litepdf::core::RenderEngine engine(doc, 1);
 
     // Gate the single worker with a slow P0 so the next submission waits in queue.
-    engine.submit({99, 0, 1.0f, [](fz_pixmap* p, fz_context* ctx){
+    std::mutex gate_m;
+    std::condition_variable gate_cv;
+    bool gate_entered = false;
+    engine.submit({99, 0, 1.0f, [&](fz_pixmap* p, fz_context* ctx){
+        {
+            std::lock_guard<std::mutex> g(gate_m);
+            gate_entered = true;
+            gate_cv.notify_all();
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(80));
         if (p) fz_drop_pixmap(ctx, p);
     }});
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    {
+        std::unique_lock<std::mutex> lk(gate_m);
+        gate_cv.wait(lk, [&]{ return gate_entered; });
+    }
 
     std::atomic<int> calls{0};
     auto tok = engine.submit({1, 2, 1.0f, [&](fz_pixmap* p, fz_context* ctx){
@@ -45,11 +58,22 @@ TEST_CASE("RenderEngine::cancel_all_below_priority cancels less-urgent queued ta
     litepdf::core::RenderEngine engine(doc, 1);
 
     // Gate
-    engine.submit({99, 0, 1.0f, [](fz_pixmap* p, fz_context* ctx){
+    std::mutex gate_m;
+    std::condition_variable gate_cv;
+    bool gate_entered = false;
+    engine.submit({99, 0, 1.0f, [&](fz_pixmap* p, fz_context* ctx){
+        {
+            std::lock_guard<std::mutex> g(gate_m);
+            gate_entered = true;
+            gate_cv.notify_all();
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(80));
         if (p) fz_drop_pixmap(ctx, p);
     }});
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    {
+        std::unique_lock<std::mutex> lk(gate_m);
+        gate_cv.wait(lk, [&]{ return gate_entered; });
+    }
 
     std::atomic<int> p1_calls{0};
     std::atomic<int> p2_calls{0};
