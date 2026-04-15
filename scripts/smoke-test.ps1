@@ -1,10 +1,10 @@
 #!/usr/bin/env pwsh
+#Requires -Version 5.1
 # Phase 0 smoke test: build, run briefly, verify window opens and exe is under budget.
 # Exits non-zero on any failure; CI uses this as the final gate.
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
-Set-Location $repoRoot
 
 $exe = Join-Path $repoRoot "build/Release/litepdf.exe"
 
@@ -20,17 +20,27 @@ if ($size -gt $maxBytes) {
 }
 Write-Host "[OK] exe size: $size bytes"
 
-# Launch briefly, verify process starts and window appears, then kill.
+# Launch and poll for a valid MainWindowHandle. On slow HDDs / cold-cache CI runners
+# the window may take longer than a single fixed sleep to appear; poll up to 5 s.
 $proc = Start-Process -FilePath $exe -PassThru
-Start-Sleep -Milliseconds 800
-if ($proc.HasExited) {
-    throw "litepdf.exe exited immediately (exit code $($proc.ExitCode))"
+$deadline = (Get-Date).AddSeconds(5)
+$hwnd = [IntPtr]::Zero
+while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Milliseconds 100
+    if ($proc.HasExited) {
+        throw "litepdf.exe exited during startup (exit code $($proc.ExitCode))"
+    }
+    $proc.Refresh()
+    if ($proc.MainWindowHandle -ne [IntPtr]::Zero) {
+        $hwnd = $proc.MainWindowHandle
+        break
+    }
 }
-if (-not $proc.MainWindowHandle -or $proc.MainWindowHandle -eq [IntPtr]::Zero) {
+if ($hwnd -eq [IntPtr]::Zero) {
     Stop-Process -Id $proc.Id -Force
-    throw "litepdf.exe did not create a main window within 800 ms"
+    throw "litepdf.exe did not create a main window within 5 s"
 }
-Write-Host "[OK] main window handle: $($proc.MainWindowHandle)"
+Write-Host "[OK] main window handle: $hwnd"
 
 Stop-Process -Id $proc.Id -Force
 Write-Host "[OK] Phase 0 smoke test passed."
