@@ -38,9 +38,9 @@ public:
     };
 
     struct RenderRequest {
-        int page_num;
-        int priority;       // 0 = highest; 1 = adjacent; 2 = prefetch
-        float scale;        // 1.0 = 72 dpi
+        int   page_num  = 0;
+        int   priority  = 0;     // 0 = highest; 1 = adjacent; 2 = prefetch
+        float scale     = 1.0f;  // 1.0 = 72 dpi
         std::function<void(fz_pixmap*, fz_context*)> on_complete;
     };
 
