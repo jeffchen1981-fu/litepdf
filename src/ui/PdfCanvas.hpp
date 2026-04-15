@@ -31,6 +31,10 @@ public:
     // Pass nullptr to clear.
     void set_view(litepdf::core::DocumentView* view);
 
+    // When true, on first real-bitmap paint the canvas calls
+    // ColdStartTimer::emit_if_complete(true) so the line is mirrored to stderr.
+    void set_log_timings(bool on) { log_timings_ = on; }
+
 private:
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
     static void register_class_once(HINSTANCE hInstance);
@@ -44,6 +48,7 @@ private:
     LRESULT on_key_down(WPARAM key);
 
     HWND hwnd_ = nullptr;
+    bool log_timings_ = false;
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

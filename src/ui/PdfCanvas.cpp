@@ -2,6 +2,7 @@
 #include "ui/PdfCanvas.hpp"
 
 #include "core/DocumentView.hpp"
+#include "ui/ColdStartTimer.hpp"
 
 #include <d2d1.h>
 #include <d2d1_1.h>
@@ -215,6 +216,7 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // both re-render, and we don't try to preserve the view point.
             impl_->pan_x = 0.0f;
             impl_->pan_y = 0.0f;
+            ColdStartTimer::mark(3);  // First pixmap converted to D2D bitmap.
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         }
@@ -340,6 +342,8 @@ void PdfCanvas::on_paint() {
         ValidateRect(hwnd_, nullptr);  // nothing to do
         return;
     }
+    const bool had_bitmap = static_cast<bool>(impl_->current_bitmap);
+
     impl_->rt->BeginDraw();
     impl_->rt->Clear(D2D1::ColorF(0xF0F0F0));  // light gray
 
@@ -369,6 +373,11 @@ void PdfCanvas::on_paint() {
         resubmit_current_page();
         // Next paint rebuilds; schedule one.
         InvalidateRect(hwnd_, nullptr, FALSE);
+    } else if (SUCCEEDED(hr) && had_bitmap) {
+        // T4 — first paint that actually drew a real bitmap. mark()/emit
+        // are both idempotent so subsequent paints are no-ops.
+        ColdStartTimer::mark(4);
+        ColdStartTimer::emit_if_complete(log_timings_);
     }
     ValidateRect(hwnd_, nullptr);
 }

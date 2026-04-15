@@ -3,6 +3,7 @@
 #include "MainMenu.rc.h"
 
 #include "core/Document.hpp"
+#include "ui/ColdStartTimer.hpp"
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -111,6 +112,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         case WM_CREATE: {
             canvas_ = std::make_unique<PdfCanvas>(
                 reinterpret_cast<CREATESTRUCTW*>(l)->hInstance, hwnd);
+            canvas_->set_log_timings(log_timings_);
             DragAcceptFiles(hwnd, TRUE);
             return 0;
         }
@@ -227,6 +229,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 delete dv;
                 return 0;
             }
+            ColdStartTimer::mark(2);  // Document fully loaded.
             view_.reset(dv);  // may destroy the old view (joins old workers)
             {
                 const auto& path = view_->source_path();
@@ -278,7 +281,8 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     return DefWindowProcW(hwnd, msg, w, l);
 }
 
-int MainWindow::run(HINSTANCE hInstance, int nCmdShow) {
+int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
+                    const std::filesystem::path& initial_path) {
     INITCOMMONCONTROLSEX icc = { sizeof(icc),
         ICC_STANDARD_CLASSES | ICC_TAB_CLASSES |
         ICC_TREEVIEW_CLASSES | ICC_LISTVIEW_CLASSES };
@@ -313,7 +317,12 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow) {
     haccel_ = CreateAcceleratorTableW(accels, _countof(accels));
 
     ShowWindow(hwnd_, nCmdShow);
+    ColdStartTimer::mark(1);  // Window visible.
     UpdateWindow(hwnd_);
+
+    if (!initial_path.empty()) {
+        open_async(initial_path);
+    }
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {

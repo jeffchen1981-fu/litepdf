@@ -18,8 +18,15 @@ public:
     MainWindow& operator=(const MainWindow&) = delete;
 
     // Registers window class, creates HWND, runs message pump.
+    // If initial_path is non-empty, opens it asynchronously after ShowWindow.
     // Returns WM_QUIT's wParam (0 on clean exit).
-    int run(HINSTANCE hInstance, int nCmdShow);
+    int run(HINSTANCE hInstance, int nCmdShow,
+            const std::filesystem::path& initial_path = {});
+
+    // When true, PdfCanvas mirrors the cold-start timing line to stderr in
+    // addition to OutputDebugStringW. Set before run().
+    void set_log_timings(bool on) { log_timings_ = on; }
+    bool log_timings() const { return log_timings_; }
 
 private:
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -33,6 +40,7 @@ private:
     std::unique_ptr<PdfCanvas>                   canvas_;
     std::unique_ptr<litepdf::core::DocumentView> view_;
     std::atomic<int>                             open_epoch_{0};
+    bool                                         log_timings_ = false;
 };
 
 }  // namespace litepdf::ui
