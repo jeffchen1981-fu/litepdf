@@ -46,6 +46,13 @@ struct PageCache::Impl {
     std::list<L1Key> l1_lru;  // front = most recent, back = oldest
     std::unordered_map<L1Key, L1Entry, L1KeyHash> l1_map;
 
+    struct L2Entry {
+        fz_display_list* list;
+        std::list<int>::iterator lru_it;
+    };
+    std::list<int> l2_lru;  // front = most recent, back = oldest
+    std::unordered_map<int, L2Entry> l2_map;
+
     Impl(std::size_t l1_cap, std::size_t l2_cap, fz_context* c)
         : ctx(c), l1_capacity(l1_cap), l2_capacity(l2_cap) {}
 
@@ -60,6 +67,18 @@ struct PageCache::Impl {
         }
         l1_lru.pop_back();
     }
+
+    // Caller must hold mtx.
+    void evict_oldest_l2() {
+        if (l2_lru.empty()) return;
+        const int oldest = l2_lru.back();  // copy, not ref — erase invalidates
+        auto it = l2_map.find(oldest);
+        if (it != l2_map.end()) {
+            fz_drop_display_list(ctx, it->second.list);
+            l2_map.erase(it);
+        }
+        l2_lru.pop_back();
+    }
 };
 
 PageCache::PageCache(std::size_t l1_capacity, std::size_t l2_capacity, fz_context* ctx)
@@ -73,6 +92,11 @@ PageCache::~PageCache() {
     }
     impl_->l1_map.clear();
     impl_->l1_lru.clear();
+    for (auto& kv : impl_->l2_map) {
+        fz_drop_display_list(impl_->ctx, kv.second.list);
+    }
+    impl_->l2_map.clear();
+    impl_->l2_lru.clear();
 }
 
 fz_pixmap* PageCache::get_pixmap(int page_num, float scale) {
@@ -122,11 +146,58 @@ void PageCache::clear() {
     }
     impl_->l1_map.clear();
     impl_->l1_lru.clear();
+    for (auto& kv : impl_->l2_map) {
+        fz_drop_display_list(impl_->ctx, kv.second.list);
+    }
+    impl_->l2_map.clear();
+    impl_->l2_lru.clear();
 }
 
 std::size_t PageCache::l1_size() const {
     std::lock_guard<std::mutex> lk(impl_->mtx);
     return impl_->l1_map.size();
+}
+
+fz_display_list* PageCache::get_display_list(int page_num) {
+    std::lock_guard<std::mutex> lk(impl_->mtx);
+    auto it = impl_->l2_map.find(page_num);
+    if (it == impl_->l2_map.end()) return nullptr;
+    // Move to front (most recent).
+    impl_->l2_lru.erase(it->second.lru_it);
+    impl_->l2_lru.push_front(page_num);
+    it->second.lru_it = impl_->l2_lru.begin();
+    // Cache keeps its ref; caller gets a new ref via fz_keep_display_list.
+    return fz_keep_display_list(impl_->ctx, it->second.list);
+}
+
+void PageCache::put_display_list(int page_num, fz_display_list* list) {
+    if (!list) return;  // no-op on null; nothing to take ownership of
+    std::lock_guard<std::mutex> lk(impl_->mtx);
+    auto it = impl_->l2_map.find(page_num);
+    if (it != impl_->l2_map.end()) {
+        // Replace at same key: drop old, store new, promote to front.
+        fz_drop_display_list(impl_->ctx, it->second.list);
+        it->second.list = list;
+        impl_->l2_lru.erase(it->second.lru_it);
+        impl_->l2_lru.push_front(page_num);
+        it->second.lru_it = impl_->l2_lru.begin();
+        return;
+    }
+    // New entry. If l2_capacity == 0 we must drop — cache takes the ref either way.
+    if (impl_->l2_capacity == 0) {
+        fz_drop_display_list(impl_->ctx, list);
+        return;
+    }
+    while (impl_->l2_map.size() >= impl_->l2_capacity) {
+        impl_->evict_oldest_l2();
+    }
+    impl_->l2_lru.push_front(page_num);
+    impl_->l2_map.emplace(page_num, Impl::L2Entry{list, impl_->l2_lru.begin()});
+}
+
+std::size_t PageCache::l2_size() const {
+    std::lock_guard<std::mutex> lk(impl_->mtx);
+    return impl_->l2_map.size();
 }
 
 } // namespace litepdf::core

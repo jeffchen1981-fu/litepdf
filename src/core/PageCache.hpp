@@ -48,14 +48,21 @@ public:
     PageCache(PageCache&&) = delete;
     PageCache& operator=(PageCache&&) = delete;
 
-    // L1 (this task)
+    // L1
     fz_pixmap* get_pixmap(int page_num, float scale);
     void       put_pixmap(int page_num, float scale, fz_pixmap* pix);
 
-    // L2 (Task 9 will implement; API intentionally not declared here yet.)
+    // L2 — display list, zoom-independent, keyed by page_num.
+    // Refcount contract mirrors L1:
+    //   put_display_list: cache TAKES caller's ref; drops on evict/replace/destroy.
+    //   get_display_list: nullptr on miss; on hit, returns fz_keep_display_list'd
+    //     ref (caller owns, must fz_drop_display_list when done).
+    fz_display_list* get_display_list(int page_num);
+    void             put_display_list(int page_num, fz_display_list* list);
 
-    void clear();                 // drops all cached entries
+    void clear();                 // drops all cached entries (L1 + L2)
     std::size_t l1_size() const;  // for tests
+    std::size_t l2_size() const;  // for tests
 
 private:
     struct Impl;
