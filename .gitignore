@@ -23,6 +23,12 @@ Makefile
 *.exp
 *.lib
 
+# MSBuild IDE build outputs at solution root (in case someone uses VS IDE build)
+/x64/
+/Win32/
+/Debug/
+/Release/
+
 # Misc
 Thumbs.db
 .DS_Store
