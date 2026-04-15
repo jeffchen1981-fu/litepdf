@@ -37,3 +37,16 @@ TEST_CASE("Document::open returns Corrupted for truncated PDF", "[document][open
     REQUIRE(*err == Document::OpenError::Corrupted);
     REQUIRE_FALSE(doc.is_open());
 }
+
+TEST_CASE("Document is safe to use after being moved from", "[document][move]") {
+    Document a;
+    REQUIRE_FALSE(a.open("tests/fixtures/simple.pdf").has_value());
+
+    Document b = std::move(a);
+    REQUIRE(b.is_open());
+
+    // a is moved-from; must be safe to query (returns false) and reusable.
+    REQUIRE_FALSE(a.is_open());              // does NOT crash
+    REQUIRE_FALSE(a.open("tests/fixtures/simple.pdf").has_value());  // reusable
+    REQUIRE(a.is_open());
+}

@@ -31,8 +31,22 @@ struct Document::Impl {
 
 Document::Document() : impl_(std::make_unique<Impl>()) {}
 Document::~Document() = default;
-Document::Document(Document&&) noexcept = default;
-Document& Document::operator=(Document&&) noexcept = default;
+
+// Move operations swap the unique_ptrs rather than moving ownership to null.
+// This keeps both `this` and `other` with a valid Impl after any move, so
+// moved-from Documents remain queryable (is_open() -> false) and reusable
+// (open() can be called again) without risking nullptr dereferences in the
+// public API, which accesses impl_-> unconditionally.
+Document::Document(Document&& other) noexcept : impl_(std::make_unique<Impl>()) {
+    std::swap(impl_, other.impl_);
+}
+
+Document& Document::operator=(Document&& other) noexcept {
+    if (this != &other) {
+        std::swap(impl_, other.impl_);
+    }
+    return *this;
+}
 
 namespace {
 
