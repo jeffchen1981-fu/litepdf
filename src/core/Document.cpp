@@ -48,6 +48,7 @@ struct Document::Impl {
     fz_document* doc = nullptr;
     bool needs_password = false;
     bool authenticated = false;
+    std::filesystem::path path;
 
     Impl() : locks(std::make_unique<MuPDFLocks>()) {
         locks->fz.user = locks.get();
@@ -161,6 +162,7 @@ std::optional<Document::OpenError> Document::open(const std::filesystem::path& p
 
     if (!impl_->doc) return OpenError::Other;
 
+    impl_->path = path;
     impl_->needs_password = fz_needs_password(impl_->ctx, impl_->doc) != 0;
     impl_->authenticated = !impl_->needs_password;
     if (impl_->needs_password) {
@@ -184,6 +186,11 @@ void Document::close() noexcept {
     }
     impl_->needs_password = false;
     impl_->authenticated = false;
+    impl_->path.clear();
+}
+
+const std::filesystem::path& Document::source_path() const noexcept {
+    return impl_->path;
 }
 
 bool Document::authenticate(std::string_view password) {

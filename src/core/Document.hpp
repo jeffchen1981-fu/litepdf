@@ -91,6 +91,12 @@ public:
     // in progress.
     [[nodiscard]] fz_context* clone_context() const;
 
+    // Returns the path that was last successfully passed to open(). If the
+    // document is not open (or was never opened), returns a reference to an
+    // empty path. RenderEngine workers use this to re-open the file on their
+    // own fz_context (MuPDF forbids sharing fz_document across contexts).
+    [[nodiscard]] const std::filesystem::path& source_path() const noexcept;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

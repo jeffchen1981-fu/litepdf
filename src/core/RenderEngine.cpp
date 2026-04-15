@@ -1,9 +1,12 @@
 #include "core/RenderEngine.hpp"
 #include "core/Document.hpp"
 
-extern "C" {
-    void fz_drop_context(fz_context*);
-}
+// RenderEngine is the only TU that includes <mupdf/fitz.h> publicly; the
+// header stays MuPDF-free so UI code can consume it without the MuPDF
+// include path. Task 7 introduces actual rasterization, so we now need
+// the full fitz types (fz_open_document, fz_load_page, fz_new_pixmap_from_page,
+// fz_scale, fz_device_rgb, etc.).
+#include <mupdf/fitz.h>
 
 #include <algorithm>
 #include <atomic>
@@ -12,6 +15,7 @@ extern "C" {
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -45,6 +49,10 @@ struct RenderEngine::Impl {
 
     std::size_t num_workers = 0;
     std::vector<fz_context*> worker_ctxs;
+    // Per-worker fz_document handles. MuPDF forbids sharing a fz_document
+    // across contexts, so each worker gets its own handle opened on its
+    // own cloned ctx. We pay N * parse-cost but gain thread isolation.
+    std::vector<fz_document*> worker_docs;
     std::vector<std::thread> workers;
     mutable std::mutex mtx;  // mutable: pending_count() is const but locks
     std::condition_variable cv;
@@ -57,9 +65,24 @@ struct RenderEngine::Impl {
 
     // Graceful shutdown: predicate wakes on stopping || !q.empty(); we only
     // return when stopping AND queue is empty, so in-flight queued requests
-    // get drained by remaining workers on dtor. Real rendering (Task 7) may
-    // want a hard-cancel path, but for Phase 2 drain-then-stop is correct.
+    // get drained by remaining workers on dtor.
+    //
+    // Rendering pipeline (Task 7):
+    //   1. Pop request from heap under lock.
+    //   2. Checkpoint A — cancel check before touching MuPDF.
+    //   3. fz_load_page on the worker's private fz_document.
+    //   4. Checkpoint B — cancel check after page load, before rasterize.
+    //   5. fz_new_pixmap_from_page at the requested scale. Drop page.
+    //   6. Checkpoint C — cancel check before handing ownership to callback.
+    //   7. Callback takes ownership of pixmap (D2); if no callback, we drop it.
+    //
+    // Exception safety: fz_try/fz_catch wraps each MuPDF call individually so
+    // a failure in load doesn't leak a pixmap, and a failure in rasterize
+    // doesn't leak a page. On catch, pix is null-guarded and ownership is
+    // not transferred. Silent failure for Phase 2; Phase 3 will add logging.
     static void worker_loop(Impl* impl, std::size_t idx) {
+        fz_context* ctx = impl->worker_ctxs[idx];
+        fz_document* wdoc = impl->worker_docs[idx];
         for (;;) {
             RenderRequest req;
             std::shared_ptr<std::atomic<bool>> canceled;
@@ -76,14 +99,59 @@ struct RenderEngine::Impl {
                 req = std::move(entry.req);
                 canceled = std::move(entry.canceled);
             }
-            // Checkpoint A: pre-callback cancel check. Cancelation is
-            // cooperative — entries stay in the heap after being flagged;
-            // workers simply skip the callback when they reach them.
+
+            // Checkpoint A: pre-MuPDF cancel check.
             if (canceled && canceled->load()) continue;
+
+            fz_page*   page = nullptr;
+            fz_pixmap* pix  = nullptr;
+
+            fz_try(ctx) {
+                page = fz_load_page(ctx, wdoc, req.page_num);
+            }
+            fz_catch(ctx) {
+                // Page load failed (e.g. out-of-range index, parse error).
+                // Leave page=null; fall through and hand nullptr to callback.
+            }
+
+            // Checkpoint B: post-load cancel check. Do not enter rasterize
+            // if the request was canceled while we were loading the page.
+            const bool should_render =
+                (page != nullptr) && !(canceled && canceled->load());
+
+            if (should_render) {
+                fz_try(ctx) {
+                    fz_matrix m = fz_scale(req.scale, req.scale);
+                    // fz_device_rgb(ctx) returns a non-owned pointer (global
+                    // colorspace singleton); no drop required.
+                    pix = fz_new_pixmap_from_page(ctx, page, m,
+                                                  fz_device_rgb(ctx), 0);
+                }
+                fz_catch(ctx) {
+                    if (pix) { fz_drop_pixmap(ctx, pix); pix = nullptr; }
+                }
+            }
+
+            if (page) {
+                fz_drop_page(ctx, page);
+            }
+
+            // Checkpoint C: post-rasterize cancel check. If the request was
+            // canceled after we already paid to rasterize, drop the pixmap
+            // and skip the callback — the consumer no longer wants the work.
+            if (canceled && canceled->load()) {
+                if (pix) fz_drop_pixmap(ctx, pix);
+                continue;
+            }
+
             // Run user callback OUTSIDE the lock to avoid deadlocks if they
             // call back into the engine (e.g. submit from within on_complete).
+            // Ownership of pix transfers to the callback per D2.
             if (req.on_complete) {
-                req.on_complete(nullptr, impl->worker_ctxs[idx]);
+                req.on_complete(pix, ctx);
+            } else if (pix) {
+                // No callback supplied; we own pix — drop to avoid a leak.
+                fz_drop_pixmap(ctx, pix);
             }
         }
     }
@@ -113,7 +181,54 @@ RenderEngine::RenderEngine(Document& doc, std::size_t n)
         throw;
     }
 
-    // Spawn workers only after all contexts are ready.
+    // Open a per-worker fz_document on each worker's ctx. MuPDF does not
+    // allow sharing fz_document across contexts, so each worker parses the
+    // file independently. Acceptable cost on Phase 2's 2-worker default.
+    //
+    // NOTE: fz_open_document takes UTF-8. std::filesystem::path::string()
+    // returns the native ACP on Windows MSVC; ASCII paths (tests/fixtures)
+    // work, Unicode path handling is a Phase 3 deferred item (matches the
+    // caveat already present in Document::open).
+    const std::string path_str = doc.source_path().string();
+    if (path_str.empty()) {
+        for (auto* c : impl_->worker_ctxs) fz_drop_context(c);
+        impl_->worker_ctxs.clear();
+        throw std::runtime_error("RenderEngine: Document has no source path "
+                                 "(is the Document open?)");
+    }
+
+    try {
+        impl_->worker_docs.reserve(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            fz_context* ctx = impl_->worker_ctxs[i];
+            fz_document* wdoc = nullptr;
+            fz_try(ctx) {
+                wdoc = fz_open_document(ctx, path_str.c_str());
+            }
+            fz_catch(ctx) {
+                // Leave wdoc null; throw std::runtime_error below.
+            }
+            if (!wdoc) {
+                throw std::runtime_error(
+                    "RenderEngine: fz_open_document failed for worker " +
+                    std::to_string(i));
+            }
+            impl_->worker_docs.push_back(wdoc);
+        }
+    } catch (...) {
+        // Rollback: drop any per-worker docs we already opened, each with
+        // its own ctx (docs MUST be dropped with the ctx they were opened
+        // on — MuPDF does not support cross-context drops), then drop ctxs.
+        for (std::size_t i = 0; i < impl_->worker_docs.size(); ++i) {
+            fz_drop_document(impl_->worker_ctxs[i], impl_->worker_docs[i]);
+        }
+        impl_->worker_docs.clear();
+        for (auto* c : impl_->worker_ctxs) fz_drop_context(c);
+        impl_->worker_ctxs.clear();
+        throw;
+    }
+
+    // Spawn workers only after all contexts and docs are ready.
     impl_->workers.reserve(n);
     try {
         for (std::size_t i = 0; i < n; ++i) {
@@ -128,6 +243,10 @@ RenderEngine::RenderEngine(Document& doc, std::size_t n)
         for (auto& t : impl_->workers) {
             if (t.joinable()) t.join();
         }
+        for (std::size_t i = 0; i < impl_->worker_docs.size(); ++i) {
+            fz_drop_document(impl_->worker_ctxs[i], impl_->worker_docs[i]);
+        }
+        impl_->worker_docs.clear();
         for (auto* c : impl_->worker_ctxs) fz_drop_context(c);
         impl_->worker_ctxs.clear();
         throw;
@@ -144,7 +263,12 @@ RenderEngine::~RenderEngine() {
         for (auto& t : impl_->workers) {
             if (t.joinable()) t.join();
         }
-        // Contexts dropped AFTER all threads join.
+        // Docs must be dropped on the SAME ctx they were opened on, and
+        // BEFORE the ctxs themselves are dropped.
+        for (std::size_t i = 0; i < impl_->worker_docs.size(); ++i) {
+            fz_drop_document(impl_->worker_ctxs[i], impl_->worker_docs[i]);
+        }
+        impl_->worker_docs.clear();
         for (auto* c : impl_->worker_ctxs) fz_drop_context(c);
     }
 }
