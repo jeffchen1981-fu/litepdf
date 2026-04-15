@@ -22,5 +22,9 @@ function(litepdf_apply_flags target)
             NOMINMAX
             _CRT_SECURE_NO_WARNINGS
         )
+    else()
+        message(FATAL_ERROR
+            "LitePDF is Windows/MSVC-only for v1. "
+            "Detected CXX compiler: ${CMAKE_CXX_COMPILER_ID}")
     endif()
 endfunction()
