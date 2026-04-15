@@ -18,6 +18,7 @@ extern "C" {
     int  fz_pixmap_stride(fz_context*, fz_pixmap*);
     unsigned char* fz_pixmap_samples(fz_context*, fz_pixmap*);
     void fz_drop_pixmap(fz_context*, fz_pixmap*);
+    struct fz_pixmap* fz_keep_pixmap(struct fz_context*, struct fz_pixmap*);
 }
 
 using Microsoft::WRL::ComPtr;
@@ -112,6 +113,12 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         case WM_PAINT:
             on_paint();
             return 0;
+        case WM_LBUTTONDOWN:
+            // Click-to-focus: ensures keystrokes (PgUp/PgDn/Home/End) reach us.
+            SetFocus(hwnd_);
+            return 0;
+        case WM_KEYDOWN:
+            return on_key_down(w);
         case WM_DPICHANGED_BEFOREPARENT:
             // DPI is changing. Discard render target; next paint rebuilds at new DPI.
             // current_bitmap is sized for the OLD DPI — discard it too
@@ -209,6 +216,48 @@ void PdfCanvas::create_render_target() {
 void PdfCanvas::discard_render_target() {
     impl_->current_bitmap.Reset();
     impl_->rt.Reset();
+}
+
+LRESULT PdfCanvas::on_key_down(WPARAM key) {
+    if (!impl_->view) return 0;
+
+    int cur     = impl_->view->current_page();
+    int max_idx = impl_->view->page_count() - 1;
+
+    bool changed = false;
+    switch (key) {
+        case VK_NEXT:   // PgDn
+            changed = impl_->view->set_current_page(cur + 1);
+            break;
+        case VK_PRIOR:  // PgUp
+            changed = impl_->view->set_current_page(cur - 1);
+            break;
+        case VK_HOME:
+            changed = impl_->view->set_current_page(0);
+            break;
+        case VK_END:
+            changed = impl_->view->set_current_page(max_idx);
+            break;
+        // Arrow keys for scroll when zoomed land in Task 9.
+        default:
+            return 0;
+    }
+
+    if (changed) {
+        // Cancel stale renders from rapid paging, then submit.
+        // NOTE(phase4-dry): MainWindow::kick_render uses the same PostMessage
+        // pattern. Phase 3 keeps duplication; Phase 4/5 can factor into a helper.
+        impl_->view->cancel_stale_renders(/*keep_priority_threshold=*/ 0);
+        HWND target = hwnd_;
+        impl_->view->request_render(
+            impl_->view->current_page(),
+            [target](fz_pixmap* p, fz_context* worker_ctx) {
+                if (p) fz_keep_pixmap(worker_ctx, p);
+                PostMessageW(target, WM_USER_RENDER_DONE,
+                             reinterpret_cast<WPARAM>(p), 0);
+            });
+    }
+    return 0;
 }
 
 void PdfCanvas::on_size(int w, int h) {

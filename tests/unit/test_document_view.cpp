@@ -1,6 +1,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <utility>
 
 #include "core/Document.hpp"
@@ -82,6 +83,22 @@ TEST_CASE("DocumentView FitPage scale derivation at 96 DPI",
                        595.2f, 421.0f, 96.0f);
     REQUIRE(view.zoom_scale() == Catch::Approx(0.5f).epsilon(0.001));
     REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::FitPage);
+}
+
+TEST_CASE("DocumentView FitPage scale uses the more restrictive dimension",
+          "[core][view][zoom]") {
+    DocumentView view(open_simple());
+    // simple.pdf is 595.2 x 842.0 pt.
+    // Viewport is wide + short — width would allow 2x, but height only allows ~0.95x.
+    // Expected: FitPage picks min(fit_w, fit_h) = ~0.95x.
+    view.set_zoom_mode(DocumentView::ZoomMode::FitPage,
+                       /*vp_w*/ 1190.4f, /*vp_h*/ 800.0f, /*dpi*/ 96.0f);
+    const float expected_fit_w = 1190.4f * (96.0f/96.0f) / 595.2f;  // = 2.0
+    const float expected_fit_h = 800.0f  * (96.0f/96.0f) / 842.0f;  // ~0.95
+    const float expected       = std::min(expected_fit_w, expected_fit_h);
+    REQUIRE(view.zoom_scale() == Catch::Approx(expected).epsilon(0.001));
+    // Sanity: FitPage < FitWidth in this case.
+    REQUIRE(view.zoom_scale() < 1.0f);
 }
 
 TEST_CASE("DocumentView zoom_in/out cycles presets and bounds correctly",

@@ -40,6 +40,7 @@ private:
     void discard_render_target();
     void on_paint();
     void on_size(int width, int height);
+    LRESULT on_key_down(WPARAM key);
 
     HWND hwnd_ = nullptr;
     struct Impl;
