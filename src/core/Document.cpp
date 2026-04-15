@@ -2,7 +2,11 @@
 
 #include <mupdf/fitz.h>
 
+#include <algorithm>
+#include <cctype>
+#include <fstream>
 #include <stdexcept>
+#include <string>
 
 namespace litepdf::core {
 
@@ -27,8 +31,30 @@ Document::~Document() = default;
 Document::Document(Document&&) noexcept = default;
 Document& Document::operator=(Document&&) noexcept = default;
 
+namespace {
+
+// LitePDF is scoped to PDF files only. Recognize format by extension +
+// magic bytes before handing off to MuPDF (which would otherwise happily
+// open images and other non-PDF formats it supports).
+bool looks_like_pdf(const std::filesystem::path& path) {
+    std::string ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (ext != ".pdf") return false;
+
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    char header[5] = {0};
+    f.read(header, 4);
+    return std::string(header, 4) == "%PDF";
+}
+
+} // namespace
+
 std::optional<Document::OpenError> Document::open(const std::filesystem::path& path) {
     if (!std::filesystem::exists(path)) return OpenError::FileNotFound;
+
+    if (!looks_like_pdf(path)) return OpenError::UnsupportedFormat;
 
     fz_try(impl_->ctx) {
         // NOTE: fz_open_document takes a UTF-8 char*. path.string() yields ACP on
@@ -37,6 +63,7 @@ std::optional<Document::OpenError> Document::open(const std::filesystem::path& p
         impl_->doc = fz_open_document(impl_->ctx, path.string().c_str());
     }
     fz_catch(impl_->ctx) {
+        // File was recognized as a PDF but failed to parse → treat as corrupted.
         return OpenError::Corrupted;
     }
 
