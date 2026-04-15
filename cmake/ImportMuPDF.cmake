@@ -34,6 +34,32 @@ if(NOT _MSBUILD_EXE OR NOT EXISTS "${_MSBUILD_EXE}")
 endif()
 message(STATUS "MuPDF will be built via: ${_MSBUILD_EXE}")
 
+# Force MuPDF vcxprojs to use /MT (static CRT) so our output exe carries no
+# msvcrt / vcruntime redistributable dependency. Upstream's vcxprojs hardcode
+# <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary> (/MD) and msbuild's
+# /p:RuntimeLibrary= and /p:ClCompile_RuntimeLibrary= command-line overrides
+# do NOT take effect against an explicit project-level property — tested both,
+# still produced MD_DynamicRelease .objs and 37 LNK2001 __imp_* errors when
+# linking with Catch2 unit test exe.
+#
+# Patch strategy: in-place rewrite RuntimeLibrary values in all vcxproj files
+# under platform/win32. Done at configure time; idempotent (second pass is a
+# no-op because the MD form no longer matches). We mirror the v142→v143
+# toolset override strategy of rewriting where command-line /p: is refused.
+file(GLOB _MUPDF_VCXPROJS "${_MUPDF_ROOT}/platform/win32/*.vcxproj")
+foreach(_vcx ${_MUPDF_VCXPROJS})
+    file(READ "${_vcx}" _vcx_content)
+    string(REPLACE
+        "<RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>"
+        "<RuntimeLibrary>MultiThreaded</RuntimeLibrary>"
+        _vcx_content "${_vcx_content}")
+    string(REPLACE
+        "<RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>"
+        "<RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>"
+        _vcx_content "${_vcx_content}")
+    file(WRITE "${_vcx}" "${_vcx_content}")
+endforeach()
+
 # ExternalProject builds MuPDF's sln. We target libmupdf; MSBuild
 # automatically chases its ProjectReferences (libthirdparty, libresources,
 # libmuthreads) and the sln-level config maps bin2coff → Release|Win32.
