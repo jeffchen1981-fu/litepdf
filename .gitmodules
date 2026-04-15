@@ -1,3 +1,4 @@
 [submodule "third_party/mupdf"]
 	path = third_party/mupdf
 	url = https://github.com/ArtifexSoftware/mupdf.git
+	ignore = dirty
