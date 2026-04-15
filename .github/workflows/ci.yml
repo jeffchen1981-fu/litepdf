@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Smoke test
+        shell: pwsh
+        run: ./scripts/smoke-test.ps1
+
+      - name: Upload exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: litepdf-phase0
+          path: build/Release/litepdf.exe
+          if-no-files-found: error
