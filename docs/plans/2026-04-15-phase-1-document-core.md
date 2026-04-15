@@ -145,34 +145,35 @@ git -c user.email="chen.yifu@local" commit -m "docs(rc): spell out phase-9 icon 
 
 ---
 
-## Task 1: Document MuPDF feature-flag decisions in the design
+## Task 1: Document MuPDF integration strategy in the design
 
 **Files:** Modify `docs/plans/2026-04-15-litepdf-design.md`
 
-Phase 0 reviewer flagged that the MuPDF disable-feature list (tesseract/leptonica/mujs/gumbo) and the freetype FTL licensing pin should be captured in the design before Phase 1 builds on them. This task adds a new §2.1 to the design.
+MuPDF 1.24.11 ships no CMakeLists.txt — its upstream Windows build system is a Visual Studio solution at `third_party/mupdf/platform/win32/mupdf.sln`. CMake integration therefore uses `include_external_msproject` on the vendor-supplied `.vcxproj` files. A consequence is that MuPDF's default preprocessor definitions ship in — CMake has no clean hook to override them. We accept this for Phase 1 and schedule feature-flag pruning (OCR, JS, HTML/gumbo) for Phase 11 size optimization.
 
 **Step 1:** Insert immediately after the §2 table, before §3 (Feature Set):
 
 ```markdown
-### 2.1 MuPDF Feature Flags & Third-Party License Pins
+### 2.1 MuPDF Integration & Deferred Feature Pruning
 
-MuPDF bundles many optional dependencies. LitePDF disables those not required by a PDF/ePub/CBZ/XPS viewer to keep the binary small and the audit surface narrow.
+MuPDF 1.24.11 lacks a CMakeLists.txt. Its Windows build is a VS solution at `third_party/mupdf/platform/win32/mupdf.sln` whose projects are consumed directly via CMake's `include_external_msproject`. The five projects we pull in:
 
-**Disabled** (via CMake cache options passed before `add_subdirectory(third_party/mupdf)`):
-
-| Flag | Component | Rationale |
+| Project | Output `.lib` | Purpose |
 |---|---|---|
-| `FZ_ENABLE_JS=0` | mujs (JavaScript engine) | PDF JS actions not supported in v1 |
-| `FZ_ENABLE_HTML=0` | gumbo-parser (HTML 5) | ePub HTML is rendered via MuPDF's own lightweight path, no gumbo needed |
-| `FZ_ENABLE_OCR=0` | tesseract + leptonica | No OCR in v1 |
-| `FZ_ENABLE_XPS=1` | XPS support | Kept — Tier 3 feature |
-| `FZ_ENABLE_SVG=1` | SVG | Kept — Tier 3 feature |
-| `FZ_ENABLE_CBZ=1` | CBZ | Kept — Tier 3 feature |
-| `FZ_ENABLE_EPUB=1` | ePub | Kept — Tier 3 feature |
+| `bin2coff.vcxproj` | (build tool) | Converts CMap/font binaries into COFF objects for `libresources` |
+| `libthirdparty.vcxproj` | `libthirdparty.lib` | freetype, zlib, harfbuzz, jbig2dec, lcms2, openjpeg, libjpeg |
+| `libresources.vcxproj` | `libresources.lib` | Embedded CMap tables and default fonts (depends on `bin2coff`) |
+| `libmuthreads.vcxproj` | `libmuthreads.lib` | Threading primitives |
+| `libmupdf.vcxproj` | `libmupdf.lib` | Main MuPDF library (depends on the other four) |
 
-**License pin:**
+**Build outputs** land at `third_party/mupdf/platform/win32/x64/$<CONFIG>/` (x64 Release → `.../x64/Release/libmupdf.lib`). These paths are stable across MuPDF 1.24.x.
 
-MuPDF's freetype submodule is dual-licensed (FTL / GPLv2). AGPL-3.0 is compatible with FTL but **not** with GPLv2-only. We select FTL explicitly by setting `FT_CONFIG_OPTION_USE_FTL=1` in the build. This is documented in the Phase 10 installer notices (§8.5).
+**Deferred: feature-flag pruning.** MuPDF ships with `mujs` (PDF JavaScript), `gumbo` (HTML), and `tesseract`+`leptonica` (OCR) compiled by default. LitePDF v1 does not use any of these. We accept the extra ~2 MB in Phase 1 and defer pruning to **Phase 11** (binary-size regression gate). When the pruning task lands it has two paths:
+
+- (A) Patch MuPDF's own `.vcxproj` files to remove the relevant sources + preprocessor defines (upstream-divergent but small diff).
+- (B) Migrate MuPDF integration from `include_external_msproject` to a hand-written CMake shim that globs sources and controls `target_compile_definitions` directly (larger up-front cost, but full control).
+
+**License compliance:** freetype's dual FTL/GPLv2 licensing resolves to FTL by default in MuPDF's upstream `ftoption.h` configuration — the Phase 0 review flagged this as needing verification. Task 2 of Phase 1 performs a `grep` confirmation and records the result in this section, replacing this sentence.
 
 **CVE audit cadence:** before each `1.24.x` → `1.24.(x+1)` bump of the MuPDF submodule, check Artifex's security advisories and changelog. Before v1.0 release, perform a full scan.
 ```
@@ -181,73 +182,111 @@ MuPDF's freetype submodule is dual-licensed (FTL / GPLv2). AGPL-3.0 is compatibl
 
 ```bash
 git add docs/plans/2026-04-15-litepdf-design.md
-git -c user.email="chen.yifu@local" commit -m "docs(design): pin MuPDF feature flags and freetype FTL licence"
+git -c user.email="chen.yifu@local" commit -m "docs(design): document MuPDF include_external_msproject integration strategy"
 ```
 
 ---
 
-## Task 2: Wire MuPDF into CMake (the hard one)
+## Task 2: Wire MuPDF into CMake via `include_external_msproject`
 
 **Files:**
+- Create: `cmake/ImportMuPDF.cmake`
 - Modify: `CMakeLists.txt`
-- Create: `cmake/MuPDFConfig.cmake`
-- Verify: build still succeeds, exe size grows to ~3–6 MB
+- Modify: `scripts/smoke-test.ps1` (size budget bump)
+- Verify: full build + smoke test pass with new MuPDF deps
 
-MuPDF's own `third_party/mupdf/CMakeLists.txt` exposes `libmupdf` and `libthirdparty` targets. Adding it as a subdirectory pulls all of MuPDF's 10+ sub-submodules into our build graph. We must set cache variables BEFORE `add_subdirectory` to steer the feature flags. Use a dedicated helper file.
+MuPDF 1.24.11 has no CMakeLists.txt (see design §2.1). We consume its shipped VS projects via `include_external_msproject`. This introduces a Visual Studio generator requirement, which is already met by the Phase 0 choice of `-G "Visual Studio 17 2022"`.
 
-**Step 1:** Create `cmake/MuPDFConfig.cmake`:
+**Pre-step: verify freetype defaults to FTL, record in design §2.1.**
 
-```cmake
-# MuPDF feature-flag configuration — see design §2.1.
-# Must be included BEFORE add_subdirectory(third_party/mupdf).
-
-# Disabled features (not required for a PDF/ePub/CBZ/XPS viewer v1)
-set(FZ_ENABLE_JS          OFF CACHE BOOL "MuPDF: JavaScript support"        FORCE)
-set(FZ_ENABLE_HTML        OFF CACHE BOOL "MuPDF: HTML5 (gumbo)"             FORCE)
-set(FZ_ENABLE_OCR         OFF CACHE BOOL "MuPDF: OCR via tesseract"         FORCE)
-set(TESSERACT_BUILD_TRAINING_TOOLS OFF CACHE BOOL "" FORCE)
-
-# Enabled features
-set(FZ_ENABLE_XPS         ON  CACHE BOOL "MuPDF: XPS"   FORCE)
-set(FZ_ENABLE_SVG         ON  CACHE BOOL "MuPDF: SVG"   FORCE)
-set(FZ_ENABLE_CBZ         ON  CACHE BOOL "MuPDF: CBZ"   FORCE)
-set(FZ_ENABLE_EPUB        ON  CACHE BOOL "MuPDF: ePub"  FORCE)
-
-# Don't build MuPDF tools (mutool, muraster) into our tree
-set(BUILD_TOOLS           OFF CACHE BOOL "MuPDF: build mutool and muraster" FORCE)
-
-# Static libraries only — we ship a single exe
-set(BUILD_SHARED_LIBS     OFF CACHE BOOL "" FORCE)
-
-# freetype: select FTL (BSD-style) license variant over GPLv2
-set(FT_DISABLE_HARFBUZZ   OFF CACHE BOOL "" FORCE)
-# FT_CONFIG_OPTION_USE_FTL is set as a preprocessor define below, not via CMake cache.
+```bash
+grep -i "FT_CONFIG_OPTION_USE_FTL\|FT_CONFIG_OPTION_INCLUDE_LZW" \
+    third_party/mupdf/thirdparty/freetype/include/freetype/config/ftoption.h \
+    | head -20
 ```
 
-**Step 2:** Modify `CMakeLists.txt`. Add this block AFTER `include(CompilerFlags)` and BEFORE `add_executable(litepdf ...)`:
+Expected: the grep prints either the `#define FT_CONFIG_OPTION_USE_FTL 1` line (FTL chosen) or shows the option commented out. Interpret:
+
+- If `FT_CONFIG_OPTION_USE_FTL` is `#define`d as `1` with no `#undef` downstream → FTL active. Replace the placeholder sentence in design §2.1 with a confirmed statement citing the line number.
+- If FTL is NOT the default → stop, ask. (This is genuinely unlikely — FreeType 2 has defaulted to FTL for over a decade.)
+
+Commit the design doc update as a sub-task of Task 1 if you prefer atomic commits; or fold into Task 2 Commit A below.
+
+**Step 1:** Create `cmake/ImportMuPDF.cmake`:
 
 ```cmake
-# --- MuPDF ----------------------------------------------------------------
-# Configure feature flags BEFORE pulling in the submodule.
-include(MuPDFConfig)
+# Import MuPDF into our CMake graph via its upstream Visual Studio projects.
+# See design §2.1 for rationale. VS generator only.
+#
+# Exports:
+#   target: litepdf::mupdf  (INTERFACE library bundling all four MuPDF .libs)
+# Side effects:
+#   adds bin2coff, libthirdparty, libresources, libmuthreads, libmupdf
+#   as external MSBuild targets under the generated .sln.
 
-# MuPDF's CMakeLists is set up as a subproject; we take it as-is.
-add_subdirectory(third_party/mupdf EXCLUDE_FROM_ALL)
-
-# Force freetype's FTL license (BSD-style) over GPLv2.
-# freetype's target is called `freetype` when built by MuPDF's tree.
-if(TARGET freetype)
-    target_compile_definitions(freetype PRIVATE FT_CONFIG_OPTION_USE_FTL=1)
+if(NOT CMAKE_GENERATOR MATCHES "Visual Studio")
+    message(FATAL_ERROR
+        "ImportMuPDF.cmake requires a Visual Studio CMake generator. "
+        "Detected: ${CMAKE_GENERATOR}")
 endif()
+
+set(_MUPDF_VCXPROJ_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mupdf/platform/win32")
+
+# Include the vendor .vcxproj files as external MSBuild targets.
+# GUID arg left to CMake's auto-detection (reads from the vcxproj).
+include_external_msproject(mupdf_bin2coff     "${_MUPDF_VCXPROJ_DIR}/bin2coff.vcxproj")
+include_external_msproject(mupdf_libthirdparty "${_MUPDF_VCXPROJ_DIR}/libthirdparty.vcxproj")
+include_external_msproject(mupdf_libresources  "${_MUPDF_VCXPROJ_DIR}/libresources.vcxproj")
+include_external_msproject(mupdf_libmuthreads  "${_MUPDF_VCXPROJ_DIR}/libmuthreads.vcxproj")
+include_external_msproject(mupdf_libmupdf      "${_MUPDF_VCXPROJ_DIR}/libmupdf.vcxproj")
+
+# Dependency chain (build order):
+#   bin2coff  -> libresources
+#   libthirdparty, libresources, libmuthreads -> libmupdf
+add_dependencies(mupdf_libresources mupdf_bin2coff)
+add_dependencies(mupdf_libmupdf
+    mupdf_libthirdparty
+    mupdf_libresources
+    mupdf_libmuthreads)
+
+# Outputs land here (MuPDF's vcxproj OutDir convention for x64):
+#   third_party/mupdf/platform/win32/x64/Release/libmupdf.lib
+#   third_party/mupdf/platform/win32/x64/Debug/libmupdf.lib
+# Use generator expressions so Debug/Release both work.
+set(_MUPDF_OUTPUT_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mupdf/platform/win32/x64/$<CONFIG>")
+
+# Expose a single INTERFACE target that bundles headers + all four .libs.
+add_library(litepdf_mupdf INTERFACE)
+add_dependencies(litepdf_mupdf mupdf_libmupdf)
+
+target_include_directories(litepdf_mupdf INTERFACE
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mupdf/include")
+
+target_link_libraries(litepdf_mupdf INTERFACE
+    "${_MUPDF_OUTPUT_DIR}/libmupdf.lib"
+    "${_MUPDF_OUTPUT_DIR}/libthirdparty.lib"
+    "${_MUPDF_OUTPUT_DIR}/libresources.lib"
+    "${_MUPDF_OUTPUT_DIR}/libmuthreads.lib"
+    # MuPDF may also need these Windows system libs — include defensively.
+    ws2_32 advapi32 gdi32 user32 crypt32)
+
+add_library(litepdf::mupdf ALIAS litepdf_mupdf)
 ```
 
-And modify the `litepdf` target to link MuPDF:
+**Step 2:** Modify `CMakeLists.txt`. Add, after `include(CompilerFlags)` and before `add_executable(litepdf ...)`:
 
 ```cmake
-# (existing)
+# --- MuPDF via include_external_msproject ---------------------------------
+include(ImportMuPDF)  # defines litepdf::mupdf INTERFACE target
+```
+
+And modify the `litepdf` target's link libraries:
+
+```cmake
 target_link_libraries(litepdf PRIVATE
     comctl32
-    libmupdf
+    litepdf::mupdf
 )
 ```
 
@@ -260,40 +299,44 @@ rm -rf build
 "$CMAKE" --build build --config Release --parallel
 ```
 
-Expected: build succeeds. Many MuPDF subprojects compile. `build/Release/litepdf.exe` is now 3–6 MB (MuPDF linked in but no calls — linker will likely strip most of it; expect ~500 KB bump for registration alone unless `--whole-archive` is used, which we are NOT using).
+Expected: build succeeds. Five new MuPDF sub-builds run (first build adds ~3 minutes cold). `build/Release/litepdf.exe` grows to **6–8 MB** (MuPDF linked but no calls yet; LTCG strips some dead code; tesseract/JS/HTML still linked in per design §2.1 deferred-pruning decision).
 
-**Step 4:** Verify smoke test still passes.
+**Likely failure modes:**
+
+- `MSB3073 bin2coff.exe not found`: `libresources` tried to build before `bin2coff`. Check the `add_dependencies` chain was applied correctly.
+- `LNK1104 cannot open file libmupdf.lib`: path expression `$<CONFIG>` didn't expand as expected. Dump the generated `litepdf.vcxproj` to check actual paths under `<AdditionalDependencies>`.
+- `fatal error C1083: cannot include fitz.h`: `target_include_directories` for `litepdf::mupdf` is set to `PRIVATE` instead of `INTERFACE` (check helper).
+- `unresolved external symbol _imp__WSACleanup@0` or similar: MuPDF uses Winsock for HTTPS-fetched assets; add `ws2_32` to link (already in helper).
+
+If the build fails in a way not listed, STOP and report. Do NOT start editing MuPDF's `.vcxproj` files to "fix" symptoms — that's out of scope.
+
+**Step 4:** Verify smoke test. First bump the size budget:
+
+```powershell
+# Size budget (Phase 1: MuPDF linked but feature-pruning deferred to Phase 11): 8 MB.
+$maxBytes = 8MB
+```
+
+Edit `scripts/smoke-test.ps1` line that says `$maxBytes = 2MB` → `$maxBytes = 8MB`, and update the preceding comment accordingly.
+
+Run:
 
 ```bash
 powershell -ExecutionPolicy Bypass -File scripts/smoke-test.ps1
 ```
 
-Expected: `[OK] Phase 0 smoke test passed.` — but update the size budget next task.
+Expected: `[OK] Phase 0 smoke test passed.` (prefix is cosmetic; the test logic passes).
 
-**Step 5:** Update `scripts/smoke-test.ps1` budget. Change `$maxBytes = 2MB` to `$maxBytes = 6MB` (Phase 1 with MuPDF linked but not called is roughly in this range). Document via comment:
-
-```powershell
-# Size budget (Phase 1, MuPDF linked but not fully exercised): 6 MB.
-# Phase 2+ will tighten when call graph stabilizes.
-$maxBytes = 6MB
-```
-
-**Step 6:** Re-run smoke test. Should still pass.
-
-**Step 7:** Commit in THREE separate commits (atomic):
+**Step 5:** Commit in TWO separate commits (atomic):
 
 ```bash
-# commit A: CMake helper + MuPDFConfig
-git add cmake/MuPDFConfig.cmake
-git -c user.email="chen.yifu@local" commit -m "build(cmake): add MuPDFConfig feature-flag helper"
+# commit A: ImportMuPDF helper
+git add cmake/ImportMuPDF.cmake
+git -c user.email="chen.yifu@local" commit -m "build(cmake): add ImportMuPDF helper (include_external_msproject)"
 
-# commit B: CMakeLists MuPDF add_subdirectory + link
-git add CMakeLists.txt
-git -c user.email="chen.yifu@local" commit -m "build(cmake): wire MuPDF into litepdf target"
-
-# commit C: smoke-test budget bump
-git add scripts/smoke-test.ps1
-git -c user.email="chen.yifu@local" commit -m "test(smoke): bump Phase 1 size budget to 6 MB"
+# commit B: wire into main CMakeLists + smoke budget bump
+git add CMakeLists.txt scripts/smoke-test.ps1
+git -c user.email="chen.yifu@local" commit -m "build(cmake): link MuPDF into litepdf, bump smoke budget to 8 MB"
 ```
 
 ---
