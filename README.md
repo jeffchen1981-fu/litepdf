@@ -10,7 +10,7 @@ A lightweight PDF / ePub / CBZ / XPS reader for Windows 11, optimized for mechan
 ## Build
 
 ```
-git clone --recursive https://github.com/<user>/litepdf
+git clone --recursive https://github.com/jeffchen1981-fu/litepdf
 cd litepdf
 cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release --parallel
