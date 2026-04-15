@@ -13,6 +13,8 @@ namespace litepdf::core {
 struct Document::Impl {
     fz_context* ctx = nullptr;
     fz_document* doc = nullptr;
+    bool needs_password = false;
+    bool authenticated = false;
 
     Impl() {
         ctx = fz_new_context(nullptr, nullptr, FZ_STORE_DEFAULT);
@@ -68,19 +70,49 @@ std::optional<Document::OpenError> Document::open(const std::filesystem::path& p
     }
 
     if (!impl_->doc) return OpenError::Other;
+
+    impl_->needs_password = fz_needs_password(impl_->ctx, impl_->doc) != 0;
+    impl_->authenticated = !impl_->needs_password;
+    if (impl_->needs_password) {
+        // Keep fz_document alive so authenticate() can complete the handshake.
+        return OpenError::NeedsPassword;
+    }
+
     return std::nullopt;
 }
 
-bool Document::is_open() const noexcept { return impl_->doc != nullptr; }
+bool Document::is_open() const noexcept {
+    if (!impl_->doc) return false;
+    // A document that needs password but hasn't been authenticated is not "open".
+    return impl_->authenticated;
+}
 
 void Document::close() noexcept {
     if (impl_->doc) {
         fz_drop_document(impl_->ctx, impl_->doc);
         impl_->doc = nullptr;
     }
+    impl_->needs_password = false;
+    impl_->authenticated = false;
 }
 
-bool Document::authenticate(std::string_view) { return false; }
+bool Document::authenticate(std::string_view password) {
+    if (!impl_->doc) return false;
+    // fz_authenticate_password expects NUL-terminated; copy to std::string to ensure it.
+    std::string pw(password);
+    int ok = 0;
+    fz_try(impl_->ctx) {
+        ok = fz_authenticate_password(impl_->ctx, impl_->doc, pw.c_str());
+    }
+    fz_catch(impl_->ctx) {
+        return false;
+    }
+    if (ok != 0) {
+        impl_->authenticated = true;
+        return true;
+    }
+    return false;
+}
 
 std::size_t Document::page_count() const {
     if (!impl_->doc) throw std::logic_error("page_count called on unopened document");
