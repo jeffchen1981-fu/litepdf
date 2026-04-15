@@ -1,0 +1,38 @@
+#include <winres.h>
+
+// Version info
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     0,1,0,0
+PRODUCTVERSION  0,1,0,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904b0"
+    BEGIN
+      VALUE "CompanyName",      "LitePDF"
+      VALUE "FileDescription",  "LitePDF - lightweight PDF reader"
+      VALUE "FileVersion",      "0.1.0.0"
+      VALUE "InternalName",     "litepdf"
+      VALUE "LegalCopyright",   "AGPL-3.0"
+      VALUE "OriginalFilename", "litepdf.exe"
+      VALUE "ProductName",      "LitePDF"
+      VALUE "ProductVersion",   "0.1.0.0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0409, 1200
+  END
+END
+
+// Manifest (side-by-side assembly)
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "manifest.xml"
+
+// Icon slots (placeholder; real icons arrive in Phase 9)
+// IDI_APPICON    101 ICON "icon/litepdf-app.ico"
+// IDI_PDFDOC     102 ICON "icon/litepdf-doc.ico"
