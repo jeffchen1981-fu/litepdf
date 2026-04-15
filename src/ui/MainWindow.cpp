@@ -51,6 +51,19 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         case WM_SETFOCUS:
             if (canvas_) SetFocus(canvas_->hwnd());
             return 0;
+        case WM_DPICHANGED: {
+            // LPARAM points to a suggested RECT in physical pixels for the new DPI.
+            auto* suggested = reinterpret_cast<const RECT*>(l);
+            SetWindowPos(hwnd, nullptr,
+                         suggested->left, suggested->top,
+                         suggested->right - suggested->left,
+                         suggested->bottom - suggested->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            // The canvas (child) receives WM_DPICHANGED_BEFOREPARENT /
+            // WM_DPICHANGED_AFTERPARENT; it discards its render target and
+            // lets the next paint rebuild at the new DPI.
+            return 0;
+        }
         case WM_COMMAND: {
             const int id = LOWORD(w);
             switch (id) {

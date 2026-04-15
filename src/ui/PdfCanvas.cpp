@@ -89,6 +89,16 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         case WM_PAINT:
             on_paint();
             return 0;
+        case WM_DPICHANGED_BEFOREPARENT:
+            // DPI is changing. Discard render target; next paint rebuilds at new DPI.
+            // current_bitmap is sized for the OLD DPI — discard it too
+            // (discard_render_target() resets both).
+            discard_render_target();
+            return 0;
+        case WM_DPICHANGED_AFTERPARENT:
+            // Parent just repositioned us. Invalidate so on_paint rebuilds the rt.
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
     }
     return DefWindowProcW(hwnd, msg, w, l);
 }
