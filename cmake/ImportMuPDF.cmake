@@ -55,7 +55,9 @@ ExternalProject_Add(mupdf_ext
         "${_MUPDF_OUTPUT_DIR}/libresources.lib"
 )
 
-# INTERFACE target that our code links against. Headers + 4 output .libs
+# INTERFACE target that our code links against. Headers + 3 output .libs
+# (libmuthreads.vcxproj is not a ProjectReference of libmupdf — MuPDF uses
+# Win32 threading APIs directly; threading helper lib is opt-in and unused)
 # + a handful of Windows system libs MuPDF may reference.
 add_library(litepdf_mupdf INTERFACE)
 add_dependencies(litepdf_mupdf mupdf_ext)
