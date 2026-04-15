@@ -35,6 +35,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_render_engine_priority.cpp
     unit/test_render_engine_cancel.cpp
     unit/test_render_engine_output.cpp
+    unit/test_page_cache_l1.cpp
 )
 target_link_libraries(litepdf_unit_tests PRIVATE litepdf_core)
 
