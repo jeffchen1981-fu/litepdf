@@ -7,6 +7,7 @@ extern "C" {
 
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
 #include <mutex>
 #include <queue>
 #include <stdexcept>
@@ -17,13 +18,33 @@ extern "C" {
 namespace litepdf::core {
 
 struct RenderEngine::Impl {
+    // Wraps a RenderRequest with stable-ordering metadata.
+    // priority: lower value == more urgent (runs first).
+    // seq: monotonically-increasing arrival tag; earlier seq wins on tie.
+    struct QueuedRequest {
+        int priority;
+        std::size_t seq;
+        RenderRequest req;
+    };
+
+    // std::priority_queue is a max-heap by default. We want the SMALLEST
+    // (priority, seq) tuple on top, so Compare returns true when `a` is
+    // "greater" (i.e. should sink) — the standard invert-for-min-heap idiom.
+    struct Compare {
+        bool operator()(const QueuedRequest& a, const QueuedRequest& b) const {
+            if (a.priority != b.priority) return a.priority > b.priority;
+            return a.seq > b.seq;
+        }
+    };
+
     std::size_t num_workers = 0;
     std::vector<fz_context*> worker_ctxs;
     std::vector<std::thread> workers;
     mutable std::mutex mtx;  // mutable: pending_count() is const but locks
     std::condition_variable cv;
     bool stopping = false;
-    std::queue<RenderRequest> q;
+    std::priority_queue<QueuedRequest, std::vector<QueuedRequest>, Compare> q;
+    std::size_t next_seq = 1;  // guarded by mtx (submit holds it anyway)
     std::atomic<std::size_t> next_id{1};
 
     // Graceful shutdown: predicate wakes on stopping || !q.empty(); we only
@@ -37,7 +58,11 @@ struct RenderEngine::Impl {
                 std::unique_lock<std::mutex> lk(impl->mtx);
                 impl->cv.wait(lk, [impl]{ return impl->stopping || !impl->q.empty(); });
                 if (impl->stopping && impl->q.empty()) return;
-                req = std::move(impl->q.front());
+                // std::priority_queue::top() returns const T& to preserve the
+                // heap invariant. Moving out of `req` (a RenderRequest field)
+                // does NOT mutate the ordering keys (priority, seq), so the
+                // const_cast is safe here — standard idiom for priority_queue.
+                req = std::move(const_cast<QueuedRequest&>(impl->q.top()).req);
                 impl->q.pop();
             }
             // Run user callback OUTSIDE the lock to avoid deadlocks if they
@@ -109,13 +134,18 @@ RenderEngine::~RenderEngine() {
     }
 }
 
+// Starvation note: a steady stream of high-priority submissions can
+// indefinitely delay low-priority work. Acceptable for Phase 2 — UI
+// submissions are bounded per paint cycle. Revisit if needed later.
 RenderEngine::RenderToken RenderEngine::submit(RenderRequest req) {
     RenderToken tok;
     tok.id = impl_->next_id.fetch_add(1);
     tok.canceled = std::make_shared<std::atomic<bool>>(false);
     {
         std::lock_guard<std::mutex> lk(impl_->mtx);
-        impl_->q.push(std::move(req));
+        int prio = req.priority;
+        std::size_t seq = impl_->next_seq++;
+        impl_->q.push({prio, seq, std::move(req)});
     }
     impl_->cv.notify_one();
     return tok;
