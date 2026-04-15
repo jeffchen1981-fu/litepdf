@@ -259,7 +259,7 @@ Two artifacts per release on GitHub Releases:
 **Wizard flow** (Traditional Chinese UI):
 
 1. Welcome (icon + version)
-2. License (AGPL-3.0 translation + English original link)
+2. **License & third-party notices** (informational — see §8.5 for exact text and rationale)
 3. Install location
 4. Component selection:
    - [✓] Start menu shortcut
@@ -278,6 +278,107 @@ Two artifacts per release on GitHub Releases:
 - Registered under `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\LitePDF` for per-user, `HKLM` for per-machine.
 
 **CI**: GitHub Actions job runs `iscc installer/litepdf.iss` after Release build and uploads both artifacts.
+
+### 8.5 License & Third-Party Notices Page (installer step 2)
+
+#### 8.5.1 Rationale
+
+The AGPL-3.0 does not require end-user agreement as a precondition to *running* the program — the license governs distribution and modification, not use. ([FSF GPL FAQ: "Does the GPL require that source code of modified versions be posted to the public?"](https://www.gnu.org/licenses/gpl-faq.html#DoesTheGPLRequireAvailabilityToPublic)). Consequently this installer page is **informational disclosure**, not an agreement gate. Using "I agree / I do not agree" radio buttons — as in Inno Setup's default template — misrepresents the license by implying use is conditional on assent.
+
+The page still exists because AGPL §7 requires reasonable attribution of third-party components under the same license (MuPDF), and because informing users of their AGPL rights (source availability, redistribution freedom, network-use clause) is good practice and a legal courtesy from the distributor.
+
+#### 8.5.2 Wording
+
+Shown in Traditional Chinese with an English toggle. Reference text (Traditional Chinese):
+
+```
+─────────────────────────────────────────────
+LitePDF 授權條款
+─────────────────────────────────────────────
+
+LitePDF 依 GNU Affero General Public License v3.0 (AGPL-3.0) 發佈。
+本條款保障您以下權利:
+  • 可自由使用本程式 (個人或商業用途均可)
+  • 可取得完整原始碼: https://github.com/<user>/litepdf
+  • 可修改並再散佈本程式,但需沿用相同授權
+
+若您將本程式或其衍生作品透過網路提供服務,
+AGPL 要求您同樣需將您的原始碼公開 (AGPL §13)。
+
+完整英文條款: https://www.gnu.org/licenses/agpl-3.0.html
+
+─────────────────────────────────────────────
+本程式包含之第三方元件
+─────────────────────────────────────────────
+
+• MuPDF 1.24.x  — © Artifex Software, Inc. — AGPL-3.0
+  https://mupdf.com
+
+─────────────────────────────────────────────
+免責聲明
+─────────────────────────────────────────────
+
+本程式按「原樣」提供,不含任何明示或默示保證。
+作者與貢獻者對任何使用後果不負責任。
+```
+
+#### 8.5.3 Buttons & Flow
+
+- **No "I agree / I do not agree" radio buttons.** The Inno Setup default radios are replaced with a single "Next" (「下一步」) and the standard "Cancel" (「取消」).
+- Proceed button label: **「我已閱讀並了解」** ("I have read and understood"). The wizard advances on click.
+- No checkbox is required. A user who reaches this page and clicks Next is acknowledging they saw the notice, which is all that is legally meaningful under AGPL.
+
+#### 8.5.4 Inno Setup Implementation
+
+The license file is a hand-authored RTF at `installer/LICENSE-DISPLAY.rtf` (not the raw AGPL text), laid out with section headers in bold. The `[Setup]` section sets `LicenseFile=` to this RTF. Default strings are overridden in the `[Messages]` section to replace agreement language with acknowledgement language, and the "I do not accept" radio is hidden via `[Code]` (Pascal Script) by setting `WizardForm.LicenseNotAcceptedRadio.Visible := False` and auto-selecting the accepted radio on page activation. See Phase 10 implementation plan for exact script.
+
+#### 8.5.5 Maintenance Rules (normative)
+
+These rules are binding on every PR that changes the set of components shipped in `litepdf.exe` or in the installer bundle.
+
+**Rule 1 — When to update this page.** Update `installer/LICENSE-DISPLAY.rtf` and this section of the design doc whenever any of the following is true:
+
+1. A new library, font, icon, or data file is statically linked, dynamically linked, or bundled into the installer.
+2. An existing bundled component's license changes (e.g. MuPDF relicenses, or we upgrade to a version with different terms).
+3. An existing bundled component's version changes in a way that affects the notice (e.g. version bump that matters for CVE disclosure).
+
+**Rule 2 — When components are exempt.** Do *not* list:
+
+- Build-time-only tooling (CMake, MSVC, Inno Setup compiler itself, ImageMagick, rsvg-convert). These are not "distributed" with the product.
+- Test-only dependencies (Catch2 linked only into the test harness and excluded from Release). If a test helper ships in the Release exe, it is no longer test-only and must be listed.
+- System libraries provided by Windows (`comctl32`, `d2d1`, `dwrite`, `gdi32`, `user32`, etc.). Windows components are not redistributed by us.
+
+**Rule 3 — License compatibility gate.** Before adding a component, verify its license is compatible with AGPL-3.0:
+
+- Compatible: AGPL-3.0, GPL-3.0, LGPL-3.0, MIT, BSD-2/3, Apache-2.0, ISC, Zlib, Public Domain / CC0.
+- **Incompatible and must be rejected**: any license that forbids copyleft (e.g. some source-available licenses), or GPL-2.0-only (without "or later" clause — incompatible with AGPL-3.0).
+- Ambiguous cases (custom licenses, dual-licensed components) require documenting the choice and the reasoning in the PR description.
+
+**Rule 4 — Required notice fields.** Each bullet in "本程式包含之第三方元件 / Third-Party Components" must contain:
+
+1. Component name and version (major.minor acceptable; patch level optional unless needed for CVE context).
+2. Copyright holder as stated in the component's own LICENSE file.
+3. License identifier (SPDX short form: `AGPL-3.0`, `MIT`, etc.).
+4. Project URL (preferred: the official homepage; fallback: the source repository).
+
+**Rule 5 — PR checklist for component changes.** The PR description must include, and the reviewer must verify:
+
+- [ ] Component name, version, license, copyright, URL gathered.
+- [ ] License compatibility confirmed against Rule 3.
+- [ ] `installer/LICENSE-DISPLAY.rtf` updated.
+- [ ] This section (§8.5) of the design doc updated to match.
+- [ ] A copy of the component's upstream `LICENSE` file is checked into `third_party/<component>/LICENSE` or equivalent path required by that license.
+- [ ] If the component's license requires a `NOTICE` file or equivalent (e.g. Apache-2.0), that file is also preserved and bundled.
+
+**Rule 6 — Source availability promise.** Because AGPL requires offering source to anyone who receives the binary, every GitHub Release must attach the exact source tarball (git archive of the tagged commit, submodules included) alongside `litepdf-setup.exe` and `litepdf-portable.zip`. The CI release job is the enforcement point; this check must not be skipped.
+
+#### 8.5.6 Current Components Inventory
+
+| Name | Version | License | Copyright | URL |
+|---|---|---|---|---|
+| MuPDF | 1.24.x (pinned per release) | AGPL-3.0 | Artifex Software, Inc. | https://mupdf.com |
+
+This table is the single source of truth. `installer/LICENSE-DISPLAY.rtf` and Rule 5 PR checklists must be kept consistent with it.
 
 ## 9. Application Icon
 

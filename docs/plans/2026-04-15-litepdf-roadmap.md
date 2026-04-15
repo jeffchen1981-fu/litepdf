@@ -65,7 +65,7 @@ Phase 3  (MainWindow + PdfCanvas, single-tab Tier 1 viewer)  ◄── first dem
 | 7 | Thumbnails | Owner-draw ListView, lazy render, F4 toggle, hidden by default | Thumbnails render on demand; opening doesn't block on thumb generation |
 | 8 | Tier 3 completion | Password dialog, ePub/CBZ/XPS, dark mode, dual-page spread | All fixtures open; toggles work; no format-specific crashes |
 | 9 | Icons | "Lightning document" app icon + red PDF document variant; 7 sizes each; multi-res `.ico` | Icons visible in Explorer at all DPIs; installer welcome shows icon |
-| 10 | Installer | Inno Setup script, per-user default, optional associations, CI release job | `litepdf-setup.exe` installs/upgrades/uninstalls cleanly on a fresh VM |
+| 10 | Installer | Inno Setup script, per-user default, optional associations, informational license page (design §8.5), CI release job with source tarball attached | `litepdf-setup.exe` installs/upgrades/uninstalls cleanly on a fresh VM; license page follows design §8.5 wording (no "I agree" radio); release bundles source tarball per AGPL §13 |
 | 11 | Benchmark gate | Cold-start benchmark harness, CI regression threshold (+10 % fails) | Baseline captured; regression PR correctly blocked in CI |
 | 12 | Release hardening | Minidump on unhandled exception, session.json restore, full manual smoke pass | All 6 smoke-test checklist items pass; v1.0 tag + GitHub release |
 
