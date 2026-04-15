@@ -7,6 +7,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace litepdf::core {
 
@@ -35,20 +36,40 @@ Document& Document::operator=(Document&&) noexcept = default;
 
 namespace {
 
-// LitePDF is scoped to PDF files only. Recognize format by extension +
-// magic bytes before handing off to MuPDF (which would otherwise happily
-// open images and other non-PDF formats it supports).
-bool looks_like_pdf(const std::filesystem::path& path) {
+// LitePDF accepts a small allowlist of document formats that MuPDF supports:
+// PDF, ePub, CBZ (comic book zip), XPS, FB2, and SVG. Recognize by extension
+// plus a magic-number sanity check for the PDF/ZIP families, so MuPDF won't
+// be handed unrelated files (e.g. PNG) that it would otherwise open.
+bool looks_like_supported_document(const std::filesystem::path& path) {
     std::string ext = path.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (ext != ".pdf") return false;
 
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return false;
-    char header[5] = {0};
-    f.read(header, 4);
-    return std::string(header, 4) == "%PDF";
+    static constexpr std::string_view kAllowedExts[] = {
+        ".pdf", ".epub", ".cbz", ".xps", ".fb2", ".svg"
+    };
+    bool ext_allowed = false;
+    for (auto e : kAllowedExts) {
+        if (ext == e) { ext_allowed = true; break; }
+    }
+    if (!ext_allowed) return false;
+
+    if (ext == ".pdf") {
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return false;
+        char header[5] = {0};
+        f.read(header, 4);
+        return std::string_view(header, 4) == "%PDF";
+    }
+    if (ext == ".epub" || ext == ".cbz" || ext == ".xps") {
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return false;
+        char header[4] = {0};
+        f.read(header, 4);
+        return std::string_view(header, 4) == std::string_view("PK\x03\x04", 4);
+    }
+    // .fb2 and .svg are XML; no magic check.
+    return true;
 }
 
 void flatten_outline(fz_context* ctx,
@@ -76,7 +97,7 @@ void flatten_outline(fz_context* ctx,
 std::optional<Document::OpenError> Document::open(const std::filesystem::path& path) {
     if (!std::filesystem::exists(path)) return OpenError::FileNotFound;
 
-    if (!looks_like_pdf(path)) return OpenError::UnsupportedFormat;
+    if (!looks_like_supported_document(path)) return OpenError::UnsupportedFormat;
 
     fz_try(impl_->ctx) {
         // NOTE: fz_open_document takes a UTF-8 char*. path.string() yields ACP on
