@@ -29,6 +29,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_document_outline.cpp
     unit/test_document_formats.cpp
     unit/test_document_clone_context.cpp
+    unit/test_render_engine_lifecycle.cpp
 )
 target_link_libraries(litepdf_unit_tests PRIVATE litepdf_core)
 

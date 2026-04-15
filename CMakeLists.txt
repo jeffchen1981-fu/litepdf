@@ -21,6 +21,7 @@ include(ImportMuPDF)  # defines litepdf::mupdf INTERFACE target
 # --- core library ---------------------------------------------------------
 add_library(litepdf_core STATIC
     src/core/Document.cpp
+    src/core/RenderEngine.cpp
 )
 
 litepdf_apply_flags(litepdf_core)

@@ -1,0 +1,67 @@
+#pragma once
+
+// core::RenderEngine — thread-pool-backed page renderer.
+//
+// Design notes (frozen per Phase 2 plan, decisions D1-D9):
+//  - PIMPL: no MuPDF headers leak through this header. Only forward
+//    declarations of fz_pixmap / fz_context are used.
+//  - on_complete fires on a worker thread. The fz_context* passed to
+//    the callback is the worker's cloned context and is valid ONLY for
+//    the duration of the callback. Do not capture or retain it.
+//  - Caller owns the fz_pixmap* delivered to on_complete (D2). It must
+//    be dropped with fz_drop_pixmap using a context the caller owns.
+//  - cancel() is cooperative, not preemptive: a worker checks the
+//    canceled flag at safe points. In-flight renders may still complete.
+//  - Not copyable and not movable: will hold std::thread resources once
+//    wired in Task 3.
+//  - This is the Task 2 scaffold. Thread pool, work queue, cancellation
+//    wiring, and actual rendering land in Tasks 3-7.
+
+#include <atomic>
+#include <cstddef>
+#include <functional>
+#include <memory>
+
+// Forward declarations — keep this header MuPDF-free (PIMPL).
+struct fz_pixmap;
+struct fz_context;
+
+namespace litepdf::core {
+
+class Document;
+
+class RenderEngine {
+public:
+    struct RenderToken {
+        std::size_t id = 0;
+        std::shared_ptr<std::atomic<bool>> canceled;
+    };
+
+    struct RenderRequest {
+        int page_num;
+        int priority;       // 0 = highest; 1 = adjacent; 2 = prefetch
+        float scale;        // 1.0 = 72 dpi
+        std::function<void(fz_pixmap*, fz_context*)> on_complete;
+    };
+
+    RenderEngine(Document& doc, std::size_t num_workers = 2);
+    ~RenderEngine();
+
+    RenderEngine(const RenderEngine&) = delete;
+    RenderEngine& operator=(const RenderEngine&) = delete;
+    RenderEngine(RenderEngine&&) = delete;
+    RenderEngine& operator=(RenderEngine&&) = delete;
+
+    RenderToken submit(RenderRequest req);
+    void cancel(const RenderToken& token);
+    void cancel_all_below_priority(int priority);
+
+    std::size_t num_workers() const noexcept;
+    std::size_t pending_count() const noexcept;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+} // namespace litepdf::core
