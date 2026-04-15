@@ -58,3 +58,9 @@ TEST_CASE("RenderEngine throws when Document is not open", "[core][render][pool]
     litepdf::core::Document doc;  // never opened
     REQUIRE_THROWS_AS(litepdf::core::RenderEngine(doc, 2), std::runtime_error);
 }
+
+TEST_CASE("RenderEngine rejects zero workers", "[core][render][pool]") {
+    litepdf::core::Document doc;
+    REQUIRE(!doc.open("tests/fixtures/simple.pdf").has_value());
+    REQUIRE_THROWS_AS(litepdf::core::RenderEngine(doc, 0), std::invalid_argument);
+}

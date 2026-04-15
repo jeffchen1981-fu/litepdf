@@ -25,6 +25,7 @@ struct RenderEngine::Impl {
         for (;;) {
             std::unique_lock<std::mutex> lk(impl->mtx);
             impl->cv.wait(lk, [impl]{ return impl->stopping; });
+            // Predicate currently only fires on stopping; Task 4 adds queue-push wakeups.
             if (impl->stopping) return;
         }
     }
@@ -32,6 +33,9 @@ struct RenderEngine::Impl {
 
 RenderEngine::RenderEngine(Document& doc, std::size_t n)
     : impl_(std::make_unique<Impl>()) {
+    if (n == 0)
+        throw std::invalid_argument("RenderEngine: num_workers must be >= 1");
+
     impl_->num_workers = n;
     impl_->worker_ctxs.reserve(n);
 
@@ -40,8 +44,6 @@ RenderEngine::RenderEngine(Document& doc, std::size_t n)
         for (std::size_t i = 0; i < n; ++i) {
             fz_context* ctx = doc.clone_context();
             if (!ctx) {
-                for (auto* c : impl_->worker_ctxs) fz_drop_context(c);
-                impl_->worker_ctxs.clear();
                 throw std::runtime_error("RenderEngine: failed to clone fz_context "
                                          "(is the Document open?)");
             }
