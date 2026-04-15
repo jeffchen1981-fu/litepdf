@@ -187,7 +187,7 @@ git -c user.email="chen.yifu@local" commit -m "docs(design): document MuPDF incl
 
 ---
 
-## Task 2: Wire MuPDF into CMake via `include_external_msproject`
+## Task 2: Wire MuPDF into CMake via `ExternalProject_Add` on `mupdf.sln`
 
 **Files:**
 - Create: `cmake/ImportMuPDF.cmake`
@@ -195,7 +195,7 @@ git -c user.email="chen.yifu@local" commit -m "docs(design): document MuPDF incl
 - Modify: `scripts/smoke-test.ps1` (size budget bump)
 - Verify: full build + smoke test pass with new MuPDF deps
 
-MuPDF 1.24.11 has no CMakeLists.txt (see design §2.1). We consume its shipped VS projects via `include_external_msproject`. This introduces a Visual Studio generator requirement, which is already met by the Phase 0 choice of `-G "Visual Studio 17 2022"`.
+**Strategy evolution:** An earlier revision of this task used `include_external_msproject`. That strategy failed in two ways: (1) MuPDF's vcxprojs hardcode `PlatformToolset=v142` which resists `Directory.Build.props` override; (2) MuPDF's `mupdf.sln` contains solution-level platform mappings — e.g. `bin2coff.vcxproj` is configured to build as `Release|Win32` for ANY solution platform because it is a host build tool — and those mappings are bypassed when projects are consumed individually. The sln-level invocation via `ExternalProject_Add` respects both the solution's platform mapping AND accepts `/p:PlatformToolset=v143` as a command-line override.
 
 **Pre-step: verify freetype defaults to FTL, record in design §2.1.**
 
@@ -215,69 +215,88 @@ Commit the design doc update as a sub-task of Task 1 if you prefer atomic commit
 **Step 1:** Create `cmake/ImportMuPDF.cmake`:
 
 ```cmake
-# Import MuPDF into our CMake graph via its upstream Visual Studio projects.
-# See design §2.1 for rationale. VS generator only.
+# Import MuPDF into our CMake graph by invoking msbuild on its upstream VS
+# solution (platform/win32/mupdf.sln). The solution's ConfigurationManager
+# supplies per-project platform mappings (e.g. bin2coff→Win32 as a host tool)
+# that we would otherwise have to replicate. VS 2022 (v143) toolset is forced
+# via command-line override.
 #
 # Exports:
-#   target: litepdf::mupdf  (INTERFACE library bundling all four MuPDF .libs)
-# Side effects:
-#   adds bin2coff, libthirdparty, libresources, libmuthreads, libmupdf
-#   as external MSBuild targets under the generated .sln.
+#   target: litepdf::mupdf  (INTERFACE library bundling MuPDF output .libs)
 
-if(NOT CMAKE_GENERATOR MATCHES "Visual Studio")
-    message(FATAL_ERROR
-        "ImportMuPDF.cmake requires a Visual Studio CMake generator. "
-        "Detected: ${CMAKE_GENERATOR}")
+include(ExternalProject)
+
+set(_MUPDF_ROOT        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mupdf")
+set(_MUPDF_SLN         "${_MUPDF_ROOT}/platform/win32/mupdf.sln")
+set(_MUPDF_OUTPUT_DIR  "${_MUPDF_ROOT}/platform/win32/x64/Release")
+
+# Locate MSBuild.exe — ship with VS BuildTools. Use vswhere for discovery.
+find_program(_VSWHERE_EXE
+    NAMES vswhere.exe
+    PATHS "$ENV{ProgramFiles\(x86\)}/Microsoft Visual Studio/Installer"
+    NO_DEFAULT_PATH)
+if(NOT _VSWHERE_EXE)
+    message(FATAL_ERROR "vswhere.exe not found — Visual Studio 2022 BuildTools required.")
 endif()
 
-set(_MUPDF_VCXPROJ_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mupdf/platform/win32")
+execute_process(
+    COMMAND "${_VSWHERE_EXE}"
+        -latest -products "*"
+        -requires Microsoft.Component.MSBuild
+        -find "MSBuild/**/Bin/MSBuild.exe"
+    OUTPUT_VARIABLE _MSBUILD_EXE
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT _MSBUILD_EXE OR NOT EXISTS "${_MSBUILD_EXE}")
+    message(FATAL_ERROR "MSBuild.exe not found via vswhere.")
+endif()
+message(STATUS "MuPDF will be built via: ${_MSBUILD_EXE}")
 
-# Include the vendor .vcxproj files as external MSBuild targets.
-# GUID arg left to CMake's auto-detection (reads from the vcxproj).
-include_external_msproject(mupdf_bin2coff     "${_MUPDF_VCXPROJ_DIR}/bin2coff.vcxproj")
-include_external_msproject(mupdf_libthirdparty "${_MUPDF_VCXPROJ_DIR}/libthirdparty.vcxproj")
-include_external_msproject(mupdf_libresources  "${_MUPDF_VCXPROJ_DIR}/libresources.vcxproj")
-include_external_msproject(mupdf_libmuthreads  "${_MUPDF_VCXPROJ_DIR}/libmuthreads.vcxproj")
-include_external_msproject(mupdf_libmupdf      "${_MUPDF_VCXPROJ_DIR}/libmupdf.vcxproj")
+# ExternalProject builds MuPDF's sln. We target libmupdf; MSBuild
+# automatically chases its ProjectReferences (libthirdparty, libresources,
+# libmuthreads) and the sln-level config maps bin2coff → Release|Win32.
+ExternalProject_Add(mupdf_ext
+    SOURCE_DIR        "${_MUPDF_ROOT}"
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND     "${_MSBUILD_EXE}" "${_MUPDF_SLN}"
+                      /t:libmupdf
+                      /p:Configuration=Release
+                      /p:Platform=x64
+                      /p:PlatformToolset=v143
+                      /m /nologo /verbosity:minimal
+    INSTALL_COMMAND   ""
+    BUILD_ALWAYS      OFF
+    BUILD_IN_SOURCE   1
+    BUILD_BYPRODUCTS
+        "${_MUPDF_OUTPUT_DIR}/libmupdf.lib"
+        "${_MUPDF_OUTPUT_DIR}/libthirdparty.lib"
+        "${_MUPDF_OUTPUT_DIR}/libresources.lib"
+        "${_MUPDF_OUTPUT_DIR}/libmuthreads.lib"
+)
 
-# Dependency chain (build order):
-#   bin2coff  -> libresources
-#   libthirdparty, libresources, libmuthreads -> libmupdf
-add_dependencies(mupdf_libresources mupdf_bin2coff)
-add_dependencies(mupdf_libmupdf
-    mupdf_libthirdparty
-    mupdf_libresources
-    mupdf_libmuthreads)
-
-# Outputs land here (MuPDF's vcxproj OutDir convention for x64):
-#   third_party/mupdf/platform/win32/x64/Release/libmupdf.lib
-#   third_party/mupdf/platform/win32/x64/Debug/libmupdf.lib
-# Use generator expressions so Debug/Release both work.
-set(_MUPDF_OUTPUT_DIR
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mupdf/platform/win32/x64/$<CONFIG>")
-
-# Expose a single INTERFACE target that bundles headers + all four .libs.
+# INTERFACE target that our code links against. Headers + 4 output .libs
+# + a handful of Windows system libs MuPDF may reference.
 add_library(litepdf_mupdf INTERFACE)
-add_dependencies(litepdf_mupdf mupdf_libmupdf)
+add_dependencies(litepdf_mupdf mupdf_ext)
 
 target_include_directories(litepdf_mupdf INTERFACE
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mupdf/include")
+    "${_MUPDF_ROOT}/include")
 
 target_link_libraries(litepdf_mupdf INTERFACE
     "${_MUPDF_OUTPUT_DIR}/libmupdf.lib"
     "${_MUPDF_OUTPUT_DIR}/libthirdparty.lib"
     "${_MUPDF_OUTPUT_DIR}/libresources.lib"
     "${_MUPDF_OUTPUT_DIR}/libmuthreads.lib"
-    # MuPDF may also need these Windows system libs — include defensively.
     ws2_32 advapi32 gdi32 user32 crypt32)
 
 add_library(litepdf::mupdf ALIAS litepdf_mupdf)
 ```
 
+**Note on Debug builds:** this helper hardcodes `Configuration=Release`. Phase 1's goal is a working Release build; Debug is a Phase 2+ concern. When Debug matters, the fix is to duplicate the `ExternalProject_Add` call for a Debug variant and switch `$<CONFIG>` driven link paths. Out of scope for Phase 1.
+
 **Step 2:** Modify `CMakeLists.txt`. Add, after `include(CompilerFlags)` and before `add_executable(litepdf ...)`:
 
 ```cmake
-# --- MuPDF via include_external_msproject ---------------------------------
+# --- MuPDF via ExternalProject_Add on mupdf.sln ---------------------------
 include(ImportMuPDF)  # defines litepdf::mupdf INTERFACE target
 ```
 
@@ -303,12 +322,14 @@ Expected: build succeeds. Five new MuPDF sub-builds run (first build adds ~3 min
 
 **Likely failure modes:**
 
-- `MSB3073 bin2coff.exe not found`: `libresources` tried to build before `bin2coff`. Check the `add_dependencies` chain was applied correctly.
-- `LNK1104 cannot open file libmupdf.lib`: path expression `$<CONFIG>` didn't expand as expected. Dump the generated `litepdf.vcxproj` to check actual paths under `<AdditionalDependencies>`.
-- `fatal error C1083: cannot include fitz.h`: `target_include_directories` for `litepdf::mupdf` is set to `PRIVATE` instead of `INTERFACE` (check helper).
-- `unresolved external symbol _imp__WSACleanup@0` or similar: MuPDF uses Winsock for HTTPS-fetched assets; add `ws2_32` to link (already in helper).
+- `MSB8020 v142 build tools not found`: the `/p:PlatformToolset=v143` override isn't taking effect. Check the exact msbuild command line from the ExternalProject build log.
+- `MSBUILD : error MSB1008: Only one project can be specified`: unquoted path with spaces. Confirm `${_MUPDF_SLN}` is quoted and contains no wildcards.
+- `LNK1104 cannot open file libmupdf.lib`: MuPDF build completed but at a different path. Verify `_MUPDF_OUTPUT_DIR` matches MuPDF's actual x64 Release output.
+- `fatal error C1083: cannot include fitz.h`: `target_include_directories` on `litepdf::mupdf` should be `INTERFACE` (check helper).
+- `unresolved external symbol _imp__WSACleanup@0` or similar: MuPDF uses Winsock for HTTPS-fetched assets; `ws2_32` should already be in the link list.
+- **Warnings from MuPDF's own source code at any /W level**: these are vendor code, not our responsibility. Count them and report, but do not suppress.
 
-If the build fails in a way not listed, STOP and report. Do NOT start editing MuPDF's `.vcxproj` files to "fix" symptoms — that's out of scope.
+If the build fails in a way not listed, STOP and report. Do NOT start editing MuPDF's `.vcxproj` files, `mupdf.sln`, or the solution's ConfigurationManager section — the sln-based invocation is supposed to make those unnecessary.
 
 **Step 4:** Verify smoke test. First bump the size budget:
 
@@ -332,7 +353,7 @@ Expected: `[OK] Phase 0 smoke test passed.` (prefix is cosmetic; the test logic 
 ```bash
 # commit A: ImportMuPDF helper
 git add cmake/ImportMuPDF.cmake
-git -c user.email="chen.yifu@local" commit -m "build(cmake): add ImportMuPDF helper (include_external_msproject)"
+git -c user.email="chen.yifu@local" commit -m "build(cmake): add ImportMuPDF helper (ExternalProject_Add on mupdf.sln)"
 
 # commit B: wire into main CMakeLists + smoke budget bump
 git add CMakeLists.txt scripts/smoke-test.ps1
