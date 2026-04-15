@@ -26,6 +26,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_document_pages.cpp
     unit/test_document_text.cpp
     unit/test_document_password.cpp
+    unit/test_document_outline.cpp
 )
 target_link_libraries(litepdf_unit_tests PRIVATE litepdf_core)
 

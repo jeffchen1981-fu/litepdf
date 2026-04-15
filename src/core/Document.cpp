@@ -51,6 +51,26 @@ bool looks_like_pdf(const std::filesystem::path& path) {
     return std::string(header, 4) == "%PDF";
 }
 
+void flatten_outline(fz_context* ctx,
+                     fz_outline* node,
+                     int depth,
+                     std::vector<Document::OutlineEntry>& out) {
+    for (; node; node = node->next) {
+        Document::OutlineEntry entry;
+        entry.depth = depth;
+        entry.title = node->title ? std::string(node->title) : std::string{};
+        entry.page_index = Document::kNoPage;
+        if (node->page.page >= 0) {
+            entry.page_index = static_cast<std::size_t>(node->page.page);
+        }
+        out.push_back(std::move(entry));
+
+        if (node->down) {
+            flatten_outline(ctx, node->down, depth + 1, out);
+        }
+    }
+}
+
 } // namespace
 
 std::optional<Document::OpenError> Document::open(const std::filesystem::path& path) {
@@ -183,6 +203,23 @@ std::string Document::page_text(std::size_t index) const {
     return result;
 }
 
-std::vector<Document::OutlineEntry> Document::outline() const { return {}; }
+std::vector<Document::OutlineEntry> Document::outline() const {
+    std::vector<OutlineEntry> result;
+    if (!impl_->doc) return result;
+
+    fz_outline* root = nullptr;
+    fz_try(impl_->ctx) {
+        root = fz_load_outline(impl_->ctx, impl_->doc);
+    }
+    fz_catch(impl_->ctx) {
+        return result;  // fz_catch — return empty rather than throw
+    }
+
+    if (root) {
+        flatten_outline(impl_->ctx, root, 0, result);
+        fz_drop_outline(impl_->ctx, root);
+    }
+    return result;
+}
 
 } // namespace litepdf::core
