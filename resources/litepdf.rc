@@ -33,6 +33,10 @@ END
 // Manifest (side-by-side assembly)
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "manifest.xml"
 
-// Icon slots (placeholder; real icons arrive in Phase 9)
+// Icon slots: real icon assets land in Phase 9. See design §9 for the "Lightning
+// Document" app icon and the red-PDF document variant. Resource IDs are reserved
+// here so existing consumers (WNDCLASSEX.hIcon, DefaultIcon registry keys) don't
+// change when we uncomment these.
+// TODO(phase-9): ship assets/icon/litepdf-app.ico and litepdf-doc.ico
 // IDI_APPICON    101 ICON "icon/litepdf-app.ico"
 // IDI_PDFDOC     102 ICON "icon/litepdf-doc.ico"
