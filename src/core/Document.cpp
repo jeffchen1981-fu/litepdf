@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cctype>
 #include <cstdio>
 #include <fstream>
@@ -275,15 +276,22 @@ std::string Document::page_text(std::size_t index) const {
 }
 
 fz_context* Document::clone_context() const {
+    // Swap-based move ctor/assign guarantees impl_ is never null for a live
+    // Document, so we assert rather than branch on it.
+    assert(impl_);
     // Only hand out clones once a document has actually been opened. This
     // mirrors the rest of the API (page_count, page_size, etc. require a
     // live fz_document) and gives workers a clear "no doc, no context"
-    // contract. Also defensive against a null impl_ or ctx.
-    if (!impl_ || !impl_->ctx || !impl_->doc) return nullptr;
+    // contract.
+    if (!impl_->doc) return nullptr;
     // fz_clone_context is thread-safe w.r.t. the source context's internal
     // locking (which the Impl ctor installed via fz_locks_context); safe to
     // call while other threads hold clones of the same original context.
     // Caller takes ownership and must fz_drop_context().
+    //
+    // NOTE: fz_clone_context itself may return nullptr on OOM. Callers
+    // must treat the nullptr return as a recoverable error, not just as
+    // "document not opened".
     return fz_clone_context(impl_->ctx);
 }
 

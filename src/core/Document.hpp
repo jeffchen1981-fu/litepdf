@@ -74,12 +74,21 @@ public:
     // thread. MuPDF contexts are not thread-safe; RenderEngine's worker
     // threads each get their own clone via this method.
     //
-    // Returns nullptr if no document is currently open (no underlying
-    // fz_document), so callers don't accidentally hand workers a context
-    // for an empty/unopened Document.
+    // Returns nullptr if:
+    //  - Document is not yet open (no source fz_document to associate), OR
+    //  - fz_clone_context itself fails (e.g., out-of-memory).
+    // Caller MUST tolerate nullptr and treat it as a recoverable error
+    // (not just "not opened" — OOM is possible too).
     //
     // Caller owns the returned pointer and MUST release it with
     // fz_drop_context() when done.
+    //
+    // Thread-safety: safe to call from multiple threads simultaneously.
+    // fz_clone_context internally acquires FZ_LOCK_ALLOC when bumping
+    // shared-context refcounts, and the lock table installed by the
+    // Impl ctor uses std::mutex under the hood. The Document (and its
+    // underlying fz_context) must not be destroyed while any call is
+    // in progress.
     [[nodiscard]] fz_context* clone_context() const;
 
 private:
