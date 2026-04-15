@@ -20,6 +20,8 @@ extern "C" {
     unsigned char* fz_pixmap_samples(fz_context*, fz_pixmap*);
     void fz_drop_pixmap(fz_context*, fz_pixmap*);
     struct fz_pixmap* fz_keep_pixmap(struct fz_context*, struct fz_pixmap*);
+    fz_context* fz_clone_context(fz_context*);
+    void        fz_drop_context(fz_context*);
 }
 
 using Microsoft::WRL::ComPtr;
@@ -37,6 +39,13 @@ struct PdfCanvas::Impl {
     ComPtr<ID2D1Bitmap>           current_bitmap;  // Task 6 populates
     D2D1_SIZE_U                   last_size = { 0, 0 };
     litepdf::core::DocumentView*  view = nullptr;  // non-owning
+    // Orphan-drop ctx: cloned from the current view's ui_ctx on set_view.
+    // Outlives view swaps so a late WM_USER_RENDER_DONE arriving after
+    // the view (and its worker_ctx / ui_ctx) has been destroyed can still
+    // drop its pixmap safely. MuPDF refcounts are atomic across clones
+    // of the same root, and fz_clone_context keeps the root state alive
+    // past the view's own ui_ctx drop. Replaced on each set_view.
+    fz_context*                   orphan_ctx = nullptr;
     // Pan offset in DIPs from the centered/fit position. Reset whenever a
     // new bitmap arrives. No clamping in Phase 3 — user can pan off-canvas.
     float                         pan_x = 0.0f;
@@ -44,9 +53,20 @@ struct PdfCanvas::Impl {
 };
 
 void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
+    // Swap orphan_ctx to track the new view. Any late WM_USER_RENDER_DONE
+    // queued for the OLD view will either arrive before this swap (handled
+    // via the old view's ui_ctx) or after (handled via the NEW orphan_ctx
+    // — legal because both are clones of the same MuPDF root state kept
+    // alive by refcount while any clone exists).
+    if (impl_->orphan_ctx) {
+        fz_drop_context(impl_->orphan_ctx);
+        impl_->orphan_ctx = nullptr;
+    }
     impl_->view = view;
-    // Clearing the view invalidates whatever bitmap was tied to its ctx.
-    if (!view) {
+    if (view) {
+        impl_->orphan_ctx = fz_clone_context(view->ui_ctx());
+    } else {
+        // Clearing the view invalidates whatever bitmap was tied to its ctx.
         impl_->current_bitmap.Reset();
         if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
     }
@@ -90,7 +110,12 @@ PdfCanvas::PdfCanvas(HINSTANCE hInstance, HWND parent)
         throw std::runtime_error("D2D1CreateFactory failed");
 }
 
-PdfCanvas::~PdfCanvas() = default;
+PdfCanvas::~PdfCanvas() {
+    if (impl_ && impl_->orphan_ctx) {
+        fz_drop_context(impl_->orphan_ctx);
+        impl_->orphan_ctx = nullptr;
+    }
+}
 
 LRESULT CALLBACK PdfCanvas::WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     PdfCanvas* self = nullptr;
@@ -165,9 +190,15 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 return 0;
             }
             if (!impl_->view) {
-                // View was swapped out; drop the orphan pixmap has no ctx here.
-                // Shouldn't happen in practice since set_view precedes render
-                // requests. For Phase 3, we leak — pathological path.
+                // View was swapped out between the worker's PostMessage and
+                // now. Drop via orphan_ctx (a clone of the old view's root
+                // ctx, kept alive across set_view(nullptr)) to avoid leaking
+                // the pixmap. If orphan_ctx is also null (never had a view),
+                // we leak — but that can't happen since a pixmap only
+                // reaches this path after set_view was called with a view.
+                if (impl_->orphan_ctx) {
+                    fz_drop_pixmap(impl_->orphan_ctx, pix);
+                }
                 return 0;
             }
             fz_context* ui_ctx = impl_->view->ui_ctx();

@@ -23,8 +23,14 @@ struct DocumentView::Impl {
     Document doc;
 
     // Order matters for destruction (see ~DocumentView):
-    //   engine (joins workers) → cache (drops pixmaps via ui_ctx) → ui_ctx.
-    fz_context*                   ui_ctx = nullptr;
+    //   engine (joins workers) → cache (drops pixmaps via cache_ctx)
+    //     → cache_ctx → ui_ctx → doc.
+    // ui_ctx is UI-thread-exclusive (D3). cache_ctx is a dedicated clone
+    // used by PageCache for its internal keep/drop ops from worker
+    // threads — MuPDF's lock table serializes refcount updates across
+    // clones of the same root, so this is safe.
+    fz_context*                   ui_ctx    = nullptr;
+    fz_context*                   cache_ctx = nullptr;
     std::unique_ptr<PageCache>    cache;
     std::unique_ptr<RenderEngine> engine;
 
@@ -48,16 +54,23 @@ DocumentView::DocumentView(Document doc,
     : impl_(std::make_unique<Impl>()) {
     impl_->doc = std::move(doc);
 
-    // Clone the UI-thread ctx BEFORE constructing cache/engine so that
-    // a throw here doesn't leak half-built subobjects.
-    impl_->ui_ctx = impl_->doc.clone_context();
-    if (!impl_->ui_ctx) {
+    // Clone the UI-thread ctx and a dedicated cache_ctx BEFORE
+    // constructing cache/engine so that a throw here doesn't leak
+    // half-built subobjects. ui_ctx stays UI-thread-exclusive (D3);
+    // cache_ctx is conceptually "the cache's own ctx" and is used by
+    // workers via PageCache for refcount ops.
+    impl_->ui_ctx    = impl_->doc.clone_context();
+    impl_->cache_ctx = impl_->doc.clone_context();
+    if (!impl_->ui_ctx || !impl_->cache_ctx) {
+        if (impl_->cache_ctx) { fz_drop_context(impl_->cache_ctx); impl_->cache_ctx = nullptr; }
+        if (impl_->ui_ctx)    { fz_drop_context(impl_->ui_ctx);    impl_->ui_ctx    = nullptr; }
         throw std::runtime_error(
             "DocumentView: Document is not open (clone_context returned null)");
     }
 
-    // Cache uses ui_ctx for its internal keep/drop.
-    impl_->cache = std::make_unique<PageCache>(l1_capacity, l2_capacity, impl_->ui_ctx);
+    // Cache uses cache_ctx (not ui_ctx) for its internal keep/drop —
+    // those ops happen on worker threads.
+    impl_->cache = std::make_unique<PageCache>(l1_capacity, l2_capacity, impl_->cache_ctx);
 
     // Engine clones its own per-worker contexts off the Document.
     impl_->engine =
@@ -67,11 +80,15 @@ DocumentView::DocumentView(Document doc,
 DocumentView::~DocumentView() {
     if (!impl_) return;
 
-    // Engine first — ensures no worker is mid-access to cache or ui_ctx.
+    // Engine first — ensures no worker is mid-access to cache or contexts.
     impl_->engine.reset();
-    // Cache next — drops remaining pixmaps / display lists via ui_ctx.
+    // Cache next — drops remaining pixmaps / display lists via cache_ctx.
     impl_->cache.reset();
-    // UI ctx last.
+    // cache_ctx before ui_ctx; both before doc (doc destructs via Impl).
+    if (impl_->cache_ctx) {
+        fz_drop_context(impl_->cache_ctx);
+        impl_->cache_ctx = nullptr;
+    }
     if (impl_->ui_ctx) {
         fz_drop_context(impl_->ui_ctx);
         impl_->ui_ctx = nullptr;
