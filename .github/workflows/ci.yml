@@ -11,7 +11,7 @@ jobs:
 
     steps:
       - name: Checkout with submodules
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -29,7 +29,7 @@ jobs:
         run: ./scripts/smoke-test.ps1
 
       - name: Upload exe artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: litepdf-phase0
           path: build/Release/litepdf.exe
