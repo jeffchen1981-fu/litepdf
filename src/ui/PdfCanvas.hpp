@@ -38,6 +38,7 @@ private:
 
     void create_render_target();
     void discard_render_target();
+    void resubmit_current_page();
     void on_paint();
     void on_size(int width, int height);
     LRESULT on_key_down(WPARAM key);

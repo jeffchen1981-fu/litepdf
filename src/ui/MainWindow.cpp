@@ -162,7 +162,12 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                          SWP_NOZORDER | SWP_NOACTIVATE);
             // The canvas (child) receives WM_DPICHANGED_BEFOREPARENT /
             // WM_DPICHANGED_AFTERPARENT; it discards its render target and
-            // lets the next paint rebuild at the new DPI.
+            // lets the next paint rebuild at the new DPI. Phase 3 Task 12:
+            // also recompute the zoom scale for the new DPI and kick a fresh
+            // render so the canvas isn't left empty after the DPI transition.
+            if (view_ && canvas_) {
+                kick_render(view_->current_page());
+            }
             return 0;
         }
         case WM_COMMAND: {

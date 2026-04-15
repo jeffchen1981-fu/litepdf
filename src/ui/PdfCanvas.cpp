@@ -200,6 +200,7 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
 
             if (hr == D2DERR_RECREATE_TARGET) {
                 discard_render_target();
+                resubmit_current_page();
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return 0;
             }
@@ -246,6 +247,18 @@ void PdfCanvas::create_render_target() {
 void PdfCanvas::discard_render_target() {
     impl_->current_bitmap.Reset();
     impl_->rt.Reset();
+}
+
+void PdfCanvas::resubmit_current_page() {
+    if (!impl_->view) return;
+    HWND target = hwnd_;
+    impl_->view->request_render_with_prefetch(
+        impl_->view->current_page(),
+        [target](fz_pixmap* p, fz_context* worker_ctx) {
+            if (p) fz_keep_pixmap(worker_ctx, p);
+            PostMessageW(target, WM_USER_RENDER_DONE,
+                         reinterpret_cast<WPARAM>(p), 0);
+        });
 }
 
 LRESULT PdfCanvas::on_key_down(WPARAM key) {
@@ -313,6 +326,7 @@ void PdfCanvas::on_size(int w, int h) {
         HRESULT hr = impl_->rt->Resize(sz);
         if (hr == D2DERR_RECREATE_TARGET) {
             discard_render_target();
+            resubmit_current_page();
         } else if (SUCCEEDED(hr)) {
             impl_->last_size = sz;
         }
@@ -352,6 +366,7 @@ void PdfCanvas::on_paint() {
     HRESULT hr = impl_->rt->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
         discard_render_target();
+        resubmit_current_page();
         // Next paint rebuilds; schedule one.
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
