@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.25)
+
+# Read version from VERSION file (single source of truth).
+# Strip any pre-release suffix (e.g. "-dev", "-rc1") because CMake's
+# project(VERSION ...) only accepts numeric major.minor.patch[.tweak].
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" LITEPDF_VERSION_RAW)
+string(STRIP "${LITEPDF_VERSION_RAW}" LITEPDF_VERSION_RAW)
+string(REGEX REPLACE "-.*$" "" LITEPDF_VERSION "${LITEPDF_VERSION_RAW}")
+
 project(litepdf
-    VERSION     0.1.0
+    VERSION     ${LITEPDF_VERSION}
     LANGUAGES   CXX
     DESCRIPTION "Lightweight PDF reader for Windows")
 
@@ -9,7 +17,7 @@ set(CMAKE_CXX_STANDARD          17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS        OFF)
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerFlags)
 
 # --- litepdf executable ---------------------------------------------------
@@ -31,7 +39,7 @@ set_target_properties(litepdf PROPERTIES
 
 # Resource compiler: ensure it can find manifest.xml relative to the .rc file
 target_include_directories(litepdf PRIVATE
-    "${CMAKE_SOURCE_DIR}/resources"
+    "${CMAKE_CURRENT_SOURCE_DIR}/resources"
 )
 
 # MuPDF will be wired in during Phase 1 (Document core). Deliberately omitted
