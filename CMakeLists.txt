@@ -42,5 +42,12 @@ target_include_directories(litepdf PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/resources"
 )
 
+# Tell the MSVC linker NOT to auto-generate/embed a manifest — resources/litepdf.rc
+# already supplies it via CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST. Having both
+# produces CVT1100 "duplicate resource" at link time.
+if(MSVC)
+    target_link_options(litepdf PRIVATE "/MANIFEST:NO")
+endif()
+
 # MuPDF will be wired in during Phase 1 (Document core). Deliberately omitted
 # here to keep Phase 0 build time small and isolate bootstrap failures.
