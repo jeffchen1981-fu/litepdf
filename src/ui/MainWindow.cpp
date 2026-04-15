@@ -36,6 +36,21 @@ LRESULT CALLBACK MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
 
 LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     switch (msg) {
+        case WM_CREATE: {
+            canvas_ = std::make_unique<PdfCanvas>(
+                reinterpret_cast<CREATESTRUCTW*>(l)->hInstance, hwnd);
+            return 0;
+        }
+        case WM_SIZE: {
+            if (canvas_)
+                SetWindowPos(canvas_->hwnd(), nullptr,
+                             0, 0, LOWORD(l), HIWORD(l),
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            return 0;
+        }
+        case WM_SETFOCUS:
+            if (canvas_) SetFocus(canvas_->hwnd());
+            return 0;
         case WM_COMMAND: {
             const int id = LOWORD(w);
             switch (id) {

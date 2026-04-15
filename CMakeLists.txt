@@ -37,6 +37,7 @@ target_link_libraries(litepdf_core PRIVATE
 add_executable(litepdf WIN32
     src/main.cpp
     src/ui/MainWindow.cpp
+    src/ui/PdfCanvas.cpp
     resources/litepdf.rc
 )
 

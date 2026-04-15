@@ -1,5 +1,8 @@
 #pragma once
+#include <memory>
 #include <windows.h>
+
+#include "ui/PdfCanvas.hpp"
 
 namespace litepdf::ui {
 
@@ -21,6 +24,7 @@ private:
 
     HWND hwnd_ = nullptr;
     HACCEL haccel_ = nullptr;
+    std::unique_ptr<PdfCanvas> canvas_;
     // Task 5+ will add: std::unique_ptr<litepdf::core::DocumentView> view_;
 };
 
