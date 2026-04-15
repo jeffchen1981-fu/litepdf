@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -219,6 +220,8 @@ std::string Document::page_text(std::size_t index) const {
         buf = fz_new_buffer(impl_->ctx, 4096);
         out = fz_new_output_with_buffer(impl_->ctx, buf);
         fz_print_stext_page_as_text(impl_->ctx, out, stext);
+        // IMPORTANT: fz_close_output must run before fz_buffer_storage to flush
+        // all pending bytes into the buffer.
         fz_close_output(impl_->ctx, out);
 
         unsigned char* data = nullptr;
@@ -247,7 +250,9 @@ std::vector<Document::OutlineEntry> Document::outline() const {
         root = fz_load_outline(impl_->ctx, impl_->doc);
     }
     fz_catch(impl_->ctx) {
-        return result;  // fz_catch — return empty rather than throw
+        std::fprintf(stderr, "litepdf: fz_load_outline failed: %s\n",
+                     fz_caught_message(impl_->ctx));
+        return result;
     }
 
     if (root) {
