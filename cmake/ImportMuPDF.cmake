@@ -16,7 +16,9 @@ set(_MUPDF_OUTPUT_DIR  "${_MUPDF_ROOT}/platform/win32/x64/Release")
 # Locate MSBuild.exe — ship with VS BuildTools. Use vswhere for discovery.
 find_program(_VSWHERE_EXE
     NAMES vswhere.exe
-    PATHS "$ENV{ProgramFiles\(x86\)}/Microsoft Visual Studio/Installer"
+    PATHS
+        "$ENV{ProgramFiles\(x86\)}/Microsoft Visual Studio/Installer"
+        "$ENV{ProgramFiles}/Microsoft Visual Studio/Installer"
     NO_DEFAULT_PATH)
 if(NOT _VSWHERE_EXE)
     message(FATAL_ERROR "vswhere.exe not found — Visual Studio 2022 BuildTools required.")

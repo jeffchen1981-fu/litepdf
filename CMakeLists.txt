@@ -12,11 +12,6 @@ project(litepdf
     LANGUAGES   CXX
     DESCRIPTION "Lightweight PDF reader for Windows")
 
-# Global settings
-set(CMAKE_CXX_STANDARD          17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS        OFF)
-
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerFlags)
 
@@ -51,7 +46,6 @@ target_link_libraries(litepdf PRIVATE
 
 set_target_properties(litepdf PROPERTIES
     OUTPUT_NAME           "litepdf"
-    RUNTIME_OUTPUT_NAME   "litepdf"
 )
 
 # Resource compiler: ensure it can find manifest.xml relative to the .rc file
