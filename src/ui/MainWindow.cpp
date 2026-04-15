@@ -165,6 +165,25 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     MessageBoxW(hwnd, L"LitePDF — Phase 3 Task 1 scaffold",
                                 kWindowTitle, MB_ICONINFORMATION);
                     return 0;
+                case IDM_ZOOM_IN:
+                    if (view_ && view_->zoom_in()) kick_render(view_->current_page());
+                    return 0;
+                case IDM_ZOOM_OUT:
+                    if (view_ && view_->zoom_out()) kick_render(view_->current_page());
+                    return 0;
+                case IDM_ZOOM_RESET: {
+                    if (view_ && canvas_) {
+                        RECT rc; GetClientRect(canvas_->hwnd(), &rc);
+                        UINT dpi = GetDpiForWindow(hwnd);
+                        view_->set_zoom_mode(
+                            litepdf::core::DocumentView::ZoomMode::FitWidth,
+                            static_cast<float>(rc.right - rc.left),
+                            static_cast<float>(rc.bottom - rc.top),
+                            static_cast<float>(dpi));
+                        kick_render(view_->current_page());
+                    }
+                    return 0;
+                }
             }
             return 0;
         }
@@ -252,9 +271,12 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow) {
         nullptr, menu, hInstance, this);
     if (!hwnd_) return 1;
 
-    // Accelerators: Ctrl+O for Open. Task 9 adds zoom accels.
+    // Accelerators: Ctrl+O for Open; Ctrl+= / Ctrl+- / Ctrl+0 for zoom.
     ACCEL accels[] = {
-        { FCONTROL | FVIRTKEY, 'O', IDM_FILE_OPEN },
+        { FCONTROL | FVIRTKEY, 'O',          IDM_FILE_OPEN  },
+        { FCONTROL | FVIRTKEY, VK_OEM_PLUS,  IDM_ZOOM_IN    },  // Ctrl+=
+        { FCONTROL | FVIRTKEY, VK_OEM_MINUS, IDM_ZOOM_OUT   },  // Ctrl+-
+        { FCONTROL | FVIRTKEY, '0',          IDM_ZOOM_RESET },
     };
     haccel_ = CreateAcceleratorTableW(accels, _countof(accels));
 

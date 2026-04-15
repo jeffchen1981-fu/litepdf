@@ -51,6 +51,12 @@ IDM_MAIN_MENU MENU
         MENUITEM SEPARATOR
         MENUITEM "E&xit",            IDM_FILE_EXIT
     }
+    POPUP "&View"
+    {
+        MENUITEM "Zoom &In\tCtrl+=",  IDM_ZOOM_IN
+        MENUITEM "Zoom &Out\tCtrl+-", IDM_ZOOM_OUT
+        MENUITEM "&Reset Zoom\tCtrl+0", IDM_ZOOM_RESET
+    }
     POPUP "&Help"
     {
         MENUITEM "&About LitePDF",   IDM_HELP_ABOUT

@@ -36,6 +36,10 @@ struct PdfCanvas::Impl {
     ComPtr<ID2D1Bitmap>           current_bitmap;  // Task 6 populates
     D2D1_SIZE_U                   last_size = { 0, 0 };
     litepdf::core::DocumentView*  view = nullptr;  // non-owning
+    // Pan offset in DIPs from the centered/fit position. Reset whenever a
+    // new bitmap arrives. No clamping in Phase 3 — user can pan off-canvas.
+    float                         pan_x = 0.0f;
+    float                         pan_y = 0.0f;
 };
 
 void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
@@ -119,6 +123,28 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             return 0;
         case WM_KEYDOWN:
             return on_key_down(w);
+        case WM_MOUSEWHEEL: {
+            if (!impl_->view) return 0;
+            WORD modifiers = GET_KEYSTATE_WPARAM(w);
+            if (modifiers & MK_CONTROL) {
+                int delta = GET_WHEEL_DELTA_WPARAM(w);
+                bool changed = (delta > 0) ? impl_->view->zoom_in()
+                                           : impl_->view->zoom_out();
+                if (changed) {
+                    impl_->view->cancel_stale_renders(0);
+                    HWND target = hwnd_;
+                    impl_->view->request_render(
+                        impl_->view->current_page(),
+                        [target](fz_pixmap* p, fz_context* wc) {
+                            if (p) fz_keep_pixmap(wc, p);
+                            PostMessageW(target, WM_USER_RENDER_DONE,
+                                         reinterpret_cast<WPARAM>(p), 0);
+                        });
+                }
+                return 0;
+            }
+            return DefWindowProcW(hwnd_, WM_MOUSEWHEEL, w, l);
+        }
         case WM_DPICHANGED_BEFOREPARENT:
             // DPI is changing. Discard render target; next paint rebuilds at new DPI.
             // current_bitmap is sized for the OLD DPI — discard it too
@@ -184,6 +210,10 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             }
 
             impl_->current_bitmap = std::move(bmp);
+            // Reset pan whenever a new bitmap arrives — zoom/page change
+            // both re-render, and we don't try to preserve the view point.
+            impl_->pan_x = 0.0f;
+            impl_->pan_y = 0.0f;
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         }
@@ -238,7 +268,24 @@ LRESULT PdfCanvas::on_key_down(WPARAM key) {
         case VK_END:
             changed = impl_->view->set_current_page(max_idx);
             break;
-        // Arrow keys for scroll when zoomed land in Task 9.
+        // Arrow keys: pan the bitmap by 100 DIPs. No clamping in Phase 3 —
+        // user can pan off-canvas; clamping is Phase 4 polish.
+        case VK_LEFT:
+            impl_->pan_x += 100.0f;
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        case VK_RIGHT:
+            impl_->pan_x -= 100.0f;
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        case VK_UP:
+            impl_->pan_y += 100.0f;
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        case VK_DOWN:
+            impl_->pan_y -= 100.0f;
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
         default:
             return 0;
     }
@@ -295,7 +342,10 @@ void PdfCanvas::on_paint() {
         float dx = (vp.width  - dst_w) * 0.5f;
         float dy = (vp.height - dst_h) * 0.5f;
 
-        D2D1_RECT_F dst = D2D1::RectF(dx, dy, dx + dst_w, dy + dst_h);
+        D2D1_RECT_F dst = D2D1::RectF(dx + impl_->pan_x,
+                                      dy + impl_->pan_y,
+                                      dx + dst_w + impl_->pan_x,
+                                      dy + dst_h + impl_->pan_y);
         impl_->rt->DrawBitmap(impl_->current_bitmap.Get(), dst, 1.0f,
                               D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
     }
