@@ -55,3 +55,9 @@ endif()
 
 # MuPDF will be wired in during Phase 1 (Document core). Deliberately omitted
 # here to keep Phase 0 build time small and isolate bootstrap failures.
+
+# --- Tests ----------------------------------------------------------------
+include(CTest)
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
