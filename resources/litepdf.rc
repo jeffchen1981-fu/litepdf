@@ -40,3 +40,19 @@ CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "manifest.xml"
 // TODO(phase-9): ship assets/icon/litepdf-app.ico and litepdf-doc.ico
 // IDI_APPICON    101 ICON "icon/litepdf-app.ico"
 // IDI_PDFDOC     102 ICON "icon/litepdf-doc.ico"
+
+#include "MainMenu.rc.h"
+
+IDM_MAIN_MENU MENU
+{
+    POPUP "&File"
+    {
+        MENUITEM "&Open...\tCtrl+O", IDM_FILE_OPEN
+        MENUITEM SEPARATOR
+        MENUITEM "E&xit",            IDM_FILE_EXIT
+    }
+    POPUP "&Help"
+    {
+        MENUITEM "&About LitePDF",   IDM_HELP_ABOUT
+    }
+}
