@@ -21,6 +21,9 @@ jobs:
       - name: Build
         run: cmake --build build --config Release --parallel
 
+      - name: Unit tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
       - name: Smoke test
         shell: pwsh
         run: ./scripts/smoke-test.ps1
