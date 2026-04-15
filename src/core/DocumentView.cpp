@@ -12,7 +12,9 @@
 // so the PIMPL stays clean for UI consumers.
 extern "C" {
 struct fz_context;
+struct fz_pixmap;
 void fz_drop_context(fz_context*);
+void fz_drop_pixmap(fz_context*, fz_pixmap*);
 }
 
 namespace litepdf::core {
@@ -186,6 +188,47 @@ void DocumentView::request_render(int page, RenderCb on_complete) {
 
 void DocumentView::cancel_stale_renders(int keep_priority_threshold) {
     impl_->engine->cancel_all_below_priority(keep_priority_threshold);
+}
+
+void DocumentView::request_render_with_prefetch(int page, RenderCb cb) {
+    // 1. Drop any pending P1/P2 from a prior nav so the queue stays
+    //    short during rapid PgDn scrubbing.
+    cancel_stale_renders(0);
+
+    // 2. P0 — current page (user-visible). Caller's callback delivers
+    //    the pixmap to the UI thread.
+    {
+        RenderEngine::RenderRequest r0;
+        r0.page_num    = page;
+        r0.priority    = 0;
+        r0.scale       = impl_->scale;
+        r0.on_complete = std::move(cb);
+        (void)impl_->engine->submit(std::move(r0));
+    }
+
+    // 3. P1 — prev/next prefetch. PageCache::put_pixmap fires inside
+    //    the worker before on_complete, so the cache already holds its
+    //    own ref by the time this callback runs; we just drop ours.
+    auto drop_cb = [](fz_pixmap* p, fz_context* ctx) {
+        if (p) fz_drop_pixmap(ctx, p);
+    };
+    const int total = page_count();
+    if (page - 1 >= 0) {
+        RenderEngine::RenderRequest r1;
+        r1.page_num    = page - 1;
+        r1.priority    = 1;
+        r1.scale       = impl_->scale;
+        r1.on_complete = drop_cb;
+        (void)impl_->engine->submit(std::move(r1));
+    }
+    if (page + 1 < total) {
+        RenderEngine::RenderRequest r1;
+        r1.page_num    = page + 1;
+        r1.priority    = 1;
+        r1.scale       = impl_->scale;
+        r1.on_complete = drop_cb;
+        (void)impl_->engine->submit(std::move(r1));
+    }
 }
 
 fz_context* DocumentView::ui_ctx() const noexcept {

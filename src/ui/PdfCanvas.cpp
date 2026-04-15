@@ -291,12 +291,11 @@ LRESULT PdfCanvas::on_key_down(WPARAM key) {
     }
 
     if (changed) {
-        // Cancel stale renders from rapid paging, then submit.
-        // NOTE(phase4-dry): MainWindow::kick_render uses the same PostMessage
-        // pattern. Phase 3 keeps duplication; Phase 4/5 can factor into a helper.
-        impl_->view->cancel_stale_renders(/*keep_priority_threshold=*/ 0);
+        // Cancel stale renders from rapid paging, submit P0 for current
+        // page, and prefetch prev/next at P1 (Task 11). Cache fills
+        // happen at the engine level so the next PgUp/PgDn is instant.
         HWND target = hwnd_;
-        impl_->view->request_render(
+        impl_->view->request_render_with_prefetch(
             impl_->view->current_page(),
             [target](fz_pixmap* p, fz_context* worker_ctx) {
                 if (p) fz_keep_pixmap(worker_ctx, p);

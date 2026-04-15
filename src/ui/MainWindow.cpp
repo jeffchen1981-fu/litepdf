@@ -98,7 +98,7 @@ void MainWindow::kick_render(int page) {
         static_cast<float>(dpi));
 
     HWND target = canvas_->hwnd();
-    view_->request_render(page,
+    view_->request_render_with_prefetch(page,
         [target](fz_pixmap* p, fz_context* worker_ctx) {
             if (p) fz_keep_pixmap(worker_ctx, p);  // extend lifetime across PostMessage
             PostMessageW(target, WM_USER_RENDER_DONE,

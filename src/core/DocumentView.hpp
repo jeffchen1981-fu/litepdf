@@ -74,6 +74,13 @@ public:
     // Bulk cancel on rapid nav (Phase 3 Task 11 wiring).
     void cancel_stale_renders(int keep_priority_threshold);
 
+    // Phase 3 Task 11: cancel stale P1/P2 work, submit P0 for `page`
+    // with the caller's callback, and submit P1 prefetch for prev/next
+    // pages with drop-only callbacks. The pixmaps land in PageCache
+    // automatically at the engine level, so the next PgUp/PgDn is
+    // served from cache.
+    void request_render_with_prefetch(int page, RenderCb on_current_complete);
+
     // UI thread's own fz_context clone (D3). Stays valid for the
     // lifetime of the DocumentView. Use for fz_drop_pixmap on refs
     // the caller moves onto the UI thread.
