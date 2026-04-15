@@ -12,6 +12,11 @@
 #include <string_view>
 #include <vector>
 
+// Forward-declare fz_context so this header can expose clone_context() without
+// pulling in <mupdf/fitz.h>. The PIMPL stays MuPDF-free for public consumers.
+// Must match MuPDF's declaration exactly: `typedef struct fz_context fz_context;`
+struct fz_context;
+
 namespace litepdf::core {
 
 struct PageSize {
@@ -64,6 +69,18 @@ public:
     };
     static constexpr std::size_t kNoPage = static_cast<std::size_t>(-1);
     [[nodiscard]] std::vector<OutlineEntry> outline() const;
+
+    // Returns a freshly cloned fz_context* suitable for use on another
+    // thread. MuPDF contexts are not thread-safe; RenderEngine's worker
+    // threads each get their own clone via this method.
+    //
+    // Returns nullptr if no document is currently open (no underlying
+    // fz_document), so callers don't accidentally hand workers a context
+    // for an empty/unopened Document.
+    //
+    // Caller owns the returned pointer and MUST release it with
+    // fz_drop_context() when done.
+    [[nodiscard]] fz_context* clone_context() const;
 
 private:
     struct Impl;

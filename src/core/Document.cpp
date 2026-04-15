@@ -3,23 +3,56 @@
 #include <mupdf/fitz.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdio>
 #include <fstream>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 
 namespace litepdf::core {
 
+namespace {
+
+// MuPDF requires a lock table (FZ_LOCK_MAX entries) to be supplied at
+// fz_new_context time when we want fz_clone_context to succeed. Without
+// locks, MuPDF refuses to clone because cloned contexts share the same
+// underlying store / font cache and must serialize access to them.
+//
+// The lock table itself is heap-owned per fz_context (MuPDF keeps the
+// fz_locks_context pointer, so the pointed-to storage must outlive the
+// context). We stash it in the Impl.
+struct MuPDFLocks {
+    std::array<std::mutex, FZ_LOCK_MAX> mutexes;
+    fz_locks_context fz;
+};
+
+void litepdf_lock(void* user, int lock) {
+    auto* locks = static_cast<MuPDFLocks*>(user);
+    locks->mutexes[static_cast<std::size_t>(lock)].lock();
+}
+
+void litepdf_unlock(void* user, int lock) {
+    auto* locks = static_cast<MuPDFLocks*>(user);
+    locks->mutexes[static_cast<std::size_t>(lock)].unlock();
+}
+
+} // namespace
+
 struct Document::Impl {
+    std::unique_ptr<MuPDFLocks> locks;
     fz_context* ctx = nullptr;
     fz_document* doc = nullptr;
     bool needs_password = false;
     bool authenticated = false;
 
-    Impl() {
-        ctx = fz_new_context(nullptr, nullptr, FZ_STORE_DEFAULT);
+    Impl() : locks(std::make_unique<MuPDFLocks>()) {
+        locks->fz.user = locks.get();
+        locks->fz.lock = &litepdf_lock;
+        locks->fz.unlock = &litepdf_unlock;
+        ctx = fz_new_context(nullptr, &locks->fz, FZ_STORE_DEFAULT);
         if (!ctx) throw std::bad_alloc();
         fz_register_document_handlers(ctx);
     }
@@ -239,6 +272,19 @@ std::string Document::page_text(std::size_t index) const {
     }
 
     return result;
+}
+
+fz_context* Document::clone_context() const {
+    // Only hand out clones once a document has actually been opened. This
+    // mirrors the rest of the API (page_count, page_size, etc. require a
+    // live fz_document) and gives workers a clear "no doc, no context"
+    // contract. Also defensive against a null impl_ or ctx.
+    if (!impl_ || !impl_->ctx || !impl_->doc) return nullptr;
+    // fz_clone_context is thread-safe w.r.t. the source context's internal
+    // locking (which the Impl ctor installed via fz_locks_context); safe to
+    // call while other threads hold clones of the same original context.
+    // Caller takes ownership and must fz_drop_context().
+    return fz_clone_context(impl_->ctx);
 }
 
 std::vector<Document::OutlineEntry> Document::outline() const {
