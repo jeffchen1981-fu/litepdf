@@ -68,7 +68,7 @@ endif()
 # --- litepdf-cli (console demo / benchmark harness) -----------------------
 add_executable(litepdf-cli src/cli/main.cpp)
 litepdf_apply_flags(litepdf-cli)
-target_link_libraries(litepdf-cli PRIVATE litepdf_core)
+target_link_libraries(litepdf-cli PRIVATE litepdf_core litepdf::mupdf)
 
 # --- Tests ----------------------------------------------------------------
 include(CTest)

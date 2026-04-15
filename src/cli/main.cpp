@@ -2,27 +2,110 @@
 // Opens a document and prints metadata, first-page size, a text snippet,
 // and the outline. Used manually during development and by Phase 11
 // benchmarks. Not user-facing — the GUI is litepdf.exe.
+//
+// Also supports `--render N` to render page N via RenderEngine and emit
+// a binary PPM (P6) image to stdout. Used for manual smoke-checking the
+// render path during Phase 2+ development.
 
 #include "core/Document.hpp"
+#include "core/RenderEngine.hpp"
 
+#include <mupdf/fitz.h>
+
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <mutex>
 #include <string>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        std::fprintf(stderr, "Usage: %s <file>\n", argv[0]);
+    if (argc < 2) {
+        std::fprintf(stderr, "Usage: %s <file> [--render N]\n", argv[0]);
         return 2;
     }
 
+    const char* path = argv[1];
+    int render_page = -1;
+    for (int i = 2; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--render") == 0 && i + 1 < argc) {
+            render_page = std::atoi(argv[++i]);
+        }
+    }
+
     litepdf::core::Document doc;
-    auto err = doc.open(argv[1]);
+    auto err = doc.open(path);
     if (err) {
         std::fprintf(stderr, "Open error: %d\n", static_cast<int>(*err));
         return 1;
     }
 
+    if (render_page >= 0) {
+#ifdef _WIN32
+        // Ensure stdout emits raw bytes (no CRLF translation) on Windows.
+        std::fflush(stdout);
+        _setmode(_fileno(stdout), _O_BINARY);
+#endif
+        litepdf::core::RenderEngine engine(doc, 1);
+
+        std::mutex m;
+        std::condition_variable cv;
+        bool done = false;
+        int exit_code = 0;
+
+        engine.submit({
+            render_page,
+            0,
+            1.0f,
+            [&](fz_pixmap* pix, fz_context* ctx) {
+                if (!pix) {
+                    std::lock_guard<std::mutex> g(m);
+                    exit_code = 2;
+                    done = true;
+                    cv.notify_all();
+                    return;
+                }
+                int w = fz_pixmap_width(ctx, pix);
+                int h = fz_pixmap_height(ctx, pix);
+                int stride = fz_pixmap_stride(ctx, pix);
+                unsigned char* samples = fz_pixmap_samples(ctx, pix);
+
+                std::fprintf(stdout, "P6\n%d %d\n255\n", w, h);
+                for (int y = 0; y < h; ++y) {
+                    std::fwrite(samples + static_cast<std::size_t>(y) * stride,
+                                1,
+                                static_cast<std::size_t>(w) * 3,
+                                stdout);
+                }
+                std::fflush(stdout);
+                fz_drop_pixmap(ctx, pix);
+
+                std::lock_guard<std::mutex> g(m);
+                done = true;
+                cv.notify_all();
+            }
+        });
+
+        {
+            std::unique_lock<std::mutex> lk(m);
+            cv.wait_for(lk, std::chrono::seconds(10), [&] { return done; });
+            if (!done) {
+                std::fprintf(stderr, "Render timed out\n");
+                exit_code = 3;
+            }
+        }
+        // engine destructor joins workers.
+        return exit_code;
+    }
+
     const std::size_t n = doc.page_count();
-    std::printf("File: %s\n", argv[1]);
+    std::printf("File: %s\n", path);
     std::printf("Pages: %zu\n", n);
 
     if (n > 0) {
