@@ -6,14 +6,18 @@
 
 #include <commctrl.h>
 #include <commdlg.h>
+#include <shellapi.h>
 #include <stdlib.h>
+#include <algorithm>
 #include <atomic>
+#include <cwctype>
 #include <filesystem>
 #include <string>
 #include <thread>
 #include <utility>
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "shell32.lib")
 
 // Forward-decl so we don't have to pull <mupdf/fitz.h> into the UI TU.
 // fz_context / fz_pixmap are forward-declared via core/DocumentView.hpp.
@@ -107,6 +111,29 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         case WM_CREATE: {
             canvas_ = std::make_unique<PdfCanvas>(
                 reinterpret_cast<CREATESTRUCTW*>(l)->hInstance, hwnd);
+            DragAcceptFiles(hwnd, TRUE);
+            return 0;
+        }
+        case WM_DROPFILES: {
+            auto hdrop = reinterpret_cast<HDROP>(w);
+            wchar_t buf[MAX_PATH] = {0};
+            UINT count = DragQueryFileW(hdrop, 0xFFFFFFFF, nullptr, 0);
+            if (count > 0 && DragQueryFileW(hdrop, 0, buf, MAX_PATH)) {
+                std::filesystem::path p(buf);
+                // Accept .pdf, .epub, .cbz, .xps (Phase 2 supported formats).
+                auto ext = p.extension().wstring();
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                    [](wchar_t c) { return static_cast<wchar_t>(::towlower(c)); });
+                if (ext == L".pdf" || ext == L".epub" ||
+                    ext == L".cbz" || ext == L".xps") {
+                    open_async(std::move(p));
+                } else {
+                    MessageBoxW(hwnd,
+                        L"LitePDF only opens PDF/ePub/CBZ/XPS files.",
+                        kWindowTitle, MB_ICONINFORMATION);
+                }
+            }
+            DragFinish(hdrop);
             return 0;
         }
         case WM_SIZE: {
