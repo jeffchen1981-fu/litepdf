@@ -38,6 +38,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_page_cache_l1.cpp
     unit/test_page_cache_l2.cpp
     unit/test_render_engine_cache.cpp
+    unit/test_render_stress.cpp
 )
 target_link_libraries(litepdf_unit_tests PRIVATE litepdf_core)
 
