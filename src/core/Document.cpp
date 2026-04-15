@@ -91,7 +91,16 @@ namespace {
 // plus a magic-number sanity check for the PDF/ZIP families, so MuPDF won't
 // be handed unrelated files (e.g. PNG) that it would otherwise open.
 bool looks_like_supported_document(const std::filesystem::path& path) {
-    std::string ext = path.extension().string();
+    // Use u8string() for hygiene even though extensions are ASCII-only in
+    // the allowlist; keeps string-handling uniform with the fz_open_document
+    // call site below. C++17 returns std::string; C++20 returns std::u8string
+    // (we reinterpret-cast the bytes to std::string for the compare).
+#if defined(__cpp_lib_char8_t) && __cpp_lib_char8_t >= 201907L
+    auto ext_u8 = path.extension().u8string();
+    std::string ext(reinterpret_cast<const char*>(ext_u8.data()), ext_u8.size());
+#else
+    std::string ext = path.extension().u8string();
+#endif
     std::transform(ext.begin(), ext.end(), ext.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
@@ -150,10 +159,18 @@ std::optional<Document::OpenError> Document::open(const std::filesystem::path& p
     if (!looks_like_supported_document(path)) return OpenError::UnsupportedFormat;
 
     fz_try(impl_->ctx) {
-        // NOTE: fz_open_document takes a UTF-8 char*. path.string() yields ACP on
-        // Windows MSVC; may fail for non-ASCII paths. Will be revisited in a
-        // later task on Unicode path robustness.
-        impl_->doc = fz_open_document(impl_->ctx, path.string().c_str());
+        // UTF-8 conversion — fz_open_document takes UTF-8 char*. On Windows,
+        // path.string() returns ACP (CP950/936/etc); path.u8string() returns
+        // UTF-8. In C++17 path::u8string() returns std::string; in C++20+ it
+        // returns std::u8string (we reinterpret-cast the bytes).
+#if defined(__cpp_lib_char8_t) && __cpp_lib_char8_t >= 201907L
+        const std::u8string u8 = path.u8string();
+        const char* utf8_bytes = reinterpret_cast<const char*>(u8.c_str());
+#else
+        const std::string u8 = path.u8string();
+        const char* utf8_bytes = u8.c_str();
+#endif
+        impl_->doc = fz_open_document(impl_->ctx, utf8_bytes);
     }
     fz_catch(impl_->ctx) {
         // File was recognized as a PDF but failed to parse → treat as corrupted.

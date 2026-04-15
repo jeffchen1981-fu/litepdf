@@ -242,11 +242,16 @@ RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache)
     // allow sharing fz_document across contexts, so each worker parses the
     // file independently. Acceptable cost on Phase 2's 2-worker default.
     //
-    // NOTE: fz_open_document takes UTF-8. std::filesystem::path::string()
-    // returns the native ACP on Windows MSVC; ASCII paths (tests/fixtures)
-    // work, Unicode path handling is a Phase 3 deferred item (matches the
-    // caveat already present in Document::open).
-    const std::string path_str = doc.source_path().string();
+    // fz_open_document takes UTF-8. std::filesystem::path::string() returns
+    // the native ACP on Windows MSVC; path::u8string() returns UTF-8. Match
+    // the Document::open conversion so non-ASCII paths round-trip correctly.
+#if defined(__cpp_lib_char8_t) && __cpp_lib_char8_t >= 201907L
+    const auto path_u8 = doc.source_path().u8string();
+    const std::string path_str(reinterpret_cast<const char*>(path_u8.data()),
+                               path_u8.size());
+#else
+    const std::string path_str = doc.source_path().u8string();
+#endif
     if (path_str.empty()) {
         for (auto* c : impl_->worker_ctxs) fz_drop_context(c);
         impl_->worker_ctxs.clear();
