@@ -21,6 +21,11 @@ add_executable(litepdf_unit_tests
     unit/test_smoke.cpp
 )
 
+target_sources(litepdf_unit_tests PRIVATE
+    unit/test_document_open.cpp
+)
+target_link_libraries(litepdf_unit_tests PRIVATE litepdf_core)
+
 litepdf_apply_flags(litepdf_unit_tests)
 
 target_link_libraries(litepdf_unit_tests PRIVATE
@@ -28,4 +33,4 @@ target_link_libraries(litepdf_unit_tests PRIVATE
 )
 
 include(Catch)
-catch_discover_tests(litepdf_unit_tests)
+catch_discover_tests(litepdf_unit_tests WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")

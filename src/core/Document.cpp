@@ -1,12 +1,25 @@
 #include "core/Document.hpp"
 
+#include <mupdf/fitz.h>
+
 #include <stdexcept>
 
 namespace litepdf::core {
 
 struct Document::Impl {
-    // MuPDF state will be added in subsequent tasks.
-    bool open = false;
+    fz_context* ctx = nullptr;
+    fz_document* doc = nullptr;
+
+    Impl() {
+        ctx = fz_new_context(nullptr, nullptr, FZ_STORE_DEFAULT);
+        if (!ctx) throw std::bad_alloc();
+        fz_register_document_handlers(ctx);
+    }
+
+    ~Impl() {
+        if (doc) fz_drop_document(ctx, doc);
+        if (ctx) fz_drop_context(ctx);
+    }
 };
 
 Document::Document() : impl_(std::make_unique<Impl>()) {}
@@ -14,12 +27,31 @@ Document::~Document() = default;
 Document::Document(Document&&) noexcept = default;
 Document& Document::operator=(Document&&) noexcept = default;
 
-std::optional<Document::OpenError> Document::open(const std::filesystem::path&) {
-    return OpenError::Other;  // TDD: to be filled in Task 5
+std::optional<Document::OpenError> Document::open(const std::filesystem::path& path) {
+    if (!std::filesystem::exists(path)) return OpenError::FileNotFound;
+
+    fz_try(impl_->ctx) {
+        // NOTE: fz_open_document takes a UTF-8 char*. path.string() yields ACP on
+        // Windows MSVC; may fail for non-ASCII paths. Will be revisited in a
+        // later task on Unicode path robustness.
+        impl_->doc = fz_open_document(impl_->ctx, path.string().c_str());
+    }
+    fz_catch(impl_->ctx) {
+        return OpenError::Corrupted;
+    }
+
+    if (!impl_->doc) return OpenError::Other;
+    return std::nullopt;
 }
 
-bool Document::is_open() const noexcept { return impl_->open; }
-void Document::close() noexcept { impl_->open = false; }
+bool Document::is_open() const noexcept { return impl_->doc != nullptr; }
+
+void Document::close() noexcept {
+    if (impl_->doc) {
+        fz_drop_document(impl_->ctx, impl_->doc);
+        impl_->doc = nullptr;
+    }
+}
 
 bool Document::authenticate(std::string_view) { return false; }
 
