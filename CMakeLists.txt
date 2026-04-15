@@ -23,6 +23,19 @@ include(CompilerFlags)
 # --- MuPDF via ExternalProject_Add on mupdf.sln ---------------------------
 include(ImportMuPDF)  # defines litepdf::mupdf INTERFACE target
 
+# --- core library ---------------------------------------------------------
+add_library(litepdf_core STATIC
+    src/core/Document.cpp
+)
+
+litepdf_apply_flags(litepdf_core)
+
+target_include_directories(litepdf_core PUBLIC src)
+
+target_link_libraries(litepdf_core PRIVATE
+    litepdf::mupdf
+)
+
 # --- litepdf executable ---------------------------------------------------
 add_executable(litepdf WIN32
     src/main.cpp
@@ -33,7 +46,7 @@ litepdf_apply_flags(litepdf)
 
 target_link_libraries(litepdf PRIVATE
     comctl32
-    litepdf::mupdf
+    litepdf_core
 )
 
 set_target_properties(litepdf PROPERTIES
