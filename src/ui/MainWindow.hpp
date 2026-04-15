@@ -1,7 +1,10 @@
 #pragma once
+#include <atomic>
+#include <filesystem>
 #include <memory>
 #include <windows.h>
 
+#include "core/DocumentView.hpp"
 #include "ui/PdfCanvas.hpp"
 
 namespace litepdf::ui {
@@ -22,10 +25,13 @@ private:
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
     LRESULT handle_message(HWND, UINT, WPARAM, LPARAM);
 
-    HWND hwnd_ = nullptr;
-    HACCEL haccel_ = nullptr;
-    std::unique_ptr<PdfCanvas> canvas_;
-    // Task 5+ will add: std::unique_ptr<litepdf::core::DocumentView> view_;
+    void open_async(std::filesystem::path path);
+
+    HWND    hwnd_   = nullptr;
+    HACCEL  haccel_ = nullptr;
+    std::unique_ptr<PdfCanvas>                   canvas_;
+    std::unique_ptr<litepdf::core::DocumentView> view_;
+    std::atomic<int>                             open_epoch_{0};
 };
 
 }  // namespace litepdf::ui
