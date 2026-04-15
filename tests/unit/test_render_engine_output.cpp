@@ -23,6 +23,10 @@ extern "C" {
     void fz_drop_pixmap(fz_context*, fz_pixmap*);
     int  fz_pixmap_width(fz_context*, fz_pixmap*);
     int  fz_pixmap_height(fz_context*, fz_pixmap*);
+    int  fz_pixmap_components(fz_context*, fz_pixmap*);
+    int  fz_pixmap_colorants(fz_context*, fz_pixmap*);
+    int  fz_pixmap_alpha(fz_context*, fz_pixmap*);
+    int  fz_pixmap_stride(fz_context*, fz_pixmap*);
 }
 
 TEST_CASE("RenderEngine renders page 0 to a non-null pixmap with sane dimensions",
@@ -61,6 +65,24 @@ TEST_CASE("RenderEngine renders page 0 to a non-null pixmap with sane dimensions
     const int h = fz_pixmap_height(test_ctx, got);
     REQUIRE(w > 0);
     REQUIRE(h > 0);
+
+    // Task 0.3 (Phase 3): rasterize uses fz_device_bgr + alpha=1, producing
+    // a BGRA buffer that Direct2D can upload byte-for-byte into a
+    // DXGI_FORMAT_B8G8R8A8_UNORM bitmap (no channel swap on the UI thread).
+    //
+    // MuPDF accounting:
+    //   fz_pixmap_components == pix->n                     (colorants + spots + alpha)
+    //   fz_pixmap_colorants  == pix->n - pix->alpha - pix->s (color-only)
+    //   fz_pixmap_alpha      == 1 for alpha=1
+    // For BGR+alpha=1 with no spots: n=4, colorants=3, alpha=1.
+    const int components = fz_pixmap_components(test_ctx, got);
+    REQUIRE(components == 4);          // B, G, R, A
+    const int colorants = fz_pixmap_colorants(test_ctx, got);
+    REQUIRE(colorants == 3);           // BGR color channels
+    const int has_alpha = fz_pixmap_alpha(test_ctx, got);
+    REQUIRE(has_alpha == 1);
+    const int stride = fz_pixmap_stride(test_ctx, got);
+    REQUIRE(stride >= w * 4);          // 4 bytes/pixel minimum
 
     fz_drop_pixmap(test_ctx, got);
     fz_drop_context(test_ctx);

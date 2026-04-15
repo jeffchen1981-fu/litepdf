@@ -76,12 +76,24 @@ int main(int argc, char* argv[]) {
                 int stride = fz_pixmap_stride(ctx, pix);
                 unsigned char* samples = fz_pixmap_samples(ctx, pix);
 
+                // Task 0.3 (Phase 3): RenderEngine now produces BGRA
+                // (fz_device_bgr + alpha=1) so Direct2D can upload the
+                // buffer without a per-pixel channel swap. PPM's P6 format
+                // is RGB with no alpha, so we swap BGRA → RGB at write time.
+                // BGRA memory layout: byte[0]=B, byte[1]=G, byte[2]=R, byte[3]=A.
                 std::fprintf(stdout, "P6\n%d %d\n255\n", w, h);
                 for (int y = 0; y < h; ++y) {
-                    std::fwrite(samples + static_cast<std::size_t>(y) * stride,
-                                1,
-                                static_cast<std::size_t>(w) * 3,
-                                stdout);
+                    const unsigned char* row =
+                        samples + static_cast<std::size_t>(y) * stride;
+                    for (int x = 0; x < w; ++x) {
+                        const unsigned char* px = row + static_cast<std::size_t>(x) * 4;
+                        const unsigned char rgb[3] = {
+                            px[2],  // R
+                            px[1],  // G
+                            px[0],  // B
+                        };
+                        std::fwrite(rgb, 1, 3, stdout);
+                    }
                 }
                 std::fflush(stdout);
                 fz_drop_pixmap(ctx, pix);

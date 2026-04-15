@@ -164,15 +164,18 @@ struct RenderEngine::Impl {
                 continue;
             }
 
-            // Rasterize from display list (if we have one). fz_device_rgb(ctx)
+            // Rasterize from display list (if we have one). fz_device_bgr(ctx)
             // returns a non-owned colorspace singleton; no drop required.
+            // BGR + alpha=1 → BGRA buffer, byte-for-byte match for Direct2D
+            // DXGI_FORMAT_B8G8R8A8_UNORM. Task 6 (D2D upload) becomes zero
+            // channel-swap.
             fz_pixmap* pix = nullptr;
             if (dlist) {
                 fz_try(ctx) {
                     fz_matrix m = fz_scale(req.scale, req.scale);
                     pix = fz_new_pixmap_from_display_list(ctx, dlist, m,
-                                                          fz_device_rgb(ctx),
-                                                          0);
+                                                          fz_device_bgr(ctx),
+                                                          1);
                 }
                 fz_catch(ctx) {
                     if (pix) { fz_drop_pixmap(ctx, pix); pix = nullptr; }
