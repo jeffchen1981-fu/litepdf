@@ -1,11 +1,24 @@
 // LitePDF — ui::PdfCanvas: child HWND with a Direct2D render target.
 #include "ui/PdfCanvas.hpp"
 
+#include "core/DocumentView.hpp"
+
 #include <d2d1.h>
 #include <d2d1_1.h>
 #include <wrl/client.h>
 #include <stdexcept>
 #pragma comment(lib, "d2d1.lib")
+
+// Forward-decl MuPDF APIs we need on the UI thread so we don't have to
+// pull <mupdf/fitz.h> into this translation unit. fz_context / fz_pixmap
+// are already forward-declared via core/DocumentView.hpp.
+extern "C" {
+    int  fz_pixmap_width(fz_context*, fz_pixmap*);
+    int  fz_pixmap_height(fz_context*, fz_pixmap*);
+    int  fz_pixmap_stride(fz_context*, fz_pixmap*);
+    unsigned char* fz_pixmap_samples(fz_context*, fz_pixmap*);
+    void fz_drop_pixmap(fz_context*, fz_pixmap*);
+}
 
 using Microsoft::WRL::ComPtr;
 
@@ -21,7 +34,17 @@ struct PdfCanvas::Impl {
     ComPtr<ID2D1HwndRenderTarget> rt;
     ComPtr<ID2D1Bitmap>           current_bitmap;  // Task 6 populates
     D2D1_SIZE_U                   last_size = { 0, 0 };
+    litepdf::core::DocumentView*  view = nullptr;  // non-owning
 };
+
+void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
+    impl_->view = view;
+    // Clearing the view invalidates whatever bitmap was tied to its ctx.
+    if (!view) {
+        impl_->current_bitmap.Reset();
+        if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
 
 void PdfCanvas::register_class_once(HINSTANCE hInstance) {
     if (g_class_registered) return;
@@ -99,6 +122,64 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // Parent just repositioned us. Invalidate so on_paint rebuilds the rt.
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
+        case WM_USER_RENDER_DONE: {
+            auto* pix = reinterpret_cast<fz_pixmap*>(w);
+            if (!pix) {
+                // Render failed (unsupported page etc); just invalidate so paint
+                // shows the cleared background.
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return 0;
+            }
+            if (!impl_->view) {
+                // View was swapped out; drop the orphan pixmap has no ctx here.
+                // Shouldn't happen in practice since set_view precedes render
+                // requests. For Phase 3, we leak — pathological path.
+                return 0;
+            }
+            fz_context* ui_ctx = impl_->view->ui_ctx();
+
+            const int w_px   = fz_pixmap_width(ui_ctx, pix);
+            const int h_px   = fz_pixmap_height(ui_ctx, pix);
+            const int stride = fz_pixmap_stride(ui_ctx, pix);
+            unsigned char* samples = fz_pixmap_samples(ui_ctx, pix);
+
+            create_render_target();
+            if (!impl_->rt) {
+                fz_drop_pixmap(ui_ctx, pix);
+                return 0;
+            }
+
+            // BGRA -> ID2D1Bitmap. MuPDF produced fz_device_bgr + alpha=1,
+            // which matches DXGI_FORMAT_B8G8R8A8_UNORM byte-for-byte. Tell D2D
+            // to IGNORE alpha so page edges render fully opaque over the
+            // canvas clear color.
+            D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                                  D2D1_ALPHA_MODE_IGNORE));
+            ComPtr<ID2D1Bitmap> bmp;
+            HRESULT hr = impl_->rt->CreateBitmap(
+                D2D1::SizeU(static_cast<UINT32>(w_px),
+                            static_cast<UINT32>(h_px)),
+                samples, static_cast<UINT32>(stride), &props, &bmp);
+
+            // Drop the worker-kept pixmap ref regardless of CreateBitmap outcome.
+            fz_drop_pixmap(ui_ctx, pix);
+
+            if (hr == D2DERR_RECREATE_TARGET) {
+                discard_render_target();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return 0;
+            }
+            if (FAILED(hr)) {
+                // Leave current_bitmap unchanged; just repaint.
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return 0;
+            }
+
+            impl_->current_bitmap = std::move(bmp);
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        }
     }
     return DefWindowProcW(hwnd, msg, w, l);
 }
@@ -153,7 +234,22 @@ void PdfCanvas::on_paint() {
     impl_->rt->BeginDraw();
     impl_->rt->Clear(D2D1::ColorF(0xF0F0F0));  // light gray
 
-    // Task 6 draws current_bitmap here.
+    if (impl_->current_bitmap) {
+        D2D1_SIZE_F src = impl_->current_bitmap->GetSize();  // DIPs at rt's DPI
+        D2D1_SIZE_F vp  = impl_->rt->GetSize();
+
+        // Fit the bitmap inside the viewport preserving aspect ratio.
+        float scale = vp.width / src.width;
+        if (src.height * scale > vp.height) scale = vp.height / src.height;
+        float dst_w = src.width * scale;
+        float dst_h = src.height * scale;
+        float dx = (vp.width  - dst_w) * 0.5f;
+        float dy = (vp.height - dst_h) * 0.5f;
+
+        D2D1_RECT_F dst = D2D1::RectF(dx, dy, dx + dst_w, dy + dst_h);
+        impl_->rt->DrawBitmap(impl_->current_bitmap.Get(), dst, 1.0f,
+                              D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+    }
 
     HRESULT hr = impl_->rt->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {

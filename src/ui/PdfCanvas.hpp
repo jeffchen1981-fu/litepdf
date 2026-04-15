@@ -7,7 +7,14 @@ struct ID2D1Factory;
 struct ID2D1HwndRenderTarget;
 struct ID2D1Bitmap;
 
+namespace litepdf::core { class DocumentView; }
+
 namespace litepdf::ui {
+
+// Posted by render-done callback. WPARAM = fz_pixmap* (kept by worker),
+// LPARAM = 0. Canvas owns the drop via view_->ui_ctx().
+// Must match the reservation in MainWindow.cpp (WM_USER + 3).
+inline constexpr UINT WM_USER_RENDER_DONE = WM_USER + 3;
 
 class PdfCanvas {
 public:
@@ -18,6 +25,11 @@ public:
     PdfCanvas& operator=(const PdfCanvas&) = delete;
 
     HWND hwnd() const { return hwnd_; }
+
+    // MainWindow owns the view; canvas holds a non-owning raw pointer
+    // used to obtain fz_context* for fz_drop_pixmap on render-done.
+    // Pass nullptr to clear.
+    void set_view(litepdf::core::DocumentView* view);
 
 private:
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);

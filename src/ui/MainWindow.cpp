@@ -15,13 +15,20 @@
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
 
+// Forward-decl so we don't have to pull <mupdf/fitz.h> into the UI TU.
+// fz_context / fz_pixmap are forward-declared via core/DocumentView.hpp.
+extern "C" {
+    struct fz_pixmap* fz_keep_pixmap(struct fz_context*, struct fz_pixmap*);
+}
+
 namespace {
 constexpr wchar_t kWindowClassName[] = L"LitePDFMainWindow";
 constexpr wchar_t kWindowTitle[]     = L"LitePDF";
 
 constexpr UINT WM_USER_OPEN_OK     = WM_USER + 1;
 constexpr UINT WM_USER_OPEN_FAILED = WM_USER + 2;
-// WM_USER + 3 reserved for WM_USER_RENDER_DONE (Task 6).
+// Must match ui::WM_USER_RENDER_DONE in PdfCanvas.hpp.
+constexpr UINT WM_USER_RENDER_DONE = WM_USER + 3;
 }  // namespace
 
 namespace litepdf::ui {
@@ -75,6 +82,26 @@ void MainWindow::open_async(std::filesystem::path path) {
     }).detach();
 }
 
+void MainWindow::kick_render(int page) {
+    if (!view_ || !canvas_) return;
+
+    RECT rc;
+    GetClientRect(canvas_->hwnd(), &rc);
+    UINT dpi = GetDpiForWindow(hwnd_);
+    view_->set_zoom_mode(view_->zoom_mode(),
+        static_cast<float>(rc.right - rc.left),
+        static_cast<float>(rc.bottom - rc.top),
+        static_cast<float>(dpi));
+
+    HWND target = canvas_->hwnd();
+    view_->request_render(page,
+        [target](fz_pixmap* p, fz_context* worker_ctx) {
+            if (p) fz_keep_pixmap(worker_ctx, p);  // extend lifetime across PostMessage
+            PostMessageW(target, WM_USER_RENDER_DONE,
+                         reinterpret_cast<WPARAM>(p), 0);
+        });
+}
+
 LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     switch (msg) {
         case WM_CREATE: {
@@ -87,6 +114,12 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 SetWindowPos(canvas_->hwnd(), nullptr,
                              0, 0, LOWORD(l), HIWORD(l),
                              SWP_NOZORDER | SWP_NOACTIVATE);
+            if (view_) {
+                // Recompute FitWidth (or whatever mode) scale for the new
+                // viewport and resubmit. Phase 3 does this directly; the
+                // brief stutter during drag-resize is acceptable.
+                kick_render(view_->current_page());
+            }
             return 0;
         }
         case WM_SETFOCUS:
@@ -150,7 +183,14 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 title += path.filename().wstring();
                 SetWindowTextW(hwnd, title.c_str());
             }
-            // Task 6 will kick off the first render here.
+            // First render: tell the canvas which view owns the ui_ctx
+            // it will need to fz_drop_pixmap, seed the zoom mode to
+            // FitWidth against the current viewport, then kick a render.
+            if (canvas_) canvas_->set_view(view_.get());
+            view_->set_zoom_mode(
+                litepdf::core::DocumentView::ZoomMode::FitWidth,
+                0.0f, 0.0f, 96.0f);  // kick_render overrides with real viewport
+            kick_render(view_->current_page());
             return 0;
         }
         case WM_USER_OPEN_FAILED: {

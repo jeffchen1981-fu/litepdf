@@ -26,6 +26,7 @@ private:
     LRESULT handle_message(HWND, UINT, WPARAM, LPARAM);
 
     void open_async(std::filesystem::path path);
+    void kick_render(int page);  // recompute zoom, submit render, post to canvas
 
     HWND    hwnd_   = nullptr;
     HACCEL  haccel_ = nullptr;
