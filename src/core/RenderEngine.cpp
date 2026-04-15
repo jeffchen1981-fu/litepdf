@@ -5,11 +5,12 @@ extern "C" {
     void fz_drop_context(fz_context*);
 }
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
+#include <memory>
 #include <mutex>
-#include <queue>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -18,18 +19,23 @@ extern "C" {
 namespace litepdf::core {
 
 struct RenderEngine::Impl {
-    // Wraps a RenderRequest with stable-ordering metadata.
+    // Wraps a RenderRequest with stable-ordering metadata plus a
+    // shared cancel flag copied from the returned RenderToken.
     // priority: lower value == more urgent (runs first).
     // seq: monotonically-increasing arrival tag; earlier seq wins on tie.
+    // canceled: shared with the RenderToken; workers check it pre-callback.
     struct QueuedRequest {
         int priority;
         std::size_t seq;
         RenderRequest req;
+        std::shared_ptr<std::atomic<bool>> canceled;
     };
 
-    // std::priority_queue is a max-heap by default. We want the SMALLEST
-    // (priority, seq) tuple on top, so Compare returns true when `a` is
-    // "greater" (i.e. should sink) — the standard invert-for-min-heap idiom.
+    // Heap is a max-heap by default. We want the SMALLEST (priority, seq)
+    // on top, so Compare returns true when `a` should sink — standard
+    // invert-for-min-heap idiom, now applied against a vector-backed heap
+    // (std::push_heap / std::pop_heap / std::make_heap) so we can iterate
+    // the queue for cancel_all_below_priority().
     struct Compare {
         bool operator()(const QueuedRequest& a, const QueuedRequest& b) const {
             if (a.priority != b.priority) return a.priority > b.priority;
@@ -43,7 +49,9 @@ struct RenderEngine::Impl {
     mutable std::mutex mtx;  // mutable: pending_count() is const but locks
     std::condition_variable cv;
     bool stopping = false;
-    std::priority_queue<QueuedRequest, std::vector<QueuedRequest>, Compare> q;
+    // Heap-ordered vector (not std::priority_queue) — iteration required
+    // by cancel_all_below_priority().
+    std::vector<QueuedRequest> q;
     std::size_t next_seq = 1;  // guarded by mtx (submit holds it anyway)
     std::atomic<std::size_t> next_id{1};
 
@@ -54,17 +62,24 @@ struct RenderEngine::Impl {
     static void worker_loop(Impl* impl, std::size_t idx) {
         for (;;) {
             RenderRequest req;
+            std::shared_ptr<std::atomic<bool>> canceled;
             {
                 std::unique_lock<std::mutex> lk(impl->mtx);
                 impl->cv.wait(lk, [impl]{ return impl->stopping || !impl->q.empty(); });
                 if (impl->stopping && impl->q.empty()) return;
-                // std::priority_queue::top() returns const T& to preserve the
-                // heap invariant. Moving out of `req` (a RenderRequest field)
-                // does NOT mutate the ordering keys (priority, seq), so the
-                // const_cast is safe here — standard idiom for priority_queue.
-                req = std::move(const_cast<QueuedRequest&>(impl->q.top()).req);
-                impl->q.pop();
+                // pop_heap moves the top element to the back; pop_back
+                // destroys that slot. We move the payload out before
+                // pop_back destroys the (now moved-from) element.
+                std::pop_heap(impl->q.begin(), impl->q.end(), Compare{});
+                auto entry = std::move(impl->q.back());
+                impl->q.pop_back();
+                req = std::move(entry.req);
+                canceled = std::move(entry.canceled);
             }
+            // Checkpoint A: pre-callback cancel check. Cancelation is
+            // cooperative — entries stay in the heap after being flagged;
+            // workers simply skip the callback when they reach them.
+            if (canceled && canceled->load()) continue;
             // Run user callback OUTSIDE the lock to avoid deadlocks if they
             // call back into the engine (e.g. submit from within on_complete).
             if (req.on_complete) {
@@ -141,18 +156,36 @@ RenderEngine::RenderToken RenderEngine::submit(RenderRequest req) {
     RenderToken tok;
     tok.id = impl_->next_id.fetch_add(1);
     tok.canceled = std::make_shared<std::atomic<bool>>(false);
+    int prio = req.priority;
     {
         std::lock_guard<std::mutex> lk(impl_->mtx);
-        int prio = req.priority;
         std::size_t seq = impl_->next_seq++;
-        impl_->q.push({prio, seq, std::move(req)});
+        impl_->q.push_back({prio, seq, std::move(req), tok.canceled});
+        std::push_heap(impl_->q.begin(), impl_->q.end(), Impl::Compare{});
     }
     impl_->cv.notify_one();
     return tok;
 }
 
-void RenderEngine::cancel(const RenderToken&) {}
-void RenderEngine::cancel_all_below_priority(int) {}
+void RenderEngine::cancel(const RenderToken& token) {
+    // No lock required: the flag is a std::atomic, and the shared_ptr
+    // keeps it alive for as long as either side holds a reference.
+    if (token.canceled) token.canceled->store(true);
+}
+
+void RenderEngine::cancel_all_below_priority(int p) {
+    // "Below priority p" means less urgent, i.e. priority value strictly
+    // greater than p (lower value = more urgent in this engine).
+    std::lock_guard<std::mutex> lk(impl_->mtx);
+    for (auto& entry : impl_->q) {
+        if (entry.priority > p && entry.canceled) {
+            entry.canceled->store(true);
+        }
+    }
+    // We do NOT remove entries from the heap — flagging is enough, and
+    // leaving the heap untouched avoids any re-heapify cost.
+}
+
 std::size_t RenderEngine::num_workers() const noexcept { return impl_->num_workers; }
 
 std::size_t RenderEngine::pending_count() const noexcept {
