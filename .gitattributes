@@ -1,0 +1,32 @@
+# Enforce LF line endings for text files across platforms.
+# Applies to files committed from here on (existing LF blobs unaffected).
+
+# Text: normalize to LF on check-in
+* text=auto eol=lf
+
+# Windows-specific files must stay CRLF (some tools break otherwise)
+*.sln     text eol=crlf
+*.vcxproj text eol=crlf
+*.props   text eol=crlf
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+
+# PowerShell ecosystem is LF-friendly on both shells (5.1 and 7+)
+*.ps1     text eol=lf
+*.psm1    text eol=lf
+*.psd1    text eol=lf
+
+# Binary (never normalize, never diff as text)
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.pdf     binary
+*.docx    binary
+*.zip     binary
+*.exe     binary
+*.dll     binary
+*.lib     binary
+*.obj     binary
+*.res     binary
