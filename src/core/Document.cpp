@@ -82,8 +82,39 @@ void Document::close() noexcept {
 
 bool Document::authenticate(std::string_view) { return false; }
 
-std::size_t Document::page_count() const { throw std::runtime_error("not implemented"); }
-PageSize    Document::page_size(std::size_t) const { throw std::runtime_error("not implemented"); }
+std::size_t Document::page_count() const {
+    if (!impl_->doc) throw std::logic_error("page_count called on unopened document");
+    int n = 0;
+    fz_try(impl_->ctx) {
+        n = fz_count_pages(impl_->ctx, impl_->doc);
+    }
+    fz_catch(impl_->ctx) {
+        throw std::runtime_error("fz_count_pages failed");
+    }
+    return static_cast<std::size_t>(n);
+}
+
+PageSize Document::page_size(std::size_t index) const {
+    if (!impl_->doc) throw std::logic_error("page_size called on unopened document");
+
+    fz_page* page = nullptr;
+    fz_rect bounds = {};
+    fz_try(impl_->ctx) {
+        page = fz_load_page(impl_->ctx, impl_->doc, static_cast<int>(index));
+        bounds = fz_bound_page(impl_->ctx, page);
+    }
+    fz_always(impl_->ctx) {
+        if (page) fz_drop_page(impl_->ctx, page);
+    }
+    fz_catch(impl_->ctx) {
+        throw std::runtime_error("fz_load_page / fz_bound_page failed");
+    }
+
+    PageSize result;
+    result.width_pt  = bounds.x1 - bounds.x0;
+    result.height_pt = bounds.y1 - bounds.y0;
+    return result;
+}
 std::string Document::page_text(std::size_t) const { throw std::runtime_error("not implemented"); }
 
 std::vector<Document::OutlineEntry> Document::outline() const { return {}; }
