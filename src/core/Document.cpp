@@ -115,7 +115,41 @@ PageSize Document::page_size(std::size_t index) const {
     result.height_pt = bounds.y1 - bounds.y0;
     return result;
 }
-std::string Document::page_text(std::size_t) const { throw std::runtime_error("not implemented"); }
+std::string Document::page_text(std::size_t index) const {
+    if (!impl_->doc) throw std::logic_error("page_text called on unopened document");
+
+    fz_page*       page  = nullptr;
+    fz_stext_page* stext = nullptr;
+    fz_buffer*     buf   = nullptr;
+    fz_output*     out   = nullptr;
+    std::string    result;
+
+    fz_try(impl_->ctx) {
+        page  = fz_load_page(impl_->ctx, impl_->doc, static_cast<int>(index));
+        fz_stext_options opts = {};
+        stext = fz_new_stext_page_from_page(impl_->ctx, page, &opts);
+
+        buf = fz_new_buffer(impl_->ctx, 4096);
+        out = fz_new_output_with_buffer(impl_->ctx, buf);
+        fz_print_stext_page_as_text(impl_->ctx, out, stext);
+        fz_close_output(impl_->ctx, out);
+
+        unsigned char* data = nullptr;
+        const std::size_t len = fz_buffer_storage(impl_->ctx, buf, &data);
+        result.assign(reinterpret_cast<const char*>(data), len);
+    }
+    fz_always(impl_->ctx) {
+        if (out)   fz_drop_output(impl_->ctx, out);
+        if (buf)   fz_drop_buffer(impl_->ctx, buf);
+        if (stext) fz_drop_stext_page(impl_->ctx, stext);
+        if (page)  fz_drop_page(impl_->ctx, page);
+    }
+    fz_catch(impl_->ctx) {
+        throw std::runtime_error("page_text extraction failed");
+    }
+
+    return result;
+}
 
 std::vector<Document::OutlineEntry> Document::outline() const { return {}; }
 

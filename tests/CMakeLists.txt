@@ -24,6 +24,7 @@ add_executable(litepdf_unit_tests
 target_sources(litepdf_unit_tests PRIVATE
     unit/test_document_open.cpp
     unit/test_document_pages.cpp
+    unit/test_document_text.cpp
 )
 target_link_libraries(litepdf_unit_tests PRIVATE litepdf_core)
 
