@@ -20,6 +20,15 @@
     </windowsSettings>
   </application>
 
+  <!-- Explicit asInvoker — no UAC elevation requested -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+
   <!-- Declare supported Windows versions (10/11) -->
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
     <application>
