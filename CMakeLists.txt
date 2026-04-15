@@ -20,6 +20,9 @@ set(CMAKE_CXX_EXTENSIONS        OFF)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerFlags)
 
+# --- MuPDF via ExternalProject_Add on mupdf.sln ---------------------------
+include(ImportMuPDF)  # defines litepdf::mupdf INTERFACE target
+
 # --- litepdf executable ---------------------------------------------------
 add_executable(litepdf WIN32
     src/main.cpp
@@ -30,6 +33,7 @@ litepdf_apply_flags(litepdf)
 
 target_link_libraries(litepdf PRIVATE
     comctl32
+    litepdf::mupdf
 )
 
 set_target_properties(litepdf PROPERTIES

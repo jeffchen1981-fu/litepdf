@@ -12,8 +12,8 @@ if (-not (Test-Path $exe)) {
     throw "exe not found at $exe — build first"
 }
 
-# Size budget (Phase 0): 2 MB
-$maxBytes = 2MB
+# Size budget (Phase 1: MuPDF linked but feature-pruning deferred to Phase 11): 8 MB.
+$maxBytes = 8MB
 $size = (Get-Item $exe).Length
 if ($size -gt $maxBytes) {
     throw "litepdf.exe is $size bytes, exceeds Phase 0 budget of $maxBytes"
