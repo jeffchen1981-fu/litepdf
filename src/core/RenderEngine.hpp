@@ -26,6 +26,8 @@
 struct fz_pixmap;
 struct fz_context;
 
+namespace litepdf::core { class PageCache; }
+
 namespace litepdf::core {
 
 class Document;
@@ -44,7 +46,19 @@ public:
         std::function<void(fz_pixmap*, fz_context*)> on_complete;
     };
 
-    RenderEngine(Document& doc, std::size_t num_workers = 2);
+    // Construct a RenderEngine.
+    //
+    // @param doc          The Document to render. Must outlive this engine.
+    // @param num_workers  Number of worker threads (each gets a cloned
+    //                     fz_context + fz_document). Must be >= 1.
+    // @param cache        Optional PageCache for L1/L2 lookups. If non-null,
+    //                     workers consult the cache before rendering and
+    //                     populate it after. The cache pointer MUST outlive
+    //                     this RenderEngine — the engine does not own it
+    //                     and will not drop it in its destructor. Passing
+    //                     nullptr falls through to the direct render path
+    //                     (equivalent to the pre-cache Task 7 behavior).
+    RenderEngine(Document& doc, std::size_t num_workers = 2, PageCache* cache = nullptr);
     ~RenderEngine();
 
     RenderEngine(const RenderEngine&) = delete;

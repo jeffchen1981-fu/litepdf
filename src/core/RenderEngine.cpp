@@ -1,5 +1,6 @@
 #include "core/RenderEngine.hpp"
 #include "core/Document.hpp"
+#include "core/PageCache.hpp"
 
 // RenderEngine is the only TU that includes <mupdf/fitz.h> publicly; the
 // header stays MuPDF-free so UI code can consume it without the MuPDF
@@ -48,6 +49,9 @@ struct RenderEngine::Impl {
     };
 
     std::size_t num_workers = 0;
+    // Optional PageCache. Non-owning; caller guarantees lifetime >= engine.
+    // When null, worker_loop falls through to the direct render path.
+    PageCache* cache = nullptr;
     std::vector<fz_context*> worker_ctxs;
     // Per-worker fz_document handles. MuPDF forbids sharing a fz_document
     // across contexts, so each worker gets its own handle opened on its
@@ -103,42 +107,89 @@ struct RenderEngine::Impl {
             // Checkpoint A: pre-MuPDF cancel check.
             if (canceled && canceled->load()) continue;
 
-            fz_page*   page = nullptr;
-            fz_pixmap* pix  = nullptr;
-
-            fz_try(ctx) {
-                page = fz_load_page(ctx, wdoc, req.page_num);
+            // L1 check — pixmap cache hit. On hit, cache has kept a ref for
+            // us; we're the caller and must drop (or hand to callback, which
+            // then owns the drop).
+            if (impl->cache) {
+                fz_pixmap* cached = impl->cache->get_pixmap(req.page_num, req.scale);
+                if (cached) {
+                    if (req.on_complete) req.on_complete(cached, ctx);
+                    else fz_drop_pixmap(ctx, cached);
+                    continue;  // skip MuPDF work entirely
+                }
             }
-            fz_catch(ctx) {
-                // Page load failed (e.g. out-of-range index, parse error).
-                // Leave page=null; fall through and hand nullptr to callback.
+
+            // L2 check — display list cache hit; else build one.
+            fz_display_list* dlist = nullptr;
+            if (impl->cache) {
+                dlist = impl->cache->get_display_list(req.page_num);
+                // On hit, cache has kept a ref for us. We own this ref and
+                // will drop it after rasterize.
             }
 
-            // Checkpoint B: post-load cancel check. Do not enter rasterize
-            // if the request was canceled while we were loading the page.
-            const bool should_render =
-                (page != nullptr) && !(canceled && canceled->load());
+            if (!dlist) {
+                // Miss: build a display list via fz_load_page +
+                // fz_new_display_list_from_page. fz_try/fz_catch wraps each
+                // call so a failure cleans up intermediate resources.
+                fz_page* page = nullptr;
+                fz_try(ctx) {
+                    page = fz_load_page(ctx, wdoc, req.page_num);
+                    dlist = fz_new_display_list_from_page(ctx, page);
+                }
+                fz_catch(ctx) {
+                    if (dlist) { fz_drop_display_list(ctx, dlist); dlist = nullptr; }
+                }
+                if (page) fz_drop_page(ctx, page);
 
-            if (should_render) {
+                // Populate L2 if we have a cache. Refcount discipline:
+                //   fz_new_display_list_from_page → refcount 1 (we own).
+                //   fz_keep_display_list          → refcount 2.
+                //   put_display_list takes our "original" ref → cache holds 1.
+                //   We retain the bump; dlist still points to same object.
+                //   After rasterize, fz_drop_display_list → cache's ref stays.
+                if (dlist && impl->cache) {
+                    fz_keep_display_list(ctx, dlist);
+                    impl->cache->put_display_list(req.page_num, dlist);
+                }
+            }
+
+            // Checkpoint B: post-load / pre-rasterize cancel check.
+            if (canceled && canceled->load()) {
+                if (dlist) fz_drop_display_list(ctx, dlist);
+                continue;
+            }
+
+            // Rasterize from display list (if we have one). fz_device_rgb(ctx)
+            // returns a non-owned colorspace singleton; no drop required.
+            fz_pixmap* pix = nullptr;
+            if (dlist) {
                 fz_try(ctx) {
                     fz_matrix m = fz_scale(req.scale, req.scale);
-                    // fz_device_rgb(ctx) returns a non-owned pointer (global
-                    // colorspace singleton); no drop required.
-                    pix = fz_new_pixmap_from_page(ctx, page, m,
-                                                  fz_device_rgb(ctx), 0);
+                    pix = fz_new_pixmap_from_display_list(ctx, dlist, m,
+                                                          fz_device_rgb(ctx),
+                                                          0);
                 }
                 fz_catch(ctx) {
                     if (pix) { fz_drop_pixmap(ctx, pix); pix = nullptr; }
                 }
+                fz_drop_display_list(ctx, dlist);
+                dlist = nullptr;
             }
 
-            if (page) {
-                fz_drop_page(ctx, page);
+            // Populate L1 if we have a cache and a successful render.
+            //   fz_new_pixmap_from_display_list → refcount 1 (we own).
+            //   fz_keep_pixmap                  → refcount 2.
+            //   put_pixmap takes our "original" ref → cache holds 1.
+            //   We retain the bump; hand to callback (caller owns) or drop.
+            if (pix && impl->cache) {
+                fz_keep_pixmap(ctx, pix);
+                impl->cache->put_pixmap(req.page_num, req.scale, pix);
             }
 
             // Checkpoint C: post-rasterize cancel check. If the request was
             // canceled after we already paid to rasterize, drop the pixmap
             // and skip the callback — the consumer no longer wants the work.
+            // (Cache still holds its own ref from put_pixmap above.)
             if (canceled && canceled->load()) {
                 if (pix) fz_drop_pixmap(ctx, pix);
                 continue;
@@ -157,12 +208,13 @@ struct RenderEngine::Impl {
     }
 };
 
-RenderEngine::RenderEngine(Document& doc, std::size_t n)
+RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache)
     : impl_(std::make_unique<Impl>()) {
     if (n == 0)
         throw std::invalid_argument("RenderEngine: num_workers must be >= 1");
 
     impl_->num_workers = n;
+    impl_->cache = cache;  // non-owning; may be null (direct render path)
     impl_->worker_ctxs.reserve(n);
 
     // Clone all contexts first; clean up on failure.
