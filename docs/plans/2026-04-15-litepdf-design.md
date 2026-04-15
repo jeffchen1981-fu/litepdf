@@ -38,6 +38,29 @@ AGPL-3.0, published on GitHub. MuPDF (also AGPL) is statically linked — compat
 | C runtime | Static `/MT` | No redistributable required |
 | Strings | UTF-16 (`wchar_t`) at Win32 boundary; UTF-8 internally | Win32 native; simpler MuPDF interop |
 
+### 2.1 MuPDF Integration & Deferred Feature Pruning
+
+MuPDF 1.24.11 lacks a CMakeLists.txt. Its Windows build is a VS solution at `third_party/mupdf/platform/win32/mupdf.sln` whose projects are consumed directly via CMake's `include_external_msproject`. The five projects we pull in:
+
+| Project | Output `.lib` | Purpose |
+|---|---|---|
+| `bin2coff.vcxproj` | (build tool) | Converts CMap/font binaries into COFF objects for `libresources` |
+| `libthirdparty.vcxproj` | `libthirdparty.lib` | freetype, zlib, harfbuzz, jbig2dec, lcms2, openjpeg, libjpeg |
+| `libresources.vcxproj` | `libresources.lib` | Embedded CMap tables and default fonts (depends on `bin2coff`) |
+| `libmuthreads.vcxproj` | `libmuthreads.lib` | Threading primitives |
+| `libmupdf.vcxproj` | `libmupdf.lib` | Main MuPDF library (depends on the other four) |
+
+**Build outputs** land at `third_party/mupdf/platform/win32/x64/$<CONFIG>/` (x64 Release → `.../x64/Release/libmupdf.lib`). These paths are stable across MuPDF 1.24.x.
+
+**Deferred: feature-flag pruning.** MuPDF ships with `mujs` (PDF JavaScript), `gumbo` (HTML), and `tesseract`+`leptonica` (OCR) compiled by default. LitePDF v1 does not use any of these. We accept the extra ~2 MB in Phase 1 and defer pruning to **Phase 11** (binary-size regression gate). When the pruning task lands it has two paths:
+
+- (A) Patch MuPDF's own `.vcxproj` files to remove the relevant sources + preprocessor defines (upstream-divergent but small diff).
+- (B) Migrate MuPDF integration from `include_external_msproject` to a hand-written CMake shim that globs sources and controls `target_compile_definitions` directly (larger up-front cost, but full control).
+
+**License compliance: freetype FTL.** FreeType 2 is dual-licensed under FTL (BSD-style, AGPL-compatible) and GPLv2-only (NOT AGPL-compatible). MuPDF ships freetype with FTL active by default — verified via inspection of `third_party/mupdf/thirdparty/freetype/include/freetype/config/ftoption.h` at MuPDF 1.24.11: the `FT_CONFIG_OPTION_USE_FTL` macro does not appear in the file (no `#define`, no `#undef`), and FreeType 2's compile-time default when the macro is absent is FTL. Record any change in this status during MuPDF version bumps.
+
+**CVE audit cadence:** before each `1.24.x` → `1.24.(x+1)` bump of the MuPDF submodule, check Artifex's security advisories and changelog. Before v1.0 release, perform a full scan.
+
 ## 3. Feature Set (Tier 3)
 
 - Multi-tab interface, per-tab independent state
