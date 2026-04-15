@@ -24,13 +24,15 @@ TEST_CASE("RenderEngine respects custom worker count", "[core][render][lifecycle
     REQUIRE(engine.num_workers() == 4);
 }
 
-TEST_CASE("RenderEngine::submit returns a default token (scaffold)", "[core][render][lifecycle]") {
+TEST_CASE("RenderEngine::submit returns a populated token", "[core][render][lifecycle]") {
+    // Task 4: submit() now yields a nonzero id and an initialized canceled flag.
     litepdf::core::Document doc;
     REQUIRE(!doc.open("tests/fixtures/simple.pdf").has_value());
     litepdf::core::RenderEngine engine(doc, 1);
     auto tok = engine.submit({0, 0, 1.0f, nullptr});
-    REQUIRE(tok.id == 0);
-    REQUIRE(!tok.canceled);
+    REQUIRE(tok.id != 0);
+    REQUIRE(tok.canceled);
+    REQUIRE(!tok.canceled->load());
 }
 
 TEST_CASE("RenderEngine spawns and joins worker threads cleanly", "[core][render][pool]") {

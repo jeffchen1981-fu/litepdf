@@ -5,10 +5,13 @@ extern "C" {
     void fz_drop_context(fz_context*);
 }
 
+#include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <queue>
 #include <stdexcept>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace litepdf::core {
@@ -17,16 +20,31 @@ struct RenderEngine::Impl {
     std::size_t num_workers = 0;
     std::vector<fz_context*> worker_ctxs;
     std::vector<std::thread> workers;
-    std::mutex mtx;
+    mutable std::mutex mtx;  // mutable: pending_count() is const but locks
     std::condition_variable cv;
     bool stopping = false;
+    std::queue<RenderRequest> q;
+    std::atomic<std::size_t> next_id{1};
 
-    static void worker_loop(Impl* impl, std::size_t /*idx*/) {
+    // Graceful shutdown: predicate wakes on stopping || !q.empty(); we only
+    // return when stopping AND queue is empty, so in-flight queued requests
+    // get drained by remaining workers on dtor. Real rendering (Task 7) may
+    // want a hard-cancel path, but for Phase 2 drain-then-stop is correct.
+    static void worker_loop(Impl* impl, std::size_t idx) {
         for (;;) {
-            std::unique_lock<std::mutex> lk(impl->mtx);
-            impl->cv.wait(lk, [impl]{ return impl->stopping; });
-            // Predicate currently only fires on stopping; Task 4 adds queue-push wakeups.
-            if (impl->stopping) return;
+            RenderRequest req;
+            {
+                std::unique_lock<std::mutex> lk(impl->mtx);
+                impl->cv.wait(lk, [impl]{ return impl->stopping || !impl->q.empty(); });
+                if (impl->stopping && impl->q.empty()) return;
+                req = std::move(impl->q.front());
+                impl->q.pop();
+            }
+            // Run user callback OUTSIDE the lock to avoid deadlocks if they
+            // call back into the engine (e.g. submit from within on_complete).
+            if (req.on_complete) {
+                req.on_complete(nullptr, impl->worker_ctxs[idx]);
+            }
         }
     }
 };
@@ -91,10 +109,25 @@ RenderEngine::~RenderEngine() {
     }
 }
 
-RenderEngine::RenderToken RenderEngine::submit(RenderRequest /*req*/) { return {}; }
+RenderEngine::RenderToken RenderEngine::submit(RenderRequest req) {
+    RenderToken tok;
+    tok.id = impl_->next_id.fetch_add(1);
+    tok.canceled = std::make_shared<std::atomic<bool>>(false);
+    {
+        std::lock_guard<std::mutex> lk(impl_->mtx);
+        impl_->q.push(std::move(req));
+    }
+    impl_->cv.notify_one();
+    return tok;
+}
+
 void RenderEngine::cancel(const RenderToken&) {}
 void RenderEngine::cancel_all_below_priority(int) {}
 std::size_t RenderEngine::num_workers() const noexcept { return impl_->num_workers; }
-std::size_t RenderEngine::pending_count() const noexcept { return 0; }
+
+std::size_t RenderEngine::pending_count() const noexcept {
+    std::lock_guard<std::mutex> lk(impl_->mtx);
+    return impl_->q.size();
+}
 
 } // namespace litepdf::core
