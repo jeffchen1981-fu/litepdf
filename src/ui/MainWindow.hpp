@@ -48,7 +48,6 @@ private:
     std::unique_ptr<OutlinePane>                 outline_;
     litepdf::core::MruList                       mru_;
     std::atomic<int>                             open_epoch_{0};
-    bool                                         outline_visible_ = false;
     bool                                         log_timings_     = false;
 };
 

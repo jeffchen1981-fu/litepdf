@@ -129,13 +129,17 @@ void MainWindow::on_layout() {
     const UINT dpi = GetDpiForWindow(hwnd_);
     const int outline_w = MulDiv(250, static_cast<int>(dpi), 96);
 
-    if (outline_visible_ && outline_) {
+    if (outline_ && outline_->visible()) {
         SetWindowPos(outline_->hwnd(), nullptr,
                      0, 0, outline_w, h,
                      SWP_NOZORDER | SWP_NOACTIVATE);
         if (canvas_) {
+            // Guard: if window is narrower than the outline pane, clamp
+            // canvas width to 0 rather than passing a negative value to
+            // SetWindowPos (undefined behavior).
+            const int canvas_w = std::max(0, w - outline_w);
             SetWindowPos(canvas_->hwnd(), nullptr,
-                         outline_w, 0, w - outline_w, h,
+                         outline_w, 0, canvas_w, h,
                          SWP_NOZORDER | SWP_NOACTIVATE);
         }
     } else {
@@ -149,12 +153,7 @@ void MainWindow::on_layout() {
 
 void MainWindow::toggle_outline() {
     if (!outline_) return;
-    outline_visible_ = !outline_visible_;
-    if (outline_visible_) {
-        outline_->show();
-    } else {
-        outline_->hide();
-    }
+    if (outline_->visible()) outline_->hide(); else outline_->show();
     on_layout();
     // Rendering follows the new canvas size so FitWidth stays correct.
     if (view_) kick_render(view_->current_page());
@@ -248,8 +247,9 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 if (lp != -1) {
                     on_outline_navigate(static_cast<int>(lp));
                 }
+                return 0;
             }
-            return 0;
+            break;  // fall through to DefWindowProc for other notifications
         }
         case WM_INITMENUPOPUP: {
             // Skip window/system menu popups.
@@ -382,17 +382,16 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // FitWidth against the current viewport, then kick a render.
             if (canvas_) canvas_->set_view(view_.get());
             // Populate outline and auto-show if the document has entries,
-            // otherwise hide. User can toggle with F5.
+            // otherwise hide. User can toggle with F5. Visibility is tracked
+            // solely by OutlinePane::visible() — on_layout() reads it directly.
             if (outline_) {
                 const auto& entries = view_->document().outline();
                 if (!entries.empty()) {
                     outline_->populate(entries);
                     outline_->show();
-                    outline_visible_ = true;
                 } else {
                     outline_->clear();
                     outline_->hide();
-                    outline_visible_ = false;
                 }
                 on_layout();
             }
