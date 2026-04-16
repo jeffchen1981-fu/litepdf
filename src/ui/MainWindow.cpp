@@ -107,12 +107,64 @@ void MainWindow::kick_render(int page) {
         });
 }
 
+void MainWindow::on_layout() {
+    if (!hwnd_) return;
+    RECT rc;
+    GetClientRect(hwnd_, &rc);
+    const int w = rc.right - rc.left;
+    const int h = rc.bottom - rc.top;
+
+    // 250 DIP scaled to current DPI (96 DPI == 100%).
+    const UINT dpi = GetDpiForWindow(hwnd_);
+    const int outline_w = MulDiv(250, static_cast<int>(dpi), 96);
+
+    if (outline_visible_ && outline_) {
+        SetWindowPos(outline_->hwnd(), nullptr,
+                     0, 0, outline_w, h,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        if (canvas_) {
+            SetWindowPos(canvas_->hwnd(), nullptr,
+                         outline_w, 0, w - outline_w, h,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    } else {
+        if (canvas_) {
+            SetWindowPos(canvas_->hwnd(), nullptr,
+                         0, 0, w, h,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+}
+
+void MainWindow::toggle_outline() {
+    if (!outline_) return;
+    outline_visible_ = !outline_visible_;
+    if (outline_visible_) {
+        outline_->show();
+    } else {
+        outline_->hide();
+    }
+    on_layout();
+    // Rendering follows the new canvas size so FitWidth stays correct.
+    if (view_) kick_render(view_->current_page());
+}
+
+void MainWindow::on_outline_navigate(int page) {
+    if (!view_) return;
+    if (view_->set_current_page(page)) {
+        kick_render(page);
+    }
+}
+
 LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     switch (msg) {
         case WM_CREATE: {
-            canvas_ = std::make_unique<PdfCanvas>(
-                reinterpret_cast<CREATESTRUCTW*>(l)->hInstance, hwnd);
+            auto* cs = reinterpret_cast<CREATESTRUCTW*>(l);
+            canvas_ = std::make_unique<PdfCanvas>(cs->hInstance, hwnd);
             canvas_->set_log_timings(log_timings_);
+            outline_ = std::make_unique<OutlinePane>(cs->hInstance, hwnd);
+            outline_->set_on_navigate(
+                [this](int page) { on_outline_navigate(page); });
             DragAcceptFiles(hwnd, TRUE);
             return 0;
         }
@@ -142,10 +194,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             return 0;
         }
         case WM_SIZE: {
-            if (canvas_)
-                SetWindowPos(canvas_->hwnd(), nullptr,
-                             0, 0, LOWORD(l), HIWORD(l),
-                             SWP_NOZORDER | SWP_NOACTIVATE);
+            on_layout();
             if (view_) {
                 // Recompute FitWidth (or whatever mode) scale for the new
                 // viewport and resubmit. Phase 3 does this directly; the
@@ -175,9 +224,24 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             }
             return 0;
         }
+        case WM_NOTIFY: {
+            auto* hdr = reinterpret_cast<NMHDR*>(l);
+            if (outline_ && hdr && hdr->hwndFrom == outline_->hwnd() &&
+                hdr->code == TVN_SELCHANGEDW) {
+                auto* nm = reinterpret_cast<NMTREEVIEWW*>(l);
+                LPARAM lp = nm->itemNew.lParam;
+                if (lp != -1) {
+                    on_outline_navigate(static_cast<int>(lp));
+                }
+            }
+            return 0;
+        }
         case WM_COMMAND: {
             const int id = LOWORD(w);
             switch (id) {
+                case IDM_VIEW_OUTLINE:
+                    toggle_outline();
+                    return 0;
                 case IDM_FILE_OPEN: {
                     wchar_t buf[MAX_PATH] = {0};
                     OPENFILENAMEW ofn = {0};
@@ -249,6 +313,21 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // it will need to fz_drop_pixmap, seed the zoom mode to
             // FitWidth against the current viewport, then kick a render.
             if (canvas_) canvas_->set_view(view_.get());
+            // Populate outline and auto-show if the document has entries,
+            // otherwise hide. User can toggle with F5.
+            if (outline_) {
+                const auto& entries = view_->document().outline();
+                if (!entries.empty()) {
+                    outline_->populate(entries);
+                    outline_->show();
+                    outline_visible_ = true;
+                } else {
+                    outline_->clear();
+                    outline_->hide();
+                    outline_visible_ = false;
+                }
+                on_layout();
+            }
             view_->set_zoom_mode(
                 litepdf::core::DocumentView::ZoomMode::FitWidth,
                 0.0f, 0.0f, 96.0f);  // kick_render overrides with real viewport
@@ -315,12 +394,14 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
         nullptr, menu, hInstance, this);
     if (!hwnd_) return 1;
 
-    // Accelerators: Ctrl+O for Open; Ctrl+= / Ctrl+- / Ctrl+0 for zoom.
+    // Accelerators: Ctrl+O for Open; Ctrl+= / Ctrl+- / Ctrl+0 for zoom;
+    // F5 toggles the outline pane.
     ACCEL accels[] = {
-        { FCONTROL | FVIRTKEY, 'O',          IDM_FILE_OPEN  },
-        { FCONTROL | FVIRTKEY, VK_OEM_PLUS,  IDM_ZOOM_IN    },  // Ctrl+=
-        { FCONTROL | FVIRTKEY, VK_OEM_MINUS, IDM_ZOOM_OUT   },  // Ctrl+-
-        { FCONTROL | FVIRTKEY, '0',          IDM_ZOOM_RESET },
+        { FCONTROL | FVIRTKEY, 'O',          IDM_FILE_OPEN     },
+        { FCONTROL | FVIRTKEY, VK_OEM_PLUS,  IDM_ZOOM_IN       },  // Ctrl+=
+        { FCONTROL | FVIRTKEY, VK_OEM_MINUS, IDM_ZOOM_OUT      },  // Ctrl+-
+        { FCONTROL | FVIRTKEY, '0',          IDM_ZOOM_RESET    },
+        { FVIRTKEY,            VK_F5,        IDM_VIEW_OUTLINE  },
     };
     haccel_ = CreateAcceleratorTableW(accels, _countof(accels));
 

@@ -5,6 +5,7 @@
 #include <windows.h>
 
 #include "core/DocumentView.hpp"
+#include "ui/OutlinePane.hpp"
 #include "ui/PdfCanvas.hpp"
 
 namespace litepdf::ui {
@@ -35,12 +36,18 @@ private:
     void open_async(std::filesystem::path path);
     void kick_render(int page);  // recompute zoom, submit render, post to canvas
 
+    void on_layout();                    // reposition canvas + outline for current state
+    void toggle_outline();               // F5 handler
+    void on_outline_navigate(int page);  // callback from OutlinePane
+
     HWND    hwnd_   = nullptr;
     HACCEL  haccel_ = nullptr;
     std::unique_ptr<PdfCanvas>                   canvas_;
     std::unique_ptr<litepdf::core::DocumentView> view_;
+    std::unique_ptr<OutlinePane>                 outline_;
     std::atomic<int>                             open_epoch_{0};
-    bool                                         log_timings_ = false;
+    bool                                         outline_visible_ = false;
+    bool                                         log_timings_     = false;
 };
 
 }  // namespace litepdf::ui
