@@ -34,11 +34,22 @@ constexpr UINT WM_USER_OPEN_OK     = WM_USER + 1;
 constexpr UINT WM_USER_OPEN_FAILED = WM_USER + 2;
 // Must match ui::WM_USER_RENDER_DONE in PdfCanvas.hpp.
 constexpr UINT WM_USER_RENDER_DONE = WM_USER + 3;
+
+// "&1 foo.pdf", "&2 foo.pdf", ..., "&9 foo.pdf", "1&0 foo.pdf".
+// The '&' marks the mnemonic character (Alt-shortcut).
+std::wstring format_mru_label(std::size_t i, const std::wstring& full_path) {
+    std::wstring fname = std::filesystem::path(full_path).filename().wstring();
+    if (fname.empty()) fname = full_path;  // defensive: path ends in separator
+    std::wstring prefix = (i < 9)
+        ? (L"&" + std::to_wstring(i + 1) + L" ")
+        : std::wstring(L"1&0 ");
+    return prefix + fname;
+}
 }  // namespace
 
 namespace litepdf::ui {
 
-MainWindow::MainWindow() = default;
+MainWindow::MainWindow() { mru_.load(); }
 MainWindow::~MainWindow() {
     if (haccel_) { DestroyAcceleratorTable(haccel_); haccel_ = nullptr; }
 }
@@ -183,6 +194,8 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     [](wchar_t c) { return static_cast<wchar_t>(::towlower(c)); });
                 if (ext == L".pdf" || ext == L".epub" ||
                     ext == L".cbz" || ext == L".xps") {
+                    mru_.push(p.wstring());
+                    mru_.save();
                     open_async(std::move(p));
                 } else {
                     MessageBoxW(hwnd,
@@ -236,8 +249,48 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             }
             return 0;
         }
+        case WM_INITMENUPOPUP: {
+            // Skip window/system menu popups.
+            if (HIWORD(l) != 0) return 0;
+            auto popup = reinterpret_cast<HMENU>(w);
+            HMENU main = GetMenu(hwnd);
+            // Only rebuild MRU when the File popup (index 0) is about to show.
+            if (!main || popup != GetSubMenu(main, 0)) return 0;
+            // Remove any existing MRU items (safe even when absent).
+            for (int id = IDM_MRU_1; id <= IDM_MRU_10; ++id) {
+                DeleteMenu(popup, id, MF_BYCOMMAND);
+            }
+            // Insert current entries, numbered &1..&9 and 1&0 for the 10th,
+            // before IDM_FILE_EXIT (which keeps the separator above it).
+            const auto& entries = mru_.entries();
+            for (std::size_t i = 0; i < entries.size(); ++i) {
+                InsertMenuW(popup, IDM_FILE_EXIT,
+                            MF_BYCOMMAND | MF_STRING,
+                            IDM_MRU_1 + static_cast<UINT>(i),
+                            format_mru_label(i, entries[i]).c_str());
+            }
+            return 0;
+        }
         case WM_COMMAND: {
             const int id = LOWORD(w);
+            // MRU range: click reopens the file, or warns + removes if gone.
+            if (id >= IDM_MRU_1 && id <= IDM_MRU_10) {
+                std::size_t index = static_cast<std::size_t>(id - IDM_MRU_1);
+                const auto& e = mru_.entries();
+                if (index < e.size()) {
+                    std::filesystem::path p(e[index]);
+                    if (std::filesystem::exists(p)) {
+                        open_async(std::move(p));
+                    } else {
+                        MessageBoxW(hwnd,
+                            (L"File not found:\n" + e[index]).c_str(),
+                            kWindowTitle, MB_OK | MB_ICONWARNING);
+                        mru_.remove(index);
+                        mru_.save();
+                    }
+                }
+                return 0;
+            }
             switch (id) {
                 case IDM_VIEW_OUTLINE:
                     toggle_outline();
@@ -255,7 +308,10 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY |
                                 OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST;
                     if (GetOpenFileNameW(&ofn)) {
-                        open_async(std::filesystem::path(buf));
+                        std::filesystem::path p(buf);
+                        mru_.push(p.wstring());
+                        mru_.save();
+                        open_async(std::move(p));
                     }
                     return 0;
                 }
