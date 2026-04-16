@@ -1,6 +1,7 @@
 #include "ui/OutlinePane.hpp"
 
 #include <commctrl.h>
+#include <stdexcept>
 #include <vector>
 
 #pragma comment(lib, "comctl32.lib")
@@ -10,24 +11,13 @@ namespace litepdf::ui {
 struct OutlinePane::Impl {
     HWND tree = nullptr;
     NavigateCb on_navigate;
-    // Map from HTREEITEM -> page_index for click-to-navigate.
-    // We store page indices in the item's lParam.
-    WNDPROC original_parent_proc = nullptr;
-    HWND parent = nullptr;
+    // Page indices are stored in each tree item's lParam for click-to-navigate.
 };
 
-// We subclass the parent to intercept WM_NOTIFY from the TreeView.
-// This is simpler than creating a dedicated parent HWND.
-// However, since MainWindow already handles WM_NOTIFY, we'll use
-// a different approach: store a static map and forward from MainWindow.
-//
-// Actually, the simplest Win32 pattern: MainWindow forwards
-// WM_NOTIFY to OutlinePane via a public method. No subclassing needed.
+// Parent's WM_NOTIFY handler forwards TVN_SELCHANGEDW to on_navigate; no subclassing required.
 
 OutlinePane::OutlinePane(HINSTANCE hInstance, HWND parent)
     : impl_(std::make_unique<Impl>()) {
-    impl_->parent = parent;
-
     // TreeView control - WS_CHILD, initially hidden.
     impl_->tree = CreateWindowExW(
         WS_EX_CLIENTEDGE,
@@ -40,6 +30,8 @@ OutlinePane::OutlinePane(HINSTANCE hInstance, HWND parent)
         nullptr,
         hInstance,
         nullptr);
+    if (!impl_->tree)
+        throw std::runtime_error("Failed to create OutlinePane TreeView HWND");
 }
 
 OutlinePane::~OutlinePane() {
@@ -80,14 +72,23 @@ void OutlinePane::populate(
             }
         }
 
-        // Convert UTF-8 title to UTF-16 for the TreeView.
-        int wlen = MultiByteToWideChar(CP_UTF8, 0,
-                       e.title.c_str(), static_cast<int>(e.title.size()),
-                       nullptr, 0);
-        std::wstring wtitle(static_cast<std::size_t>(wlen), L'\0');
-        MultiByteToWideChar(CP_UTF8, 0,
-            e.title.c_str(), static_cast<int>(e.title.size()),
-            wtitle.data(), wlen);
+        // Convert UTF-8 title to UTF-16 for the TreeView. MultiByteToWideChar
+        // returns 0 on failure or when the source is empty; guard both so we
+        // never allocate on a negative/zero size nor dereference bad data.
+        // On conversion failure wtitle remains empty and the TreeView shows
+        // an empty entry (acceptable).
+        std::wstring wtitle;
+        if (!e.title.empty()) {
+            int wlen = MultiByteToWideChar(CP_UTF8, 0,
+                           e.title.c_str(), static_cast<int>(e.title.size()),
+                           nullptr, 0);
+            if (wlen > 0) {
+                wtitle.resize(static_cast<std::size_t>(wlen));
+                MultiByteToWideChar(CP_UTF8, 0,
+                    e.title.c_str(), static_cast<int>(e.title.size()),
+                    wtitle.data(), wlen);
+            }
+        }
 
         tvi.item.mask    = TVIF_TEXT | TVIF_PARAM;
         tvi.item.pszText = const_cast<wchar_t*>(wtitle.c_str());

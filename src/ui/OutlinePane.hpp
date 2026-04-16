@@ -4,6 +4,7 @@
 
 #include <functional>
 #include <memory>
+#include <vector>
 #include <windows.h>
 
 namespace litepdf::ui {
