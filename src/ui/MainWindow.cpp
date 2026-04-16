@@ -332,7 +332,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     return 0;
                 case IDM_HELP_ABOUT:
                     MessageBoxW(hwnd,
-                        L"LitePDF v0.0.4\n\n"
+                        L"LitePDF v0.0.5\n\n"
                         L"A lightweight PDF / ePub / CBZ / XPS viewer for Windows.\n\n"
                         L"License: AGPL-3.0\n"
                         L"Engine: MuPDF 1.24.11\n"
