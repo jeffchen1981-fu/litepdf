@@ -96,4 +96,52 @@ if ($timingLine -match "T0->T4=(\d+)\s*ms") {
 }
 
 Remove-Item $errFile -Force -ErrorAction SilentlyContinue
+
+# Phase 4 smoke: launch with bookmarks.pdf to exercise the outline-pane path.
+# Confirms the MainWindow + OutlinePane + MRU stack comes up cleanly on a
+# document with bookmark entries. Liveness-only - no timing assertion here,
+# since the cold-start budget is already covered by the simple.pdf run above.
+
+$bookmarksFixture = Join-Path $repoRoot "tests/fixtures/bookmarks.pdf"
+if (-not (Test-Path $bookmarksFixture)) {
+    throw "fixture not found at $bookmarksFixture"
+}
+
+Write-Host "Launching: $exe $bookmarksFixture"
+$proc2 = Start-Process -FilePath $exe `
+    -ArgumentList @($bookmarksFixture) `
+    -PassThru -NoNewWindow
+
+$deadline2 = (Get-Date).AddSeconds(5)
+$hwnd2 = [IntPtr]::Zero
+while ((Get-Date) -lt $deadline2) {
+    Start-Sleep -Milliseconds 100
+    if ($proc2.HasExited) {
+        throw "litepdf.exe exited during bookmarks.pdf startup (exit code $($proc2.ExitCode))"
+    }
+    $proc2.Refresh()
+    if ($proc2.MainWindowHandle -ne [IntPtr]::Zero) {
+        $hwnd2 = $proc2.MainWindowHandle
+        break
+    }
+}
+if ($hwnd2 -eq [IntPtr]::Zero) {
+    Stop-Process -Id $proc2.Id -Force -ErrorAction SilentlyContinue
+    throw "litepdf.exe did not create a main window within 5 s for bookmarks.pdf"
+}
+Write-Host "[OK] bookmarks.pdf main window handle: $hwnd2"
+
+# Title is set in MainWindow WM_USER_OPEN_OK to "LitePDF - <filename>", so it
+# takes a moment past the bare window creation for the title to update.
+Start-Sleep -Seconds 1
+$proc2.Refresh()
+$title2 = $proc2.MainWindowTitle
+if ($title2 -notmatch "bookmarks") {
+    Stop-Process -Id $proc2.Id -Force -ErrorAction SilentlyContinue
+    throw "bookmarks.pdf window title did not contain 'bookmarks': '$title2'"
+}
+Write-Host "[OK] bookmarks.pdf window title: $title2"
+
+Stop-Process -Id $proc2.Id -Force -ErrorAction SilentlyContinue
+
 Write-Host "[OK] smoke test passed."
