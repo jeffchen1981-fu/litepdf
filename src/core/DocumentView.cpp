@@ -256,4 +256,8 @@ const std::filesystem::path& DocumentView::source_path() const {
     return impl_->doc.source_path();
 }
 
+const Document& DocumentView::document() const {
+    return impl_->doc;
+}
+
 }  // namespace litepdf::core

@@ -100,6 +100,11 @@ public:
     // Source path (for window title bar etc.).
     const std::filesystem::path& source_path() const;
 
+    // Read-only access to the underlying Document (for outline queries,
+    // page count, etc.). The Document reference is valid for the
+    // lifetime of this DocumentView.
+    const Document& document() const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
