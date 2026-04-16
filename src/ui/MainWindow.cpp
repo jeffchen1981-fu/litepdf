@@ -194,6 +194,8 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     [](wchar_t c) { return static_cast<wchar_t>(::towlower(c)); });
                 if (ext == L".pdf" || ext == L".epub" ||
                     ext == L".cbz" || ext == L".xps") {
+                    // Push BEFORE moving p into open_async — otherwise
+                    // p.wstring() reads moved-from state.
                     mru_.push(p.wstring());
                     mru_.save();
                     open_async(std::move(p));
@@ -274,12 +276,20 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         case WM_COMMAND: {
             const int id = LOWORD(w);
             // MRU range: click reopens the file, or warns + removes if gone.
+            // Plan: MRU click does NOT re-rank (no mru_.push here); only real
+            // Open/Drop sites push. Per D4 literal text.
             if (id >= IDM_MRU_1 && id <= IDM_MRU_10) {
                 std::size_t index = static_cast<std::size_t>(id - IDM_MRU_1);
                 const auto& e = mru_.entries();
                 if (index < e.size()) {
                     std::filesystem::path p(e[index]);
-                    if (std::filesystem::exists(p)) {
+                    // Non-throwing exists(): MRU paths go stale on removable
+                    // drives or disconnected SMB shares, and the throwing
+                    // overload would propagate out of handle_message and
+                    // crash the UI thread. Any error (permission denied,
+                    // network unreachable, ENOENT) collapses to "gone".
+                    std::error_code ec;
+                    if (std::filesystem::exists(p, ec)) {
                         open_async(std::move(p));
                     } else {
                         MessageBoxW(hwnd,
@@ -309,6 +319,8 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                                 OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST;
                     if (GetOpenFileNameW(&ofn)) {
                         std::filesystem::path p(buf);
+                        // Push BEFORE moving p into open_async — otherwise
+                        // p.wstring() reads moved-from state.
                         mru_.push(p.wstring());
                         mru_.save();
                         open_async(std::move(p));
