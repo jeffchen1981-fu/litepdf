@@ -41,6 +41,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_render_engine_cache.cpp
     unit/test_render_stress.cpp
     unit/test_document_view.cpp
+    unit/test_mru_list.cpp
 )
 target_link_libraries(litepdf_unit_tests PRIVATE litepdf_core)
 
