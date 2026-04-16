@@ -118,9 +118,12 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         }
         case WM_DROPFILES: {
             auto hdrop = reinterpret_cast<HDROP>(w);
-            wchar_t buf[MAX_PATH] = {0};
             UINT count = DragQueryFileW(hdrop, 0xFFFFFFFF, nullptr, 0);
-            if (count > 0 && DragQueryFileW(hdrop, 0, buf, MAX_PATH)) {
+            // Query required buffer length (includes null terminator).
+            // Handles paths longer than MAX_PATH (260) on Windows 10 1607+.
+            UINT len = (count > 0) ? DragQueryFileW(hdrop, 0, nullptr, 0) : 0;
+            std::wstring buf(len, L'\0');
+            if (len > 0 && DragQueryFileW(hdrop, 0, buf.data(), len + 1)) {
                 std::filesystem::path p(buf);
                 // Accept .pdf, .epub, .cbz, .xps (Phase 2 supported formats).
                 auto ext = p.extension().wstring();
@@ -196,8 +199,13 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     DestroyWindow(hwnd);
                     return 0;
                 case IDM_HELP_ABOUT:
-                    MessageBoxW(hwnd, L"LitePDF — Phase 3 Task 1 scaffold",
-                                kWindowTitle, MB_ICONINFORMATION);
+                    MessageBoxW(hwnd,
+                        L"LitePDF v0.0.4\n\n"
+                        L"A lightweight PDF / ePub / CBZ / XPS viewer for Windows.\n\n"
+                        L"License: AGPL-3.0\n"
+                        L"Engine: MuPDF 1.24.11\n"
+                        L"Rendering: Direct2D",
+                        kWindowTitle, MB_ICONINFORMATION);
                     return 0;
                 case IDM_ZOOM_IN:
                     if (view_ && view_->zoom_in()) kick_render(view_->current_page());

@@ -7,6 +7,7 @@
 #include <d2d1.h>
 #include <d2d1_1.h>
 #include <wrl/client.h>
+#include <mutex>
 #include <stdexcept>
 #pragma comment(lib, "d2d1.lib")
 
@@ -28,7 +29,7 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 constexpr wchar_t kCanvasClassName[] = L"LitePDFPdfCanvas";
-bool g_class_registered = false;
+std::once_flag g_class_registered;
 }  // namespace
 
 namespace litepdf::ui {
@@ -73,18 +74,18 @@ void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
 }
 
 void PdfCanvas::register_class_once(HINSTANCE hInstance) {
-    if (g_class_registered) return;
-    WNDCLASSEXW wc = {};
-    wc.cbSize        = sizeof(wc);
-    wc.style         = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc   = PdfCanvas::WndProc;
-    wc.hInstance     = hInstance;
-    wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = nullptr;  // we paint ourselves (WM_ERASEBKGND returns 1)
-    wc.lpszClassName = kCanvasClassName;
-    if (!RegisterClassExW(&wc))
-        throw std::runtime_error("Failed to register PdfCanvas window class");
-    g_class_registered = true;
+    std::call_once(g_class_registered, [&]() {
+        WNDCLASSEXW wc = {};
+        wc.cbSize        = sizeof(wc);
+        wc.style         = CS_HREDRAW | CS_VREDRAW;
+        wc.lpfnWndProc   = PdfCanvas::WndProc;
+        wc.hInstance     = hInstance;
+        wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = nullptr;  // we paint ourselves (WM_ERASEBKGND returns 1)
+        wc.lpszClassName = kCanvasClassName;
+        if (!RegisterClassExW(&wc))
+            throw std::runtime_error("Failed to register PdfCanvas window class");
+    });
 }
 
 PdfCanvas::PdfCanvas(HINSTANCE hInstance, HWND parent)

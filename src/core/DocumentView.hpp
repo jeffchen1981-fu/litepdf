@@ -56,6 +56,17 @@ public:
 
     ZoomMode zoom_mode() const noexcept;
     float    zoom_scale() const noexcept;
+
+    // Set zoom mode and recompute scale for the given viewport / DPI.
+    //
+    // Thread-safety: must be called on the UI thread only. The computed
+    // scale_ is read by request_render() to build the CTM, and although
+    // scale_ is a plain float (not atomic), in Phase 3 all callers
+    // (kick_render, WM_SIZE, WM_DPICHANGED, zoom_in/out) run on the
+    // UI thread and always call set_zoom_mode before request_render in
+    // the same message handler — so the worker never observes a torn
+    // read. If Phase 5+ introduces off-thread zoom changes, scale_
+    // must become atomic or protected by a mutex.
     void     set_zoom_mode(ZoomMode mode,
                            float viewport_w_dip,
                            float viewport_h_dip,
