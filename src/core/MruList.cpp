@@ -33,41 +33,51 @@ void MruList::load() {
         DWORD buf_cb = sizeof(buf);
         rc = RegQueryValueExW(hkey, name, nullptr, nullptr,
                               reinterpret_cast<BYTE*>(buf), &buf_cb);
-        if (rc == ERROR_SUCCESS && buf[0] != L'\0') {
-            entries_.emplace_back(buf);
+        if (rc == ERROR_SUCCESS) {
+            buf[sizeof(buf)/sizeof(wchar_t) - 1] = L'\0';  // defensive: REG_SZ may not be null-terminated
+            if (buf[0] != L'\0') entries_.emplace_back(buf);
         }
     }
     RegCloseKey(hkey);
 }
 
-void MruList::save() const {
+bool MruList::save() const {
     HKEY hkey = nullptr;
     DWORD disp = 0;
     LONG rc = RegCreateKeyExW(HKEY_CURRENT_USER, registry_subkey_.c_str(),
                               0, nullptr, REG_OPTION_NON_VOLATILE,
                               KEY_WRITE, nullptr, &hkey, &disp);
-    if (rc != ERROR_SUCCESS) return;
+    if (rc != ERROR_SUCCESS) return false;
 
+    bool ok = true;
     DWORD count = static_cast<DWORD>(entries_.size());
-    RegSetValueExW(hkey, L"Count", 0, REG_DWORD,
-                   reinterpret_cast<const BYTE*>(&count), sizeof(count));
+    if (RegSetValueExW(hkey, L"Count", 0, REG_DWORD,
+                       reinterpret_cast<const BYTE*>(&count), sizeof(count))
+        != ERROR_SUCCESS) {
+        ok = false;
+    }
 
     for (DWORD i = 0; i < count; ++i) {
         wchar_t name[16];
         wsprintfW(name, L"Entry%u", i);
         const auto& e = entries_[i];
-        RegSetValueExW(hkey, name, 0, REG_SZ,
-                       reinterpret_cast<const BYTE*>(e.c_str()),
-                       static_cast<DWORD>((e.size() + 1) * sizeof(wchar_t)));
+        if (RegSetValueExW(hkey, name, 0, REG_SZ,
+                           reinterpret_cast<const BYTE*>(e.c_str()),
+                           static_cast<DWORD>((e.size() + 1) * sizeof(wchar_t)))
+            != ERROR_SUCCESS) {
+            ok = false;
+        }
     }
     // Clean up stale entries beyond current count (from a previous
-    // session that may have had more items).
+    // session that may have had more items). RegDeleteValueW errors are
+    // ignored here — stale values are cosmetic, not a correctness issue.
     for (DWORD i = count; i < static_cast<DWORD>(kMaxEntries); ++i) {
         wchar_t name[16];
         wsprintfW(name, L"Entry%u", i);
         RegDeleteValueW(hkey, name);
     }
     RegCloseKey(hkey);
+    return ok;
 }
 
 void MruList::push(const std::wstring& path) {

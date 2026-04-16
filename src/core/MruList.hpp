@@ -11,6 +11,11 @@
 //   mru.push(path);     // add/move-to-front
 //   mru.save();         // write back
 //   auto v = mru.entries();  // most-recent-first
+//
+// Limitations:
+//   - Paths are loaded via a 1024-wchar stack buffer. Paths stored exceeding
+//     this limit (long-path mode) are silently truncated on load. `save()` has
+//     no such limit. Typical PDF paths are well under MAX_PATH (260).
 
 #include <cstddef>
 #include <string>
@@ -28,8 +33,11 @@ public:
     // Read entries from registry into in-memory list.
     void load();
 
-    // Write in-memory list to registry.
-    void save() const;
+    // Write in-memory list to registry. Returns true on full success,
+    // false if the registry key could not be created or any value write
+    // failed (e.g., GPO-blocked, quota exceeded). Stale-value cleanup
+    // errors are intentionally ignored (cosmetic only).
+    bool save() const;
 
     // Add or move `path` to the front. Caps at kMaxEntries.
     void push(const std::wstring& path);
