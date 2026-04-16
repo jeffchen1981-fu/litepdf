@@ -49,10 +49,15 @@ IDM_MAIN_MENU MENU
     {
         MENUITEM "&Open...\tCtrl+O", IDM_FILE_OPEN
         MENUITEM SEPARATOR
+        // MRU entries are inserted dynamically at WM_INITMENUPOPUP.
+        // The separator above doubles as the MRU divider.
+        MENUITEM SEPARATOR
         MENUITEM "E&xit",            IDM_FILE_EXIT
     }
     POPUP "&View"
     {
+        MENUITEM "Toggle &Outline\tF5", IDM_VIEW_OUTLINE
+        MENUITEM SEPARATOR
         MENUITEM "Zoom &In\tCtrl+=",  IDM_ZOOM_IN
         MENUITEM "Zoom &Out\tCtrl+-", IDM_ZOOM_OUT
         MENUITEM "&Reset Zoom\tCtrl+0", IDM_ZOOM_RESET
