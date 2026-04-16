@@ -41,6 +41,7 @@ add_executable(litepdf WIN32
     src/ui/ColdStartTimer.cpp
     src/ui/MainWindow.cpp
     src/ui/PdfCanvas.cpp
+    src/ui/OutlinePane.cpp
     resources/litepdf.rc
 )
 
