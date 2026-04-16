@@ -258,18 +258,28 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             HMENU main = GetMenu(hwnd);
             // Only rebuild MRU when the File popup (index 0) is about to show.
             if (!main || popup != GetSubMenu(main, 0)) return 0;
-            // Remove any existing MRU items (safe even when absent).
+            // Remove any existing MRU items + the dynamic SEP (safe when absent).
+            DeleteMenu(popup, IDM_MRU_SEPARATOR, MF_BYCOMMAND);
             for (int id = IDM_MRU_1; id <= IDM_MRU_10; ++id) {
                 DeleteMenu(popup, id, MF_BYCOMMAND);
             }
-            // Insert current entries, numbered &1..&9 and 1&0 for the 10th,
-            // before IDM_FILE_EXIT (which keeps the separator above it).
+            // Bracket: only insert SEP + MRU entries when MRU has content.
+            // Empty-MRU layout stays as Open / static SEP / Exit (single
+            // separator). With entries: Open / SEP / MRU1..N / SEP / Exit.
+            // Insert SEP first (before Exit), then MRU items in order before
+            // SEP — InsertMenuW pushes prior insertions further from anchor,
+            // preserving &1, &2, ... order.
             const auto& entries = mru_.entries();
-            for (std::size_t i = 0; i < entries.size(); ++i) {
+            if (!entries.empty()) {
                 InsertMenuW(popup, IDM_FILE_EXIT,
-                            MF_BYCOMMAND | MF_STRING,
-                            IDM_MRU_1 + static_cast<UINT>(i),
-                            format_mru_label(i, entries[i]).c_str());
+                            MF_BYCOMMAND | MF_SEPARATOR,
+                            IDM_MRU_SEPARATOR, nullptr);
+                for (std::size_t i = 0; i < entries.size(); ++i) {
+                    InsertMenuW(popup, IDM_MRU_SEPARATOR,
+                                MF_BYCOMMAND | MF_STRING,
+                                IDM_MRU_1 + static_cast<UINT>(i),
+                                format_mru_label(i, entries[i]).c_str());
+                }
             }
             return 0;
         }

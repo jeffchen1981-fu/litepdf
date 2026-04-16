@@ -49,9 +49,10 @@ IDM_MAIN_MENU MENU
     {
         MENUITEM "&Open...\tCtrl+O", IDM_FILE_OPEN
         MENUITEM SEPARATOR
-        // MRU entries are inserted dynamically at WM_INITMENUPOPUP.
-        // The separator above doubles as the MRU divider.
-        MENUITEM SEPARATOR
+        // MRU entries + their trailing separator (IDM_MRU_SEPARATOR) are
+        // inserted dynamically at WM_INITMENUPOPUP between this static
+        // separator and Exit, but ONLY when the MRU has at least one
+        // entry — keeps the empty-MRU layout as Open / SEP / Exit.
         MENUITEM "E&xit",            IDM_FILE_EXIT
     }
     POPUP "&View"
