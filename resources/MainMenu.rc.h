@@ -27,3 +27,19 @@
 #define IDM_MRU_8        40027
 #define IDM_MRU_9        40028
 #define IDM_MRU_10       40029
+
+// Phase 5: tab management. Added as accelerators only — not in the File menu
+// popup, to keep the empty-MRU layout from Phase 4 unchanged.
+#define IDM_TAB_CLOSE    40030   // Ctrl+W
+#define IDM_TAB_NEXT     40031   // Ctrl+Tab
+#define IDM_TAB_PREV     40032   // Ctrl+Shift+Tab
+// Ctrl+1..9 jump to tab 1..9 (range 40033-40041, 1-indexed in user UI).
+#define IDM_TAB_GOTO_1   40033
+#define IDM_TAB_GOTO_2   40034
+#define IDM_TAB_GOTO_3   40035
+#define IDM_TAB_GOTO_4   40036
+#define IDM_TAB_GOTO_5   40037
+#define IDM_TAB_GOTO_6   40038
+#define IDM_TAB_GOTO_7   40039
+#define IDM_TAB_GOTO_8   40040
+#define IDM_TAB_GOTO_9   40041
