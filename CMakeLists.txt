@@ -25,6 +25,7 @@ add_library(litepdf_core STATIC
     src/core/MruList.cpp
     src/core/PageCache.cpp
     src/core/RenderEngine.cpp
+    src/core/TabList.cpp
 )
 
 litepdf_apply_flags(litepdf_core)
