@@ -87,9 +87,9 @@ int TabManager::add_tab(std::unique_ptr<litepdf::core::Tab> t) {
 void TabManager::close_tab(int index) {
     if (index < 0 || index >= count()) return;
     const int old_active = impl_->list.active_index();
+    const int new_active = impl_->list.remove(static_cast<std::size_t>(index));
     SendMessageW(impl_->hwnd, TCM_DELETEITEM,
                  static_cast<WPARAM>(index), 0);
-    const int new_active = impl_->list.remove(static_cast<std::size_t>(index));
     if (new_active >= 0) {
         SendMessageW(impl_->hwnd, TCM_SETCURSEL,
                      static_cast<WPARAM>(new_active), 0);
@@ -144,9 +144,20 @@ bool TabManager::handle_notify(const NMHDR* hdr) {
     return false;
 }
 
-int TabManager::strip_height(UINT dpi) const {
-    const int baseline = 24;
-    return MulDiv(baseline, static_cast<int>(dpi), 96);
+int TabManager::strip_height(UINT /*dpi*/) const {
+    if (!impl_ || !impl_->hwnd) return 0;
+    // Use TCM_ADJUSTRECT to measure the control's natural tab-strip height
+    // in the control's own DPI/font/theme context. The control draws its
+    // tabs at the top of its client area, so TCM_ADJUSTRECT(FALSE) shrinks
+    // an input display rect into the content rect — the difference is the
+    // strip height. This respects themed padding and the tab control's
+    // font without us having to re-derive the math.
+    RECT r = {0, 0, 100, 100};
+    SendMessageW(impl_->hwnd, TCM_ADJUSTRECT, FALSE,
+                 reinterpret_cast<LPARAM>(&r));
+    // r.top is positive: the y offset from the display rect's top to the
+    // content area's top == the strip height.
+    return r.top > 0 ? r.top : 0;
 }
 
 void TabManager::set_visible(bool v) {
@@ -158,6 +169,12 @@ void TabManager::set_visible(bool v) {
 LRESULT CALLBACK tab_subclass_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l,
                                    UINT_PTR /*id*/, DWORD_PTR ref_data) {
     auto* self = reinterpret_cast<TabManager*>(ref_data);
+    // TODO(phase5-task5): tighten middle-click gesture to DOWN+UP on same
+    // tab (match Chrome/Edge/VS Code). Currently fires on any MBUTTONUP
+    // over a hit-tested tab, which would close tab B if the user pressed
+    // MBUTTON on A and dragged to B before release. Low-impact footgun;
+    // fix in the Task 5 polish pass by tracking pressed-tab index in Impl
+    // and checking it matches the released-tab index here.
     if (msg == WM_MBUTTONUP && self && self->impl_) {
         TCHITTESTINFO hti = {};
         hti.pt.x = GET_X_LPARAM(l);

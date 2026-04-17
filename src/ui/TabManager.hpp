@@ -51,8 +51,11 @@ public:
     // can emit SwitchCb. Returns true if the notification was handled.
     bool handle_notify(const NMHDR* hdr);
 
-    // Reserve vertical space: writes tab-strip height into *h_out in
-    // pixels for the given DPI. Used by MainWindow::on_layout().
+    // Returns the tab-strip height in the control's own pixel units
+    // (measured via TCM_ADJUSTRECT — respects theme + font + DPI of the
+    // control HWND). The `dpi` argument is kept for source-compatibility
+    // but is not currently consulted. Returns 0 if the control isn't
+    // live yet. Used by MainWindow::on_layout().
     int  strip_height(UINT dpi) const;
 
     // Show / hide the tab strip (hidden when count()==0 per D1).
