@@ -217,8 +217,10 @@ function Tab-Enum([IntPtr]$parent) {
   $count  = [W.U32]::SendMessage($tabc, $TCM_GETITEMCOUNT, [IntPtr]::Zero, [IntPtr]::Zero).ToInt32()
   $active = [W.U32]::SendMessage($tabc, $TCM_GETCURSEL,    [IntPtr]::Zero, [IntPtr]::Zero).ToInt32()
 
-  # Text buffer: 128 wchars (256 bytes) is plenty for path.filename().
-  $bufLen  = 128
+  # Allocate a text buffer in unmanaged memory. 260 wchars covers MAX_PATH
+  # which is well above any legitimate Tab::label (currently path.filename()).
+  # Under-sizing would silently truncate — TCM_GETITEMW has no error signal.
+  $bufLen  = 260
   $bufSize = $bufLen * 2
   $bufPtr  = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($bufSize)
 
@@ -364,8 +366,11 @@ switch ($Action) {
     Write-Host "Sent VK_RETURN to dialog HWND 0x$($dlg.ToInt64().ToString('X8'))"
   }
   'tab-enum' {
-    # Stdout must be exactly one line of JSON (callers parse it). If the window
-    # isn't up yet, emit empty JSON so pollers see count=0 rather than a crash.
+    # Unlike sibling actions (capture, sendkey, ...), this action must
+    # never exit non-zero on "window not found" — smoke-test polls with
+    # retry and treats empty JSON as "not up yet". The contract is:
+    # stdout is always exactly one line of valid JSON; any missing-state
+    # reports as count=0 rather than throwing.
     $h = Get-LitePdfHwnd
     if ($h -eq [IntPtr]::Zero) {
       Write-Output '{"count":0,"active":-1,"labels":[]}'
