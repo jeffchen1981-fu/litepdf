@@ -25,6 +25,11 @@ struct TabManager::Impl {
     TabManager::SwitchCb        on_switch;
     TabManager::CloseRequestCb  on_close_request;
 
+    // I1 gesture: index of tab where WM_MBUTTONDOWN fired; set to -1
+    // between gestures. Mouse is captured between DOWN and UP so we
+    // receive the UP even if released off-tab.
+    int                         pressed_tab = -1;
+
     // Called by the subclass proc on WM_MBUTTONUP when the hit-tested tab
     // index is valid. Kept as a member (rather than inline in the proc) so
     // the callback invocation lives in a named C++ function, which static
@@ -169,21 +174,45 @@ void TabManager::set_visible(bool v) {
 LRESULT CALLBACK tab_subclass_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l,
                                    UINT_PTR /*id*/, DWORD_PTR ref_data) {
     auto* self = reinterpret_cast<TabManager*>(ref_data);
-    // TODO(phase5-task5): tighten middle-click gesture to DOWN+UP on same
-    // tab (match Chrome/Edge/VS Code). Currently fires on any MBUTTONUP
-    // over a hit-tested tab, which would close tab B if the user pressed
-    // MBUTTON on A and dragged to B before release. Low-impact footgun;
-    // fix in the Task 5 polish pass by tracking pressed-tab index in Impl
-    // and checking it matches the released-tab index here.
-    if (msg == WM_MBUTTONUP && self && self->impl_) {
-        TCHITTESTINFO hti = {};
-        hti.pt.x = GET_X_LPARAM(l);
-        hti.pt.y = GET_Y_LPARAM(l);
-        const int hit = static_cast<int>(
-            SendMessageW(hwnd, TCM_HITTEST, 0, reinterpret_cast<LPARAM>(&hti)));
-        if (hit >= 0) {
-            self->impl_->fire_close_request(hit);
+    if (!self || !self->impl_) {
+        return DefSubclassProc(hwnd, msg, w, l);
+    }
+    auto& impl = *self->impl_;
+
+    switch (msg) {
+        case WM_MBUTTONDOWN: {
+            TCHITTESTINFO hti = {};
+            hti.pt.x = GET_X_LPARAM(l);
+            hti.pt.y = GET_Y_LPARAM(l);
+            const int hit = static_cast<int>(
+                SendMessageW(hwnd, TCM_HITTEST, 0,
+                             reinterpret_cast<LPARAM>(&hti)));
+            impl.pressed_tab = hit;  // -1 if no tab under cursor
+            if (hit >= 0) SetCapture(hwnd);
+            break;
         }
+        case WM_MBUTTONUP: {
+            const int pressed = impl.pressed_tab;
+            impl.pressed_tab = -1;
+            if (GetCapture() == hwnd) ReleaseCapture();
+            if (pressed < 0) break;
+            TCHITTESTINFO hti = {};
+            hti.pt.x = GET_X_LPARAM(l);
+            hti.pt.y = GET_Y_LPARAM(l);
+            const int released_on = static_cast<int>(
+                SendMessageW(hwnd, TCM_HITTEST, 0,
+                             reinterpret_cast<LPARAM>(&hti)));
+            // Fire only when DOWN and UP hit-test to the same tab index.
+            if (released_on == pressed) {
+                impl.fire_close_request(pressed);
+            }
+            break;
+        }
+        case WM_CAPTURECHANGED:
+            // Another window stole capture (Alt+Tab, dialog, etc.).
+            // Cancel the in-flight gesture.
+            impl.pressed_tab = -1;
+            break;
     }
     return DefSubclassProc(hwnd, msg, w, l);
 }

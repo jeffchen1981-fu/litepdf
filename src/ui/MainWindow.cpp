@@ -418,9 +418,35 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 }
                 return 0;
             }
+            // Ctrl+1..9 jumps to tab N (0-indexed internally). No-op if
+            // the requested tab doesn't exist (e.g., Ctrl+5 with 3 tabs).
+            if (id >= IDM_TAB_GOTO_1 && id <= IDM_TAB_GOTO_9) {
+                const int target = id - IDM_TAB_GOTO_1;  // 0-indexed
+                if (tabs_ && target < tabs_->count()) {
+                    tabs_->set_active(target);
+                }
+                return 0;
+            }
             switch (id) {
                 case IDM_VIEW_OUTLINE:
                     toggle_outline();
+                    return 0;
+                case IDM_TAB_CLOSE:
+                    if (tabs_ && tabs_->count() > 0) {
+                        on_tab_close_request(tabs_->active_index());
+                    }
+                    return 0;
+                case IDM_TAB_NEXT:
+                    if (tabs_ && tabs_->count() > 1) {
+                        const int n = (tabs_->active_index() + 1) % tabs_->count();
+                        tabs_->set_active(n);
+                    }
+                    return 0;
+                case IDM_TAB_PREV:
+                    if (tabs_ && tabs_->count() > 1) {
+                        const int n = (tabs_->active_index() - 1 + tabs_->count()) % tabs_->count();
+                        tabs_->set_active(n);
+                    }
                     return 0;
                 case IDM_FILE_OPEN: {
                     wchar_t buf[MAX_PATH] = {0};
@@ -561,13 +587,28 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
     if (!hwnd_) return 1;
 
     // Accelerators: Ctrl+O for Open; Ctrl+= / Ctrl+- / Ctrl+0 for zoom;
-    // F5 toggles the outline pane.
+    // F5 toggles the outline pane. Phase 5 adds tab management:
+    // Ctrl+W closes active tab, Ctrl+Tab / Ctrl+Shift+Tab cycles,
+    // Ctrl+1..9 jumps to tab N.
     ACCEL accels[] = {
         { FCONTROL | FVIRTKEY, 'O',          IDM_FILE_OPEN     },
         { FCONTROL | FVIRTKEY, VK_OEM_PLUS,  IDM_ZOOM_IN       },  // Ctrl+=
         { FCONTROL | FVIRTKEY, VK_OEM_MINUS, IDM_ZOOM_OUT      },  // Ctrl+-
         { FCONTROL | FVIRTKEY, '0',          IDM_ZOOM_RESET    },
         { FVIRTKEY,            VK_F5,        IDM_VIEW_OUTLINE  },
+        // Phase 5: tab management.
+        { FCONTROL | FVIRTKEY,          'W',     IDM_TAB_CLOSE  },
+        { FCONTROL | FVIRTKEY,          VK_TAB,  IDM_TAB_NEXT   },
+        { FCONTROL | FSHIFT | FVIRTKEY, VK_TAB,  IDM_TAB_PREV   },
+        { FCONTROL | FVIRTKEY, '1', IDM_TAB_GOTO_1 },
+        { FCONTROL | FVIRTKEY, '2', IDM_TAB_GOTO_2 },
+        { FCONTROL | FVIRTKEY, '3', IDM_TAB_GOTO_3 },
+        { FCONTROL | FVIRTKEY, '4', IDM_TAB_GOTO_4 },
+        { FCONTROL | FVIRTKEY, '5', IDM_TAB_GOTO_5 },
+        { FCONTROL | FVIRTKEY, '6', IDM_TAB_GOTO_6 },
+        { FCONTROL | FVIRTKEY, '7', IDM_TAB_GOTO_7 },
+        { FCONTROL | FVIRTKEY, '8', IDM_TAB_GOTO_8 },
+        { FCONTROL | FVIRTKEY, '9', IDM_TAB_GOTO_9 },
     };
     haccel_ = CreateAcceleratorTableW(accels, _countof(accels));
 

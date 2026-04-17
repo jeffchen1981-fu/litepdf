@@ -43,3 +43,6 @@
 #define IDM_TAB_GOTO_7   40039
 #define IDM_TAB_GOTO_8   40040
 #define IDM_TAB_GOTO_9   40041
+
+// Next free ID: 40042. Reserve 40042-40049 for future tab commands
+// (e.g., IDM_TAB_GOTO_LAST, IDM_TAB_DUPLICATE, IDM_TAB_REOPEN_CLOSED).
