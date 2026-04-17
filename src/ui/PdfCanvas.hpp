@@ -31,6 +31,13 @@ public:
     // Pass nullptr to clear.
     void set_view(litepdf::core::DocumentView* view);
 
+    // Get/set the canvas pan offset (DIPs from the centered/fit origin).
+    // Used by MainWindow to snapshot/restore per-tab scroll on tab switch.
+    // Both are no-ops if called before the impl is ready.
+    struct Pan { float x; float y; };
+    Pan  pan() const;
+    void set_pan(float x, float y);
+
     // When true, on first real-bitmap paint the canvas calls
     // ColdStartTimer::emit_if_complete(true) so the line is mirrored to stderr.
     void set_log_timings(bool on) { log_timings_ = on; }

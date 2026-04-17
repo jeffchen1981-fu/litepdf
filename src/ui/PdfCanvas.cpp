@@ -73,6 +73,18 @@ void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
     }
 }
 
+PdfCanvas::Pan PdfCanvas::pan() const {
+    if (!impl_) return { 0.0f, 0.0f };
+    return { impl_->pan_x, impl_->pan_y };
+}
+
+void PdfCanvas::set_pan(float x, float y) {
+    if (!impl_) return;
+    impl_->pan_x = x;
+    impl_->pan_y = y;
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
 void PdfCanvas::register_class_once(HINSTANCE hInstance) {
     std::call_once(g_class_registered, [&]() {
         WNDCLASSEXW wc = {};
