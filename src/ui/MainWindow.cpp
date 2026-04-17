@@ -1,8 +1,10 @@
-// LitePDF — ui::MainWindow: top-level window, menu, message pump.
+// LitePDF -- ui::MainWindow: top-level window, menu, message pump.
 #include "ui/MainWindow.hpp"
 #include "MainMenu.rc.h"
 
 #include "core/Document.hpp"
+#include "core/DocumentView.hpp"
+#include "core/TabList.hpp"
 #include "ui/ColdStartTimer.hpp"
 
 #include <commctrl.h>
@@ -10,9 +12,9 @@
 #include <shellapi.h>
 #include <stdlib.h>
 #include <algorithm>
-#include <atomic>
 #include <cwctype>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <thread>
 #include <utility>
@@ -70,47 +72,67 @@ LRESULT CALLBACK MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     return DefWindowProcW(hwnd, msg, w, l);
 }
 
-void MainWindow::open_async(std::filesystem::path path) {
-    int my_epoch = ++open_epoch_;
+litepdf::core::DocumentView* MainWindow::active_view() {
+    if (!tabs_) return nullptr;
+    auto* t = tabs_->active_tab();
+    return t ? t->view.get() : nullptr;
+}
+
+void MainWindow::update_window_title() {
+    if (!hwnd_) return;
+    auto* t = tabs_ ? tabs_->active_tab() : nullptr;
+    if (!t) {
+        SetWindowTextW(hwnd_, kWindowTitle);
+        return;
+    }
+    std::wstring title = L"LitePDF \u2014 ";
+    title += t->label;
+    SetWindowTextW(hwnd_, title.c_str());
+}
+
+void MainWindow::open_tab_async(std::filesystem::path path) {
     HWND hwnd = hwnd_;
-    std::thread([hwnd, path = std::move(path), my_epoch]() {
+    std::thread([hwnd, path = std::move(path)]() {
         litepdf::core::Document doc;
         auto err = doc.open(path);
         if (err.has_value()) {
             PostMessageW(hwnd, WM_USER_OPEN_FAILED,
-                         static_cast<WPARAM>(*err),
-                         static_cast<LPARAM>(my_epoch));
+                         static_cast<WPARAM>(*err), 0);
             return;
         }
         try {
-            auto* dv = new litepdf::core::DocumentView(std::move(doc));
+            auto tab = std::make_unique<litepdf::core::Tab>();
+            tab->path  = path;
+            tab->label = path.filename().wstring();
+            tab->view  = std::make_unique<litepdf::core::DocumentView>(
+                std::move(doc));
+            // Transfer ownership across thread boundary via raw ptr.
             PostMessageW(hwnd, WM_USER_OPEN_OK,
-                         reinterpret_cast<WPARAM>(dv),
-                         static_cast<LPARAM>(my_epoch));
+                         reinterpret_cast<WPARAM>(tab.release()), 0);
         } catch (...) {
             // DocumentView ctor can throw (e.g., ui-ctx clone or worker
             // thread creation failed). Map to the closest existing error.
             PostMessageW(hwnd, WM_USER_OPEN_FAILED,
                          static_cast<WPARAM>(
-                             litepdf::core::Document::OpenError::Other),
-                         static_cast<LPARAM>(my_epoch));
+                             litepdf::core::Document::OpenError::Other), 0);
         }
     }).detach();
 }
 
 void MainWindow::kick_render(int page) {
-    if (!view_ || !canvas_) return;
+    auto* view = active_view();
+    if (!view || !canvas_) return;
 
     RECT rc;
     GetClientRect(canvas_->hwnd(), &rc);
     UINT dpi = GetDpiForWindow(hwnd_);
-    view_->set_zoom_mode(view_->zoom_mode(),
+    view->set_zoom_mode(view->zoom_mode(),
         static_cast<float>(rc.right - rc.left),
         static_cast<float>(rc.bottom - rc.top),
         static_cast<float>(dpi));
 
     HWND target = canvas_->hwnd();
-    view_->request_render_with_prefetch(page,
+    view->request_render_with_prefetch(page,
         [target](fz_pixmap* p, fz_context* worker_ctx) {
             if (p) fz_keep_pixmap(worker_ctx, p);  // extend lifetime across PostMessage
             PostMessageW(target, WM_USER_RENDER_DONE,
@@ -120,18 +142,31 @@ void MainWindow::kick_render(int page) {
 
 void MainWindow::on_layout() {
     if (!hwnd_) return;
-    RECT rc;
-    GetClientRect(hwnd_, &rc);
+    RECT rc; GetClientRect(hwnd_, &rc);
     const int w = rc.right - rc.left;
     const int h = rc.bottom - rc.top;
-
-    // 250 DIP scaled to current DPI (96 DPI == 100%).
     const UINT dpi = GetDpiForWindow(hwnd_);
+
+    // Tab strip: only when there's at least one tab.
+    const int tab_h = (tabs_ && tabs_->count() > 0)
+        ? tabs_->strip_height(dpi) : 0;
+    if (tabs_) {
+        tabs_->set_visible(tab_h > 0);
+        if (tab_h > 0) {
+            SetWindowPos(tabs_->hwnd(), nullptr,
+                         0, 0, w, tab_h,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+
+    const int row_y = tab_h;
+    const int row_h = std::max(0, h - tab_h);
+
     const int outline_w = MulDiv(250, static_cast<int>(dpi), 96);
 
     if (outline_ && outline_->visible()) {
         SetWindowPos(outline_->hwnd(), nullptr,
-                     0, 0, outline_w, h,
+                     0, row_y, outline_w, row_h,
                      SWP_NOZORDER | SWP_NOACTIVATE);
         if (canvas_) {
             // Guard: if window is narrower than the outline pane, clamp
@@ -139,13 +174,13 @@ void MainWindow::on_layout() {
             // SetWindowPos (undefined behavior).
             const int canvas_w = std::max(0, w - outline_w);
             SetWindowPos(canvas_->hwnd(), nullptr,
-                         outline_w, 0, canvas_w, h,
+                         outline_w, row_y, canvas_w, row_h,
                          SWP_NOZORDER | SWP_NOACTIVATE);
         }
     } else {
         if (canvas_) {
             SetWindowPos(canvas_->hwnd(), nullptr,
-                         0, 0, w, h,
+                         0, row_y, w, row_h,
                          SWP_NOZORDER | SWP_NOACTIVATE);
         }
     }
@@ -154,15 +189,90 @@ void MainWindow::on_layout() {
 void MainWindow::toggle_outline() {
     if (!outline_) return;
     if (outline_->visible()) outline_->hide(); else outline_->show();
+    // Remember per-tab outline visibility.
+    if (auto* t = tabs_ ? tabs_->active_tab() : nullptr) {
+        t->outline_visible = outline_->visible();
+    }
     on_layout();
     // Rendering follows the new canvas size so FitWidth stays correct.
-    if (view_) kick_render(view_->current_page());
+    if (auto* view = active_view()) kick_render(view->current_page());
 }
 
 void MainWindow::on_outline_navigate(int page) {
-    if (!view_) return;
-    if (view_->set_current_page(page)) {
+    auto* view = active_view();
+    if (!view) return;
+    if (view->set_current_page(page)) {
         kick_render(page);
+    }
+}
+
+void MainWindow::on_tab_switch(int new_index, int old_index) {
+    // Snapshot outgoing state.
+    if (old_index >= 0) {
+        if (auto* outgoing = tabs_->tab_at(old_index)) {
+            auto p = canvas_ ? canvas_->pan() : PdfCanvas::Pan{0, 0};
+            outgoing->pan_x = p.x;
+            outgoing->pan_y = p.y;
+            outgoing->outline_visible = outline_ && outline_->visible();
+        }
+    }
+
+    auto* incoming = tabs_->active_tab();
+    if (canvas_) {
+        canvas_->set_view(incoming ? incoming->view.get() : nullptr);
+        if (incoming) canvas_->set_pan(incoming->pan_x, incoming->pan_y);
+        else          canvas_->set_pan(0.0f, 0.0f);
+    }
+
+    if (outline_) {
+        outline_->clear();
+        if (incoming) {
+            const auto& entries = incoming->view->document().outline();
+            if (!entries.empty() && incoming->outline_visible) {
+                outline_->populate(entries);
+                outline_->show();
+            } else {
+                outline_->hide();
+            }
+        } else {
+            outline_->hide();
+        }
+    }
+
+    on_layout();
+    update_window_title();
+
+    if (incoming && canvas_) {
+        // Re-seed zoom for the current viewport then kick render.
+        RECT rc; GetClientRect(canvas_->hwnd(), &rc);
+        UINT dpi = GetDpiForWindow(hwnd_);
+        incoming->view->set_zoom_mode(
+            incoming->view->zoom_mode(),
+            static_cast<float>(rc.right - rc.left),
+            static_cast<float>(rc.bottom - rc.top),
+            static_cast<float>(dpi));
+        kick_render(incoming->view->current_page());
+    } else if (canvas_) {
+        InvalidateRect(canvas_->hwnd(), nullptr, FALSE);
+    }
+
+    (void)new_index;
+}
+
+void MainWindow::on_tab_close_request(int index) {
+    if (!tabs_) return;
+    tabs_->close_tab(index);
+    // close_tab() fires on_switch if the active tab changed -- so layout,
+    // canvas, outline, title all get refreshed via the existing path.
+    if (tabs_->count() == 0) {
+        // No active tab; ensure everything is blank.
+        if (canvas_) {
+            canvas_->set_view(nullptr);
+            canvas_->set_pan(0.0f, 0.0f);
+        }
+        if (outline_) { outline_->clear(); outline_->hide(); }
+        on_layout();
+        update_window_title();
     }
 }
 
@@ -170,6 +280,12 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     switch (msg) {
         case WM_CREATE: {
             auto* cs = reinterpret_cast<CREATESTRUCTW*>(l);
+            tabs_ = std::make_unique<TabManager>(cs->hInstance, hwnd);
+            tabs_->set_on_switch(
+                [this](int n, int o) { on_tab_switch(n, o); });
+            tabs_->set_on_close_request(
+                [this](int i) { on_tab_close_request(i); });
+            tabs_->set_visible(false);  // no tabs yet
             canvas_ = std::make_unique<PdfCanvas>(cs->hInstance, hwnd);
             canvas_->set_log_timings(log_timings_);
             outline_ = std::make_unique<OutlinePane>(cs->hInstance, hwnd);
@@ -193,11 +309,11 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     [](wchar_t c) { return static_cast<wchar_t>(::towlower(c)); });
                 if (ext == L".pdf" || ext == L".epub" ||
                     ext == L".cbz" || ext == L".xps") {
-                    // Push BEFORE moving p into open_async — otherwise
+                    // Push BEFORE moving p into open_tab_async -- otherwise
                     // p.wstring() reads moved-from state.
                     mru_.push(p.wstring());
                     mru_.save();
-                    open_async(std::move(p));
+                    open_tab_async(std::move(p));
                 } else {
                     MessageBoxW(hwnd,
                         L"LitePDF only opens PDF/ePub/CBZ/XPS files.",
@@ -209,11 +325,11 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         }
         case WM_SIZE: {
             on_layout();
-            if (view_) {
+            if (auto* view = active_view()) {
                 // Recompute FitWidth (or whatever mode) scale for the new
                 // viewport and resubmit. Phase 3 does this directly; the
                 // brief stutter during drag-resize is acceptable.
-                kick_render(view_->current_page());
+                kick_render(view->current_page());
             }
             return 0;
         }
@@ -230,16 +346,17 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                          SWP_NOZORDER | SWP_NOACTIVATE);
             // The canvas (child) receives WM_DPICHANGED_BEFOREPARENT /
             // WM_DPICHANGED_AFTERPARENT; it discards its render target and
-            // lets the next paint rebuild at the new DPI. Phase 3 Task 12:
-            // also recompute the zoom scale for the new DPI and kick a fresh
-            // render so the canvas isn't left empty after the DPI transition.
-            if (view_ && canvas_) {
-                kick_render(view_->current_page());
+            // lets the next paint rebuild at the new DPI. Also re-seed the
+            // active tab's zoom scale for the new DPI. Inactive tabs re-seed
+            // their own zoom on switch, so a single active-tab kick suffices.
+            if (auto* view = active_view(); view && canvas_) {
+                kick_render(view->current_page());
             }
             return 0;
         }
         case WM_NOTIFY: {
             auto* hdr = reinterpret_cast<NMHDR*>(l);
+            if (tabs_ && tabs_->handle_notify(hdr)) return 0;
             if (outline_ && hdr && hdr->hwndFrom == outline_->hwnd() &&
                 hdr->code == TVN_SELCHANGEDW) {
                 auto* nm = reinterpret_cast<NMTREEVIEWW*>(l);
@@ -267,7 +384,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // Empty-MRU layout stays as Open / static SEP / Exit (single
             // separator). With entries: Open / SEP / MRU1..N / SEP / Exit.
             // Insert SEP first (before Exit), then MRU items in order before
-            // SEP — InsertMenuW pushes prior insertions further from anchor,
+            // SEP -- InsertMenuW pushes prior insertions further from anchor,
             // preserving &1, &2, ... order.
             const auto& entries = mru_.entries();
             if (!entries.empty()) {
@@ -300,7 +417,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     // network unreachable, ENOENT) collapses to "gone".
                     std::error_code ec;
                     if (std::filesystem::exists(p, ec)) {
-                        open_async(std::move(p));
+                        open_tab_async(std::move(p));
                     } else {
                         MessageBoxW(hwnd,
                             (L"File not found:\n" + e[index]).c_str(),
@@ -329,11 +446,11 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                                 OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST;
                     if (GetOpenFileNameW(&ofn)) {
                         std::filesystem::path p(buf);
-                        // Push BEFORE moving p into open_async — otherwise
+                        // Push BEFORE moving p into open_tab_async -- otherwise
                         // p.wstring() reads moved-from state.
                         mru_.push(p.wstring());
                         mru_.save();
-                        open_async(std::move(p));
+                        open_tab_async(std::move(p));
                     }
                     return 0;
                 }
@@ -350,21 +467,27 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                         kWindowTitle, MB_ICONINFORMATION);
                     return 0;
                 case IDM_ZOOM_IN:
-                    if (view_ && view_->zoom_in()) kick_render(view_->current_page());
+                    if (auto* view = active_view();
+                        view && view->zoom_in()) {
+                        kick_render(view->current_page());
+                    }
                     return 0;
                 case IDM_ZOOM_OUT:
-                    if (view_ && view_->zoom_out()) kick_render(view_->current_page());
+                    if (auto* view = active_view();
+                        view && view->zoom_out()) {
+                        kick_render(view->current_page());
+                    }
                     return 0;
                 case IDM_ZOOM_RESET: {
-                    if (view_ && canvas_) {
+                    if (auto* view = active_view(); view && canvas_) {
                         RECT rc; GetClientRect(canvas_->hwnd(), &rc);
                         UINT dpi = GetDpiForWindow(hwnd);
-                        view_->set_zoom_mode(
+                        view->set_zoom_mode(
                             litepdf::core::DocumentView::ZoomMode::FitWidth,
                             static_cast<float>(rc.right - rc.left),
                             static_cast<float>(rc.bottom - rc.top),
                             static_cast<float>(dpi));
-                        kick_render(view_->current_page());
+                        kick_render(view->current_page());
                     }
                     return 0;
                 }
@@ -372,49 +495,18 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             return 0;
         }
         case WM_USER_OPEN_OK: {
-            auto* dv = reinterpret_cast<litepdf::core::DocumentView*>(w);
-            int epoch = static_cast<int>(l);
-            if (epoch != open_epoch_.load()) {
-                // User opened another file after this one; discard stale.
-                delete dv;
-                return 0;
-            }
+            auto* raw = reinterpret_cast<litepdf::core::Tab*>(w);
+            std::unique_ptr<litepdf::core::Tab> t(raw);
             ColdStartTimer::mark(2);  // Document fully loaded.
-            view_.reset(dv);  // may destroy the old view (joins old workers)
-            {
-                const auto& path = view_->source_path();
-                std::wstring title = L"LitePDF — ";
-                title += path.filename().wstring();
-                SetWindowTextW(hwnd, title.c_str());
-            }
-            // First render: tell the canvas which view owns the ui_ctx
-            // it will need to fz_drop_pixmap, seed the zoom mode to
-            // FitWidth against the current viewport, then kick a render.
-            if (canvas_) canvas_->set_view(view_.get());
-            // Populate outline and auto-show if the document has entries,
-            // otherwise hide. User can toggle with F5. Visibility is tracked
-            // solely by OutlinePane::visible() — on_layout() reads it directly.
-            if (outline_) {
-                const auto& entries = view_->document().outline();
-                if (!entries.empty()) {
-                    outline_->populate(entries);
-                    outline_->show();
-                } else {
-                    outline_->clear();
-                    outline_->hide();
-                }
-                on_layout();
-            }
-            view_->set_zoom_mode(
-                litepdf::core::DocumentView::ZoomMode::FitWidth,
-                0.0f, 0.0f, 96.0f);  // kick_render overrides with real viewport
-            kick_render(view_->current_page());
+
+            const int new_index = tabs_->add_tab(std::move(t));
+            // add_tab() fires on_switch synchronously with new_index -- that
+            // callback is where canvas/outline/layout/kick_render happens.
+            // So here we have nothing further to do.
+            (void)new_index;
             return 0;
         }
         case WM_USER_OPEN_FAILED: {
-            int epoch = static_cast<int>(l);
-            if (epoch != open_epoch_.load()) return 0;  // stale
-
             using OE = litepdf::core::Document::OpenError;
             const wchar_t* emsg = L"Failed to open the document.";
             switch (static_cast<OE>(w)) {
@@ -487,7 +579,7 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
     UpdateWindow(hwnd_);
 
     if (!initial_path.empty()) {
-        open_async(initial_path);
+        open_tab_async(initial_path);
     }
 
     MSG msg;
