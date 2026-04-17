@@ -32,8 +32,13 @@ struct Tab {
     float pan_y            = 0.0f;
     bool  outline_visible  = false;
 
-    Tab();   // out-of-line so DocumentView can stay forward-declared here.
-    ~Tab();  // out-of-line so DocumentView can stay forward-declared here.
+    // Out-of-line so DocumentView can stay forward-declared here: the
+    // unique_ptr<DocumentView> member needs the full type to destroy.
+    // The user-declared dtor also suppresses implicit move operations,
+    // which is intentional: Tab is always held via unique_ptr and is
+    // never moved by value.
+    Tab();
+    ~Tab();
 
     Tab(const Tab&)            = delete;
     Tab& operator=(const Tab&) = delete;
@@ -46,6 +51,8 @@ public:
 
     TabList(const TabList&)            = delete;
     TabList& operator=(const TabList&) = delete;
+    TabList(TabList&&)                 = default;
+    TabList& operator=(TabList&&)      = default;
 
     std::size_t size()  const noexcept { return tabs_.size(); }
     bool        empty() const noexcept { return tabs_.empty(); }

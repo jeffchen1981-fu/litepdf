@@ -99,3 +99,18 @@ TEST_CASE("TabList at() bounds-checks", "[tablist]") {
     REQUIRE(list.at(1) == nullptr);  // one past end
     REQUIRE(list.at(std::size_t(-1)) == nullptr);  // wrap-around
 }
+
+TEST_CASE("TabList remove without prior set_active leaves active at -1", "[tablist]") {
+    // Regression: when active_ == -1 and remove() is called on a non-empty
+    // list, the signed/unsigned compare must NOT decrement active_ below
+    // -1. Without the guard, active_ underflowed to -2 here.
+    TabList list;
+    list.add(make_tab(L"a"));
+    list.add(make_tab(L"b"));
+    REQUIRE(list.active_index() == -1);   // add() does not auto-activate
+    int new_active = list.remove(0);
+    REQUIRE(new_active == -1);
+    REQUIRE(list.active_index() == -1);
+    REQUIRE(list.size() == 1);
+    REQUIRE(list.active() == nullptr);
+}

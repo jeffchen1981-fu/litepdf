@@ -38,8 +38,11 @@ int TabList::remove(std::size_t i) {
     } else if (removing_active) {
         // Right-neighbor default; clamp to last tab if we removed the end.
         active_ = static_cast<int>(std::min(i, tabs_.size() - 1));
-    } else if (static_cast<std::size_t>(active_) > i) {
+    } else if (active_ >= 0 && static_cast<std::size_t>(active_) > i) {
         // Active tab was to the right of the removed one; shift down.
+        // Guard against active_ == -1: without the `active_ >= 0` check,
+        // the cast to size_t produces SIZE_MAX, which compares greater
+        // than any valid i and would underflow active_ to -2.
         --active_;
     }
     return active_;
