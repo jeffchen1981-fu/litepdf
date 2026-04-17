@@ -143,5 +143,73 @@ if ($title2 -notmatch "bookmarks") {
 Write-Host "[OK] bookmarks.pdf window title: $title2"
 
 Stop-Process -Id $proc2.Id -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 500
+
+# Phase 5 multi-tab + single-instance smoke: launch simple.pdf, then a second
+# litepdf.exe with bookmarks.pdf. The second invocation should forward via
+# single-instance IPC (WM_COPYDATA) to the first, exit with code 0, and leave
+# the first instance with 2 tabs (active = most-recently-forwarded, index 1).
+
+Write-Host "Launching first instance: $exe $fixture (simple.pdf)"
+$proc3 = Start-Process -FilePath $exe `
+    -ArgumentList @($fixture) `
+    -PassThru -NoNewWindow
+$deadline3 = (Get-Date).AddSeconds(5)
+$hwnd3 = [IntPtr]::Zero
+while ((Get-Date) -lt $deadline3) {
+    Start-Sleep -Milliseconds 100
+    if ($proc3.HasExited) { throw "first instance exited during startup (code $($proc3.ExitCode))" }
+    $proc3.Refresh()
+    if ($proc3.MainWindowHandle -ne [IntPtr]::Zero) { $hwnd3 = $proc3.MainWindowHandle; break }
+}
+if ($hwnd3 -eq [IntPtr]::Zero) {
+    Stop-Process -Id $proc3.Id -Force -ErrorAction SilentlyContinue
+    throw "first instance did not create a main window within 5 s"
+}
+Write-Host "[OK] first instance main window: $hwnd3"
+
+# Let WM_USER_OPEN_OK land so the first tab is actually registered before the
+# forwarder races in with a second WM_COPYDATA.
+Start-Sleep -Seconds 1
+
+Write-Host "Launching second instance (forwarder): $exe $bookmarksFixture"
+$fwd = Start-Process -FilePath $exe `
+    -ArgumentList @($bookmarksFixture) `
+    -PassThru -NoNewWindow -Wait
+if ($fwd.ExitCode -ne 0) {
+    Stop-Process -Id $proc3.Id -Force -ErrorAction SilentlyContinue
+    throw "forwarder exited with code $($fwd.ExitCode), expected 0"
+}
+Write-Host "[OK] forwarder exited with code 0"
+
+# Poll the first instance's tab count via ux-probe tab-enum.
+$uxProbe = Join-Path $PSScriptRoot "ux-probe.ps1"
+$tabCount = -1
+$activeIdx = -1
+$pollDeadline = (Get-Date).AddSeconds(5)
+while ((Get-Date) -lt $pollDeadline) {
+    Start-Sleep -Milliseconds 200
+    $raw = & $uxProbe tab-enum 2>&1 | Out-String
+    try {
+        $obj = $raw | ConvertFrom-Json -ErrorAction Stop
+        $tabCount = [int]$obj.count
+        $activeIdx = [int]$obj.active
+        if ($tabCount -ge 2) { break }
+    } catch {
+        # ux-probe may still be coming up or emit diagnostic lines; keep polling.
+    }
+}
+if ($tabCount -ne 2) {
+    Stop-Process -Id $proc3.Id -Force -ErrorAction SilentlyContinue
+    throw "expected 2 tabs after forwarder, got $tabCount"
+}
+if ($activeIdx -ne 1) {
+    Stop-Process -Id $proc3.Id -Force -ErrorAction SilentlyContinue
+    throw "expected active tab index 1 (most recent forward), got $activeIdx"
+}
+Write-Host "[OK] first instance has 2 tabs, active=1"
+
+Stop-Process -Id $proc3.Id -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 500
 
 Write-Host "[OK] smoke test passed."

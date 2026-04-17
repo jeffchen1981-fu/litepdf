@@ -8,6 +8,7 @@
 #   ux-probe.ps1 mru-write <path1> [path2] ...            - Write entries to MRU (most-recent first)
 #   ux-probe.ps1 mru-clear                                - Delete the MRU registry key
 #   ux-probe.ps1 file-menu                                - Trigger WM_INITMENUPOPUP, enumerate File submenu items
+#   ux-probe.ps1 tab-enum                                 - JSON dump of tab control state (count/active/labels)
 
 param(
   [Parameter(Mandatory=$true, Position=0)] [string] $Action,
@@ -198,6 +199,67 @@ function File-Menu([IntPtr]$hwnd) {
   }
 }
 
+function Tab-Enum([IntPtr]$parent) {
+  # Find the SysTabControl32 child of the LitePDF main window, read tab count,
+  # active index, and each tab's label via TCM_GETITEMW. Emits one line of JSON
+  # to stdout so callers (smoke-test.ps1) can parse directly. Any diagnostics
+  # must go to stderr via [Console]::Error.WriteLine so stdout stays JSON-clean.
+  $tabc = [W.U32]::FindWindowEx($parent, [IntPtr]::Zero, "SysTabControl32", [String]::Empty)
+  if ($tabc -eq [IntPtr]::Zero) {
+    Write-Output '{"count":0,"active":-1,"labels":[]}'
+    return
+  }
+  $TCM_GETITEMCOUNT = 0x1304
+  $TCM_GETCURSEL    = 0x130B
+  $TCM_GETITEMW     = 0x133C
+  $TCIF_TEXT        = 0x0001
+
+  $count  = [W.U32]::SendMessage($tabc, $TCM_GETITEMCOUNT, [IntPtr]::Zero, [IntPtr]::Zero).ToInt32()
+  $active = [W.U32]::SendMessage($tabc, $TCM_GETCURSEL,    [IntPtr]::Zero, [IntPtr]::Zero).ToInt32()
+
+  # Text buffer: 128 wchars (256 bytes) is plenty for path.filename().
+  $bufLen  = 128
+  $bufSize = $bufLen * 2
+  $bufPtr  = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($bufSize)
+
+  # TCITEMW on x64: UINT mask (4) + DWORD dwState (4) + DWORD dwStateMask (4)
+  # + 4 bytes padding + LPWSTR pszText (8) + int cchTextMax (4) + int iImage (4)
+  # + LPARAM lParam (8). Offsets: mask=0, pszText=16, cchTextMax=24. Use 64 bytes
+  # to be safe against any compiler padding.
+  $structSize = 64
+  $structPtr  = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($structSize)
+
+  $labels = @()
+  try {
+    for ($i = 0; $i -lt $count; $i++) {
+      # Zero the struct and the text buffer each iteration.
+      for ($z = 0; $z -lt $structSize; $z++) {
+        [System.Runtime.InteropServices.Marshal]::WriteByte($structPtr, $z, 0)
+      }
+      for ($z = 0; $z -lt $bufSize; $z++) {
+        [System.Runtime.InteropServices.Marshal]::WriteByte($bufPtr, $z, 0)
+      }
+      [System.Runtime.InteropServices.Marshal]::WriteInt32($structPtr, 0,  $TCIF_TEXT)
+      [System.Runtime.InteropServices.Marshal]::WriteIntPtr($structPtr, 16, $bufPtr)
+      [System.Runtime.InteropServices.Marshal]::WriteInt32($structPtr, 24, $bufLen)
+
+      [void][W.U32]::SendMessage($tabc, $TCM_GETITEMW, [IntPtr]$i, $structPtr)
+      $label = [System.Runtime.InteropServices.Marshal]::PtrToStringUni($bufPtr)
+      if ($null -eq $label) { $label = "" }
+      $labels += $label
+    }
+  } finally {
+    [System.Runtime.InteropServices.Marshal]::FreeHGlobal($structPtr)
+    [System.Runtime.InteropServices.Marshal]::FreeHGlobal($bufPtr)
+  }
+
+  $obj = [ordered]@{ count = $count; active = $active; labels = $labels }
+  # ConvertTo-Json -Compress forces a single line; force array on labels so a
+  # single-tab case still serializes as ["foo"] not "foo".
+  $json = $obj | ConvertTo-Json -Compress
+  Write-Output $json
+}
+
 # --- Dispatch ---
 switch ($Action) {
   'capture' {
@@ -300,6 +362,16 @@ switch ($Action) {
     [void][W.U32]::PostMessage($dlg, $WM_KEYDOWN, [IntPtr]0x0D, [IntPtr]0)  # VK_RETURN
     [void][W.U32]::PostMessage($dlg, $WM_KEYUP, [IntPtr]0x0D, [IntPtr]0x40000000)
     Write-Host "Sent VK_RETURN to dialog HWND 0x$($dlg.ToInt64().ToString('X8'))"
+  }
+  'tab-enum' {
+    # Stdout must be exactly one line of JSON (callers parse it). If the window
+    # isn't up yet, emit empty JSON so pollers see count=0 rather than a crash.
+    $h = Get-LitePdfHwnd
+    if ($h -eq [IntPtr]::Zero) {
+      Write-Output '{"count":0,"active":-1,"labels":[]}'
+      exit 0
+    }
+    Tab-Enum $h
   }
   default { Write-Error "Unknown action: $Action"; exit 1 }
 }
