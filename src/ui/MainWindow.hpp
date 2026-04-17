@@ -56,6 +56,9 @@ private:
     // Rewrite window title based on the active tab (or reset to "LitePDF").
     void update_window_title();
 
+    // WM_COPYDATA handler for single-instance IPC (see app/SingleInstance.hpp).
+    LRESULT on_copydata(HWND hwnd, WPARAM w, LPARAM l);
+
     HWND    hwnd_   = nullptr;
     HACCEL  haccel_ = nullptr;
     std::unique_ptr<PdfCanvas>    canvas_;

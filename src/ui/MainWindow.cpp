@@ -2,6 +2,7 @@
 #include "ui/MainWindow.hpp"
 #include "MainMenu.rc.h"
 
+#include "app/SingleInstance.hpp"
 #include "core/Document.hpp"
 #include "core/DocumentView.hpp"
 #include "core/TabList.hpp"
@@ -553,11 +554,43 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             MessageBoxW(hwnd, emsg, kWindowTitle, MB_ICONWARNING);
             return 0;
         }
+        case WM_COPYDATA:
+            return on_copydata(hwnd, w, l);
         case WM_DESTROY:
             PostQuitMessage(0);
             return 0;
     }
     return DefWindowProcW(hwnd, msg, w, l);
+}
+
+LRESULT MainWindow::on_copydata(HWND hwnd, WPARAM, LPARAM l) {
+    auto* cds = reinterpret_cast<const COPYDATASTRUCT*>(l);
+    if (!cds) return 0;
+
+    if (cds->dwData == litepdf::app::kIpcBringToFront) {
+        if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+        SetForegroundWindow(hwnd);
+        return 1;
+    }
+
+    if (cds->dwData == litepdf::app::kIpcOpenPath) {
+        // Validate: non-empty, sane length, null-terminated UTF-16.
+        if (cds->cbData < sizeof(wchar_t)) return 0;
+        if (cds->cbData > 64u * 1024u) return 0;
+        if (cds->cbData % sizeof(wchar_t) != 0) return 0;
+        const wchar_t* data = static_cast<const wchar_t*>(cds->lpData);
+        const std::size_t count = cds->cbData / sizeof(wchar_t);
+        if (count == 0 || data[count - 1] != L'\0') return 0;
+
+        std::filesystem::path p(std::wstring(data, count - 1));
+        if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+        SetForegroundWindow(hwnd);
+        mru_.push(p.wstring());
+        mru_.save();
+        open_tab_async(std::move(p));
+        return 1;
+    }
+    return 0;
 }
 
 int MainWindow::run(HINSTANCE hInstance, int nCmdShow,

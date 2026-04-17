@@ -39,6 +39,7 @@ target_link_libraries(litepdf_core PRIVATE
 # --- litepdf executable ---------------------------------------------------
 add_executable(litepdf WIN32
     src/main.cpp
+    src/app/SingleInstance.cpp
     src/ui/ColdStartTimer.cpp
     src/ui/MainWindow.cpp
     src/ui/OutlinePane.cpp
