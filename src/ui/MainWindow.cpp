@@ -189,12 +189,11 @@ void MainWindow::on_layout() {
 void MainWindow::toggle_outline() {
     if (!outline_) return;
     if (outline_->visible()) outline_->hide(); else outline_->show();
-    // Remember per-tab outline visibility.
-    if (auto* t = tabs_ ? tabs_->active_tab() : nullptr) {
-        t->outline_visible = outline_->visible();
-    }
     on_layout();
     // Rendering follows the new canvas size so FitWidth stays correct.
+    // on_tab_switch's outgoing-snapshot writes outline_visible back into
+    // the active Tab when the user switches away -- that's the single
+    // source of truth, so we don't write it here.
     if (auto* view = active_view()) kick_render(view->current_page());
 }
 
@@ -210,7 +209,7 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
     // Snapshot outgoing state.
     if (old_index >= 0) {
         if (auto* outgoing = tabs_->tab_at(old_index)) {
-            auto p = canvas_ ? canvas_->pan() : PdfCanvas::Pan{0, 0};
+            auto p = canvas_ ? canvas_->pan() : PdfCanvas::Pan{0.0f, 0.0f};
             outgoing->pan_x = p.x;
             outgoing->pan_y = p.y;
             outgoing->outline_visible = outline_ && outline_->visible();
@@ -262,18 +261,9 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
 void MainWindow::on_tab_close_request(int index) {
     if (!tabs_) return;
     tabs_->close_tab(index);
-    // close_tab() fires on_switch if the active tab changed -- so layout,
-    // canvas, outline, title all get refreshed via the existing path.
-    if (tabs_->count() == 0) {
-        // No active tab; ensure everything is blank.
-        if (canvas_) {
-            canvas_->set_view(nullptr);
-            canvas_->set_pan(0.0f, 0.0f);
-        }
-        if (outline_) { outline_->clear(); outline_->hide(); }
-        on_layout();
-        update_window_title();
-    }
+    // close_tab() fires on_switch (with new_active=-1 when the last tab
+    // is dropped); on_tab_switch() performs all the canvas/outline/layout
+    // teardown. No further work needed here.
 }
 
 LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
@@ -527,6 +517,13 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 default:
                     break;
             }
+            // Note: MessageBoxW runs a nested message loop. If another
+            // worker posts WM_USER_OPEN_OK during the dialog, its
+            // add_tab() + on_tab_switch() will run before this case
+            // returns. Surfaces as "dialog dismissed -> active tab
+            // changed". Non-fatal; revisit in Phase 5 Task 8 (or
+            // Phase 12 crash-protection hardening) if the UX becomes
+            // confusing.
             MessageBoxW(hwnd, emsg, kWindowTitle, MB_ICONWARNING);
             return 0;
         }
