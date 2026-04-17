@@ -34,8 +34,11 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     bool already = false;
     HANDLE mutex = litepdf::app::try_acquire_single_instance(already);
     if (already) {
-        litepdf::app::forward_to_running_instance(initial_path);
-        return 0;
+        // Another instance is already running — forward our payload and exit.
+        // Exit 0 on successful delivery, 1 if forwarding failed (target
+        // HWND missing or SendMessageTimeoutW hung); never fall through
+        // to becoming a normal instance — see plan D14.
+        return litepdf::app::forward_to_running_instance(initial_path) ? 0 : 1;
     }
     // If CreateMutex failed entirely (mutex == nullptr && !already),
     // fall through as a normal instance -- a single stale process is less
