@@ -13,6 +13,7 @@
 #include <shellapi.h>
 #include <stdlib.h>
 #include <algorithm>
+#include <climits>
 #include <cwctype>
 #include <filesystem>
 #include <memory>
@@ -215,13 +216,22 @@ void MainWindow::on_outline_navigate(int page) {
 }
 
 void MainWindow::on_tab_switch(int new_index, int old_index) {
-    // Snapshot outgoing state.
+    // Snapshot outgoing state + drain its render queue to narrow the
+    // cross-tab render-bleed race window. If a P0 is already with a
+    // worker, its pixmap will still arrive at WM_USER_RENDER_DONE after
+    // the set_view() below -- canvas handling of that edge is tracked
+    // as a Phase 6 hardening item (see plan "Known Limitations").
+    // Cancelling P0/P1/P2 here drops all queued work, leaving at most
+    // one in-flight pixmap per worker thread.
     if (old_index >= 0) {
         if (auto* outgoing = tabs_->tab_at(old_index)) {
             auto p = canvas_ ? canvas_->pan() : PdfCanvas::Pan{0.0f, 0.0f};
             outgoing->pan_x = p.x;
             outgoing->pan_y = p.y;
             outgoing->outline_visible = outline_ && outline_->visible();
+            if (outgoing->view) {
+                outgoing->view->cancel_stale_renders(INT_MAX);
+            }
         }
     }
 
