@@ -266,6 +266,8 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 return 0;
             }
 
+            // BGRA + IGNORE_ALPHA matches MuPDF's RGBA pixmap output byte-for-byte
+            // on little-endian; we ignore the alpha channel (opaque page output).
             D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
                 D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
                                   D2D1_ALPHA_MODE_IGNORE));
@@ -291,9 +293,11 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             }
 
             impl_->current_bitmap = std::move(bmp);
+            // Reset pan whenever a new bitmap lands — the page content has
+            // changed, the prior scroll position is meaningless.
             impl_->pan_x = 0.0f;
             impl_->pan_y = 0.0f;
-            ColdStartTimer::mark(3);
+            ColdStartTimer::mark(3);  // first pixmap -> D2D bitmap
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         }
