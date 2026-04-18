@@ -76,13 +76,6 @@ struct PdfCanvas::Impl {
     ComPtr<ID2D1Bitmap>           current_bitmap;  // Task 6 populates
     D2D1_SIZE_U                   last_size = { 0, 0 };
     litepdf::core::DocumentView*  view = nullptr;  // non-owning
-    // Orphan-drop ctx: cloned from the current view's ui_ctx on set_view.
-    // Outlives view swaps so a late WM_USER_RENDER_DONE arriving after
-    // the view (and its worker_ctx / ui_ctx) has been destroyed can still
-    // drop its pixmap safely. MuPDF refcounts are atomic across clones
-    // of the same root, and fz_clone_context keeps the root state alive
-    // past the view's own ui_ctx drop. Replaced on each set_view.
-    fz_context*                   orphan_ctx = nullptr;
     // Pan offset in DIPs from the centered/fit position. Reset whenever a
     // new bitmap arrives. No clamping in Phase 3 — user can pan off-canvas.
     float                         pan_x = 0.0f;
@@ -90,20 +83,16 @@ struct PdfCanvas::Impl {
 };
 
 void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
-    // Swap orphan_ctx to track the new view. Any late WM_USER_RENDER_DONE
-    // queued for the OLD view will either arrive before this swap (handled
-    // via the old view's ui_ctx) or after (handled via the NEW orphan_ctx
-    // — legal because both are clones of the same MuPDF root state kept
-    // alive by refcount while any clone exists).
-    if (impl_->orphan_ctx) {
-        fz_drop_context(impl_->orphan_ctx);
-        impl_->orphan_ctx = nullptr;
-    }
+    // Per-render escrow (see PdfCanvas::post_render_done) is now the
+    // lifetime mechanism for in-flight pixmaps — a canvas-level
+    // orphan_ctx clone is no longer needed. The canvas just repoints
+    // its view reference; the old view's pending pixmaps carry their
+    // own escrow ctx and drop correctly regardless of this swap.
     impl_->view = view;
-    if (view) {
-        impl_->orphan_ctx = fz_clone_context(view->ui_ctx());
-    } else {
-        // Clearing the view invalidates whatever bitmap was tied to its ctx.
+    if (!view) {
+        // No active view — whatever bitmap is on screen is tied to a
+        // ctx that will soon be gone. Discard so the next paint shows
+        // the cleared background.
         impl_->current_bitmap.Reset();
         if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
     }
@@ -159,12 +148,7 @@ PdfCanvas::PdfCanvas(HINSTANCE hInstance, HWND parent)
         throw std::runtime_error("D2D1CreateFactory failed");
 }
 
-PdfCanvas::~PdfCanvas() {
-    if (impl_ && impl_->orphan_ctx) {
-        fz_drop_context(impl_->orphan_ctx);
-        impl_->orphan_ctx = nullptr;
-    }
-}
+PdfCanvas::~PdfCanvas() = default;
 
 LRESULT CALLBACK PdfCanvas::WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     PdfCanvas* self = nullptr;
