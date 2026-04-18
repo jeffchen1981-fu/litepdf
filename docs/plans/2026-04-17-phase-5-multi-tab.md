@@ -23,7 +23,7 @@
 2. Clicking a tab header switches the canvas + outline to that tab's document. Each tab remembers its own `current_page`, zoom mode + scale, canvas pan, and outline visibility across switches.
 3. `Ctrl+Tab` cycles forward, `Ctrl+Shift+Tab` cycles backward, `Ctrl+1`…`Ctrl+9` jump to tab N (1-indexed).
 4. `Ctrl+W` closes the active tab; middle-click on a tab header closes that tab.
-5. Closing a non-last tab activates the left neighbor (or right neighbor if no left). Closing the last tab leaves the window blank and the title reverts to `"LitePDF"`.
+5. Closing a non-last tab activates the right neighbor (the tab now at the same index). Closing the active last tab activates the new last tab (left neighbor). Closing the only tab leaves the window blank and the title reverts to `"LitePDF"`.
 6. No cross-tab render bleed: rapidly switching while renders are in flight never paints tab A's bitmap on tab B's canvas.
 7. Launching a second `litepdf.exe <path>` while a first is running results in a single process with two tabs; the second process exits with code 0 and no window is created.
 8. Launching a second `litepdf.exe` with no path while a first is running brings the first instance's window to the foreground and exits.
@@ -1651,4 +1651,5 @@ LOC note: the roadmap estimated ~400 for Phase 5. Realistic count lands closer t
 - **No tab context menu.** Phase 5 has no right-click "close others" / "close to the right" affordance. Middle-click closes; `Ctrl+W` closes active. Context menu is YAGNI for v1.0; revisit if user feedback demands it.
 - **No session restore.** Closing the last tab blanks the window. Phase 12 adds `session.json` per design §6.3.
 - **No drag-to-reorder tabs.** Defer to post-v1.0.
+- **Cross-tab render-bleed race (residual).** On rapid tab-switch mid-P0, a pixmap from the outgoing view's worker can arrive at `PdfCanvas::WM_USER_RENDER_DONE` after `set_view()` has pointed the canvas at the new view. `on_tab_switch` calls `cancel_stale_renders(INT_MAX)` to drain the queue, narrowing the window to at most one in-flight pixmap per worker thread. Proper fix (carry originating `fz_context*` through the message or use a per-view generation token) is deferred to Phase 6 hardening; see MainWindow.cpp::on_tab_switch inline comment. Symptom: very brief wrong-tab paint on fast tab-click during pan; no crash observed in smoke testing.
 - **IPC is one-way.** The forwarder never receives an ack; `SendMessageTimeoutW` returns 0 on timeout but we've already exited the sender by then. Acceptable because the only possible "failure" is a hung server, and failing silently is better than spawning a duplicate process.
