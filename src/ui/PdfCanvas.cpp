@@ -34,6 +34,38 @@ std::once_flag g_class_registered;
 
 namespace litepdf::ui {
 
+bool PdfCanvas::post_render_done(HWND target,
+                                 fz_pixmap* pix,
+                                 fz_context* worker_ctx) {
+    if (!pix) {
+        // A null pixmap signals "render failed / cancelled". Post with
+        // LPARAM=0; the canvas handler invalidates and moves on.
+        PostMessageW(target, WM_USER_RENDER_DONE,
+                     reinterpret_cast<WPARAM>(nullptr),
+                     static_cast<LPARAM>(0));
+        return true;
+    }
+
+    fz_keep_pixmap(worker_ctx, pix);               // refcount: 1 -> 2
+    fz_context* escrow = fz_clone_context(worker_ctx);
+    if (!escrow) {
+        // OOM on clone. Drop the keep we just took and abandon. The
+        // worker's own drop-after-callback will bring the refcount to 0.
+        fz_drop_pixmap(worker_ctx, pix);
+        return false;
+    }
+
+    if (!PostMessageW(target, WM_USER_RENDER_DONE,
+                      reinterpret_cast<WPARAM>(pix),
+                      reinterpret_cast<LPARAM>(escrow))) {
+        // Target HWND is invalid (window destroyed). Clean up both halves.
+        fz_drop_pixmap(escrow, pix);
+        fz_drop_context(escrow);
+        return false;
+    }
+    return true;
+}
+
 struct PdfCanvas::Impl {
     ComPtr<ID2D1Factory>          factory;
     ComPtr<ID2D1HwndRenderTarget> rt;

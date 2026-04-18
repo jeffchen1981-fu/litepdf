@@ -7,6 +7,10 @@ struct ID2D1Factory;
 struct ID2D1HwndRenderTarget;
 struct ID2D1Bitmap;
 
+// MuPDF forward decls — header stays mupdf-free; full types only in .cpp.
+struct fz_context;
+struct fz_pixmap;
+
 namespace litepdf::core { class DocumentView; }
 
 namespace litepdf::ui {
@@ -37,6 +41,23 @@ public:
     struct Pan { float x; float y; };
     Pan  pan() const;
     void set_pan(float x, float y);
+
+    // Post WM_USER_RENDER_DONE to `target` for the (pixmap, ctx) pair,
+    // where `ctx` is a clone-escrow made from `worker_ctx` so the UI
+    // thread can drop the pixmap with the correct MuPDF root — even if
+    // the producing DocumentView is torn down before the message lands.
+    //
+    // Called from the worker thread inside the render callback. Takes
+    // an extra ref on the pixmap via fz_keep_pixmap, clones
+    // worker_ctx, and on any failure (clone OOM, post FALSE) cleans up
+    // both the kept pixmap and the escrow ctx. Returns true iff the
+    // message was successfully posted.
+    //
+    // Callers: MainWindow::kick_render, resubmit_current_page,
+    // on_key_down's page-change path, WM_MOUSEWHEEL zoom path.
+    static bool post_render_done(HWND target,
+                                 fz_pixmap* pix,
+                                 fz_context* worker_ctx);
 
     // When true, on first real-bitmap paint the canvas calls
     // ColdStartTimer::emit_if_complete(true) so the line is mirrored to stderr.
