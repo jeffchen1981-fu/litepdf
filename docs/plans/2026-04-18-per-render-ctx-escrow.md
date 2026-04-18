@@ -690,3 +690,17 @@ The listing should end with `v0.0.6-phase5.2`.
 - **Risk: `fz_clone_context` allocates an allocation-tracking shadow context behind the ref-inc.** MuPDF docs describe clone as cheap but not free. If N tabs × M renders/second causes visible CPU regression, measure first; revisit only with data (Phase 11 benchmark gate).
 - **Risk: existing callers of `PostMessageW(WM_USER_RENDER_DONE, pix, 0)` from outside the codebase.** There are none (private API). No compat concern.
 - **Monitoring signal:** after landing, watch the first dogfooding session for any "frame paints wrong content briefly during tab switch" report. The escrow fix should make such reports genuinely impossible; any report would indicate a deeper bug.
+
+---
+
+## Verification record
+
+Performed at implementation end:
+
+- `ctest`: 73/73 pass. Runtime 21.60 s.
+- `smoke-test.ps1`: exit 0. Output summary: Phase 3 cold-start [OK] (T0->T4 = 270 ms, budget 1500 ms), Phase 4 bookmarks [OK] (window title + handle confirmed), Phase 5 multi-tab [OK] (forwarder exit 0, first instance reports 2 tabs, active=1).
+- Manual stress (~30 s rapid PgDn across 2 open tabs): **no crash, no visual corruption, no anomaly during teardown.** I-2 correctness signal cleared.
+  - Caveats observed during the stress run (non-blocking for I-2, tracked as separate follow-ups):
+    - Page advance felt slightly slow under held `PgDn`. Consistent with §Risks — defer quantification to Phase 11 benchmark gate.
+    - `Ctrl+Tab` did not visibly switch tabs during the run (Phase 5 Task 5 shipped this shortcut at `00ba4ca`; appears to be a message-routing regression or focus-interaction edge case). As a result, cross-tab switch coverage in this stress run was weaker than intended — the race surface was exercised by `set_view` calls during the render-pipeline churn but not by a tight tab-switch loop. Primary I-2 confidence continues to rest on the architectural review + full `ctest` + smoke pass. Tracked as a separate follow-up.
+    - Tab strip visual boundaries between adjacent tabs are unclear. UX polish, not correctness. Deferred to Phase 6 UI pass.
