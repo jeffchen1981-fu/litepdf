@@ -211,9 +211,7 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     impl_->view->request_render(
                         impl_->view->current_page(),
                         [target](fz_pixmap* p, fz_context* wc) {
-                            if (p) fz_keep_pixmap(wc, p);
-                            PostMessageW(target, WM_USER_RENDER_DONE,
-                                         reinterpret_cast<WPARAM>(p), 0);
+                            PdfCanvas::post_render_done(target, p, wc);
                         });
                 }
                 return 0;
@@ -338,9 +336,7 @@ void PdfCanvas::resubmit_current_page() {
     impl_->view->request_render_with_prefetch(
         impl_->view->current_page(),
         [target](fz_pixmap* p, fz_context* worker_ctx) {
-            if (p) fz_keep_pixmap(worker_ctx, p);
-            PostMessageW(target, WM_USER_RENDER_DONE,
-                         reinterpret_cast<WPARAM>(p), 0);
+            PdfCanvas::post_render_done(target, p, worker_ctx);
         });
 }
 
@@ -394,9 +390,7 @@ LRESULT PdfCanvas::on_key_down(WPARAM key) {
         impl_->view->request_render_with_prefetch(
             impl_->view->current_page(),
             [target](fz_pixmap* p, fz_context* worker_ctx) {
-                if (p) fz_keep_pixmap(worker_ctx, p);
-                PostMessageW(target, WM_USER_RENDER_DONE,
-                             reinterpret_cast<WPARAM>(p), 0);
+                PdfCanvas::post_render_done(target, p, worker_ctx);
             });
     }
     return 0;

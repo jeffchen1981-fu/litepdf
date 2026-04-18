@@ -24,12 +24,6 @@
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shell32.lib")
 
-// Forward-decl so we don't have to pull <mupdf/fitz.h> into the UI TU.
-// fz_context / fz_pixmap are forward-declared via core/DocumentView.hpp.
-extern "C" {
-    struct fz_pixmap* fz_keep_pixmap(struct fz_context*, struct fz_pixmap*);
-}
-
 namespace {
 constexpr wchar_t kWindowClassName[] = L"LitePDFMainWindow";
 constexpr wchar_t kWindowTitle[]     = L"LitePDF";
@@ -144,9 +138,7 @@ void MainWindow::kick_render(int page) {
     HWND target = canvas_->hwnd();
     view->request_render_with_prefetch(page,
         [target](fz_pixmap* p, fz_context* worker_ctx) {
-            if (p) fz_keep_pixmap(worker_ctx, p);  // extend lifetime across PostMessage
-            PostMessageW(target, WM_USER_RENDER_DONE,
-                         reinterpret_cast<WPARAM>(p), 0);
+            PdfCanvas::post_render_done(target, p, worker_ctx);
         });
 }
 
