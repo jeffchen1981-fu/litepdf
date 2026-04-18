@@ -109,8 +109,18 @@ void MainWindow::open_tab_async(std::filesystem::path path) {
             tab->view  = std::make_unique<litepdf::core::DocumentView>(
                 std::move(doc));
             // Transfer ownership across thread boundary via raw ptr.
-            PostMessageW(hwnd, WM_USER_OPEN_OK,
-                         reinterpret_cast<WPARAM>(tab.release()), 0);
+            auto* raw = tab.release();
+            // Ownership has crossed the thread boundary. If PostMessageW
+            // fails (target HWND destroyed between the mutex check and
+            // now — e.g., user closed the window while we were opening),
+            // there is no consumer to adopt the Tab; delete it here to
+            // avoid a leak. Cannot use RAII (unique_ptr scope guard)
+            // because release() has already happened — the ownership is
+            // external to this scope until the message is received.
+            if (!PostMessageW(hwnd, WM_USER_OPEN_OK,
+                              reinterpret_cast<WPARAM>(raw), 0)) {
+                delete raw;
+            }
         } catch (...) {
             // DocumentView ctor can throw (e.g., ui-ctx clone or worker
             // thread creation failed). Map to the closest existing error.
