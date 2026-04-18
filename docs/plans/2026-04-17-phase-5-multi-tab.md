@@ -1645,11 +1645,12 @@ LOC note: the roadmap estimated ~400 for Phase 5. Realistic count lands closer t
 
 ---
 
+> **Fast-follow log:** `v0.0.6-phase5.1` added `cancel_stale_renders(INT_MAX)` on tab switch as a mitigation; `v0.0.6-phase5.2` delivered the root-cause fix via per-render context escrow (see `docs/plans/2026-04-18-per-render-ctx-escrow-design.md`).
+
 ## Known Limitations (to revisit)
 
 - **Per-tab render pool.** Each `DocumentView` constructs its own `RenderEngine` with `num_workers = 2`. Ten tabs ⇒ twenty worker threads. Design §5.3 implies a shared pool; the refactor is deferred to Phase 11 where the benchmark gate will quantify the cost. (D16.)
 - **No tab context menu.** Phase 5 has no right-click "close others" / "close to the right" affordance. Middle-click closes; `Ctrl+W` closes active. Context menu is YAGNI for v1.0; revisit if user feedback demands it.
 - **No session restore.** Closing the last tab blanks the window. Phase 12 adds `session.json` per design §6.3.
 - **No drag-to-reorder tabs.** Defer to post-v1.0.
-- **Cross-tab render-bleed race (residual).** On rapid tab-switch mid-P0, a pixmap from the outgoing view's worker can arrive at `PdfCanvas::WM_USER_RENDER_DONE` after `set_view()` has pointed the canvas at the new view. `on_tab_switch` calls `cancel_stale_renders(INT_MAX)` to drain the queue, narrowing the window to at most one in-flight pixmap per worker thread. Proper fix (carry originating `fz_context*` through the message or use a per-view generation token) is deferred to Phase 6 hardening; see MainWindow.cpp::on_tab_switch inline comment. Symptom: very brief wrong-tab paint on fast tab-click during pan; no crash observed in smoke testing.
 - **IPC is one-way.** The forwarder never receives an ack; `SendMessageTimeoutW` returns 0 on timeout but we've already exited the sender by then. Acceptable because the only possible "failure" is a hung server, and failing silently is better than spawning a duplicate process.
