@@ -30,8 +30,6 @@ constexpr wchar_t kWindowTitle[]     = L"LitePDF";
 
 constexpr UINT WM_USER_OPEN_OK     = WM_USER + 1;
 constexpr UINT WM_USER_OPEN_FAILED = WM_USER + 2;
-// Must match ui::WM_USER_RENDER_DONE in PdfCanvas.hpp.
-constexpr UINT WM_USER_RENDER_DONE = WM_USER + 3;
 
 // "&1 foo.pdf", "&2 foo.pdf", ..., "&9 foo.pdf", "1&0 foo.pdf".
 // The '&' marks the mnemonic character (Alt-shortcut).

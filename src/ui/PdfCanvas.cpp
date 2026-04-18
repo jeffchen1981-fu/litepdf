@@ -210,8 +210,8 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     HWND target = hwnd_;
                     impl_->view->request_render(
                         impl_->view->current_page(),
-                        [target](fz_pixmap* p, fz_context* wc) {
-                            PdfCanvas::post_render_done(target, p, wc);
+                        [target](fz_pixmap* p, fz_context* worker_ctx) {
+                            PdfCanvas::post_render_done(target, p, worker_ctx);
                         });
                 }
                 return 0;
