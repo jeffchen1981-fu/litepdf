@@ -46,6 +46,10 @@ bool PdfCanvas::post_render_done(HWND target,
         return true;
     }
 
+    // No fz_try wrapper: fz_keep_pixmap is an atomic refcount bump (no
+    // longjmp), fz_clone_context returns nullptr on OOM rather than
+    // longjmp'ing (same contract as Document::clone_context — see
+    // Document.hpp:82), and fz_drop_* are longjmp-free.
     fz_keep_pixmap(worker_ctx, pix);               // refcount: 1 -> 2
     fz_context* escrow = fz_clone_context(worker_ctx);
     if (!escrow) {
