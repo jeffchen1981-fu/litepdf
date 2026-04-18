@@ -16,7 +16,10 @@ namespace litepdf::core { class DocumentView; }
 namespace litepdf::ui {
 
 // Posted by render-done callback. WPARAM = fz_pixmap* (kept by worker),
-// LPARAM = 0. Canvas owns the drop via view_->ui_ctx().
+// LPARAM = fz_context* escrow clone (also kept by worker). Both are null
+// on cancel/fail. Canvas drops the pixmap through escrow, then drops
+// escrow — staying on the pixmap's own MuPDF root even if the producing
+// DocumentView has been swapped or destroyed.
 // Must match the reservation in MainWindow.cpp (WM_USER + 3).
 inline constexpr UINT WM_USER_RENDER_DONE = WM_USER + 3;
 

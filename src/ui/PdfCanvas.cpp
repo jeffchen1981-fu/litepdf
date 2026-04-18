@@ -231,42 +231,41 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         case WM_USER_RENDER_DONE: {
-            auto* pix = reinterpret_cast<fz_pixmap*>(w);
+            auto* pix    = reinterpret_cast<fz_pixmap*>(w);
+            auto* escrow = reinterpret_cast<fz_context*>(l);
+
             if (!pix) {
-                // Render failed (unsupported page etc); just invalidate so paint
-                // shows the cleared background.
+                // Render failed or cancelled (helper posts WPARAM=0 here).
+                // escrow will also be null on this path — nothing to drop.
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return 0;
             }
-            if (!impl_->view) {
-                // View was swapped out between the worker's PostMessage and
-                // now. Drop via orphan_ctx (a clone of the old view's root
-                // ctx, kept alive across set_view(nullptr)) to avoid leaking
-                // the pixmap. If orphan_ctx is also null (never had a view),
-                // we leak — but that can't happen since a pixmap only
-                // reaches this path after set_view was called with a view.
-                if (impl_->orphan_ctx) {
-                    fz_drop_pixmap(impl_->orphan_ctx, pix);
-                }
+
+            // Invariant (design §2.1): a non-null pixmap always travels
+            // with an escrow ctx clone. If escrow is null we have a
+            // caller that bypassed post_render_done — defensive drop
+            // against the worst-case leak. Should never fire in practice.
+            if (!escrow) {
                 return 0;
             }
-            fz_context* ui_ctx = impl_->view->ui_ctx();
 
-            const int w_px   = fz_pixmap_width(ui_ctx, pix);
-            const int h_px   = fz_pixmap_height(ui_ctx, pix);
-            const int stride = fz_pixmap_stride(ui_ctx, pix);
-            unsigned char* samples = fz_pixmap_samples(ui_ctx, pix);
+            // Use escrow (NOT impl_->view->ui_ctx()) for every fz op so
+            // we stay on the pixmap's own MuPDF root. impl_->view may
+            // point at a different tab by now — it's only consulted for
+            // bitmap placement, which happens implicitly via the canvas
+            // HWND.
+            const int w_px   = fz_pixmap_width(escrow, pix);
+            const int h_px   = fz_pixmap_height(escrow, pix);
+            const int stride = fz_pixmap_stride(escrow, pix);
+            unsigned char* samples = fz_pixmap_samples(escrow, pix);
 
             create_render_target();
             if (!impl_->rt) {
-                fz_drop_pixmap(ui_ctx, pix);
+                fz_drop_pixmap(escrow, pix);
+                fz_drop_context(escrow);
                 return 0;
             }
 
-            // BGRA -> ID2D1Bitmap. MuPDF produced fz_device_bgr + alpha=1,
-            // which matches DXGI_FORMAT_B8G8R8A8_UNORM byte-for-byte. Tell D2D
-            // to IGNORE alpha so page edges render fully opaque over the
-            // canvas clear color.
             D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
                 D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
                                   D2D1_ALPHA_MODE_IGNORE));
@@ -276,8 +275,9 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                             static_cast<UINT32>(h_px)),
                 samples, static_cast<UINT32>(stride), &props, &bmp);
 
-            // Drop the worker-kept pixmap ref regardless of CreateBitmap outcome.
-            fz_drop_pixmap(ui_ctx, pix);
+            // Drop order: pixmap first (escrow still valid), then escrow.
+            fz_drop_pixmap(escrow, pix);
+            fz_drop_context(escrow);
 
             if (hr == D2DERR_RECREATE_TARGET) {
                 discard_render_target();
@@ -286,17 +286,14 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 return 0;
             }
             if (FAILED(hr)) {
-                // Leave current_bitmap unchanged; just repaint.
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return 0;
             }
 
             impl_->current_bitmap = std::move(bmp);
-            // Reset pan whenever a new bitmap arrives — zoom/page change
-            // both re-render, and we don't try to preserve the view point.
             impl_->pan_x = 0.0f;
             impl_->pan_y = 0.0f;
-            ColdStartTimer::mark(3);  // First pixmap converted to D2D bitmap.
+            ColdStartTimer::mark(3);
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         }
