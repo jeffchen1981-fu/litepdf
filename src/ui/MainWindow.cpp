@@ -111,7 +111,7 @@ void MainWindow::open_tab_async(std::filesystem::path path) {
             // Transfer ownership across thread boundary via raw ptr.
             auto* raw = tab.release();
             // Ownership has crossed the thread boundary. If PostMessageW
-            // fails (target HWND destroyed between the mutex check and
+            // fails (target HWND destroyed between the hwnd capture and
             // now — e.g., user closed the window while we were opening),
             // there is no consumer to adopt the Tab; delete it here to
             // avoid a leak. Cannot use RAII (unique_ptr scope guard)
