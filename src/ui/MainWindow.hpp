@@ -59,6 +59,13 @@ private:
     // WM_COPYDATA handler for single-instance IPC (see app/SingleInstance.hpp).
     LRESULT on_copydata(HWND hwnd, WPARAM w, LPARAM l);
 
+    // Absolutize + resolve the path so MRU entries don't accumulate
+    // ".\foo.pdf" / "C:\tmp\foo.pdf" / "foo.pdf" duplicates. On
+    // canonicalization failure (permission denied, race, etc.) the
+    // input is returned unchanged -- MRU staleness beats data loss.
+    static std::filesystem::path canonicalize_for_mru(
+        const std::filesystem::path& p);
+
     HWND    hwnd_   = nullptr;
     HACCEL  haccel_ = nullptr;
     std::unique_ptr<PdfCanvas>    canvas_;

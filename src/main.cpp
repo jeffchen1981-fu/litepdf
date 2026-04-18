@@ -29,6 +29,16 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     }
     if (argv) LocalFree(argv);
 
+    // Canonicalize once up front so the IPC payload is always absolute
+    // (the receiver has no CWD context for the sender) AND the normal
+    // initial-path open gets the same normalization for free. Silent
+    // fallback on error: a stale / unusual path beats losing the open.
+    if (!initial_path.empty()) {
+        std::error_code ec;
+        auto canon = std::filesystem::weakly_canonical(initial_path, ec);
+        if (!ec) initial_path = canon;
+    }
+
     // Single-instance gate: if another litepdf.exe is already running for this
     // user, forward our command-line argument to it and exit.
     bool already = false;

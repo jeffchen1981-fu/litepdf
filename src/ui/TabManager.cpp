@@ -135,6 +135,11 @@ void TabManager::set_on_close_request(CloseRequestCb cb) {
 }
 
 bool TabManager::handle_notify(const NMHDR* hdr) {
+    // Note: TCM_SETCURSEL (fired from set_active / close_tab / add_tab) does
+    // NOT emit TCN_SELCHANGE — programmatic selection changes are silent by
+    // design. Those paths invoke on_switch directly, so set_active is the
+    // single authoritative notification route for programmatic changes, and
+    // this TCN_SELCHANGE branch only fires on genuine user interaction.
     if (!hdr || hdr->hwndFrom != impl_->hwnd) return false;
     if (hdr->code == TCN_SELCHANGE) {
         const int new_index = static_cast<int>(

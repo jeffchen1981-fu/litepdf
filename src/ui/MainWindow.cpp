@@ -57,6 +57,14 @@ MainWindow::~MainWindow() {
     if (haccel_) { DestroyAcceleratorTable(haccel_); haccel_ = nullptr; }
 }
 
+std::filesystem::path MainWindow::canonicalize_for_mru(
+    const std::filesystem::path& p)
+{
+    std::error_code ec;
+    auto canon = std::filesystem::weakly_canonical(p, ec);
+    return ec ? p : canon;
+}
+
 LRESULT CALLBACK MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     MainWindow* self = nullptr;
     if (msg == WM_NCCREATE) {
@@ -300,11 +308,12 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     [](wchar_t c) { return static_cast<wchar_t>(::towlower(c)); });
                 if (ext == L".pdf" || ext == L".epub" ||
                     ext == L".cbz" || ext == L".xps") {
-                    // Push BEFORE moving p into open_tab_async -- otherwise
-                    // p.wstring() reads moved-from state.
-                    mru_.push(p.wstring());
+                    // Canonicalize before push so MRU doesn't accumulate
+                    // spelling-variant duplicates of the same file.
+                    std::filesystem::path normalized = canonicalize_for_mru(p);
+                    mru_.push(normalized.wstring());
                     mru_.save();
-                    open_tab_async(std::move(p));
+                    open_tab_async(std::move(normalized));
                 } else {
                     MessageBoxW(hwnd,
                         L"LitePDF only opens PDF/ePub/CBZ/XPS files.",
@@ -318,8 +327,8 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             on_layout();
             if (auto* view = active_view()) {
                 // Recompute FitWidth (or whatever mode) scale for the new
-                // viewport and resubmit. Phase 3 does this directly; the
-                // brief stutter during drag-resize is acceptable.
+                // viewport and resubmit. We resubmit on every WM_SIZE;
+                // the brief stutter during drag-resize is acceptable.
                 kick_render(view->current_page());
             }
             return 0;
@@ -462,12 +471,13 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY |
                                 OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST;
                     if (GetOpenFileNameW(&ofn)) {
-                        std::filesystem::path p(buf);
-                        // Push BEFORE moving p into open_tab_async -- otherwise
-                        // p.wstring() reads moved-from state.
-                        mru_.push(p.wstring());
+                        // Canonicalize before push so MRU doesn't accumulate
+                        // spelling-variant duplicates of the same file.
+                        std::filesystem::path normalized =
+                            canonicalize_for_mru(std::filesystem::path(buf));
+                        mru_.push(normalized.wstring());
                         mru_.save();
-                        open_tab_async(std::move(p));
+                        open_tab_async(std::move(normalized));
                     }
                     return 0;
                 }
@@ -476,7 +486,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     return 0;
                 case IDM_HELP_ABOUT:
                     MessageBoxW(hwnd,
-                        L"LitePDF v0.0.5\n\n"
+                        L"LitePDF v0.0.6\n\n"
                         L"A lightweight PDF / ePub / CBZ / XPS viewer for Windows.\n\n"
                         L"License: AGPL-3.0\n"
                         L"Engine: MuPDF 1.24.11\n"
@@ -585,9 +595,14 @@ LRESULT MainWindow::on_copydata(HWND hwnd, WPARAM, LPARAM l) {
         std::filesystem::path p(std::wstring(data, count - 1));
         if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
         SetForegroundWindow(hwnd);
-        mru_.push(p.wstring());
+        // IPC sender already canonicalizes before forwarding (see main.cpp
+        // — sender's CWD is the authoritative context). We canonicalize
+        // again here as a safety net in case an older sender / third-party
+        // caller skipped sender-side normalization.
+        std::filesystem::path normalized = canonicalize_for_mru(p);
+        mru_.push(normalized.wstring());
         mru_.save();
-        open_tab_async(std::move(p));
+        open_tab_async(std::move(normalized));
         return 1;
     }
     return 0;
@@ -650,7 +665,17 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
     UpdateWindow(hwnd_);
 
     if (!initial_path.empty()) {
-        open_tab_async(initial_path);
+        // Pre-existing bug (not Phase 5): initial-path open via double-click
+        // / command-line argv bypassed mru_.push, so the user's first-ever
+        // open never entered MRU. Folded into Task 8's canonicalization
+        // sweep since the fix site is identical. Sender-side (main.cpp)
+        // already canonicalizes before handing us initial_path, but we
+        // re-canonicalize defensively for consistency with the other three
+        // call sites.
+        std::filesystem::path normalized = canonicalize_for_mru(initial_path);
+        mru_.push(normalized.wstring());
+        mru_.save();
+        open_tab_async(std::move(normalized));
     }
 
     MSG msg;
