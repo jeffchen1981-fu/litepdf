@@ -1645,7 +1645,7 @@ LOC note: the roadmap estimated ~400 for Phase 5. Realistic count lands closer t
 
 ---
 
-> **Fast-follow log:** `v0.0.6-phase5.1` added `cancel_stale_renders(INT_MAX)` on tab switch as a mitigation; `v0.0.6-phase5.2` delivered the root-cause fix via per-render context escrow (see `docs/plans/2026-04-18-per-render-ctx-escrow-design.md`).
+> **Fast-follow log:** `v0.0.6-phase5.1` added `cancel_stale_renders(INT_MAX)` on tab switch as a mitigation; `v0.0.6-phase5.2` delivered the root-cause fix via per-render context escrow (see `docs/plans/2026-04-18-per-render-ctx-escrow-design.md`); `v0.0.6-phase5.3` fixed a pre-existing pixmap refcount leak (I-A) surfaced by the I-2 final review — unconditional `fz_keep_pixmap` in `post_render_done` clashed with the D2 ownership transfer, leaking one ref per rendered pixmap until `DocumentView` teardown.
 
 ## Known Limitations (to revisit)
 

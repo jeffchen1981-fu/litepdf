@@ -704,3 +704,27 @@ Performed at implementation end:
     - Page advance felt slightly slow under held `PgDn`. Consistent with §Risks — defer quantification to Phase 11 benchmark gate.
     - `Ctrl+Tab` did not visibly switch tabs during the run (Phase 5 Task 5 shipped this shortcut at `00ba4ca`; appears to be a message-routing regression or focus-interaction edge case). As a result, cross-tab switch coverage in this stress run was weaker than intended — the race surface was exercised by `set_view` calls during the render-pipeline churn but not by a tight tab-switch loop. Primary I-2 confidence continues to rest on the architectural review + full `ctest` + smoke pass. Tracked as a separate follow-up.
     - Tab strip visual boundaries between adjacent tabs are unclear. UX polish, not correctness. Deferred to Phase 6 UI pass.
+
+### Post-landing follow-up: I-A pixmap refcount leak (`v0.0.6-phase5.3`)
+
+The final integration review of I-2 surfaced a pre-existing pixmap refcount
+leak (tracked as I-A) that predates the escrow rewrite: `post_render_done`
+did an unconditional `fz_keep_pixmap` on entry, which clashed with
+`RenderEngine` D2 ownership transfer — the worker's ref on `pix` travels
+into the callback and the worker does NOT drop after `on_complete` returns.
+The keep bumped refcount to 2 on the happy path while the UI-thread handler
+only dropped once, orphaning one ref per rendered pixmap until
+`DocumentView` teardown reclaimed it via the MuPDF allocator pool.
+
+The leak existed since Phase 3 Task 12 (commit `2775212`, Apr 16) and was
+faithfully carried forward by the I-2 rewrite. Explicitly descoped from I-2
+at landing to keep the commit narrative clean; fixed immediately after as
+`v0.0.6-phase5.3` (Option A in the reviewer's brief — remove the keep, let
+the transferred ref BE the shipping ref). See commits `babd39d` (code fix)
+and `8a3e905` (design-doc §4 annotation correction).
+
+Verification after I-A landing: `ctest` 73/73 pass (Release, 27.20 s).
+`smoke-test.ps1` and the manual RSS-stability page-through were covered by
+the interactive verification session that produced the v0.0.6-phase5.3
+tag; this plan file's post-landing note records that they were part of the
+sign-off loop rather than re-running them here.
