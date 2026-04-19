@@ -114,7 +114,8 @@ struct PaintCtx {
 };
 
 void paint_tab(const DRAWITEMSTRUCT* dis, const std::wstring& label,
-               TabVisualState state, const PaintCtx& pc) {
+               TabVisualState state, bool draw_right_separator,
+               const PaintCtx& pc) {
     HDC hdc = dis->hDC;
     RECT rc = dis->rcItem;
 
@@ -151,6 +152,18 @@ void paint_tab(const DRAWITEMSTRUCT* dis, const std::wstring& label,
                   | DT_NOPREFIX);
 
     SelectObject(hdc, old_font);
+
+    if (draw_right_separator && state != TabVisualState::Active) {
+        const int sep_w = 1;
+        RECT sep = rc;
+        sep.left = rc.right - sep_w;
+        const int inset = MulDiv(6, static_cast<int>(pc.dpi), 96);
+        sep.top    += inset;
+        sep.bottom -= inset;
+        HBRUSH b = CreateSolidBrush(pc.palette.separator);
+        FillRect(hdc, &sep, b);
+        DeleteObject(b);
+    }
 }
 }  // namespace
 
@@ -350,7 +363,10 @@ bool TabManager::handle_draw_item(const DRAWITEMSTRUCT* dis) {
 
     PaintCtx pc { impl_->palette, impl_->font_normal.get(),
                   impl_->font_bold.get(), dpi };
-    paint_tab(dis, tab->label, state, pc);
+    const bool has_next = (idx + 1) < count();
+    const bool next_is_active = has_next && (idx + 1 == active_index());
+    const bool draw_sep = has_next && !is_active && !next_is_active;
+    paint_tab(dis, tab->label, state, draw_sep, pc);
     return true;
 }
 
