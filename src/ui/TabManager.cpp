@@ -104,25 +104,53 @@ HFONT create_tab_font(UINT dpi, bool bold) {
     return CreateFontIndirectW(&lf);
 }
 
-void paint_tab_minimal(const DRAWITEMSTRUCT* dis, const std::wstring& label) {
+enum class TabVisualState { Normal, Hover, Active };
+
+struct PaintCtx {
+    const Palette& palette;
+    HFONT font_normal;
+    HFONT font_bold;
+    UINT  dpi;
+};
+
+void paint_tab(const DRAWITEMSTRUCT* dis, const std::wstring& label,
+               TabVisualState state, const PaintCtx& pc) {
     HDC hdc = dis->hDC;
     RECT rc = dis->rcItem;
 
-    // Background: pale grey for normal, near-white for active.
-    const bool is_active = (dis->itemState & ODS_SELECTED) != 0;
-    HBRUSH bg = CreateSolidBrush(is_active ? RGB(0xFF, 0xFF, 0xFF)
-                                           : RGB(0xE8, 0xE8, 0xE8));
-    FillRect(hdc, &rc, bg);
-    DeleteObject(bg);
+    COLORREF bg = pc.palette.bg_normal;
+    if (state == TabVisualState::Hover)  bg = pc.palette.bg_hover;
+    if (state == TabVisualState::Active) bg = pc.palette.bg_active;
 
-    // Label.
+    HBRUSH brush = CreateSolidBrush(bg);
+    FillRect(hdc, &rc, brush);
+    DeleteObject(brush);
+
+    if (state == TabVisualState::Active) {
+        const int bar_h = MulDiv(2, static_cast<int>(pc.dpi), 96);
+        RECT bar = rc;
+        bar.bottom = bar.top + bar_h;
+        HBRUSH accent = CreateSolidBrush(pc.palette.accent);
+        FillRect(hdc, &bar, accent);
+        DeleteObject(accent);
+    }
+
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, RGB(0x20, 0x20, 0x20));
+    SetTextColor(hdc, (state == TabVisualState::Active)
+        ? pc.palette.text_active : pc.palette.text_inactive);
+    HFONT chosen = (state == TabVisualState::Active) ? pc.font_bold
+                                                     : pc.font_normal;
+    HGDIOBJ old_font = SelectObject(hdc, chosen);
+
+    const int pad = MulDiv(kTabPaddingDip, static_cast<int>(pc.dpi), 96);
     RECT text_rc = rc;
-    text_rc.left += 8;
-    text_rc.right -= 8;
+    text_rc.left  += pad;
+    text_rc.right -= pad;
     DrawTextW(hdc, label.c_str(), -1, &text_rc,
-              DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+              DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS
+                  | DT_NOPREFIX);
+
+    SelectObject(hdc, old_font);
 }
 }  // namespace
 
@@ -311,7 +339,18 @@ bool TabManager::handle_draw_item(const DRAWITEMSTRUCT* dis) {
     if (idx < 0 || idx >= count()) return false;
     auto* tab = impl_->list.at(static_cast<std::size_t>(idx));
     if (!tab) return false;
-    paint_tab_minimal(dis, tab->label);
+
+    const UINT dpi = GetDpiForWindow(impl_->hwnd);
+    impl_->ensure_fonts(dpi);
+
+    const bool is_active = (dis->itemState & ODS_SELECTED) != 0;
+    TabVisualState state = is_active ? TabVisualState::Active
+                                     : TabVisualState::Normal;
+    // Hover handling lands in Task 7.
+
+    PaintCtx pc { impl_->palette, impl_->font_normal.get(),
+                  impl_->font_bold.get(), dpi };
+    paint_tab(dis, tab->label, state, pc);
     return true;
 }
 
