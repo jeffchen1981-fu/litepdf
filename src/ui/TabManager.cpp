@@ -1,6 +1,7 @@
 #include "ui/TabManager.hpp"
 
 #include <commctrl.h>
+#include <dwmapi.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -9,6 +10,7 @@
 #include <utility>
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "dwmapi.lib")
 
 namespace litepdf::ui {
 
@@ -26,6 +28,70 @@ using unique_hfont = std::unique_ptr<std::remove_pointer_t<HFONT>,
                                      decltype(&DeleteObject)>;
 unique_hfont make_unique_hfont(HFONT h) {
     return unique_hfont(h, &DeleteObject);
+}
+
+struct Palette {
+    COLORREF bg_normal;
+    COLORREF bg_hover;
+    COLORREF bg_active;
+    COLORREF text_inactive;
+    COLORREF text_active;
+    COLORREF separator;
+    COLORREF accent;
+    COLORREF close_hover_bg;
+    COLORREF close_hover_fg;
+    COLORREF close_fg;
+};
+
+Palette make_palette(bool dark) {
+    if (dark) {
+        return {
+            /*bg_normal*/      RGB(0x26, 0x26, 0x26),
+            /*bg_hover*/       RGB(0x3A, 0x3A, 0x3A),
+            /*bg_active*/      RGB(0x2D, 0x2D, 0x2D),
+            /*text_inactive*/  RGB(0xA0, 0xA0, 0xA0),
+            /*text_active*/    RGB(0xF2, 0xF2, 0xF2),
+            /*separator*/      RGB(0x3A, 0x3A, 0x3A),
+            /*accent*/         GetSysColor(COLOR_HOTLIGHT),
+            /*close_hover_bg*/ RGB(0xC4, 0x2B, 0x1C),
+            /*close_hover_fg*/ RGB(0xFF, 0xFF, 0xFF),
+            /*close_fg*/       RGB(0xC8, 0xC8, 0xC8),
+        };
+    }
+    return {
+        /*bg_normal*/      RGB(0xF3, 0xF3, 0xF3),
+        /*bg_hover*/       RGB(0xEA, 0xEA, 0xEA),
+        /*bg_active*/      RGB(0xFF, 0xFF, 0xFF),
+        /*text_inactive*/  RGB(0x60, 0x60, 0x60),
+        /*text_active*/    RGB(0x1C, 0x1C, 0x1C),
+        /*separator*/      RGB(0xD8, 0xD8, 0xD8),
+        /*accent*/         GetSysColor(COLOR_HOTLIGHT),
+        /*close_hover_bg*/ RGB(0xE8, 0x11, 0x23),
+        /*close_hover_fg*/ RGB(0xFF, 0xFF, 0xFF),
+        /*close_fg*/       RGB(0x50, 0x50, 0x50),
+    };
+}
+
+bool detect_dark_mode(HWND hwnd) {
+    // 1. DWM immersive-dark-mode attr.
+    BOOL dark = FALSE;
+    if (SUCCEEDED(DwmGetWindowAttribute(hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark)))) {
+        if (dark) return true;
+    }
+    // 2. AppsUseLightTheme registry (system-wide app mode).
+    HKEY hk = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+            0, KEY_READ, &hk) == ERROR_SUCCESS) {
+        DWORD val = 1, cb = sizeof(val);
+        LONG r = RegQueryValueExW(hk, L"AppsUseLightTheme", nullptr, nullptr,
+                                  reinterpret_cast<LPBYTE>(&val), &cb);
+        RegCloseKey(hk);
+        if (r == ERROR_SUCCESS) return val == 0;
+    }
+    // 3. Fallback: assume light.
+    return false;
 }
 
 HFONT create_tab_font(UINT dpi, bool bold) {
@@ -88,6 +154,9 @@ struct TabManager::Impl {
     unique_hfont font_bold   { nullptr, &DeleteObject };
     UINT cached_dpi = 0;
 
+    bool dark_mode = false;
+    Palette palette = make_palette(false);
+
     void ensure_fonts(UINT dpi) {
         if (cached_dpi == dpi && font_normal && font_bold) return;
         font_normal = make_unique_hfont(create_tab_font(dpi, /*bold=*/false));
@@ -117,6 +186,9 @@ TabManager::TabManager(HINSTANCE hInstance, HWND parent)
     SendMessageW(impl_->hwnd, WM_SETFONT,
                  reinterpret_cast<WPARAM>(impl_->font_normal.get()),
                  MAKELPARAM(TRUE, 0));
+
+    impl_->dark_mode = detect_dark_mode(parent);
+    impl_->palette   = make_palette(impl_->dark_mode);
 }
 
 TabManager::~TabManager() {
