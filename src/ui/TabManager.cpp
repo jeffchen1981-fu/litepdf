@@ -94,6 +94,18 @@ bool detect_dark_mode(HWND hwnd) {
     return false;
 }
 
+RECT close_rect_in(const RECT& tab, UINT dpi) {
+    const int sz  = MulDiv(kCloseSizeDip, static_cast<int>(dpi), 96);
+    const int pad = MulDiv(kCloseRightPadDip, static_cast<int>(dpi), 96);
+    const int cy  = (tab.top + tab.bottom) / 2;
+    RECT r;
+    r.right  = tab.right - pad;
+    r.left   = r.right - sz;
+    r.top    = cy - sz / 2;
+    r.bottom = r.top + sz;
+    return r;
+}
+
 HFONT create_tab_font(UINT dpi, bool bold) {
     LOGFONTW lf = {};
     lf.lfHeight = -MulDiv(9, static_cast<int>(dpi), 72);  // 9 pt
@@ -115,6 +127,7 @@ struct PaintCtx {
 
 void paint_tab(const DRAWITEMSTRUCT* dis, const std::wstring& label,
                TabVisualState state, bool draw_right_separator,
+               bool show_close, bool close_is_hot,
                const PaintCtx& pc) {
     HDC hdc = dis->hDC;
     RECT rc = dis->rcItem;
@@ -146,12 +159,38 @@ void paint_tab(const DRAWITEMSTRUCT* dis, const std::wstring& label,
     const int pad = MulDiv(kTabPaddingDip, static_cast<int>(pc.dpi), 96);
     RECT text_rc = rc;
     text_rc.left  += pad;
-    text_rc.right -= pad;
+    const int right_pad = show_close
+        ? MulDiv(kCloseSizeDip + kCloseRightPadDip + 6,
+                 static_cast<int>(pc.dpi), 96)
+        : pad;
+    text_rc.right = rc.right - right_pad;
     DrawTextW(hdc, label.c_str(), -1, &text_rc,
               DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS
                   | DT_NOPREFIX);
 
     SelectObject(hdc, old_font);
+
+    if (show_close) {
+        RECT cb = close_rect_in(rc, pc.dpi);
+        if (close_is_hot) {
+            HBRUSH hb = CreateSolidBrush(pc.palette.close_hover_bg);
+            FillRect(hdc, &cb, hb);
+            DeleteObject(hb);
+        }
+        COLORREF x_color = close_is_hot ? pc.palette.close_hover_fg
+                                        : pc.palette.close_fg;
+        HPEN pen = CreatePen(PS_SOLID,
+                             MulDiv(1, static_cast<int>(pc.dpi), 96),
+                             x_color);
+        HGDIOBJ old_pen = SelectObject(hdc, pen);
+        const int inset = MulDiv(3, static_cast<int>(pc.dpi), 96);
+        MoveToEx(hdc, cb.left + inset, cb.top + inset, nullptr);
+        LineTo  (hdc, cb.right - inset, cb.bottom - inset);
+        MoveToEx(hdc, cb.right - inset, cb.top + inset, nullptr);
+        LineTo  (hdc, cb.left + inset, cb.bottom - inset);
+        SelectObject(hdc, old_pen);
+        DeleteObject(pen);
+    }
 
     if (draw_right_separator && state != TabVisualState::Active) {
         const int sep_w = 1;
@@ -193,6 +232,8 @@ struct TabManager::Impl {
 
     int  hovered_tab    = -1;
     bool mouse_tracking = false;
+    bool hovered_close = false;
+    int  pressed_close = -1;
 
     RECT tab_rect(int i) const {
         RECT r = {};
@@ -386,7 +427,13 @@ bool TabManager::handle_draw_item(const DRAWITEMSTRUCT* dis) {
     const bool has_next = (idx + 1) < count();
     const bool next_is_active = has_next && (idx + 1 == active_index());
     const bool draw_sep = has_next && !is_active && !next_is_active;
-    paint_tab(dis, tab->label, state, draw_sep, pc);
+    const bool show_close = is_active ||
+                            (idx == impl_->hovered_tab);
+    const bool close_is_hot = show_close &&
+                              (idx == impl_->hovered_tab) &&
+                              impl_->hovered_close;
+    paint_tab(dis, tab->label, state, draw_sep,
+              show_close, close_is_hot, pc);
     return true;
 }
 
@@ -434,8 +481,52 @@ LRESULT CALLBACK tab_subclass_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l,
         case WM_CAPTURECHANGED:
             // Another window stole capture (Alt+Tab, dialog, etc.).
             // Cancel the in-flight gesture.
-            impl.pressed_tab = -1;
+            impl.pressed_tab   = -1;
+            impl.pressed_close = -1;
             break;
+        case WM_LBUTTONDOWN: {
+            TCHITTESTINFO hti = {};
+            hti.pt.x = GET_X_LPARAM(l);
+            hti.pt.y = GET_Y_LPARAM(l);
+            const int i = static_cast<int>(
+                SendMessageW(hwnd, TCM_HITTEST, 0,
+                             reinterpret_cast<LPARAM>(&hti)));
+            if (i >= 0) {
+                RECT tr = impl.tab_rect(i);
+                RECT cb = close_rect_in(tr, GetDpiForWindow(hwnd));
+                POINT pt = { GET_X_LPARAM(l), GET_Y_LPARAM(l) };
+                if (PtInRect(&cb, pt)) {
+                    impl.pressed_close = i;
+                    SetCapture(hwnd);
+                    impl.invalidate_tab(i);
+                    return 0;  // block tab-select
+                }
+            }
+            break;  // fall through for tab-select
+        }
+        case WM_LBUTTONUP: {
+            if (impl.pressed_close >= 0) {
+                const int pressed = impl.pressed_close;
+                impl.pressed_close = -1;
+                if (GetCapture() == hwnd) ReleaseCapture();
+                TCHITTESTINFO hti = {};
+                hti.pt.x = GET_X_LPARAM(l);
+                hti.pt.y = GET_Y_LPARAM(l);
+                const int released_on = static_cast<int>(
+                    SendMessageW(hwnd, TCM_HITTEST, 0,
+                                 reinterpret_cast<LPARAM>(&hti)));
+                if (released_on == pressed) {
+                    RECT tr = impl.tab_rect(released_on);
+                    RECT cb = close_rect_in(tr, GetDpiForWindow(hwnd));
+                    POINT pt = { GET_X_LPARAM(l), GET_Y_LPARAM(l) };
+                    if (PtInRect(&cb, pt)) {
+                        impl.fire_close_request(released_on);
+                    }
+                }
+                return 0;
+            }
+            break;
+        }
         case WM_MOUSEMOVE: {
             TCHITTESTINFO hti = {};
             hti.pt.x = GET_X_LPARAM(l);
@@ -449,6 +540,17 @@ LRESULT CALLBACK tab_subclass_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l,
                 if (old_hover >= 0) impl.invalidate_tab(old_hover);
                 if (i >= 0) impl.invalidate_tab(i);
             }
+            bool new_close_hover = false;
+            if (i >= 0) {
+                RECT tr = impl.tab_rect(i);
+                RECT cb = close_rect_in(tr, GetDpiForWindow(hwnd));
+                POINT pt = { GET_X_LPARAM(l), GET_Y_LPARAM(l) };
+                new_close_hover = PtInRect(&cb, pt);
+            }
+            if (new_close_hover != impl.hovered_close) {
+                impl.hovered_close = new_close_hover;
+                if (i >= 0) impl.invalidate_tab(i);
+            }
             if (!impl.mouse_tracking) {
                 TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
                 TrackMouseEvent(&tme);
@@ -460,6 +562,7 @@ LRESULT CALLBACK tab_subclass_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l,
             impl.mouse_tracking = false;
             const int old_hover = impl.hovered_tab;
             impl.hovered_tab = -1;
+            impl.hovered_close = false;
             if (old_hover >= 0) impl.invalidate_tab(old_hover);
             break;
         }
