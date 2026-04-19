@@ -19,7 +19,7 @@ constexpr UINT_PTR kTabSubclassId = 0xAB01;
 
 constexpr int kTabHeightDip  = 32;
 constexpr int kTabMinWidthDip = 120;
-constexpr int kTabMaxWidthDip = 240;
+constexpr int kTabMaxWidthDip = 200;
 constexpr int kTabPaddingDip  = 12;
 constexpr int kCloseSizeDip   = 14;
 constexpr int kCloseRightPadDip = 8;
@@ -43,6 +43,20 @@ struct Palette {
     COLORREF close_fg;
 };
 
+COLORREF resolve_accent_color() {
+    DWORD argb = 0;
+    BOOL  opaque = FALSE;
+    if (SUCCEEDED(DwmGetColorizationColor(&argb, &opaque))) {
+        // DwmGetColorizationColor returns 0xAARRGGBB; strip alpha and swap
+        // to COLORREF's 0x00BBGGRR layout.
+        const BYTE r = (argb >> 16) & 0xFF;
+        const BYTE g = (argb >>  8) & 0xFF;
+        const BYTE b = (argb >>  0) & 0xFF;
+        return RGB(r, g, b);
+    }
+    return GetSysColor(COLOR_HOTLIGHT);
+}
+
 Palette make_palette(bool dark) {
     if (dark) {
         return {
@@ -52,7 +66,7 @@ Palette make_palette(bool dark) {
             /*text_inactive*/  RGB(0xA0, 0xA0, 0xA0),
             /*text_active*/    RGB(0xF2, 0xF2, 0xF2),
             /*separator*/      RGB(0x3A, 0x3A, 0x3A),
-            /*accent*/         GetSysColor(COLOR_HOTLIGHT),
+            /*accent*/         resolve_accent_color(),
             /*close_hover_bg*/ RGB(0xC4, 0x2B, 0x1C),
             /*close_hover_fg*/ RGB(0xFF, 0xFF, 0xFF),
             /*close_fg*/       RGB(0xC8, 0xC8, 0xC8),
@@ -65,7 +79,7 @@ Palette make_palette(bool dark) {
         /*text_inactive*/  RGB(0x60, 0x60, 0x60),
         /*text_active*/    RGB(0x1C, 0x1C, 0x1C),
         /*separator*/      RGB(0xD8, 0xD8, 0xD8),
-        /*accent*/         GetSysColor(COLOR_HOTLIGHT),
+        /*accent*/         resolve_accent_color(),
         /*close_hover_bg*/ RGB(0xE8, 0x11, 0x23),
         /*close_hover_fg*/ RGB(0xFF, 0xFF, 0xFF),
         /*close_fg*/       RGB(0x50, 0x50, 0x50),
@@ -141,7 +155,7 @@ void paint_tab(const DRAWITEMSTRUCT* dis, const std::wstring& label,
     DeleteObject(brush);
 
     if (state == TabVisualState::Active) {
-        const int bar_h = MulDiv(2, static_cast<int>(pc.dpi), 96);
+        const int bar_h = MulDiv(3, static_cast<int>(pc.dpi), 96);
         RECT bar = rc;
         bar.bottom = bar.top + bar_h;
         HBRUSH accent = CreateSolidBrush(pc.palette.accent);
@@ -269,7 +283,7 @@ TabManager::TabManager(HINSTANCE hInstance, HWND parent)
 {
     impl_->hwnd = CreateWindowExW(
         0, WC_TABCONTROLW, L"",
-        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_FOCUSNEVER | TCS_OWNERDRAWFIXED,
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_FOCUSNEVER | TCS_OWNERDRAWFIXED | TCS_FIXEDWIDTH,
         0, 0, 0, 0,
         parent, nullptr, hInstance, nullptr);
     // Subclass so we can catch WM_MBUTTONUP (middle-click close).
