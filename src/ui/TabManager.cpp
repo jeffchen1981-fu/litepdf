@@ -438,7 +438,13 @@ bool TabManager::handle_draw_item(const DRAWITEMSTRUCT* dis) {
 }
 
 void TabManager::handle_theme_change() {
-    // stub — Task 9 will implement
+    if (!impl_ || !impl_->hwnd) return;
+    HWND parent = GetParent(impl_->hwnd);
+    const bool new_dark = detect_dark_mode(parent ? parent : impl_->hwnd);
+    if (new_dark == impl_->dark_mode) return;
+    impl_->dark_mode = new_dark;
+    impl_->palette   = make_palette(new_dark);
+    InvalidateRect(impl_->hwnd, nullptr, TRUE);
 }
 
 LRESULT CALLBACK tab_subclass_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l,
