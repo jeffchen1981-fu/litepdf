@@ -51,6 +51,14 @@ public:
     // can emit SwitchCb. Returns true if the notification was handled.
     bool handle_notify(const NMHDR* hdr);
 
+    // Parent's WM_DRAWITEM routes here when the tab control is the sender.
+    // Returns true if the DRAWITEMSTRUCT was ours and was painted.
+    bool handle_draw_item(const DRAWITEMSTRUCT* dis);
+
+    // Parent's WM_SETTINGCHANGE routes here on "ImmersiveColorSet" so the
+    // strip can re-detect dark mode and repaint without a restart.
+    void handle_theme_change();
+
     // Returns the tab-strip height in the control's own pixel units
     // (measured via TCM_ADJUSTRECT — respects theme + font + DPI of the
     // control HWND). The `dpi` argument is kept for source-compatibility

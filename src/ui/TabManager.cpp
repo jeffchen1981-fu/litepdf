@@ -176,6 +176,14 @@ void TabManager::set_visible(bool v) {
     }
 }
 
+bool TabManager::handle_draw_item(const DRAWITEMSTRUCT* /*dis*/) {
+    return false;  // stub — Task 2 will implement
+}
+
+void TabManager::handle_theme_change() {
+    // stub — Task 9 will implement
+}
+
 LRESULT CALLBACK tab_subclass_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l,
                                    UINT_PTR /*id*/, DWORD_PTR ref_data) {
     auto* self = reinterpret_cast<TabManager*>(ref_data);

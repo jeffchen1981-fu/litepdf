@@ -363,6 +363,22 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             }
             return 0;
         }
+        case WM_DRAWITEM: {
+            auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(l);
+            if (tabs_ && dis && dis->hwndItem == tabs_->hwnd()) {
+                if (tabs_->handle_draw_item(dis)) return TRUE;
+            }
+            break;
+        }
+        case WM_SETTINGCHANGE: {
+            if (w == 0 && l != 0) {
+                auto* name = reinterpret_cast<const wchar_t*>(l);
+                if (wcscmp(name, L"ImmersiveColorSet") == 0) {
+                    if (tabs_) tabs_->handle_theme_change();
+                }
+            }
+            break;
+        }
         case WM_NOTIFY: {
             auto* hdr = reinterpret_cast<NMHDR*>(l);
             if (tabs_ && tabs_->handle_notify(hdr)) return 0;
