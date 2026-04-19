@@ -4,6 +4,8 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <memory>
+#include <type_traits>
 #include <utility>
 
 #pragma comment(lib, "comctl32.lib")
@@ -12,6 +14,29 @@ namespace litepdf::ui {
 
 namespace {
 constexpr UINT_PTR kTabSubclassId = 0xAB01;
+
+constexpr int kTabHeightDip  = 32;
+constexpr int kTabMinWidthDip = 120;
+constexpr int kTabMaxWidthDip = 240;
+constexpr int kTabPaddingDip  = 12;
+constexpr int kCloseSizeDip   = 14;
+constexpr int kCloseRightPadDip = 8;
+
+using unique_hfont = std::unique_ptr<std::remove_pointer_t<HFONT>,
+                                     decltype(&DeleteObject)>;
+unique_hfont make_unique_hfont(HFONT h) {
+    return unique_hfont(h, &DeleteObject);
+}
+
+HFONT create_tab_font(UINT dpi, bool bold) {
+    LOGFONTW lf = {};
+    lf.lfHeight = -MulDiv(9, static_cast<int>(dpi), 72);  // 9 pt
+    lf.lfWeight = bold ? FW_SEMIBOLD : FW_NORMAL;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lf.lfQuality = CLEARTYPE_QUALITY;
+    wcscpy_s(lf.lfFaceName, L"Segoe UI");
+    return CreateFontIndirectW(&lf);
+}
 
 void paint_tab_minimal(const DRAWITEMSTRUCT* dis, const std::wstring& label) {
     HDC hdc = dis->hDC;
@@ -58,6 +83,17 @@ struct TabManager::Impl {
     void fire_close_request(int index) {
         if (on_close_request) on_close_request(index);
     }
+
+    unique_hfont font_normal { nullptr, &DeleteObject };
+    unique_hfont font_bold   { nullptr, &DeleteObject };
+    UINT cached_dpi = 0;
+
+    void ensure_fonts(UINT dpi) {
+        if (cached_dpi == dpi && font_normal && font_bold) return;
+        font_normal = make_unique_hfont(create_tab_font(dpi, /*bold=*/false));
+        font_bold   = make_unique_hfont(create_tab_font(dpi, /*bold=*/true));
+        cached_dpi  = dpi;
+    }
 };
 
 TabManager::TabManager(HINSTANCE hInstance, HWND parent)
@@ -71,6 +107,16 @@ TabManager::TabManager(HINSTANCE hInstance, HWND parent)
     // Subclass so we can catch WM_MBUTTONUP (middle-click close).
     SetWindowSubclass(impl_->hwnd, tab_subclass_proc,
                       kTabSubclassId, reinterpret_cast<DWORD_PTR>(this));
+
+    // Baseline item size; paint code still computes per-tab width.
+    const UINT dpi = GetDpiForWindow(impl_->hwnd);
+    SendMessageW(impl_->hwnd, TCM_SETITEMSIZE, 0,
+                 MAKELPARAM(MulDiv(kTabMaxWidthDip, dpi, 96),
+                            MulDiv(kTabHeightDip, dpi, 96)));
+    impl_->ensure_fonts(dpi);
+    SendMessageW(impl_->hwnd, WM_SETFONT,
+                 reinterpret_cast<WPARAM>(impl_->font_normal.get()),
+                 MAKELPARAM(TRUE, 0));
 }
 
 TabManager::~TabManager() {
@@ -175,20 +221,10 @@ bool TabManager::handle_notify(const NMHDR* hdr) {
     return false;
 }
 
-int TabManager::strip_height(UINT /*dpi*/) const {
+int TabManager::strip_height(UINT dpi) const {
     if (!impl_ || !impl_->hwnd) return 0;
-    // Use TCM_ADJUSTRECT to measure the control's natural tab-strip height
-    // in the control's own DPI/font/theme context. The control draws its
-    // tabs at the top of its client area, so TCM_ADJUSTRECT(FALSE) shrinks
-    // an input display rect into the content rect — the difference is the
-    // strip height. This respects themed padding and the tab control's
-    // font without us having to re-derive the math.
-    RECT r = {0, 0, 100, 100};
-    SendMessageW(impl_->hwnd, TCM_ADJUSTRECT, FALSE,
-                 reinterpret_cast<LPARAM>(&r));
-    // r.top is positive: the y offset from the display rect's top to the
-    // content area's top == the strip height.
-    return r.top > 0 ? r.top : 0;
+    if (dpi == 0) dpi = GetDpiForWindow(impl_->hwnd);
+    return MulDiv(kTabHeightDip, static_cast<int>(dpi), 96);
 }
 
 void TabManager::set_visible(bool v) {
