@@ -191,6 +191,23 @@ struct TabManager::Impl {
         if (on_close_request) on_close_request(index);
     }
 
+    int  hovered_tab    = -1;
+    bool mouse_tracking = false;
+
+    RECT tab_rect(int i) const {
+        RECT r = {};
+        if (hwnd && i >= 0) {
+            SendMessageW(hwnd, TCM_GETITEMRECT, static_cast<WPARAM>(i),
+                         reinterpret_cast<LPARAM>(&r));
+        }
+        return r;
+    }
+    void invalidate_tab(int i) {
+        if (!hwnd || i < 0) return;
+        RECT r = tab_rect(i);
+        InvalidateRect(hwnd, &r, FALSE);
+    }
+
     unique_hfont font_normal { nullptr, &DeleteObject };
     unique_hfont font_bold   { nullptr, &DeleteObject };
     UINT cached_dpi = 0;
@@ -357,9 +374,12 @@ bool TabManager::handle_draw_item(const DRAWITEMSTRUCT* dis) {
     impl_->ensure_fonts(dpi);
 
     const bool is_active = (dis->itemState & ODS_SELECTED) != 0;
-    TabVisualState state = is_active ? TabVisualState::Active
-                                     : TabVisualState::Normal;
-    // Hover handling lands in Task 7.
+    TabVisualState state = TabVisualState::Normal;
+    if (is_active) {
+        state = TabVisualState::Active;
+    } else if (idx == impl_->hovered_tab) {
+        state = TabVisualState::Hover;
+    }
 
     PaintCtx pc { impl_->palette, impl_->font_normal.get(),
                   impl_->font_bold.get(), dpi };
@@ -416,6 +436,33 @@ LRESULT CALLBACK tab_subclass_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l,
             // Cancel the in-flight gesture.
             impl.pressed_tab = -1;
             break;
+        case WM_MOUSEMOVE: {
+            TCHITTESTINFO hti = {};
+            hti.pt.x = GET_X_LPARAM(l);
+            hti.pt.y = GET_Y_LPARAM(l);
+            const int i = static_cast<int>(
+                SendMessageW(hwnd, TCM_HITTEST, 0,
+                             reinterpret_cast<LPARAM>(&hti)));
+            if (i != impl.hovered_tab) {
+                const int old_hover = impl.hovered_tab;
+                impl.hovered_tab = i;
+                if (old_hover >= 0) impl.invalidate_tab(old_hover);
+                if (i >= 0) impl.invalidate_tab(i);
+            }
+            if (!impl.mouse_tracking) {
+                TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
+                TrackMouseEvent(&tme);
+                impl.mouse_tracking = true;
+            }
+            break;
+        }
+        case WM_MOUSELEAVE: {
+            impl.mouse_tracking = false;
+            const int old_hover = impl.hovered_tab;
+            impl.hovered_tab = -1;
+            if (old_hover >= 0) impl.invalidate_tab(old_hover);
+            break;
+        }
     }
     return DefSubclassProc(hwnd, msg, w, l);
 }
