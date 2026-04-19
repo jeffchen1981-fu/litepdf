@@ -155,7 +155,7 @@ void paint_tab(const DRAWITEMSTRUCT* dis, const std::wstring& label,
     DeleteObject(brush);
 
     if (state == TabVisualState::Active) {
-        const int bar_h = MulDiv(3, static_cast<int>(pc.dpi), 96);
+        const int bar_h = MulDiv(4, static_cast<int>(pc.dpi), 96);
         RECT bar = rc;
         bar.bottom = bar.top + bar_h;
         HBRUSH accent = CreateSolidBrush(pc.palette.accent);
