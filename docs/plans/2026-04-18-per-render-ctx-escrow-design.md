@@ -56,16 +56,18 @@ Estimated diff size: approximately −15 / +15 lines net across two .cpp files. 
                                  |
                                  v
 [Worker thread N]  render page -> fz_pixmap* pix
+    (worker's ref on pix transfers to the callback per RenderEngine D2;
+     worker does NOT drop after on_complete returns.)
     cb(pix, worker_ctx):
       if pix:
-        fz_keep_pixmap(worker_ctx, pix)                // refcount 1 -> 2
         escrow = fz_clone_context(worker_ctx)          // ref-inc on root
         if escrow == nullptr:                          // OOM
-          fz_drop_pixmap(worker_ctx, pix)
+          fz_drop_pixmap(worker_ctx, pix)              // drop transferred ref
           return
         if !PostMessageW(target, WM_USER_RENDER_DONE, pix, escrow):
-          fz_drop_pixmap(escrow, pix)
+          fz_drop_pixmap(escrow, pix)                  // drop transferred ref
           fz_drop_context(escrow)
+        // Happy path: the transferred ref travels as WPARAM; UI thread drops it.
                                  |
                                  v
          ... message queue (may outlive view + worker) ...
@@ -76,10 +78,16 @@ Estimated diff size: approximately −15 / +15 lines net across two .cpp files. 
     escrow = LPARAM
     use escrow for fz_pixmap_width/height/stride/samples
     CreateBitmapFromMemory -> impl_->current_bitmap
-    fz_drop_pixmap(escrow, pix)                        // refcount 2 -> 1 (worker still owns the original ref)
+    fz_drop_pixmap(escrow, pix)                        // drops the shipping ref
     fz_drop_context(escrow)                            // root ref-dec
     InvalidateRect -> WM_PAINT
 ```
+
+Refcount arithmetic for a cached render (no cancel): the worker kept one
+bump for the cache (absorbed by `PageCache::put_pixmap`) and one for the
+callback (transferred via `on_complete`). The callback's ref is the shipping
+ref; dropping it in the UI-thread handler leaves exactly the cache's ref —
+no orphan, no leak.
 
 ## 5. Error handling
 
