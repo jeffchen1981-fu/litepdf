@@ -77,4 +77,26 @@ private:
     int                               active_ = -1;
 };
 
+// Pure-function helpers mapping Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+N
+// accelerator presses to the resulting active index. Kept as free
+// functions so MainWindow's WM_COMMAND dispatch and unit tests can
+// share the exact same arithmetic. Return -1 means "no change": the
+// caller should leave the current active tab alone.
+inline int next_tab_index(int active, int count) noexcept {
+    if (count < 2 || active < 0) return -1;
+    return (active + 1) % count;
+}
+inline int prev_tab_index(int active, int count) noexcept {
+    if (count < 2 || active < 0) return -1;
+    return (active - 1 + count) % count;
+}
+// Ctrl+1..9 maps 1-indexed user shortcut to 0-indexed tab position.
+// Returns -1 when the requested tab does not exist (e.g. Ctrl+5 with
+// 3 tabs open), matching Chrome/Edge "silent no-op" behaviour.
+inline int goto_tab_index(int one_indexed, int count) noexcept {
+    const int target = one_indexed - 1;
+    if (target < 0 || target >= count) return -1;
+    return target;
+}
+
 }  // namespace litepdf::core

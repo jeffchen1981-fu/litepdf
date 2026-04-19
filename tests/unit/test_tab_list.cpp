@@ -114,3 +114,35 @@ TEST_CASE("TabList remove without prior set_active leaves active at -1", "[tabli
     REQUIRE(list.size() == 1);
     REQUIRE(list.active() == nullptr);
 }
+
+// Regression coverage for the Ctrl+Tab / Ctrl+Shift+Tab / Ctrl+1..9
+// arithmetic. These helpers are the single source of truth that both
+// the main window's WM_COMMAND dispatch and the canvas's defensive
+// Ctrl+Tab forwarder rely on, so the mapping must be exercised even
+// though the surrounding Win32 message routing is not.
+TEST_CASE("next_tab_index wraps forward and no-ops on tiny lists", "[tab_nav]") {
+    REQUIRE(next_tab_index(0, 2) == 1);
+    REQUIRE(next_tab_index(1, 2) == 0);        // wrap
+    REQUIRE(next_tab_index(2, 3) == 0);        // wrap
+    REQUIRE(next_tab_index(0, 1) == -1);       // only one tab -> no-op
+    REQUIRE(next_tab_index(-1, 3) == -1);      // no active -> no-op
+    REQUIRE(next_tab_index(0, 0) == -1);       // empty list
+}
+
+TEST_CASE("prev_tab_index wraps backward and no-ops on tiny lists", "[tab_nav]") {
+    REQUIRE(prev_tab_index(1, 2) == 0);
+    REQUIRE(prev_tab_index(0, 2) == 1);        // wrap
+    REQUIRE(prev_tab_index(0, 3) == 2);        // wrap
+    REQUIRE(prev_tab_index(0, 1) == -1);
+    REQUIRE(prev_tab_index(-1, 3) == -1);
+    REQUIRE(prev_tab_index(0, 0) == -1);
+}
+
+TEST_CASE("goto_tab_index maps 1-indexed shortcut to 0-indexed slot", "[tab_nav]") {
+    REQUIRE(goto_tab_index(1, 3) == 0);
+    REQUIRE(goto_tab_index(2, 3) == 1);
+    REQUIRE(goto_tab_index(3, 3) == 2);
+    REQUIRE(goto_tab_index(4, 3) == -1);       // out of range
+    REQUIRE(goto_tab_index(0, 3) == -1);       // below range
+    REQUIRE(goto_tab_index(1, 0) == -1);       // empty list
+}

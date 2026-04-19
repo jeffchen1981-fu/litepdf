@@ -437,12 +437,14 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 }
                 return 0;
             }
-            // Ctrl+1..9 jumps to tab N (0-indexed internally). No-op if
-            // the requested tab doesn't exist (e.g., Ctrl+5 with 3 tabs).
+            // Ctrl+1..9 jumps to tab N. core::goto_tab_index returns -1
+            // for the silent-no-op case (e.g., Ctrl+5 with 3 tabs).
             if (id >= IDM_TAB_GOTO_1 && id <= IDM_TAB_GOTO_9) {
-                const int target = id - IDM_TAB_GOTO_1;  // 0-indexed
-                if (tabs_ && target < tabs_->count()) {
-                    tabs_->set_active(target);
+                if (tabs_) {
+                    const int one_indexed = id - IDM_TAB_GOTO_1 + 1;
+                    const int target = litepdf::core::goto_tab_index(
+                        one_indexed, tabs_->count());
+                    if (target >= 0) tabs_->set_active(target);
                 }
                 return 0;
             }
@@ -456,15 +458,17 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     }
                     return 0;
                 case IDM_TAB_NEXT:
-                    if (tabs_ && tabs_->count() > 1) {
-                        const int n = (tabs_->active_index() + 1) % tabs_->count();
-                        tabs_->set_active(n);
+                    if (tabs_) {
+                        const int n = litepdf::core::next_tab_index(
+                            tabs_->active_index(), tabs_->count());
+                        if (n >= 0) tabs_->set_active(n);
                     }
                     return 0;
                 case IDM_TAB_PREV:
-                    if (tabs_ && tabs_->count() > 1) {
-                        const int n = (tabs_->active_index() - 1 + tabs_->count()) % tabs_->count();
-                        tabs_->set_active(n);
+                    if (tabs_) {
+                        const int n = litepdf::core::prev_tab_index(
+                            tabs_->active_index(), tabs_->count());
+                        if (n >= 0) tabs_->set_active(n);
                     }
                     return 0;
                 case IDM_FILE_OPEN: {

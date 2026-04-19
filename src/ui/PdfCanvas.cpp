@@ -1,6 +1,7 @@
 // LitePDF — ui::PdfCanvas: child HWND with a Direct2D render target.
 #include "ui/PdfCanvas.hpp"
 
+#include "MainMenu.rc.h"
 #include "core/DocumentView.hpp"
 #include "ui/ColdStartTimer.hpp"
 
@@ -183,8 +184,38 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // Click-to-focus: ensures keystrokes (PgUp/PgDn/Home/End) reach us.
             SetFocus(hwnd_);
             return 0;
-        case WM_KEYDOWN:
+        case WM_KEYDOWN: {
+            // Defense-in-depth for tab-navigation shortcuts. Ctrl+Tab /
+            // Ctrl+Shift+Tab / Ctrl+W are registered in the main window's
+            // accelerator table (see MainWindow::run) and TranslateAccel
+            // usually converts them to WM_COMMAND before DispatchMessage
+            // ever reaches us. But that conversion depends on the async
+            // GetKeyState snapshot at message-retrieval time, which has
+            // been observed to briefly desync under heavy repeat input
+            // (user report: holding PgDn while hitting Ctrl+Tab with two
+            // tabs open swallowed the Ctrl+Tab). Canvas owns keyboard
+            // focus in that scenario, so if the accelerator misses, the
+            // WM_KEYDOWN lands here -- forward it to the parent as
+            // WM_COMMAND so the existing IDM_TAB_* dispatch still fires.
+            // Posted rather than Sent so tab-close teardown (which swaps
+            // canvas->view) cannot run inside our own WndProc frame.
+            const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            if (ctrl && w == VK_TAB) {
+                const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                const WORD id = shift ? IDM_TAB_PREV : IDM_TAB_NEXT;
+                // HIWORD=1 marks the WM_COMMAND as accelerator-sourced,
+                // matching what TranslateAcceleratorW would have posted.
+                PostMessageW(GetParent(hwnd), WM_COMMAND,
+                             MAKEWPARAM(id, 1), 0);
+                return 0;
+            }
+            if (ctrl && w == 'W') {
+                PostMessageW(GetParent(hwnd), WM_COMMAND,
+                             MAKEWPARAM(IDM_TAB_CLOSE, 1), 0);
+                return 0;
+            }
             return on_key_down(w);
+        }
         case WM_MOUSEWHEEL: {
             if (!impl_->view) return 0;
             WORD modifiers = GET_KEYSTATE_WPARAM(w);
