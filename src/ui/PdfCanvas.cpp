@@ -20,7 +20,6 @@ extern "C" {
     int  fz_pixmap_stride(fz_context*, fz_pixmap*);
     unsigned char* fz_pixmap_samples(fz_context*, fz_pixmap*);
     void fz_drop_pixmap(fz_context*, fz_pixmap*);
-    struct fz_pixmap* fz_keep_pixmap(struct fz_context*, struct fz_pixmap*);
     fz_context* fz_clone_context(fz_context*);
     void        fz_drop_context(fz_context*);
 }
@@ -46,15 +45,19 @@ bool PdfCanvas::post_render_done(HWND target,
         return true;
     }
 
-    // No fz_try wrapper: fz_keep_pixmap is an atomic refcount bump (no
-    // longjmp), fz_clone_context returns nullptr on OOM rather than
-    // longjmp'ing (same contract as Document::clone_context — see
-    // Document.hpp:82), and fz_drop_* are longjmp-free.
-    fz_keep_pixmap(worker_ctx, pix);               // refcount: 1 -> 2
+    // Refcount contract (D2, RenderEngine.cpp:81):
+    //   The worker transfers its ref on `pix` into this callback. After
+    //   on_complete returns, the worker does NOT drop. So the ref we own
+    //   right here IS the shipping ref — we pass it through PostMessage,
+    //   the UI thread drops it. No keep required.
+    //
+    // No fz_try wrapper: fz_clone_context returns nullptr on OOM rather
+    // than longjmp'ing (same contract as Document::clone_context — see
+    // Document.hpp:82); fz_drop_* and fz_drop_context are longjmp-free.
     fz_context* escrow = fz_clone_context(worker_ctx);
     if (!escrow) {
-        // OOM on clone. Drop the keep we just took and abandon. The
-        // worker's own drop-after-callback will bring the refcount to 0.
+        // OOM on clone. We still own the transferred ref — drop it via
+        // worker_ctx (still alive inside the callback) so it doesn't leak.
         fz_drop_pixmap(worker_ctx, pix);
         return false;
     }
