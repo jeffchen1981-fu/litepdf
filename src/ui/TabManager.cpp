@@ -498,12 +498,17 @@ LRESULT CALLBACK tab_subclass_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l,
             }
             break;
         }
-        case WM_CAPTURECHANGED:
+        case WM_CAPTURECHANGED: {
             // Another window stole capture (Alt+Tab, dialog, etc.).
-            // Cancel the in-flight gesture.
+            // Cancel the in-flight gesture AND invalidate the affected tab so
+            // the hot close-button visual doesn't linger until next paint.
+            const int to_refresh = (impl.pressed_close >= 0) ? impl.pressed_close
+                                                             : impl.pressed_tab;
             impl.pressed_tab   = -1;
             impl.pressed_close = -1;
+            if (to_refresh >= 0) impl.invalidate_tab(to_refresh);
             break;
+        }
         case WM_LBUTTONDOWN: {
             TCHITTESTINFO hti = {};
             hti.pt.x = GET_X_LPARAM(l);
