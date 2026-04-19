@@ -12,6 +12,27 @@ namespace litepdf::ui {
 
 namespace {
 constexpr UINT_PTR kTabSubclassId = 0xAB01;
+
+void paint_tab_minimal(const DRAWITEMSTRUCT* dis, const std::wstring& label) {
+    HDC hdc = dis->hDC;
+    RECT rc = dis->rcItem;
+
+    // Background: pale grey for normal, near-white for active.
+    const bool is_active = (dis->itemState & ODS_SELECTED) != 0;
+    HBRUSH bg = CreateSolidBrush(is_active ? RGB(0xFF, 0xFF, 0xFF)
+                                           : RGB(0xE8, 0xE8, 0xE8));
+    FillRect(hdc, &rc, bg);
+    DeleteObject(bg);
+
+    // Label.
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, RGB(0x20, 0x20, 0x20));
+    RECT text_rc = rc;
+    text_rc.left += 8;
+    text_rc.right -= 8;
+    DrawTextW(hdc, label.c_str(), -1, &text_rc,
+              DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+}
 }  // namespace
 
 // Forward declaration at namespace scope (not anonymous) so the friend
@@ -44,7 +65,7 @@ TabManager::TabManager(HINSTANCE hInstance, HWND parent)
 {
     impl_->hwnd = CreateWindowExW(
         0, WC_TABCONTROLW, L"",
-        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_FOCUSNEVER,
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_FOCUSNEVER | TCS_OWNERDRAWFIXED,
         0, 0, 0, 0,
         parent, nullptr, hInstance, nullptr);
     // Subclass so we can catch WM_MBUTTONUP (middle-click close).
@@ -176,8 +197,14 @@ void TabManager::set_visible(bool v) {
     }
 }
 
-bool TabManager::handle_draw_item(const DRAWITEMSTRUCT* /*dis*/) {
-    return false;  // stub — Task 2 will implement
+bool TabManager::handle_draw_item(const DRAWITEMSTRUCT* dis) {
+    if (!impl_ || !dis || dis->hwndItem != impl_->hwnd) return false;
+    const int idx = static_cast<int>(dis->itemID);
+    if (idx < 0 || idx >= count()) return false;
+    auto* tab = impl_->list.at(static_cast<std::size_t>(idx));
+    if (!tab) return false;
+    paint_tab_minimal(dis, tab->label);
+    return true;
 }
 
 void TabManager::handle_theme_change() {
