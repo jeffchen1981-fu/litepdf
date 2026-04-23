@@ -62,6 +62,12 @@ public:
     // For InlineDispatcher (tests), fires on the caller thread.
     void set_on_update(OnUpdate cb);
 
+    // Returns a copy of the currently-installed observer (or an empty
+    // std::function if none). Used by CrossTabSearch to chain its own
+    // observer on top of whatever MainWindow installed, so that
+    // per-tab find-bar counters keep updating during cross-tab scans.
+    OnUpdate on_update() const;
+
     // Reposition cursor to first hit at-or-after the given page; wraps
     // to the first hit if nothing is at-or-after.
     void set_reference_page(std::size_t page);
