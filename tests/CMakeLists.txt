@@ -46,6 +46,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_mru_list.cpp
     unit/test_tab_list.cpp
     unit/test_search_dispatcher.cpp  # Phase 6 Task 4
+    unit/test_search_session.cpp     # Phase 6 Task 5
 )
 target_link_libraries(litepdf_unit_tests PRIVATE litepdf_core)
 
