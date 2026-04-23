@@ -1,11 +1,17 @@
 #pragma once
+#include <functional>
 #include <memory>
+#include <optional>
+#include <vector>
 #include <windows.h>
+
+#include "core/SearchSession.hpp"
 
 // Forward-decl so the header stays COM-free. ComPtr in .cpp only.
 struct ID2D1Factory;
 struct ID2D1HwndRenderTarget;
 struct ID2D1Bitmap;
+struct ID2D1SolidColorBrush;
 
 // MuPDF forward decls — header stays mupdf-free; full types only in .cpp.
 struct fz_context;
@@ -65,6 +71,27 @@ public:
     // When true, on first real-bitmap paint the canvas calls
     // ColdStartTimer::emit_if_complete(true) so the line is mirrored to stderr.
     void set_log_timings(bool on) { log_timings_ = on; }
+
+    // --- Phase 6 Task 9: search hit overlay ---
+
+    // Source for overlay hits. PdfCanvas calls this each paint to fetch
+    // the hits for the currently visible page. Non-owning; caller must
+    // ensure the lambda stays valid while set (or call set_hits_source(nullptr)
+    // before the lambda's captures become invalid).
+    using HitsFn = std::function<std::vector<litepdf::core::SearchSession::Hit>(std::size_t page)>;
+    void set_hits_source(HitsFn fn);
+
+    // Current hit (if any). Drawn in orange (+ outline); others drawn in
+    // yellow. Pass std::nullopt to clear current highlight.
+    void set_current_hit(std::optional<litepdf::core::SearchSession::Hit> h);
+
+    // Scroll / page-change such that `h`'s quad is visible with a 24 DIP
+    // margin. If already visible, no scroll — only the invalidate. If
+    // target page differs from current, page is switched via
+    // DocumentView::set_current_page; caller (MainWindow) is responsible
+    // for the subsequent kick_render. This method only handles pan and
+    // invalidation.
+    void scroll_into_view(const litepdf::core::SearchSession::Hit& h);
 
 private:
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
