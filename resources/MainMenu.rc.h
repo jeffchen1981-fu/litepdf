@@ -44,5 +44,14 @@
 #define IDM_TAB_GOTO_8   40040
 #define IDM_TAB_GOTO_9   40041
 
-// Next free ID: 40042. Reserve 40042-40049 for future tab commands
-// (e.g., IDM_TAB_GOTO_LAST, IDM_TAB_DUPLICATE, IDM_TAB_REOPEN_CLOSED).
+// Phase 6: in-doc and cross-tab search. Keyboard-only, not in any menu popup
+// (the floating find bar and docked results panel each have their own UI).
+#define IDM_FIND              40042   // Ctrl+F
+#define IDM_FIND_NEXT         40043   // F3
+#define IDM_FIND_PREV         40044   // Shift+F3
+#define IDM_CROSS_TAB_FIND    40045   // Ctrl+Shift+F
+#define IDM_TOGGLE_RESULTS    40046   // F6
+#define IDM_FIND_CLOSE        40047   // ESC when find bar focused (fallback accel)
+
+// Next free ID: 40048. Reserve 40048-40059 for future search commands
+// (e.g., IDM_FIND_ALL_HIGHLIGHT, IDM_FIND_CASE_TOGGLE, IDM_FIND_REGEX).
