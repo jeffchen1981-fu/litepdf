@@ -26,6 +26,7 @@ add_library(litepdf_core STATIC
     src/core/PageCache.cpp
     src/core/RenderEngine.cpp
     src/core/TabList.cpp
+    src/app/SearchDispatcher.cpp   # Phase 6 Task 4
 )
 
 litepdf_apply_flags(litepdf_core)
