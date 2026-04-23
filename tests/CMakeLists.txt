@@ -38,6 +38,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_render_engine_output.cpp
     unit/test_page_cache_l1.cpp
     unit/test_page_cache_l2.cpp
+    unit/test_page_cache_peek.cpp   # Phase 6 Task 1
     unit/test_render_engine_cache.cpp
     unit/test_render_stress.cpp
     unit/test_document_view.cpp
