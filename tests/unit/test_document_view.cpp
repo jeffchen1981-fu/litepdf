@@ -4,9 +4,11 @@
 #include <algorithm>
 #include <utility>
 
+#include "app/SearchDispatcher.hpp"
 #include "core/Document.hpp"
 #include "core/DocumentView.hpp"
 
+using litepdf::app::InlineDispatcher;
 using litepdf::core::Document;
 using litepdf::core::DocumentView;
 
@@ -18,27 +20,36 @@ Document open_simple() {
     return doc;
 }
 
+// Shared inline dispatcher for all DocumentView unit tests. Each test
+// gets its own local one in practice (below) to keep tasks isolated;
+// this free function reduces the boilerplate. Keeping it non-static so
+// each TU that includes this file is fine — it's only used here.
 }  // namespace
 
 TEST_CASE("DocumentView constructs from opened Document", "[core][view][ctor]") {
-    DocumentView view(open_simple());
+    InlineDispatcher disp;
+    DocumentView view(open_simple(), disp);
     REQUIRE(view.page_count() > 0);
     REQUIRE(view.current_page() == 0);
     REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::FitWidth);
     REQUIRE(view.ui_ctx() != nullptr);
     // source_path should round-trip through the move.
     REQUIRE(view.source_path().filename() == "simple.pdf");
+    // Phase 6: search() accessor returns a valid session reference.
+    (void)view.search();
 }
 
 TEST_CASE("DocumentView throws when given an unopened Document",
           "[core][view][ctor]") {
+    InlineDispatcher disp;
     Document doc;  // never opened
-    REQUIRE_THROWS_AS(DocumentView(std::move(doc)), std::runtime_error);
+    REQUIRE_THROWS_AS(DocumentView(std::move(doc), disp), std::runtime_error);
 }
 
 TEST_CASE("DocumentView::set_current_page clamps and signals change",
           "[core][view][page]") {
-    DocumentView view(open_simple());
+    InlineDispatcher disp;
+    DocumentView view(open_simple(), disp);
     REQUIRE(view.current_page() == 0);
 
     // Same-index, negative, and out-of-range inputs all clamp to [0, last].
@@ -61,7 +72,8 @@ TEST_CASE("DocumentView::set_current_page clamps and signals change",
 
 TEST_CASE("DocumentView FitWidth scale derivation at 96 DPI",
           "[core][view][zoom]") {
-    DocumentView view(open_simple());
+    InlineDispatcher disp;
+    DocumentView view(open_simple(), disp);
     // simple.pdf page 0 is ~595.2 x 842.0 pt (A4).
     // FitWidth at 1190.4 DIP × 800 DIP × 96 DPI:
     //   phys_px_w = 1190.4 * (96/96) = 1190.4
@@ -74,7 +86,8 @@ TEST_CASE("DocumentView FitWidth scale derivation at 96 DPI",
 
 TEST_CASE("DocumentView FitPage scale derivation at 96 DPI",
           "[core][view][zoom]") {
-    DocumentView view(open_simple());
+    InlineDispatcher disp;
+    DocumentView view(open_simple(), disp);
     // FitPage at 595.2 × 421.0 DIP × 96 DPI on 595.2×842 page:
     //   fit_w = 595.2/595.2 = 1.0
     //   fit_h = 421.0/842.0 = 0.5
@@ -87,7 +100,8 @@ TEST_CASE("DocumentView FitPage scale derivation at 96 DPI",
 
 TEST_CASE("DocumentView FitPage scale uses the more restrictive dimension",
           "[core][view][zoom]") {
-    DocumentView view(open_simple());
+    InlineDispatcher disp;
+    DocumentView view(open_simple(), disp);
     // simple.pdf is 595.2 x 842.0 pt.
     // Viewport is wide + short — width would allow 2x, but height only allows ~0.95x.
     // Expected: FitPage picks min(fit_w, fit_h) = ~0.95x.
@@ -103,7 +117,8 @@ TEST_CASE("DocumentView FitPage scale uses the more restrictive dimension",
 
 TEST_CASE("DocumentView zoom_in/out cycles presets and bounds correctly",
           "[core][view][zoom]") {
-    DocumentView view(open_simple());
+    InlineDispatcher disp;
+    DocumentView view(open_simple(), disp);
 
     // Ramp up to the top preset.
     int up_steps = 0;

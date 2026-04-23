@@ -8,6 +8,7 @@
 #include "ui/PdfCanvas.hpp"
 #include "ui/TabManager.hpp"
 
+namespace litepdf::app { class ThreadPoolDispatcher; }
 namespace litepdf::core { class DocumentView; }
 
 namespace litepdf::ui {
@@ -68,6 +69,13 @@ private:
 
     HWND    hwnd_   = nullptr;
     HACCEL  haccel_ = nullptr;
+    // Phase 6: single process-wide dispatcher shared by every tab's
+    // SearchSession. Declared BEFORE tabs_/canvas_ so that on
+    // MainWindow destruction it is destroyed AFTER them — each tab's
+    // DocumentView holds a ref to this dispatcher via its SearchSession.
+    // The dispatcher's dtor drains any queued task so in-flight work
+    // finishes before the dispatcher goes away.
+    std::unique_ptr<litepdf::app::ThreadPoolDispatcher> search_dispatcher_;
     std::unique_ptr<PdfCanvas>    canvas_;
     std::unique_ptr<TabManager>   tabs_;
     std::unique_ptr<OutlinePane>  outline_;

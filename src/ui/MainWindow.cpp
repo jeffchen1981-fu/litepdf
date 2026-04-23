@@ -2,6 +2,7 @@
 #include "ui/MainWindow.hpp"
 #include "MainMenu.rc.h"
 
+#include "app/SearchDispatcher.hpp"
 #include "app/SingleInstance.hpp"
 #include "core/Document.hpp"
 #include "core/DocumentView.hpp"
@@ -45,9 +46,19 @@ std::wstring format_mru_label(std::size_t i, const std::wstring& full_path) {
 
 namespace litepdf::ui {
 
-MainWindow::MainWindow() { mru_.load(); }
+MainWindow::MainWindow()
+    // Phase 6: one dispatcher, shared by every tab's SearchSession.
+    // 2 workers is the Phase 6 design default (§4 D5); re-tune once we
+    // have perf data on large corpora.
+    : search_dispatcher_(
+          std::make_unique<litepdf::app::ThreadPoolDispatcher>(2)) {
+    mru_.load();
+}
 MainWindow::~MainWindow() {
     if (haccel_) { DestroyAcceleratorTable(haccel_); haccel_ = nullptr; }
+    // search_dispatcher_ is destroyed AFTER tabs_ (reverse declaration
+    // order in MainWindow.hpp) — its dtor drains queued tasks so any
+    // in-flight search finishes before the pool disappears.
 }
 
 std::filesystem::path MainWindow::canonicalize_for_mru(
@@ -94,7 +105,16 @@ void MainWindow::update_window_title() {
 
 void MainWindow::open_tab_async(std::filesystem::path path) {
     HWND hwnd = hwnd_;
-    std::thread([hwnd, path = std::move(path)]() {
+    // Capture dispatcher by raw ref — it lives for the entire MainWindow
+    // lifetime (declared before tabs_ in MainWindow.hpp) and the UI
+    // thread waits on window messages, so the dispatcher is guaranteed
+    // to be alive when we either construct a DocumentView here or post
+    // WM_USER_OPEN_OK. If hwnd is destroyed before PostMessageW runs,
+    // the ownership-recovery path (delete raw) still works because
+    // DocumentView's dtor tears down its SearchSession before anything
+    // else touches the dispatcher.
+    auto& dispatcher = *search_dispatcher_;
+    std::thread([hwnd, &dispatcher, path = std::move(path)]() {
         litepdf::core::Document doc;
         auto err = doc.open(path);
         if (err.has_value()) {
@@ -107,7 +127,7 @@ void MainWindow::open_tab_async(std::filesystem::path path) {
             tab->path  = path;
             tab->label = path.filename().wstring();
             tab->view  = std::make_unique<litepdf::core::DocumentView>(
-                std::move(doc));
+                std::move(doc), dispatcher);
             // Transfer ownership across thread boundary via raw ptr.
             auto* raw = tab.release();
             // Ownership has crossed the thread boundary. If PostMessageW
