@@ -4,8 +4,10 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "app/SearchDispatcher.hpp"
 #include "core/PageCache.hpp"
 #include "core/RenderEngine.hpp"
+#include "core/SearchSession.hpp"
 
 // DocumentView is MuPDF-aware only to the extent of holding an
 // fz_context* and dropping it. Pull in fitz.h here (not in the header)
@@ -20,15 +22,20 @@ void fz_drop_pixmap(fz_context*, fz_pixmap*);
 namespace litepdf::core {
 
 struct DocumentView::Impl {
+    // NOTE: declaration order == reverse destruction order. Members
+    // declared LATER destruct EARLIER. The required tear-down order is
+    // (first to last):
+    //   session → engine → cache → cache_ctx → ui_ctx → doc
+    // so `session` must be declared LAST (destructs first) and `doc`
+    // FIRST (destructs last). See DocumentView.hpp for rationale.
     Document doc;
 
-    // Order matters for destruction (see ~DocumentView):
-    //   engine (joins workers) → cache (drops pixmaps via cache_ctx)
-    //     → cache_ctx → ui_ctx → doc.
     // ui_ctx is UI-thread-exclusive (D3). cache_ctx is a dedicated clone
     // used by PageCache for its internal keep/drop ops from worker
     // threads — MuPDF's lock table serializes refcount updates across
-    // clones of the same root, so this is safe.
+    // clones of the same root, so this is safe. Both are raw fz_context*
+    // (dropped explicitly in ~DocumentView); they do not RAII-destruct
+    // in reverse-declaration order.
     fz_context*                   ui_ctx    = nullptr;
     fz_context*                   cache_ctx = nullptr;
     std::unique_ptr<PageCache>    cache;
@@ -45,9 +52,17 @@ struct DocumentView::Impl {
     static constexpr float kPresets[] = {
         0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f, 4.0f,
     };
+
+    // Declared LAST so it destructs FIRST — see order contract above.
+    // The SearchSession holds non-owning refs to `doc` and to the
+    // externally-owned ISearchDispatcher; both must outlive the session.
+    // `doc` is declared above (destructs after session) ✓.
+    // Dispatcher is owned by MainWindow and outlives all DocumentViews ✓.
+    std::unique_ptr<SearchSession> session;
 };
 
 DocumentView::DocumentView(Document doc,
+                           litepdf::app::ISearchDispatcher& dispatcher,
                            std::size_t num_workers,
                            std::size_t l1_capacity,
                            std::size_t l2_capacity)
@@ -75,12 +90,23 @@ DocumentView::DocumentView(Document doc,
     // Engine clones its own per-worker contexts off the Document.
     impl_->engine =
         std::make_unique<RenderEngine>(impl_->doc, num_workers, impl_->cache.get());
+
+    // Construct SearchSession LAST — it references impl_->doc (already
+    // moved into place) and the caller-owned dispatcher. If this throws
+    // (shouldn't, current ctor is noexcept-ish), earlier members RAII-
+    // unwind correctly via Impl's declaration order.
+    impl_->session = std::make_unique<SearchSession>(impl_->doc, dispatcher);
 }
 
 DocumentView::~DocumentView() {
     if (!impl_) return;
 
-    // Engine first — ensures no worker is mid-access to cache or contexts.
+    // Session first — drops the strong ref to its shared_ptr<State>.
+    // Any in-flight worker task keeps its own shared_ptr alive until it
+    // completes; the task's captured `const Document&` stays valid
+    // because impl_->doc is destroyed LAST (below, via Impl unwinding).
+    impl_->session.reset();
+    // Engine next — ensures no worker is mid-access to cache or contexts.
     impl_->engine.reset();
     // Cache next — drops remaining pixmaps / display lists via cache_ctx.
     impl_->cache.reset();
@@ -258,6 +284,14 @@ const std::filesystem::path& DocumentView::source_path() const {
 
 const Document& DocumentView::document() const {
     return impl_->doc;
+}
+
+SearchSession& DocumentView::search() {
+    return *impl_->session;
+}
+
+const SearchSession& DocumentView::search() const {
+    return *impl_->session;
 }
 
 }  // namespace litepdf::core

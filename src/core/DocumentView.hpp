@@ -1,17 +1,30 @@
 #pragma once
 
 // core::DocumentView — per-tab container bundling a Document with its
-// RenderEngine, PageCache, and a UI-thread fz_context* clone (D3).
+// RenderEngine, PageCache, a UI-thread fz_context* clone (D3), and
+// (Phase 6) a per-tab SearchSession.
 // Phase 3 Task 4. UI-agnostic: the Win32 MainWindow / PdfCanvas built
 // on top of this in later Phase 3 tasks owns one DocumentView per tab.
 //
 // Lifetime contract (enforced by ~DocumentView):
-//   1. RenderEngine destructed first — joins worker threads, so no
+//   1. SearchSession destructed first — drops the strong ref to its
+//      internal State; any in-flight worker task still holds its own
+//      shared_ptr copy, so State survives until workers finish, but the
+//      session-side observer no longer sees updates.
+//   2. RenderEngine destructed second — joins worker threads, so no
 //      worker can still be touching the cache afterwards.
-//   2. PageCache destructed second — drops any pixmaps / display lists
-//      still in L1/L2 using the UI-thread fz_context.
-//   3. UI-thread fz_context dropped third.
-//   4. Document cleaned up last via unique_ptr.
+//   3. PageCache destructed third — drops any pixmaps / display lists
+//      still in L1/L2 using the cache fz_context.
+//   4. UI-thread fz_context dropped fourth.
+//   5. Document cleaned up last via unique_ptr — in-flight search
+//      workers capture `const Document&` by reference; Document must
+//      outlive those tasks. Since the SearchDispatcher is owned ABOVE
+//      DocumentView (in MainWindow) and outlives every tab, any task
+//      still running after DocumentView destruction keeps a
+//      shared_ptr<State> alive but also needs Document alive — that is
+//      guaranteed by declaring SearchSession AFTER Document in Impl so
+//      it destructs FIRST, and by having the dispatcher outlive all
+//      DocumentViews (enforced at the MainWindow level).
 
 #include <cstddef>
 #include <filesystem>
@@ -26,20 +39,26 @@
 struct fz_pixmap;
 struct fz_context;
 
+namespace litepdf::app { class ISearchDispatcher; }
+
 namespace litepdf::core {
 
 class RenderEngine;
 class PageCache;
+class SearchSession;
 
 class DocumentView {
 public:
     enum class ZoomMode { FitWidth, FitPage, Custom };
 
     // Takes ownership of an already-opened Document. Constructs the
-    // per-tab cache + engine + UI-thread context clone.
+    // per-tab cache + engine + UI-thread context clone + SearchSession.
+    // `dispatcher` must outlive this DocumentView (MainWindow owns one
+    // ThreadPoolDispatcher for all tabs — see Phase 6 design §4 D5).
     // Throws std::runtime_error if `doc` is not opened (clone_context
     // returns null) or if context cloning fails (e.g. OOM).
     explicit DocumentView(Document doc,
+                          litepdf::app::ISearchDispatcher& dispatcher,
                           std::size_t num_workers = 2,
                           std::size_t l1_capacity = 5,
                           std::size_t l2_capacity = 10);
@@ -104,6 +123,11 @@ public:
     // page count, etc.). The Document reference is valid for the
     // lifetime of this DocumentView.
     const Document& document() const;
+
+    // Per-tab SearchSession. The reference is stable for the lifetime
+    // of this DocumentView; do NOT cache across tab close/reopen.
+    SearchSession&       search();
+    const SearchSession& search() const;
 
 private:
     struct Impl;
