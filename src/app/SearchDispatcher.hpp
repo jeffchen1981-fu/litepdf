@@ -4,10 +4,11 @@
 // across all tabs. See Phase 6 design §4 D5.
 //
 // Tasks carry a std::weak_ptr<void> (type-erased SearchState from
-// core/SearchSession.cpp); workers skip expired weaks (tab closed) and
-// stale epochs (query superseded).
+// core/SearchSession.cpp); workers skip expired weaks (tab closed).
+// Epoch-based cancellation is folded into the task's own run lambda:
+// the caller snapshots the epoch at submit time and checks it against
+// state->epoch at run time, returning early on mismatch.
 
-#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -24,11 +25,18 @@ class ISearchDispatcher {
 public:
     struct Task {
         std::weak_ptr<void>   state_weak;        // type-erased SearchState
-        int                   page = 0;
-        std::uint64_t         epoch = 0;
         std::uint8_t          priority = 2;      // 0=P0 highest
-        std::function<void()> run;               // performs the search
-        std::function<bool()> is_current_epoch;  // true if task epoch still current
+        std::function<void()> run;               // performs the search;
+                                                 // caller encodes epoch check inside
+
+        Task() = default;
+        // Move-only: std::function payloads can be heavy (lambdas with
+        // captured shared_ptr + state), and the dispatcher pops-then-moves
+        // from the priority queue — copies would be wasteful and error-prone.
+        Task(const Task&)            = delete;
+        Task& operator=(const Task&) = delete;
+        Task(Task&&) noexcept        = default;
+        Task& operator=(Task&&) noexcept = default;
     };
 
     virtual ~ISearchDispatcher() = default;
@@ -36,9 +44,9 @@ public:
 };
 
 // Synchronous dispatcher for unit tests. Runs tasks on submit() caller
-// thread. Epoch + weak checks still honored. Does NOT ignore priority
-// but does NOT reorder — tasks run in submission order (tests that
-// care about priority should use ThreadPoolDispatcher).
+// thread. Weak check still honored. Does NOT reorder — tasks run in
+// submission order (tests that care about priority should use
+// ThreadPoolDispatcher).
 class InlineDispatcher final : public ISearchDispatcher {
 public:
     void submit(Task t) override;
@@ -74,7 +82,11 @@ private:
     std::condition_variable                                cv_;
     std::priority_queue<Task, std::vector<Task>, TaskCmp>  q_;
     std::vector<std::thread>                               workers_;
-    std::atomic<bool>                                      stop_{false};
+    // Guarded by m_ on every read and write; all writers notify cv_ after
+    // release. Plain bool (not atomic) is deliberate: mixing atomic stores
+    // with condition_variable waits is a well-known lost-wakeup footgun,
+    // and making it atomic invites future contributors to skip the lock.
+    bool                                                   stop_ = false;
 
     void worker_loop();
 };
