@@ -109,11 +109,14 @@ public:
     // @param page        0-based page index.
     // @param needle_utf8 UTF-8 query. Empty returns {}.
     // @param flags       Case sensitivity (ignored on MuPDF 1.24.x; see above).
-    // @param abort_flag  Optional cooperative cancellation pointer. If the
-    //                    pointed int becomes non-zero, MuPDF's fz_cookie.abort
-    //                    path is taken. Because fz_cookie.abort is read by
-    //                    value periodically inside MuPDF, we snapshot it
-    //                    before the call — mid-page cancel is best-effort.
+    // @param abort_flag  Accepted for API forward-compatibility but NOT
+    //                    honored by MuPDF 1.24.11 — fz_search_page does
+    //                    not accept a cookie. A per-page search runs to
+    //                    completion once started. Cross-page cancellation
+    //                    is SearchSession's responsibility (epoch bump).
+    //                    TODO(phase-11): when MuPDF exposes fz_search_page2
+    //                    or an equivalent cookie-accepting variant, honor
+    //                    abort_flag by feeding it through fz_cookie.abort.
     //
     // Thread-safety: same contract as page_text() — not safe to call
     // concurrently on the same Document instance (fz_context is not

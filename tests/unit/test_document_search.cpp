@@ -49,13 +49,18 @@ TEST_CASE("page_hits: case-insensitive matches lowercase needle", "[document][se
     REQUIRE(hits.size() == 12);
 }
 
-TEST_CASE("page_hits: case-sensitive does not match mismatched case", "[document][search][!mayfail]") {
+// Revisit trigger: the Phase 11 MuPDF upgrade (FZ_SEARCH_EXACT /
+// fz_search_page2) is expected to make this test pass. When that happens,
+// Catch2's [!shouldfail] will flip the test RED to force a manual re-audit:
+// remove the tag, adjust the case-sensitivity code path in Document.cpp, and
+// confirm the semantics still match what callers expect.
+TEST_CASE("page_hits: case-sensitive does not match mismatched case", "[document][search][!shouldfail]") {
     // MuPDF 1.24.11's fz_search_page is always case-insensitive (canon() in
     // stext-search.c uppercases every codepoint before matching). This test
     // therefore fails on 1.24.x: lowercase "lorem" still matches "Lorem".
-    // Marked [!mayfail] so the suite stays green; will pass once we upgrade
-    // to a MuPDF that exposes FZ_SEARCH_EXACT / fz_search_page2 (Phase 11),
-    // or when we route case-sensitive queries through a custom stext matcher.
+    // Marked [!shouldfail] so Catch2 inverts the expectation — the failing
+    // REQUIRE below counts as a pass today, and if a future MuPDF upgrade
+    // makes it actually pass, Catch2 will flip it RED so we revisit.
     Document doc = open_search_fixture();
     Document::SearchFlags f{true};  // match_case=true
     auto hits = doc.page_hits(0, "lorem", f);  // lowercase; fixture uses "Lorem"

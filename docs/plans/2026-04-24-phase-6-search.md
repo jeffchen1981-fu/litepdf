@@ -552,6 +552,11 @@ Edit `src/core/Document.hpp`, after `outline()`:
         std::atomic<int>* abort_flag = nullptr) const;
 ```
 
+**Updated 2026-04-24 post-implementation:** page_hits uses the Document's root
+fz_context directly (same contract as page_text — single-caller). SearchSession
+workers in Task 5 MUST call `doc.clone_context()` per worker thread before
+dispatching page_hits tasks. This matches RenderEngine's worker-context model.
+
 Also add at the top of the file:
 ```cpp
 #include <atomic>

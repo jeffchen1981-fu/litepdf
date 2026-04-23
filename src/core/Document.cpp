@@ -339,12 +339,10 @@ std::vector<Document::PageHit> Document::page_hits(
     fz_context* ctx = impl_->ctx;
     fz_page* pg = nullptr;
 
-    // fz_cookie.abort is read by value periodically inside MuPDF. We snapshot
-    // the atomic once before the call; mid-page cancellation is therefore
-    // best-effort for long pages. Cross-page cancellation is handled one
-    // level up by SearchSession's epoch bump (Task 5).
-    fz_cookie cookie = {};
-    if (abort_flag) cookie.abort = abort_flag->load();
+    // abort_flag is accepted for API forward-compatibility but not honored
+    // by MuPDF 1.24.11 — fz_search_page takes no fz_cookie. See the header
+    // comment on page_hits for the phase-11 upgrade path.
+    (void)abort_flag;
 
     // Cap per-page hits. Larger than typical query hit counts; if a page
     // exceeds this we simply drop the tail — acceptable for v1 search UI.
@@ -369,6 +367,17 @@ std::vector<Document::PageHit> Document::page_hits(
         return out;
     }
 
+    // D15: log when the per-page hit cap is reached so ops can see truncation.
+    // Placed before the extraction loop so the log fires even if reserve() or
+    // push_back() throws. TODO(phase-6.x): surface hit_limit_reached flag to
+    // SearchSession per design D15 (may require changing return type to
+    // include metadata).
+    if (n == kMaxQuads) {
+        std::fprintf(stderr,
+            "litepdf: page_hits: hit cap %d reached on page %zu — tail dropped\n",
+            kMaxQuads, page);
+    }
+
     out.reserve(static_cast<std::size_t>(n));
     for (int i = 0; i < n; ++i) {
         PageHit h{};
@@ -376,8 +385,8 @@ std::vector<Document::PageHit> Document::page_hits(
         h.ur_x = quads[i].ur.x; h.ur_y = quads[i].ur.y;
         h.ll_x = quads[i].ll.x; h.ll_y = quads[i].ll.y;
         h.lr_x = quads[i].lr.x; h.lr_y = quads[i].lr.y;
-        // Minimal v1 snippet — the needle itself. A centered 30-char
-        // window is a Phase 6.2 upgrade once stext-based matching lands.
+        // TODO(phase-6.2): replace with a centered ~30-char snippet once
+        // stext-backed matching lands. v1 returns just the needle itself.
         h.snippet_utf8 = std::string(needle_utf8);
         out.push_back(std::move(h));
     }
