@@ -98,10 +98,13 @@ The Document class stays UI-agnostic and headless-testable (Phase 1 contract pre
 ### D3. `PageCache::peek_display_list` is read-only
 Signature:
 ```cpp
-// Returns a borrowed, non-owning fz_display_list* if page `p` is currently
+// Returns a borrowed, non-owning fz_display_list* if the page is currently
 // in L2; nullptr otherwise. Does NOT update the LRU recency — search
 // must be a neutral observer, never a cache pollutant.
-fz_display_list* peek_display_list(std::size_t p) const;
+//
+// Uses `int page_num` to stay consistent with the existing
+// get_display_list / put_display_list siblings from Phase 2.
+fz_display_list* peek_display_list(int page_num) const;
 ```
 
 This is the single new public API added to `PageCache` in Phase 6. Render-path behavior is untouched.
