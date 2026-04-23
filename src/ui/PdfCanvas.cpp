@@ -8,6 +8,7 @@
 #include <d2d1.h>
 #include <d2d1_1.h>
 #include <wrl/client.h>
+#include <algorithm>
 #include <mutex>
 #include <stdexcept>
 #pragma comment(lib, "d2d1.lib")
@@ -84,6 +85,19 @@ struct PdfCanvas::Impl {
     // new bitmap arrives. No clamping in Phase 3 — user can pan off-canvas.
     float                         pan_x = 0.0f;
     float                         pan_y = 0.0f;
+
+    // --- Phase 6 Task 9: search hit overlay ---
+    // Device-bound brushes. Created in create_render_target, released
+    // in discard_render_target (mirroring the rt lifecycle).
+    ComPtr<ID2D1SolidColorBrush>  brush_hit_other_fill;
+    ComPtr<ID2D1SolidColorBrush>  brush_hit_current_fill;
+    ComPtr<ID2D1SolidColorBrush>  brush_hit_current_stroke;
+
+    // Hits source and current-hit marker. hits_fn may be null if the
+    // owner hasn't wired search yet — paint loop treats that as "no
+    // overlay". current_hit is std::nullopt when no hit is selected.
+    PdfCanvas::HitsFn             hits_fn;
+    std::optional<litepdf::core::SearchSession::Hit> current_hit;
 };
 
 void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
@@ -112,6 +126,77 @@ void PdfCanvas::set_pan(float x, float y) {
     impl_->pan_x = x;
     impl_->pan_y = y;
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void PdfCanvas::set_hits_source(HitsFn fn) {
+    if (!impl_) return;
+    impl_->hits_fn = std::move(fn);
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void PdfCanvas::set_current_hit(std::optional<litepdf::core::SearchSession::Hit> h) {
+    if (!impl_) return;
+    impl_->current_hit = std::move(h);
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
+    if (!impl_ || !impl_->view || !hwnd_) return;
+
+    // Page switch if needed. Caller drives kick_render afterwards.
+    const int target_pg = static_cast<int>(h.page);
+    if (impl_->view->current_page() != target_pg) {
+        impl_->view->set_current_page(target_pg);
+        // Reset pan so the new page lands at its natural fit origin;
+        // new_pan_y below will then recenter on the hit once the fresh
+        // bitmap arrives. Without this, a large stale pan from the old
+        // page could push the hit off-screen on the new page.
+        impl_->pan_x = 0.0f;
+        impl_->pan_y = 0.0f;
+    }
+
+    // Transform the hit quad to viewport-DIP space using the same
+    // pdf_pt → DIP mapping as on_paint.
+    //   quad_dip_top = dst.top  + ul_y * zoom_scale * fit_scale
+    //   quad_dip_bot = dst.top  + ll_y * zoom_scale * fit_scale
+    // We may not have a bitmap yet (e.g. after a page change), in which
+    // case fit_scale is unknown. Fall back to InvalidateRect only.
+    if (!impl_->current_bitmap || !impl_->rt) {
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+
+    D2D1_SIZE_F src = impl_->current_bitmap->GetSize();
+    D2D1_SIZE_F vp  = impl_->rt->GetSize();
+    float fit_scale = vp.width / src.width;
+    if (src.height * fit_scale > vp.height) fit_scale = vp.height / src.height;
+    const float dst_h_unpanned = src.height * fit_scale;
+    const float dy = (vp.height - dst_h_unpanned) * 0.5f;
+
+    const float zoom = impl_->view->zoom_scale();
+    const float s    = zoom * fit_scale;
+
+    // Axis-aligned Y span of the quad in pdf-points.
+    const float q_min_y_pt = std::min({ h.geom.ul_y, h.geom.ur_y,
+                                        h.geom.ll_y, h.geom.lr_y });
+    const float q_max_y_pt = std::max({ h.geom.ul_y, h.geom.ur_y,
+                                        h.geom.ll_y, h.geom.lr_y });
+
+    // Already-visible check uses the current pan_y.
+    const float q_top_dip = dy + impl_->pan_y + q_min_y_pt * s;
+    const float q_bot_dip = dy + impl_->pan_y + q_max_y_pt * s;
+    const float margin    = 24.0f;
+    if (q_top_dip >= margin && q_bot_dip <= vp.height - margin) {
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+
+    // Pan so the quad's center sits at the viewport's vertical center.
+    // center_dip = dy + pan_y + q_center_pt * s = vp.height * 0.5
+    const float q_center_pt = (q_min_y_pt + q_max_y_pt) * 0.5f;
+    impl_->pan_y = vp.height * 0.5f - dy - q_center_pt * s;
+
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void PdfCanvas::register_class_once(HINSTANCE hInstance) {
@@ -341,9 +426,28 @@ void PdfCanvas::create_render_target() {
         return;
     }
     impl_->last_size = sz;
+
+    // Hit-overlay brushes. Yellow fill for non-current hits; orange fill
+    // + darker orange stroke for the current hit. All three are device-
+    // bound and must be recreated on device loss (released in
+    // discard_render_target). Failures just leave the ComPtr null — the
+    // paint loop null-checks before use.
+    impl_->rt->CreateSolidColorBrush(
+        D2D1::ColorF(1.0f, 1.0f, 0.0f, 0.40f),
+        &impl_->brush_hit_other_fill);
+    impl_->rt->CreateSolidColorBrush(
+        D2D1::ColorF(1.0f, 0.647f, 0.0f, 0.50f),
+        &impl_->brush_hit_current_fill);
+    impl_->rt->CreateSolidColorBrush(
+        D2D1::ColorF(0.8f, 0.467f, 0.0f, 1.0f),
+        &impl_->brush_hit_current_stroke);
 }
 
 void PdfCanvas::discard_render_target() {
+    // Brushes first — they're device-bound to the rt.
+    impl_->brush_hit_other_fill.Reset();
+    impl_->brush_hit_current_fill.Reset();
+    impl_->brush_hit_current_stroke.Reset();
     impl_->current_bitmap.Reset();
     impl_->rt.Reset();
 }
@@ -458,6 +562,63 @@ void PdfCanvas::on_paint() {
                                       dy + dst_h + impl_->pan_y);
         impl_->rt->DrawBitmap(impl_->current_bitmap.Get(), dst, 1.0f,
                               D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+
+        // --- Phase 6 Task 9: search hit overlay ---
+        // PDF-point → viewport-DIP mapping:
+        //   bitmap_pixel = pdf_point * zoom_scale   (RenderEngine passes
+        //     fz_scale(scale, scale) to MuPDF; bitmap DPI is the D2D
+        //     default of 96, so bitmap DIPs equal bitmap pixels.)
+        //   viewport_DIP = bitmap_DIP * scale + dst_origin
+        // where scale/dst_origin are the fit-to-viewport values above.
+        // Combined: viewport_DIP = pdf_pt * (zoom_scale * scale)
+        //                        + (dst.left, dst.top).
+        // MuPDF 1.24 page coords are top-left origin, Y-down — matching
+        // D2D — so no Y-flip. Quads are drawn as axis-aligned bounding
+        // boxes (v1); rotated-text quads would need a transformed
+        // geometry in a follow-up.
+        if (impl_->hits_fn && impl_->view
+            && impl_->brush_hit_other_fill && impl_->brush_hit_current_fill) {
+            const float zoom = impl_->view->zoom_scale();
+            const float s    = zoom * scale;
+            const float ox   = dst.left;
+            const float oy   = dst.top;
+            const std::size_t pg = static_cast<std::size_t>(
+                impl_->view->current_page());
+
+            const auto hits = impl_->hits_fn(pg);
+            for (const auto& hit : hits) {
+                const auto& q = hit.geom;
+                // Axis-aligned bounding box from the 4 quad corners.
+                const float min_x = std::min({ q.ul_x, q.ur_x, q.ll_x, q.lr_x });
+                const float max_x = std::max({ q.ul_x, q.ur_x, q.ll_x, q.lr_x });
+                const float min_y = std::min({ q.ul_y, q.ur_y, q.ll_y, q.lr_y });
+                const float max_y = std::max({ q.ul_y, q.ur_y, q.ll_y, q.lr_y });
+
+                D2D1_RECT_F r = D2D1::RectF(
+                    ox + min_x * s,
+                    oy + min_y * s,
+                    ox + max_x * s,
+                    oy + max_y * s);
+
+                const bool is_current =
+                    impl_->current_hit.has_value()
+                    && impl_->current_hit->page == hit.page
+                    && impl_->current_hit->geom.ul_x == q.ul_x
+                    && impl_->current_hit->geom.ul_y == q.ul_y
+                    && impl_->current_hit->geom.lr_x == q.lr_x
+                    && impl_->current_hit->geom.lr_y == q.lr_y;
+
+                if (is_current) {
+                    impl_->rt->FillRectangle(r, impl_->brush_hit_current_fill.Get());
+                    if (impl_->brush_hit_current_stroke) {
+                        impl_->rt->DrawRectangle(
+                            r, impl_->brush_hit_current_stroke.Get(), 1.0f);
+                    }
+                } else {
+                    impl_->rt->FillRectangle(r, impl_->brush_hit_other_fill.Get());
+                }
+            }
+        }
     }
 
     HRESULT hr = impl_->rt->EndDraw();
