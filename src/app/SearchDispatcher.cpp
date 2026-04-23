@@ -7,13 +7,12 @@ namespace litepdf::app {
 
 namespace {
 
-// A task is runnable only if its owning state is still alive AND the
-// task's epoch matches the current epoch on that state. Either check
-// missing (empty std::function) falls back to "assume still current".
+// A task is runnable only if its owning state is still alive. Epoch
+// checking is the caller's responsibility — folded into t.run itself
+// (see header). Trivial enough to inline; kept as a named helper for
+// readability at the call sites.
 bool is_runnable(const ISearchDispatcher::Task& t) {
-    if (t.state_weak.expired()) return false;
-    if (t.is_current_epoch && !t.is_current_epoch()) return false;
-    return true;
+    return !t.state_weak.expired();
 }
 
 }  // namespace
@@ -22,13 +21,15 @@ bool is_runnable(const ISearchDispatcher::Task& t) {
 // InlineDispatcher
 // ---------------------------------------------------------------------------
 void InlineDispatcher::submit(Task t) {
-    if (!is_runnable(t)) return;
-    if (!t.run) return;
+    // Broad try/catch: even the runnability check or lambda invocation of
+    // a user-provided functor could conceivably throw. Swallow everything
+    // to keep the caller thread alive — search work should not throw, and
+    // this path is primarily for tests.
     try {
+        if (!is_runnable(t)) return;
+        if (!t.run) return;
         t.run();
     } catch (...) {
-        // Search work should not throw; swallow to keep the caller thread
-        // alive. Production uses ThreadPoolDispatcher; this path is tests.
         std::fprintf(stderr, "InlineDispatcher: task threw exception\n");
     }
 }
@@ -46,7 +47,7 @@ ThreadPoolDispatcher::ThreadPoolDispatcher(std::size_t num_workers) {
         // Rollback: signal stop, join whatever we spawned, rethrow.
         {
             std::lock_guard<std::mutex> g(m_);
-            stop_.store(true);
+            stop_ = true;
         }
         cv_.notify_all();
         for (auto& w : workers_) {
@@ -59,7 +60,7 @@ ThreadPoolDispatcher::ThreadPoolDispatcher(std::size_t num_workers) {
 ThreadPoolDispatcher::~ThreadPoolDispatcher() {
     {
         std::lock_guard<std::mutex> g(m_);
-        stop_.store(true);
+        stop_ = true;
     }
     cv_.notify_all();
     for (auto& w : workers_) {
@@ -80,22 +81,27 @@ void ThreadPoolDispatcher::worker_loop() {
         Task task;
         {
             std::unique_lock<std::mutex> lk(m_);
-            cv_.wait(lk, [this] { return stop_.load() || !q_.empty(); });
+            cv_.wait(lk, [this] { return stop_ || !q_.empty(); });
             // Drain-before-exit: only return once BOTH the stop flag is set
             // AND the queue is empty. This guarantees in-flight queued tasks
             // complete before ~ThreadPoolDispatcher() returns.
-            if (stop_.load() && q_.empty()) return;
-            // std::priority_queue::top() returns const&, so we copy the task
-            // out before popping. Task holds two std::function objects and
-            // a handful of PODs; the copy cost is a couple of shared_ptr
-            // refcount bumps inside the lambdas — acceptable for the
-            // clarity win over const_cast gymnastics.
-            task = q_.top();
+            if (stop_ && q_.empty()) return;
+            // std::priority_queue::top() returns const&, which prevents a
+            // plain move. const_cast is safe here because (a) we hold m_
+            // exclusively, so no other thread can observe the moved-from
+            // element, and (b) the next line pops it unconditionally. This
+            // idiom is widely used (e.g. folly, abseil) as the standard
+            // workaround for priority_queue's const top().
+            task = std::move(const_cast<Task&>(q_.top()));
             q_.pop();
         }
-        if (!is_runnable(task)) continue;
-        if (!task.run) continue;
+        // Broad try/catch: is_runnable is trivial today, but wrapping it
+        // (along with the run() call) defends against future changes or
+        // user-provided functors that may throw. A bare throw here would
+        // terminate the worker thread and silently shrink the pool.
         try {
+            if (!is_runnable(task)) continue;
+            if (!task.run) continue;
             task.run();
         } catch (...) {
             std::fprintf(stderr, "SearchDispatcher: worker caught exception\n");

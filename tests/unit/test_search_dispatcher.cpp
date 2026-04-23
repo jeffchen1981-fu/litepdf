@@ -21,19 +21,21 @@ struct MockState {
     std::mutex                 m;
 };
 
+// Build a task whose run() encodes the epoch check itself. This mirrors
+// the real call site (Task 5): the caller snapshots `epoch` at submit
+// time and compares it to state->epoch.load() at run time, returning
+// early on a stale epoch.
 ISearchDispatcher::Task make_task(std::shared_ptr<MockState> s, int page,
                                   std::uint64_t epoch,
                                   std::uint8_t priority = 2) {
     ISearchDispatcher::Task t{};
     t.state_weak = s;
-    t.page       = page;
-    t.epoch      = epoch;
     t.priority   = priority;
-    t.run        = [s, page]() {
+    t.run        = [s, page, epoch]() {
+        if (s->epoch.load() != epoch) return;  // stale — skip
         std::lock_guard<std::mutex> g(s->m);
         s->pages_processed.push_back(page);
     };
-    t.is_current_epoch = [s, epoch]() { return s->epoch.load() == epoch; };
     return t;
 }
 
@@ -100,11 +102,10 @@ TEST_CASE("ThreadPoolDispatcher respects task priority",
     {
         ISearchDispatcher::Task gate{};
         gate.state_weak = s;
-        gate.page       = 999;
-        gate.epoch      = 0;
         gate.priority   = 2;  // same P2 as the bulk, doesn't matter — it's
                               // already the only queued item when submitted.
         gate.run = [&, s]() {
+            if (s->epoch.load() != 0) return;  // epoch check folded in
             {
                 std::lock_guard<std::mutex> gl(gate_m);
                 gate_entered = true;
@@ -116,7 +117,6 @@ TEST_CASE("ThreadPoolDispatcher respects task priority",
             std::lock_guard<std::mutex> g(s->m);
             s->pages_processed.push_back(999);
         };
-        gate.is_current_epoch = [s]() { return s->epoch.load() == 0; };
         pool.submit(std::move(gate));
     }
 
