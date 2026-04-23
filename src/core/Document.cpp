@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <cctype>
 #include <cstdio>
@@ -317,6 +318,70 @@ fz_context* Document::clone_context() const {
     // must treat the nullptr return as a recoverable error, not just as
     // "document not opened".
     return fz_clone_context(impl_->ctx);
+}
+
+std::vector<Document::PageHit> Document::page_hits(
+    std::size_t page,
+    std::string_view needle_utf8,
+    SearchFlags flags,
+    std::atomic<int>* abort_flag) const
+{
+    std::vector<PageHit> out;
+    if (!is_open() || needle_utf8.empty()) return out;
+
+    // match_case is intentionally ignored on MuPDF 1.24.x — see the header
+    // comment on SearchFlags. Silence the unused-parameter warning.
+    (void)flags;
+
+    // fz_search_page / fz_search_stext_page expect a NUL-terminated char*.
+    const std::string needle(needle_utf8);
+
+    fz_context* ctx = impl_->ctx;
+    fz_page* pg = nullptr;
+
+    // fz_cookie.abort is read by value periodically inside MuPDF. We snapshot
+    // the atomic once before the call; mid-page cancellation is therefore
+    // best-effort for long pages. Cross-page cancellation is handled one
+    // level up by SearchSession's epoch bump (Task 5).
+    fz_cookie cookie = {};
+    if (abort_flag) cookie.abort = abort_flag->load();
+
+    // Cap per-page hits. Larger than typical query hit counts; if a page
+    // exceeds this we simply drop the tail — acceptable for v1 search UI.
+    constexpr int kMaxQuads = 256;
+    fz_quad quads[kMaxQuads] = {};
+    int marks[kMaxQuads] = {};
+    int n = 0;
+
+    fz_try(ctx) {
+        pg = fz_load_page(ctx, impl_->doc, static_cast<int>(page));
+        // MuPDF 1.24.11 only exposes fz_search_page (always case-insensitive).
+        // When we upgrade to a MuPDF with fz_search_page2 + FZ_SEARCH_EXACT,
+        // switch on flags.match_case here.
+        n = fz_search_page(ctx, pg, needle.c_str(), marks, quads, kMaxQuads);
+    }
+    fz_always(ctx) {
+        if (pg) fz_drop_page(ctx, pg);
+    }
+    fz_catch(ctx) {
+        std::fprintf(stderr, "litepdf: page_hits failed on page %zu: %s\n",
+                     page, fz_caught_message(ctx));
+        return out;
+    }
+
+    out.reserve(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        PageHit h{};
+        h.ul_x = quads[i].ul.x; h.ul_y = quads[i].ul.y;
+        h.ur_x = quads[i].ur.x; h.ur_y = quads[i].ur.y;
+        h.ll_x = quads[i].ll.x; h.ll_y = quads[i].ll.y;
+        h.lr_x = quads[i].lr.x; h.lr_y = quads[i].lr.y;
+        // Minimal v1 snippet — the needle itself. A centered 30-char
+        // window is a Phase 6.2 upgrade once stext-based matching lands.
+        h.snippet_utf8 = std::string(needle_utf8);
+        out.push_back(std::move(h));
+    }
+    return out;
 }
 
 std::vector<Document::OutlineEntry> Document::outline() const {
