@@ -365,6 +365,16 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
 
 void MainWindow::on_tab_close_request(int index) {
     if (!tabs_) return;
+    // Defense-in-depth against C2: if a cross-tab scan is in flight
+    // (results panel visible == dispatch active), drop its sentinel and
+    // restore per-session observers BEFORE destroying the tab. The
+    // chained observer lambda held by each SearchSession captures
+    // `view` / `sess` by raw pointer; clearing now means any task that
+    // finishes during ~SearchSession's drain (C1) will see an expired
+    // weak_sentinel and return early without touching the dying view.
+    if (cross_tab_ && results_panel_ && results_panel_->visible()) {
+        cross_tab_->clear();
+    }
     tabs_->close_tab(index);
     // close_tab() fires on_switch (with new_active=-1 when the last tab
     // is dropped); on_tab_switch() performs all the canvas/outline/layout
@@ -823,8 +833,7 @@ void MainWindow::on_find_open() {
 }
 
 void MainWindow::on_find_query_changed(const std::wstring& q, bool mc) {
-    last_find_query_       = q;
-    find_bar_match_case_   = mc;
+    last_find_query_ = q;
     auto* v = active_view();
     if (!v) return;
     v->search().set_query(q, {mc});
@@ -1013,12 +1022,9 @@ void MainWindow::on_results_close() {
     if (!results_panel_) return;
     results_panel_->hide();
     // Drop the cross-tab sentinel (stale hits on this panel after reopen
-    // would otherwise keep weak_ptrs alive) and detach our observers
-    // from every captured SearchSession. MainWindow's per-tab find-bar
-    // observer is re-installed when a tab is reopened (WM_USER_OPEN_OK)
-    // or on the next cross-tab dispatch; in the interim, scan-progress
-    // updates for Ctrl+F counters may be briefly missed — acceptable per
-    // Phase 6 design §4 D11.
+    // would otherwise keep weak_ptrs alive) and restore each tab's
+    // previous on_update observer so the per-tab find-bar counter
+    // resumes immediately on Ctrl+F (I1 fix in CrossTabSearch::clear).
     if (cross_tab_) cross_tab_->clear();
     on_layout();
     if (canvas_) SetFocus(canvas_->hwnd());

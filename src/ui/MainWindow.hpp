@@ -126,7 +126,9 @@ private:
     // 0 = hidden; first Ctrl+Shift+F / F6 seeds to max(200 px, 1/3 client).
     int                           results_panel_height_px_ = 0;
     std::wstring                  last_find_query_;
-    bool                          find_bar_match_case_ = false;
+    // TODO(phase-6.x): preserve match-case across find-bar reopens once
+    // FindBar::show_or_focus grows a second arg. For now each reopen
+    // inherits whatever checkbox state the bar keeps internally.
     litepdf::core::MruList        mru_;
     bool                          log_timings_ = false;
 };

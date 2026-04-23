@@ -109,7 +109,7 @@ Captured at `v0.0.7-phase6` tag. See `docs/plans/2026-04-24-phase-6-search-desig
 - **`fz_cookie::abort` is not honored by MuPDF 1.24.11's search path.** In-progress per-page searches run to completion; cross-page cancellation is handled by `SearchSession` epoch bump. Phase 11 MuPDF upgrade will enable true mid-page abort.
 - **SearchDispatcher is 2-worker fixed.** Adequate per design §5.4 "tabs run in parallel", but Phase 11 benchmark data may motivate DPI-/CPU-count-adaptive sizing.
 - **Cross-tab results `N hits` counter is total-only.** Plan's ideal format is "m / n" (current / total) but `SearchSession` doesn't expose cursor index; a Phase 6.x follow-up adds `cursor_index()` and flips the counter format.
-- **FindBar counter refreshes paused during cross-tab scan.** `CrossTabSearch::dispatch` installs an observer chain; `clear()` sets empty observer and MainWindow reinstalls find-bar counter updater on the next tab switch or Ctrl+F. Documented in `CrossTabSearch.hpp`.
+- **FindBar counter refreshes during cross-tab scan: resolved.** `CrossTabSearch::clear()` restores each tab's previous on_update observer, so the per-tab find-bar counter resumes updating the moment the results panel is dismissed. `dispatch()` also calls `clear()` first so repeated Ctrl+Shift+F invocations don't stack chained lambdas.
 
 ## Out of Scope (post-v1.0)
 
