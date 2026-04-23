@@ -39,6 +39,11 @@ constexpr UINT WM_USER_OPEN_FAILED   = WM_USER + 2;
 // scan_complete flips). Cheap — handler just reads hit_count/scan_complete
 // and refreshes the counter + invalidates the canvas.
 constexpr UINT WM_USER_SEARCH_UPDATE = WM_USER + 10;
+// Phase 6 Tasks 11-14: CrossTabSearch aggregation observer fires on a
+// worker thread as each per-tab SearchSession's page scan completes.
+// PostMessage-marshals to this message on the UI thread so the docked
+// ResultsPanel can ListView_SetItemCountEx without cross-thread UI calls.
+constexpr UINT WM_USER_CROSS_TAB_UPDATE = WM_USER + 11;
 
 // "&1 foo.pdf", "&2 foo.pdf", ..., "&9 foo.pdf", "1&0 foo.pdf".
 // The '&' marks the mnemonic character (Alt-shortcut).
@@ -198,7 +203,17 @@ void MainWindow::on_layout() {
     }
 
     const int row_y = tab_h;
-    const int row_h = std::max(0, h - tab_h);
+
+    // Phase 6 Tasks 12-13: reserve bottom space for splitter + results
+    // panel when visible. Splitter is 4 DIP tall, docked immediately
+    // above the panel. When the panel is hidden (panel_h == 0), both
+    // vanish and the canvas spans the full remaining vertical strip.
+    const int panel_h = (results_panel_ && results_panel_->visible())
+                         ? results_panel_height_px_ : 0;
+    const int splitter_h = (panel_h > 0)
+                           ? MulDiv(4, static_cast<int>(dpi), 96) : 0;
+    const int canvas_bottom = h - panel_h - splitter_h;
+    const int row_h = std::max(0, canvas_bottom - row_y);
 
     const int outline_w = MulDiv(250, static_cast<int>(dpi), 96);
 
@@ -221,6 +236,23 @@ void MainWindow::on_layout() {
                          0, row_y, w, row_h,
                          SWP_NOZORDER | SWP_NOACTIVATE);
         }
+    }
+
+    // Splitter + results panel bottom strip.
+    if (splitter_) {
+        if (panel_h > 0 && splitter_h > 0) {
+            RECT sr = { 0, canvas_bottom, w, canvas_bottom + splitter_h };
+            splitter_->set_bounds(sr);
+            if (splitter_->hwnd()) {
+                ShowWindow(splitter_->hwnd(), SW_SHOW);
+            }
+        } else if (splitter_->hwnd()) {
+            ShowWindow(splitter_->hwnd(), SW_HIDE);
+        }
+    }
+    if (results_panel_ && panel_h > 0) {
+        RECT pr = { 0, canvas_bottom + splitter_h, w, h };
+        results_panel_->set_bounds(pr);
     }
 
     // Phase 6 Task 10: anchor the find bar to the canvas's top-right.
@@ -367,6 +399,54 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // No active tab yet, so canvas_->set_hits_source wiring is a
             // no-op. We set it once on first tab open via
             // update_canvas_hits_source() (called from on_tab_switch).
+
+            // Phase 6 Tasks 11-14: cross-tab search orchestrator + bottom
+            // results panel + drag splitter. Created at WM_CREATE for
+            // cleaner lifetime than lazy allocation on first Ctrl+Shift+F.
+            // ResultsPanel + Splitter are hidden via results_panel_->hide()
+            // and the layout branch in on_layout() (panel_h == 0 suppresses
+            // splitter positioning); they become visible on first
+            // IDM_CROSS_TAB_FIND / IDM_TOGGLE_RESULTS.
+            cross_tab_     = std::make_unique<litepdf::app::CrossTabSearch>();
+            results_panel_ = std::make_unique<ResultsPanel>(
+                cs->hInstance, hwnd, *cross_tab_);
+            splitter_      = std::make_unique<Splitter>(cs->hInstance, hwnd);
+            // Hide both until first Ctrl+Shift+F. ResultsPanel is created
+            // with WS_CHILD only (no WS_VISIBLE) so hide() is the no-op
+            // path; Splitter is created with WS_VISIBLE so we explicitly
+            // hide it here.
+            results_panel_->hide();
+            if (splitter_->hwnd()) {
+                ShowWindow(splitter_->hwnd(), SW_HIDE);
+            }
+            results_panel_->set_on_query_submit(
+                [this](std::wstring q) { on_results_query(q); });
+            results_panel_->set_on_row_click(
+                [this](std::size_t i) { on_results_row_click(i); });
+            results_panel_->set_on_close(
+                [this] { on_results_close(); });
+            splitter_->set_on_drag([this](int new_h) {
+                // Clamp the dragged height so the splitter can't swallow
+                // the canvas entirely — leave at least ~100 px of canvas
+                // visible and refuse a panel shorter than ~80 px (below
+                // which the ListView has no room for even a single row).
+                RECT client; GetClientRect(hwnd_, &client);
+                const int max_h = std::max(80,
+                    static_cast<int>(client.bottom) - 100);
+                results_panel_height_px_ = std::clamp(new_h, 80, max_h);
+                on_layout();
+            });
+            // Observer chains: CrossTabSearch's own aggregator runs on a
+            // worker thread when any tab's SearchSession finishes a page
+            // scan. Marshal to UI thread so ResultsPanel's
+            // ListView_SetItemCountEx is called from the right thread.
+            {
+                HWND target = hwnd;
+                cross_tab_->set_on_update([target] {
+                    PostMessageW(target, WM_USER_CROSS_TAB_UPDATE, 0, 0);
+                });
+            }
+
             DragAcceptFiles(hwnd, TRUE);
             return 0;
         }
@@ -636,11 +716,10 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     }
                     return 0;
                 case IDM_CROSS_TAB_FIND:
+                    on_cross_tab_find();
+                    return 0;
                 case IDM_TOGGLE_RESULTS:
-                    // Phase 6.2 (cross-tab search) and 6.3 (docked results
-                    // panel) land in later tasks. For now, swallow the
-                    // accelerator so it doesn't reach DefWindowProc and
-                    // beep, but do nothing.
+                    on_toggle_results();
                     return 0;
             }
             return 0;
@@ -703,6 +782,9 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         }
         case WM_USER_SEARCH_UPDATE:
             on_search_update_posted();
+            return 0;
+        case WM_USER_CROSS_TAB_UPDATE:
+            if (results_panel_) results_panel_->refresh_count();
             return 0;
         case WM_COPYDATA:
             return on_copydata(hwnd, w, l);
@@ -828,6 +910,118 @@ void MainWindow::on_search_update_posted() {
     if (canvas_) {
         InvalidateRect(canvas_->hwnd(), nullptr, FALSE);
     }
+}
+
+// ---------------- Phase 6 Tasks 11-14: cross-tab search --------------
+
+void MainWindow::on_cross_tab_find() {
+    if (!active_view()) return;      // nothing to search
+    if (!results_panel_) return;
+
+    // First-show sizing: one-third of the client height, floored at
+    // 200 px so the ListView always has room for a handful of rows.
+    if (results_panel_height_px_ == 0) {
+        RECT client; GetClientRect(hwnd_, &client);
+        results_panel_height_px_ = std::max(200,
+            static_cast<int>(client.bottom - client.top) / 3);
+    }
+    results_panel_->show_and_focus_edit();
+    on_layout();
+}
+
+void MainWindow::on_toggle_results() {
+    if (!results_panel_) return;
+    if (results_panel_->visible()) {
+        results_panel_->hide();
+    } else {
+        if (!active_view()) return;  // nothing to search
+        if (results_panel_height_px_ == 0) {
+            RECT client; GetClientRect(hwnd_, &client);
+            results_panel_height_px_ = std::max(200,
+            static_cast<int>(client.bottom - client.top) / 3);
+        }
+        results_panel_->show_and_focus_edit();
+    }
+    on_layout();
+}
+
+void MainWindow::on_results_query(const std::wstring& q) {
+    if (!cross_tab_ || !tabs_) return;
+
+    // Snapshot open tabs for fan-out. Per §D9 the tab list at dispatch
+    // time is frozen; tabs opened afterward are not joined.
+    std::vector<litepdf::app::CrossTabSearch::TabRef> snapshot;
+    snapshot.reserve(static_cast<std::size_t>(tabs_->count()));
+    for (int i = 0; i < tabs_->count(); ++i) {
+        auto* t = tabs_->tab_at(i);
+        if (!t || !t->view) continue;
+        std::wstring label = t->path.filename().wstring();
+        if (label.empty()) label = t->label.empty() ? L"Untitled" : t->label;
+        snapshot.push_back({t->view.get(), std::move(label)});
+    }
+
+    // Cross-tab is independent of the find-bar's case toggle per design —
+    // an empty Flags{} matches the default (case-insensitive). Revisit if
+    // the results panel gains its own case-toggle checkbox.
+    litepdf::core::SearchSession::Flags f{};
+    cross_tab_->dispatch(q, f, std::move(snapshot));
+
+    // Refresh immediately so an empty-query / no-hits case doesn't leave
+    // a stale row count visible until the first worker post lands.
+    if (results_panel_) results_panel_->refresh_count();
+}
+
+void MainWindow::on_results_row_click(std::size_t idx) {
+    if (!cross_tab_ || !tabs_ || !canvas_) return;
+
+    const auto all_hits = cross_tab_->hits();  // snapshot copy
+    if (idx >= all_hits.size()) return;
+    const auto& h = all_hits[idx];
+
+    // Liveness check: sentinel expires on clear() or the next dispatch().
+    // If expired, the owning tab may also be gone; bail without navigation
+    // to avoid dereferencing a dangling view_at_submit.
+    if (h.session_state.expired()) return;
+
+    // Resolve the tab whose DocumentView produced this hit. Linear search
+    // is fine for Phase 6.2 (<=1000 hits, <=32 tabs in practice).
+    int target_idx = -1;
+    for (int i = 0; i < tabs_->count(); ++i) {
+        auto* t = tabs_->tab_at(i);
+        if (t && t->view.get() == h.view_at_submit) {
+            target_idx = i;
+            break;
+        }
+    }
+    if (target_idx < 0) return;
+
+    tabs_->set_active(target_idx);
+    auto* v = active_view();
+    if (!v) return;
+    v->set_current_page(static_cast<int>(h.page));
+
+    // Recompose a Hit for the canvas overlay + scroll. SearchSession::Hit
+    // and CrossTabSearch::Hit share the (page, geom) pair; we copy into
+    // the canvas-native shape.
+    litepdf::core::SearchSession::Hit sh{h.page, h.geom};
+    canvas_->set_current_hit(sh);
+    canvas_->scroll_into_view(sh);
+    kick_render(v->current_page());
+}
+
+void MainWindow::on_results_close() {
+    if (!results_panel_) return;
+    results_panel_->hide();
+    // Drop the cross-tab sentinel (stale hits on this panel after reopen
+    // would otherwise keep weak_ptrs alive) and detach our observers
+    // from every captured SearchSession. MainWindow's per-tab find-bar
+    // observer is re-installed when a tab is reopened (WM_USER_OPEN_OK)
+    // or on the next cross-tab dispatch; in the interim, scan-progress
+    // updates for Ctrl+F counters may be briefly missed — acceptable per
+    // Phase 6 design §4 D11.
+    if (cross_tab_) cross_tab_->clear();
+    on_layout();
+    if (canvas_) SetFocus(canvas_->hwnd());
 }
 
 LRESULT MainWindow::on_copydata(HWND hwnd, WPARAM, LPARAM l) {
