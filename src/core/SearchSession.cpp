@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <iterator>
 #include <mutex>
+#include <thread>
 #include <utility>
 
 namespace litepdf::core {
@@ -34,6 +35,16 @@ struct SearchSession::Impl {
         // can flip the abort flag during set_query() to cut running
         // page scans short.
         std::atomic<int>         abort_flag{0};
+        // Live counter of task lambdas that have been submitted but whose
+        // run() body has not yet returned. Incremented at submit time in
+        // set_query() and decremented by an RAII scope guard at the top
+        // of each task lambda so every early-return path (stale-epoch
+        // skip, MuPDF throw, normal completion) decrements exactly once.
+        // ~SearchSession spins on this counter so no worker is ever
+        // mid-call on doc_ref after the session dtor returns — which
+        // closes the critical UAF window where SearchSession destructs
+        // before Document in DocumentView::Impl's member order.
+        std::atomic<int>         pending_tasks{0};
         std::vector<Hit>         hits;
         std::size_t              cursor = 0;
         std::size_t              pages_remaining = 0;
@@ -75,7 +86,34 @@ SearchSession::SearchSession(const Document& doc,
                              litepdf::app::ISearchDispatcher& disp)
     : impl_(std::make_unique<Impl>(doc, disp)) {}
 
-SearchSession::~SearchSession() = default;
+SearchSession::~SearchSession() {
+    // Drain any in-flight task before letting Document (which outlives
+    // this session only briefly — it's the LAST member of
+    // DocumentView::Impl) go out of scope under the caller's destructor.
+    //
+    // Step 1: bump epoch so queued-but-not-yet-running tasks observe the
+    // new generation and return without calling doc_ref.page_hits().
+    // They still pay one scope-guard decrement each, which is what lets
+    // the drain loop below terminate.
+    auto& st = *impl_->state;
+    st.epoch.fetch_add(1, std::memory_order_acq_rel);
+    // Also set the MuPDF cookie abort flag for any tasks already inside
+    // page_hits(). MuPDF 1.24.11 ignores it, but Phase 11's upgrade will
+    // honor it and cut in-progress scans short.
+    st.abort_flag.store(1, std::memory_order_relaxed);
+
+    // Step 2: spin-wait until every submitted task has executed its
+    // scope guard. Tasks that haven't run yet will be popped off the
+    // dispatcher queue and — seeing the bumped epoch — return
+    // immediately, decrementing the counter inside their guard's dtor.
+    //
+    // Worst case: all N page tasks are sequenced behind a higher-priority
+    // batch on a 2-worker pool; they still burn down in O(N / workers)
+    // epoch-checks. In practice this is microseconds.
+    while (st.pending_tasks.load(std::memory_order_acquire) > 0) {
+        std::this_thread::yield();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // set_query / clear
@@ -137,6 +175,15 @@ void SearchSession::set_query(std::wstring q, Flags f) {
     const std::string            needle_utf8  = utf16_to_utf8(state_strong->query);
     const Flags                  captured_flags = f;
 
+    // Arm the drain counter BEFORE submitting. fetch_add (not store)
+    // because a prior generation's tasks may still be in-flight — they
+    // decrement via their own scope guards, so we must not clobber their
+    // contribution by overwriting. The counter transiently reflects
+    // "sum of in-flight across all generations", which is exactly what
+    // ~SearchSession wants to drain down to zero.
+    st.pending_tasks.fetch_add(static_cast<int>(pages),
+                               std::memory_order_acq_rel);
+
     // Priority: all tasks at P2 in v1. Phase 6.x optimization will use
     // set_reference_page() to bump nearby pages to P0/P1.
     for (std::size_t i = 0; i < pages; ++i) {
@@ -145,6 +192,17 @@ void SearchSession::set_query(std::wstring q, Flags f) {
             std::static_pointer_cast<void>(state_strong));
         t.priority = 2;
         t.run = [state_strong, &doc_ref, i, needle_utf8, captured_flags, ep]() {
+            // RAII drain guard: always decrement pending_tasks on return,
+            // whether we hit the stale-epoch fast exit below, MuPDF
+            // throws out of page_hits, or we complete normally. This is
+            // what makes ~SearchSession's spin-wait terminate.
+            struct Guard {
+                std::shared_ptr<Impl::State> s;
+                ~Guard() {
+                    s->pending_tasks.fetch_sub(1, std::memory_order_acq_rel);
+                }
+            } guard{state_strong};
+
             // Epoch check #1: caller may have bumped state->epoch after
             // we were submitted but before we started running.
             if (state_strong->epoch.load(std::memory_order_acquire) != ep) return;

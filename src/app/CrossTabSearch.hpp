@@ -14,9 +14,11 @@
 // MainWindow's find-bar installs one to refresh counters. dispatch()
 // captures the existing observer via SearchSession::on_update(), chains
 // it ahead of CrossTabSearch's own aggregation callback, and re-installs
-// the chained pair. The original observer is preserved across clear()
-// for the duration of that dispatch only — subsequent dispatch() on the
-// same tab will re-capture whatever is currently installed.
+// the chained pair. clear() restores the previously-captured observer
+// on every tracked session, so the per-tab find-bar counter resumes
+// updating the moment the cross-tab panel is dismissed (I1 fix).
+// dispatch() itself calls clear() first to avoid stacking chained
+// lambdas across repeated Ctrl+Shift+F invocations.
 
 #include "core/Document.hpp"
 #include "core/SearchSession.hpp"
@@ -70,9 +72,9 @@ public:
                   std::vector<TabRef>                   tabs);
 
     // Clear all results, expire the dispatch epoch (so in-flight
-    // aggregation callbacks become no-ops), and install empty observers
-    // on the captured sessions. MainWindow will re-install its own
-    // find-bar observer on the next tab switch or Ctrl+F.
+    // aggregation callbacks become no-ops), and restore each captured
+    // session's previous on_update observer. Safe to call on a fresh
+    // instance or repeatedly.
     void clear();
 
     void set_on_update(OnUpdate cb);

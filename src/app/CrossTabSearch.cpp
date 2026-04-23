@@ -24,10 +24,12 @@ namespace litepdf::app {
 //
 //   * `observers` — per-tab record of (view, previous_observer) so we
 //     can chain the caller's observer ahead of our aggregation callback.
-//     We do not restore the previous observer on clear(); MainWindow is
-//     expected to re-install its own on the next tab switch or Ctrl+F.
-//     Restoring would require gating against concurrent worker callbacks
-//     mid-scan, which is more complexity than Phase 6.2 needs.
+//     On clear() we restore each session's previous observer so that
+//     per-tab find-bar counter updates resume immediately (see I1 fix).
+//     SearchSession::set_on_update takes the session's own mutex, so
+//     the restore race-free against a worker that has already COPIED
+//     the observer out from under the mutex: the worker runs the old
+//     chained observer once more, future events see the restored one.
 // ---------------------------------------------------------------------------
 struct CrossTabSearch::Impl {
     mutable std::mutex                  m;
@@ -63,6 +65,14 @@ CrossTabSearch::~CrossTabSearch() = default;
 void CrossTabSearch::dispatch(std::wstring                        query,
                               litepdf::core::SearchSession::Flags flags,
                               std::vector<TabRef>                 tabs) {
+    // Phase 0: restore per-session observers from any previous dispatch
+    // before we capture `sess.on_update()` below. Without this, a
+    // second cross-tab scan would read the *previous* dispatch's
+    // chained lambda as its "prev" and nest indefinitely on every
+    // Ctrl+Shift+F. clear() is safe to call on a fresh instance too
+    // (no-op).
+    clear();
+
     // Phase 1: drop old state under lock. Dropping the old sentinel
     // here expires every Hit from the previous dispatch, even ones
     // still in `impl_->hits` we're about to clear. This is the epoch
@@ -178,13 +188,20 @@ void CrossTabSearch::clear() {
         impl_->tabs.clear();
     }
 
-    // Drop our observers. MainWindow is expected to reinstall its own
-    // on the next tab switch or Ctrl+F. We do NOT attempt to restore
-    // prev_observer because concurrent worker callbacks could race with
-    // the restore; the simpler contract is "clear() detaches".
+    // Restore each captured SearchSession's previous observer (I1 fix).
+    // Without this, the first cross-tab scan permanently detaches the
+    // per-tab find-bar counter observer that MainWindow installed at
+    // WM_USER_OPEN_OK, so a post-scan Ctrl+F shows a stuck counter.
+    //
+    // Race analysis: SearchSession::set_on_update takes state->m; a
+    // worker currently running the chained observer has already
+    // *copied* the old observer out from under that mutex (see
+    // SearchSession.cpp task lambda, the "cb = state->on_update" copy
+    // under lock) and is executing outside the mutex — safe. Future
+    // on_update() events see the restored observer.
     for (const auto& rec : to_detach) {
         if (rec.view) {
-            rec.view->search().set_on_update(litepdf::core::SearchSession::OnUpdate{});
+            rec.view->search().set_on_update(rec.prev_observer);
         }
     }
 }
