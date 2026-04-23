@@ -43,6 +43,7 @@ add_executable(litepdf WIN32
     src/main.cpp
     src/app/SingleInstance.cpp
     src/ui/ColdStartTimer.cpp
+    src/ui/FindBar.cpp           # Phase 6 Task 8
     src/ui/MainWindow.cpp
     src/ui/OutlinePane.cpp
     src/ui/PdfCanvas.cpp
