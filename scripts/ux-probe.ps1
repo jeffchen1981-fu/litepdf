@@ -9,6 +9,8 @@
 #   ux-probe.ps1 mru-clear                                - Delete the MRU registry key
 #   ux-probe.ps1 file-menu                                - Trigger WM_INITMENUPOPUP, enumerate File submenu items
 #   ux-probe.ps1 tab-enum                                 - JSON dump of tab control state (count/active/labels)
+#   ux-probe.ps1 find-bar-state                           - JSON dump of find-bar child state (present/visible/rect)
+#   ux-probe.ps1 find-open                                - Post WM_COMMAND IDM_FIND (40042) — convenience wrapper
 
 param(
   [Parameter(Mandatory=$true, Position=0)] [string] $Action,
@@ -364,6 +366,46 @@ switch ($Action) {
     [void][W.U32]::PostMessage($dlg, $WM_KEYDOWN, [IntPtr]0x0D, [IntPtr]0)  # VK_RETURN
     [void][W.U32]::PostMessage($dlg, $WM_KEYUP, [IntPtr]0x0D, [IntPtr]0x40000000)
     Write-Host "Sent VK_RETURN to dialog HWND 0x$($dlg.ToInt64().ToString('X8'))"
+  }
+  'find-bar-state' {
+    # Locate a LitePDFFindBar child of the main window, report its
+    # presence / visibility / rect as one line of JSON on stdout. Missing
+    # window reports present=false rather than a non-zero exit, so
+    # callers can poll without try/catch noise.
+    #
+    # TODO(phase-6.x): also report counter text (Static child of the
+    # find bar) so the smoke test can assert "N hits" after a query.
+    # Requires a second FindWindowEx for the Static with counter style,
+    # plus careful buffer handling similar to Tab-Enum above.
+    $h = Get-LitePdfHwnd
+    if ($h -eq [IntPtr]::Zero) {
+      Write-Output '{"present":false,"visible":false}'
+      exit 0
+    }
+    $fb = [W.U32]::FindWindowEx($h, [IntPtr]::Zero, "LitePDFFindBar", [String]::Empty)
+    if ($fb -eq [IntPtr]::Zero) {
+      Write-Output '{"present":false,"visible":false}'
+      exit 0
+    }
+    $vis = [W.U32]::IsWindowVisible($fb)
+    $r = New-Object W.U32+RECT
+    [void][W.U32]::GetWindowRect($fb, [ref]$r)
+    $obj = [ordered]@{
+      present = $true
+      visible = [bool]$vis
+      rect    = @{ left = $r.Left; top = $r.Top; right = $r.Right; bottom = $r.Bottom }
+    }
+    $obj | ConvertTo-Json -Compress
+  }
+  'find-open' {
+    # Convenience: post WM_COMMAND IDM_FIND (40042) and return. Smoke
+    # test has its own send-cmd call; this wrapper exists so a human
+    # running the script manually doesn't need to remember the magic id.
+    $h = Get-LitePdfHwnd
+    if ($h -eq [IntPtr]::Zero) { Write-Error "litepdf window not found"; exit 1 }
+    $WM_COMMAND = 0x0111
+    [void][W.U32]::PostMessage($h, $WM_COMMAND, [IntPtr]40042, [IntPtr]0)
+    Write-Host "Posted IDM_FIND to HWND 0x$($h.ToInt64().ToString('X8'))"
   }
   'tab-enum' {
     # Unlike sibling actions (capture, sendkey, ...), this action must

@@ -6,6 +6,7 @@
 #include "app/SingleInstance.hpp"
 #include "core/Document.hpp"
 #include "core/DocumentView.hpp"
+#include "core/SearchSession.hpp"
 #include "core/TabList.hpp"
 #include "ui/ColdStartTimer.hpp"
 
@@ -29,8 +30,15 @@ namespace {
 constexpr wchar_t kWindowClassName[] = L"LitePDFMainWindow";
 constexpr wchar_t kWindowTitle[]     = L"LitePDF";
 
-constexpr UINT WM_USER_OPEN_OK     = WM_USER + 1;
-constexpr UINT WM_USER_OPEN_FAILED = WM_USER + 2;
+constexpr UINT WM_USER_OPEN_OK       = WM_USER + 1;
+constexpr UINT WM_USER_OPEN_FAILED   = WM_USER + 2;
+// WM_USER + 3 is WM_USER_RENDER_DONE, reserved by PdfCanvas.
+// Phase 6 Task 10: per-tab SearchSession on_update() observer fires on a
+// worker thread and PostMessage-marshals to this message on the UI thread.
+// Posted once per completed page scan (plus a final post when
+// scan_complete flips). Cheap — handler just reads hit_count/scan_complete
+// and refreshes the counter + invalidates the canvas.
+constexpr UINT WM_USER_SEARCH_UPDATE = WM_USER + 10;
 
 // "&1 foo.pdf", "&2 foo.pdf", ..., "&9 foo.pdf", "1&0 foo.pdf".
 // The '&' marks the mnemonic character (Alt-shortcut).
@@ -214,6 +222,23 @@ void MainWindow::on_layout() {
                          SWP_NOZORDER | SWP_NOACTIVATE);
         }
     }
+
+    // Phase 6 Task 10: anchor the find bar to the canvas's top-right.
+    // Only when visible — reposition() calls SetWindowPos which would
+    // otherwise force a move even though the window stays hidden.
+    if (find_bar_ && find_bar_->visible() && canvas_) {
+        RECT cr;
+        GetWindowRect(canvas_->hwnd(), &cr);
+        // Convert canvas screen rect to MainWindow client-space so
+        // reposition() (which treats the rect as child coordinates)
+        // anchors inside the canvas region.
+        POINT tl = { cr.left,  cr.top    };
+        POINT br = { cr.right, cr.bottom };
+        ScreenToClient(hwnd_, &tl);
+        ScreenToClient(hwnd_, &br);
+        RECT cr_client = { tl.x, tl.y, br.x, br.y };
+        find_bar_->reposition(cr_client);
+    }
 }
 
 void MainWindow::toggle_outline() {
@@ -293,6 +318,16 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
         InvalidateRect(canvas_->hwnd(), nullptr, FALSE);
     }
 
+    // Phase 6 Task 10: refresh canvas hits-source + counter for the new
+    // active view. The HitsFn callback itself just closes over `this`
+    // and looks up active_view() each paint, so the binding is stable
+    // across tab switches — but we still need to clear the
+    // current-hit highlight carried over from the outgoing tab, and
+    // refresh the find bar counter.
+    update_canvas_hits_source();
+    if (canvas_) canvas_->set_current_hit(std::nullopt);
+    update_find_counter();
+
     (void)new_index;
 }
 
@@ -319,6 +354,19 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             outline_ = std::make_unique<OutlinePane>(cs->hInstance, hwnd);
             outline_->set_on_navigate(
                 [this](int page) { on_outline_navigate(page); });
+            // Phase 6 Task 10: floating find bar, initially hidden. Wire
+            // callbacks before Ctrl+F can ever fire.
+            find_bar_ = std::make_unique<FindBar>(cs->hInstance, hwnd);
+            find_bar_->set_on_query_changed(
+                [this](std::wstring q, bool mc) {
+                    on_find_query_changed(q, mc);
+                });
+            find_bar_->set_on_next ([this] { on_find_next();  });
+            find_bar_->set_on_prev ([this] { on_find_prev();  });
+            find_bar_->set_on_close([this] { on_find_close(); });
+            // No active tab yet, so canvas_->set_hits_source wiring is a
+            // no-op. We set it once on first tab open via
+            // update_canvas_hits_source() (called from on_tab_switch).
             DragAcceptFiles(hwnd, TRUE);
             return 0;
         }
@@ -567,6 +615,33 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     }
                     return 0;
                 }
+                // Phase 6 Task 10: find bar keyboard entrypoints.
+                case IDM_FIND:
+                    on_find_open();
+                    return 0;
+                case IDM_FIND_NEXT:
+                    on_find_next();
+                    return 0;
+                case IDM_FIND_PREV:
+                    on_find_prev();
+                    return 0;
+                case IDM_FIND_CLOSE:
+                    // Scope ESC: only claim it when the find bar is the
+                    // active UI. Otherwise fall through to DefWindowProc
+                    // so other consumers (future modal dialogs, etc.) can
+                    // see ESC as well.
+                    if (find_bar_ && find_bar_->visible()) {
+                        on_find_close();
+                        return 0;
+                    }
+                    return 0;
+                case IDM_CROSS_TAB_FIND:
+                case IDM_TOGGLE_RESULTS:
+                    // Phase 6.2 (cross-tab search) and 6.3 (docked results
+                    // panel) land in later tasks. For now, swallow the
+                    // accelerator so it doesn't reach DefWindowProc and
+                    // beep, but do nothing.
+                    return 0;
             }
             return 0;
         }
@@ -575,10 +650,23 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             std::unique_ptr<litepdf::core::Tab> t(raw);
             ColdStartTimer::mark(2);  // Document fully loaded.
 
+            // Phase 6 Task 10: install SearchSession observer BEFORE
+            // handing ownership to tabs_. Observer fires on a worker
+            // thread; we marshal to UI thread via PostMessage. Capture
+            // hwnd_ by value — the lambda outlives `this` only if the
+            // worker callback fires after MainWindow destruction, in
+            // which case PostMessage to a dead hwnd is a silent no-op.
+            if (t && t->view) {
+                HWND target = hwnd_;
+                t->view->search().set_on_update([target]() {
+                    PostMessageW(target, WM_USER_SEARCH_UPDATE, 0, 0);
+                });
+            }
+
             const int new_index = tabs_->add_tab(std::move(t));
             // add_tab() fires on_switch synchronously with new_index -- that
-            // callback is where canvas/outline/layout/kick_render happens.
-            // So here we have nothing further to do.
+            // callback is where canvas/outline/layout/kick_render happens
+            // (and, via on_tab_switch, update_canvas_hits_source()).
             (void)new_index;
             return 0;
         }
@@ -613,6 +701,9 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             MessageBoxW(hwnd, emsg, kWindowTitle, MB_ICONWARNING);
             return 0;
         }
+        case WM_USER_SEARCH_UPDATE:
+            on_search_update_posted();
+            return 0;
         case WM_COPYDATA:
             return on_copydata(hwnd, w, l);
         case WM_DESTROY:
@@ -620,6 +711,123 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             return 0;
     }
     return DefWindowProcW(hwnd, msg, w, l);
+}
+
+// ---------------- Phase 6 Task 10: find-bar helpers -----------------
+
+void MainWindow::update_canvas_hits_source() {
+    if (!canvas_) return;
+    // Look up the currently-active view on every paint, rather than
+    // capturing a raw DocumentView* here: on tab switch the target
+    // session changes but the HitsFn binding stays the same. If there
+    // is no active view, return empty.
+    canvas_->set_hits_source(
+        [this](std::size_t page)
+            -> std::vector<litepdf::core::SearchSession::Hit>
+        {
+            auto* v = active_view();
+            if (!v) return {};
+            return v->search().hits_for_page(page);
+        });
+}
+
+void MainWindow::on_find_open() {
+    if (!find_bar_ || !active_view()) return;  // no tab, no find
+    find_bar_->show_or_focus(last_find_query_);
+    // Layout again — reposition() only runs when visible, and we just
+    // flipped visibility on.
+    on_layout();
+    update_find_counter();
+}
+
+void MainWindow::on_find_query_changed(const std::wstring& q, bool mc) {
+    last_find_query_       = q;
+    find_bar_match_case_   = mc;
+    auto* v = active_view();
+    if (!v) return;
+    v->search().set_query(q, {mc});
+    update_find_counter();
+    if (canvas_) {
+        canvas_->set_current_hit(std::nullopt);
+        InvalidateRect(canvas_->hwnd(), nullptr, FALSE);
+    }
+}
+
+void MainWindow::on_find_next() {
+    auto* v = active_view();
+    if (!v || !canvas_) return;
+    auto h = v->search().next();
+    if (!h) return;
+    canvas_->set_current_hit(*h);
+    canvas_->scroll_into_view(*h);
+    // scroll_into_view may have switched the current page; kick a
+    // render for the (possibly new) page.
+    kick_render(v->current_page());
+    update_find_counter();
+}
+
+void MainWindow::on_find_prev() {
+    auto* v = active_view();
+    if (!v || !canvas_) return;
+    auto h = v->search().prev();
+    if (!h) return;
+    canvas_->set_current_hit(*h);
+    canvas_->scroll_into_view(*h);
+    kick_render(v->current_page());
+    update_find_counter();
+}
+
+void MainWindow::on_find_close() {
+    if (!find_bar_ || !find_bar_->visible()) return;
+    find_bar_->hide();
+    if (canvas_) {
+        canvas_->set_current_hit(std::nullopt);
+    }
+    // Phase 6 design Q7 7c: ESC clears highlights. clear() wipes the
+    // hit cache and fires on_update so the canvas repaints with no
+    // hits. A subsequent Ctrl+F reopens the bar with last_find_query_
+    // prefilled, at which point the first keystroke (or an Enter)
+    // re-runs the scan.
+    if (auto* v = active_view()) {
+        v->search().clear();
+    }
+    update_find_counter();
+    if (canvas_) {
+        SetFocus(canvas_->hwnd());
+        InvalidateRect(canvas_->hwnd(), nullptr, FALSE);
+    }
+}
+
+void MainWindow::update_find_counter() {
+    if (!find_bar_) return;
+    auto* v = active_view();
+    if (!v) {
+        find_bar_->set_counter(L"");
+        return;
+    }
+    const std::size_t n   = v->search().hit_count();
+    const bool        eof = v->search().scan_complete();
+    if (n == 0) {
+        find_bar_->set_counter(eof ? std::wstring(L"") : std::wstring(L"…"));
+        return;
+    }
+    wchar_t buf[48];
+    // TODO(phase-6.x): surface "m / n" current/total once SearchSession
+    // exposes a cursor_index() accessor. Showing totals only for v1.
+    if (eof) {
+        _snwprintf_s(buf, _countof(buf), _TRUNCATE, L"%zu hits", n);
+    } else {
+        _snwprintf_s(buf, _countof(buf), _TRUNCATE,
+                     L"%zu hits (scanning)", n);
+    }
+    find_bar_->set_counter(buf);
+}
+
+void MainWindow::on_search_update_posted() {
+    update_find_counter();
+    if (canvas_) {
+        InvalidateRect(canvas_->hwnd(), nullptr, FALSE);
+    }
 }
 
 LRESULT MainWindow::on_copydata(HWND hwnd, WPARAM, LPARAM l) {
@@ -706,6 +914,15 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
         { FCONTROL | FVIRTKEY, '7', IDM_TAB_GOTO_7 },
         { FCONTROL | FVIRTKEY, '8', IDM_TAB_GOTO_8 },
         { FCONTROL | FVIRTKEY, '9', IDM_TAB_GOTO_9 },
+        // Phase 6: in-doc find + (stubbed) cross-tab find + results
+        // panel toggle. ESC only fires when the find bar is the active
+        // UI — see IDM_FIND_CLOSE handler in WM_COMMAND above.
+        { FCONTROL | FVIRTKEY,          'F',       IDM_FIND           },
+        { FVIRTKEY,                     VK_F3,     IDM_FIND_NEXT      },
+        { FSHIFT   | FVIRTKEY,          VK_F3,     IDM_FIND_PREV      },
+        { FCONTROL | FSHIFT | FVIRTKEY, 'F',       IDM_CROSS_TAB_FIND },
+        { FVIRTKEY,                     VK_F6,     IDM_TOGGLE_RESULTS },
+        { FVIRTKEY,                     VK_ESCAPE, IDM_FIND_CLOSE     },
     };
     haccel_ = CreateAcceleratorTableW(accels, _countof(accels));
 

@@ -212,4 +212,65 @@ Write-Host "[OK] first instance has 2 tabs, active=1"
 Stop-Process -Id $proc3.Id -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 500
 
+# Phase 6 Task 10: in-doc find bar smoke. Launch search.pdf, post WM_COMMAND
+# IDM_FIND (40042) to show the find bar, then confirm a child window with the
+# "LitePDFFindBar" class becomes visible. Counter polling requires per-child
+# text reads that ux-probe doesn't expose yet; the full m/n assertion is a
+# Phase 11 UX-automation follow-up. This step is liveness-only — no crash is
+# sufficient evidence that the accelerator and child-creation plumbing works.
+
+$searchFixture = Join-Path $repoRoot "tests/fixtures/search.pdf"
+if (-not (Test-Path $searchFixture)) {
+    throw "fixture not found at $searchFixture"
+}
+
+Write-Host "Launching for find-bar smoke: $exe $searchFixture"
+$proc4 = Start-Process -FilePath $exe `
+    -ArgumentList @($searchFixture) `
+    -PassThru -NoNewWindow
+$deadline4 = (Get-Date).AddSeconds(5)
+$hwnd4 = [IntPtr]::Zero
+while ((Get-Date) -lt $deadline4) {
+    Start-Sleep -Milliseconds 100
+    if ($proc4.HasExited) {
+        throw "litepdf.exe exited during search.pdf startup (code $($proc4.ExitCode))"
+    }
+    $proc4.Refresh()
+    if ($proc4.MainWindowHandle -ne [IntPtr]::Zero) {
+        $hwnd4 = $proc4.MainWindowHandle
+        break
+    }
+}
+if ($hwnd4 -eq [IntPtr]::Zero) {
+    Stop-Process -Id $proc4.Id -Force -ErrorAction SilentlyContinue
+    throw "litepdf.exe did not create a main window for search.pdf"
+}
+# Let first tab finish opening before we fire Ctrl+F.
+Start-Sleep -Seconds 1
+
+# Post IDM_FIND (40042) via ux-probe send-cmd.
+& $uxProbe send-cmd 40042 | Out-Null
+Start-Sleep -Milliseconds 300
+
+# Confirm a LitePDFFindBar child is present + visible.
+$findState = & $uxProbe find-bar-state 2>&1 | Out-String
+try {
+    $fb = $findState | ConvertFrom-Json -ErrorAction Stop
+    if (-not $fb.present) {
+        Stop-Process -Id $proc4.Id -Force -ErrorAction SilentlyContinue
+        throw "find bar child window not found after Ctrl+F"
+    }
+    if (-not $fb.visible) {
+        Stop-Process -Id $proc4.Id -Force -ErrorAction SilentlyContinue
+        throw "find bar present but not visible after Ctrl+F"
+    }
+    Write-Host "[OK] find bar child visible after Ctrl+F"
+} catch {
+    Stop-Process -Id $proc4.Id -Force -ErrorAction SilentlyContinue
+    throw "find-bar-state probe failed: $findState"
+}
+
+Stop-Process -Id $proc4.Id -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 500
+
 Write-Host "[OK] smoke test passed."
