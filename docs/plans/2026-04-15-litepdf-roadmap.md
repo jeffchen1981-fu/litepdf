@@ -98,6 +98,19 @@ Before starting any phase after Phase 0:
 3. Incorporate anything learned (API surprises, performance findings) into the new plan.
 4. Do not attempt to execute more than one phase without re-planning.
 
+## Known Limitations (Post-Phase-6)
+
+Captured at `v0.0.7-phase6` tag. See `docs/plans/2026-04-24-phase-6-search-design.md` §9 for full context.
+
+- **Whole-word and regex search are not supported.** MuPDF 1.24.11 provides no primitive for either and neither is in Phase 6 scope. Revisit if user demand surfaces.
+- **Case-sensitive search is a no-op in v1.** MuPDF 1.24.11's `fz_search_page` is unconditionally case-insensitive (internal `canon()` upper-cases before matching). The `SearchFlags::match_case` flag is accepted but ignored. Phase 11 MuPDF upgrade will expose `fz_search_page2` + `FZ_SEARCH_EXACT`; see `TODO(phase-11)` markers in `src/core/Document.cpp`.
+- **ResultsPanel is not a true dockable panel.** It is a bottom-docked resizable pane only. A full docking framework (undock-to-float, left/right dock) is out of scope for v1 and would require ~1500 additional LOC.
+- **L2 display list cache is not warmed by search.** Pages searched once but never viewed stay cold for subsequent renders. Intentional per design §D16 (search must not pollute render's hot cache).
+- **`fz_cookie::abort` is not honored by MuPDF 1.24.11's search path.** In-progress per-page searches run to completion; cross-page cancellation is handled by `SearchSession` epoch bump. Phase 11 MuPDF upgrade will enable true mid-page abort.
+- **SearchDispatcher is 2-worker fixed.** Adequate per design §5.4 "tabs run in parallel", but Phase 11 benchmark data may motivate DPI-/CPU-count-adaptive sizing.
+- **Cross-tab results `N hits` counter is total-only.** Plan's ideal format is "m / n" (current / total) but `SearchSession` doesn't expose cursor index; a Phase 6.x follow-up adds `cursor_index()` and flips the counter format.
+- **FindBar counter refreshes paused during cross-tab scan.** `CrossTabSearch::dispatch` installs an observer chain; `clear()` sets empty observer and MainWindow reinstalls find-bar counter updater on the next tab switch or Ctrl+F. Documented in `CrossTabSearch.hpp`.
+
 ## Out of Scope (post-v1.0)
 
 See §10 of the design doc. Post-v1.0 roadmap is not planned here.
