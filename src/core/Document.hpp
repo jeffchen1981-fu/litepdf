@@ -4,6 +4,7 @@
 // PIMPL: no MuPDF types leak through this header, so UI code (Phase 3+)
 // can include Document.hpp without pulling fitz.h.
 
+#include <atomic>
 #include <cstddef>
 #include <filesystem>
 #include <memory>
@@ -72,6 +73,59 @@ public:
     };
     static constexpr std::size_t kNoPage = static_cast<std::size_t>(-1);
     [[nodiscard]] std::vector<OutlineEntry> outline() const;
+
+    // ------------------------------------------------------------------
+    // Search (Phase 6)
+    // ------------------------------------------------------------------
+    // Stateless per-page search. Callers (core::SearchSession, Task 5)
+    // drive the cursor/cache and epoch-based cancellation on top of this.
+    //
+    // MuPDF 1.24.11 exposes only fz_search_page which is unconditionally
+    // case-insensitive (it uppercases each codepoint via fz_toupper before
+    // matching). SearchFlags::match_case is therefore a no-op on this MuPDF
+    // release — we keep the field so the API shape is stable across the
+    // Phase 11 MuPDF upgrade and the eventual custom-matcher fallback.
+    struct SearchFlags {
+        bool match_case = false;
+    };
+
+    // One search hit on a page. Coordinates are in PDF user space (points),
+    // same convention as page_size(). The quad corners are stored as plain
+    // floats to keep this header MuPDF-free.
+    struct PageHit {
+        float ul_x = 0, ul_y = 0;  // upper-left
+        float ur_x = 0, ur_y = 0;  // upper-right
+        float ll_x = 0, ll_y = 0;  // lower-left
+        float lr_x = 0, lr_y = 0;  // lower-right
+        // Snippet string for the cross-tab results panel. v1 returns just
+        // the needle itself; a centered 30-char snippet is a Phase 6.2
+        // upgrade once stext-backed matching lands.
+        std::string snippet_utf8;
+    };
+
+    // Returns all hits for `needle_utf8` on `page`. Empty needle → empty
+    // result (matches MuPDF's own behavior in fz_search_stext_page).
+    //
+    // @param page        0-based page index.
+    // @param needle_utf8 UTF-8 query. Empty returns {}.
+    // @param flags       Case sensitivity (ignored on MuPDF 1.24.x; see above).
+    // @param abort_flag  Optional cooperative cancellation pointer. If the
+    //                    pointed int becomes non-zero, MuPDF's fz_cookie.abort
+    //                    path is taken. Because fz_cookie.abort is read by
+    //                    value periodically inside MuPDF, we snapshot it
+    //                    before the call — mid-page cancel is best-effort.
+    //
+    // Thread-safety: same contract as page_text() — not safe to call
+    // concurrently on the same Document instance (fz_context is not
+    // thread-safe). Worker threads in core::SearchSession (Task 5) hold
+    // their own cloned fz_context + reopened fz_document, mirroring the
+    // RenderEngine pattern; this entry point serves the foreground thread
+    // and one-shot synchronous queries.
+    [[nodiscard]] std::vector<PageHit> page_hits(
+        std::size_t page,
+        std::string_view needle_utf8,
+        SearchFlags flags,
+        std::atomic<int>* abort_flag = nullptr) const;
 
     // Returns a freshly cloned fz_context* suitable for use on another
     // thread. MuPDF contexts are not thread-safe; RenderEngine's worker

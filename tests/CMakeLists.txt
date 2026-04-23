@@ -31,6 +31,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_document_clone_context.cpp
     unit/test_document_accessors.cpp
     unit/test_document_unicode_path.cpp
+    unit/test_document_search.cpp   # Phase 6 Task 3
     unit/test_render_engine_lifecycle.cpp
     unit/test_render_engine_submit.cpp
     unit/test_render_engine_priority.cpp
