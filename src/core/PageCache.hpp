@@ -60,6 +60,23 @@ public:
     fz_display_list* get_display_list(int page_num);
     void             put_display_list(int page_num, fz_display_list* list);
 
+    // Phase 6: read-only display list access for search.
+    // Returns a borrowed, non-owning fz_display_list* if page `p` is
+    // currently in L2; nullptr otherwise. Does NOT update the LRU
+    // recency — search must be a neutral observer, never a cache
+    // pollutant (see Phase 6 design D3/D16).
+    //
+    // Thread-safety: same std::mutex as get_display_list. Safe to call
+    // concurrently from search worker threads.
+    //
+    // Lifetime: the returned pointer is valid only while the cache still
+    // holds that page in L2. A concurrent put_display_list that evicts
+    // page `p` may drop the last reference. Callers reading the display
+    // list with MuPDF routines that yield the lock (e.g., during page
+    // parse) must fz_keep_display_list the pointer first to guarantee
+    // survival across the call.
+    fz_display_list* peek_display_list(int page_num) const;
+
     void clear();                 // drops all cached entries (L1 + L2)
     std::size_t l1_size() const;  // for tests
     std::size_t l2_size() const;  // for tests

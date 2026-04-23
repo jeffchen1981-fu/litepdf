@@ -195,6 +195,17 @@ void PageCache::put_display_list(int page_num, fz_display_list* list) {
     impl_->l2_map.emplace(page_num, Impl::L2Entry{list, impl_->l2_lru.begin()});
 }
 
+fz_display_list* PageCache::peek_display_list(int page_num) const {
+    // Read-only L2 lookup for search. MUST NOT touch LRU recency and
+    // MUST NOT fz_keep_display_list — the returned pointer is borrowed
+    // and valid only while the cache still holds page_num in L2. See
+    // the declaration in PageCache.hpp for the full lifetime contract.
+    std::lock_guard<std::mutex> lk(impl_->mtx);
+    auto it = impl_->l2_map.find(page_num);
+    if (it == impl_->l2_map.end()) return nullptr;
+    return it->second.list;
+}
+
 std::size_t PageCache::l2_size() const {
     std::lock_guard<std::mutex> lk(impl_->mtx);
     return impl_->l2_map.size();
