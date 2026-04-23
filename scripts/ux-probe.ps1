@@ -11,6 +11,8 @@
 #   ux-probe.ps1 tab-enum                                 - JSON dump of tab control state (count/active/labels)
 #   ux-probe.ps1 find-bar-state                           - JSON dump of find-bar child state (present/visible/rect)
 #   ux-probe.ps1 find-open                                - Post WM_COMMAND IDM_FIND (40042) — convenience wrapper
+#   ux-probe.ps1 cross-tab-find                           - Post WM_COMMAND IDM_CROSS_TAB_FIND (40045) — show ResultsPanel
+#   ux-probe.ps1 results-panel-state                      - JSON dump of ResultsPanel child state (present/visible/rect)
 
 param(
   [Parameter(Mandatory=$true, Position=0)] [string] $Action,
@@ -406,6 +408,43 @@ switch ($Action) {
     $WM_COMMAND = 0x0111
     [void][W.U32]::PostMessage($h, $WM_COMMAND, [IntPtr]40042, [IntPtr]0)
     Write-Host "Posted IDM_FIND to HWND 0x$($h.ToInt64().ToString('X8'))"
+  }
+  'cross-tab-find' {
+    # Phase 6 Task 14: post WM_COMMAND IDM_CROSS_TAB_FIND (40045). This
+    # shows the bottom-docked ResultsPanel (creating height on first call).
+    # Caller is responsible for the subsequent assertions (results-panel-state
+    # below) — this action is intentionally fire-and-forget so it composes
+    # into scripted UX tours the same way find-open does.
+    $h = Get-LitePdfHwnd
+    if ($h -eq [IntPtr]::Zero) { Write-Error "litepdf window not found"; exit 1 }
+    $WM_COMMAND = 0x0111
+    [void][W.U32]::PostMessage($h, $WM_COMMAND, [IntPtr]40045, [IntPtr]0)
+    Write-Host "Posted IDM_CROSS_TAB_FIND to HWND 0x$($h.ToInt64().ToString('X8'))"
+  }
+  'results-panel-state' {
+    # Report whether the bottom-docked ResultsPanel child is present and
+    # visible. Contract matches find-bar-state: stdout is always one line
+    # of JSON, missing state reports present=false rather than a non-zero
+    # exit so smoke-test can poll without try/catch noise.
+    $h = Get-LitePdfHwnd
+    if ($h -eq [IntPtr]::Zero) {
+      Write-Output '{"present":false,"visible":false}'
+      exit 0
+    }
+    $rp = [W.U32]::FindWindowEx($h, [IntPtr]::Zero, "LitePDFResultsPanel", [String]::Empty)
+    if ($rp -eq [IntPtr]::Zero) {
+      Write-Output '{"present":false,"visible":false}'
+      exit 0
+    }
+    $vis = [W.U32]::IsWindowVisible($rp)
+    $r = New-Object W.U32+RECT
+    [void][W.U32]::GetWindowRect($rp, [ref]$r)
+    $obj = [ordered]@{
+      present = $true
+      visible = [bool]$vis
+      rect    = @{ left = $r.Left; top = $r.Top; right = $r.Right; bottom = $r.Bottom }
+    }
+    $obj | ConvertTo-Json -Compress
   }
   'tab-enum' {
     # Unlike sibling actions (capture, sendkey, ...), this action must

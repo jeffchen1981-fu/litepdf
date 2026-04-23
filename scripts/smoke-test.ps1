@@ -273,4 +273,90 @@ try {
 Stop-Process -Id $proc4.Id -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 500
 
+# Phase 6 Task 14: cross-tab find smoke. Launch with two fixtures so the
+# first instance opens two tabs (search.pdf + bookmarks.pdf — two distinct
+# paths because single-instance IPC dedups by path if we passed the same
+# file twice). Post WM_COMMAND IDM_CROSS_TAB_FIND (40045) and confirm a
+# LitePDFResultsPanel child becomes visible. As with the find-bar smoke
+# above, this is liveness-only: no crash + correct child-window class is
+# evidence that WM_CREATE wiring + accelerator + on_cross_tab_find reach
+# the panel. Row-click navigation and per-hit highlighting are manual-QA
+# territory until ux-probe grows ListView row enumeration.
+
+Write-Host "Launching first instance for cross-tab find: $exe $searchFixture"
+$proc5 = Start-Process -FilePath $exe `
+    -ArgumentList @($searchFixture) `
+    -PassThru -NoNewWindow
+$deadline5 = (Get-Date).AddSeconds(5)
+$hwnd5 = [IntPtr]::Zero
+while ((Get-Date) -lt $deadline5) {
+    Start-Sleep -Milliseconds 100
+    if ($proc5.HasExited) {
+        throw "litepdf.exe exited during cross-tab startup (code $($proc5.ExitCode))"
+    }
+    $proc5.Refresh()
+    if ($proc5.MainWindowHandle -ne [IntPtr]::Zero) {
+        $hwnd5 = $proc5.MainWindowHandle
+        break
+    }
+}
+if ($hwnd5 -eq [IntPtr]::Zero) {
+    Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
+    throw "litepdf.exe did not create a main window for cross-tab smoke"
+}
+# Let the first tab finish opening before we forward the second.
+Start-Sleep -Seconds 1
+
+# Forward bookmarks.pdf to the first instance so the tab count is 2.
+Write-Host "Forwarding second fixture: $exe $bookmarksFixture"
+$fwd5 = Start-Process -FilePath $exe `
+    -ArgumentList @($bookmarksFixture) `
+    -PassThru -NoNewWindow -Wait
+if ($fwd5.ExitCode -ne 0) {
+    Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
+    throw "cross-tab forwarder exited with code $($fwd5.ExitCode), expected 0"
+}
+Start-Sleep -Seconds 1
+
+# Post IDM_CROSS_TAB_FIND (40045) via ux-probe.
+& $uxProbe send-cmd 40045 | Out-Null
+Start-Sleep -Milliseconds 400
+
+# Confirm the ResultsPanel child is present + visible.
+$rpState = & $uxProbe results-panel-state 2>&1 | Out-String
+try {
+    $rp = $rpState | ConvertFrom-Json -ErrorAction Stop
+    if (-not $rp.present) {
+        Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
+        throw "results panel child window not found after Ctrl+Shift+F"
+    }
+    if (-not $rp.visible) {
+        Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
+        throw "results panel present but not visible after Ctrl+Shift+F"
+    }
+    Write-Host "[OK] results panel visible after Ctrl+Shift+F"
+} catch {
+    Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
+    throw "results-panel-state probe failed: $rpState"
+}
+
+# F6 toggles the panel off.
+& $uxProbe send-cmd 40046 | Out-Null
+Start-Sleep -Milliseconds 300
+$rpState2 = & $uxProbe results-panel-state 2>&1 | Out-String
+try {
+    $rp2 = $rpState2 | ConvertFrom-Json -ErrorAction Stop
+    if ($rp2.visible) {
+        Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
+        throw "results panel still visible after F6 toggle"
+    }
+    Write-Host "[OK] results panel hidden after F6"
+} catch {
+    Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
+    throw "results-panel-state post-toggle probe failed: $rpState2"
+}
+
+Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 500
+
 Write-Host "[OK] smoke test passed."

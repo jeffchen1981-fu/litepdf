@@ -4,10 +4,13 @@
 #include <string>
 #include <windows.h>
 
+#include "app/CrossTabSearch.hpp"
 #include "core/MruList.hpp"
 #include "ui/FindBar.hpp"
 #include "ui/OutlinePane.hpp"
 #include "ui/PdfCanvas.hpp"
+#include "ui/ResultsPanel.hpp"
+#include "ui/Splitter.hpp"
 #include "ui/TabManager.hpp"
 
 namespace litepdf::app { class ThreadPoolDispatcher; }
@@ -56,6 +59,13 @@ private:
     void update_canvas_hits_source();     // rebind canvas HitsFn to active view
     void on_search_update_posted();       // WM_USER_SEARCH_UPDATE handler
 
+    // Phase 6 Tasks 11-14: cross-tab search + bottom results panel.
+    void on_cross_tab_find();                        // IDM_CROSS_TAB_FIND (Ctrl+Shift+F)
+    void on_toggle_results();                        // IDM_TOGGLE_RESULTS (F6)
+    void on_results_query(const std::wstring& q);    // ResultsPanel Enter on query
+    void on_results_row_click(std::size_t hit_idx);  // ResultsPanel row click
+    void on_results_close();                         // ResultsPanel x button / cleanup
+
     // Active-tab view accessor -- replaces the old `view_` raw reference.
     // Returns nullptr when no tab is active.
     litepdf::core::DocumentView* active_view();
@@ -88,8 +98,17 @@ private:
     // The dispatcher's dtor drains any queued task so in-flight work
     // finishes before the dispatcher goes away.
     std::unique_ptr<litepdf::app::ThreadPoolDispatcher> search_dispatcher_;
-    std::unique_ptr<PdfCanvas>    canvas_;
+    // Phase 6 Task 11-14: cross-tab query orchestrator. Declared AFTER
+    // search_dispatcher_ (it captures per-tab session observers whose
+    // aggregation lambdas reach into CrossTabSearch::Impl — which in turn
+    // gets modified by dispatch() that submits dispatcher tasks) and
+    // BEFORE tabs_ so that cross_tab_ outlives every tab's SearchSession.
+    // When a tab closes, its SearchSession destructs and drops the chained
+    // observer lambda; cross_tab_ is still alive so the lambda's captures
+    // (which include weak_sentinel) are safely torn down.
+    std::unique_ptr<litepdf::app::CrossTabSearch> cross_tab_;
     std::unique_ptr<TabManager>   tabs_;
+    std::unique_ptr<PdfCanvas>    canvas_;
     std::unique_ptr<OutlinePane>  outline_;
     // Phase 6 Task 10: floating find bar, child HWND of MainWindow. Created
     // in WM_CREATE, hidden until Ctrl+F. Destroyed by unique_ptr dtor
@@ -98,6 +117,14 @@ private:
     // callbacks captured in find_bar_ reference this-> but never reach into
     // canvas_ at teardown (bar is hidden / destroyed first).
     std::unique_ptr<FindBar>      find_bar_;
+    // Phase 6 Tasks 12-13: bottom-docked results panel + drag splitter.
+    // Declared AFTER find_bar_/canvas_/tabs_ so that on destruction these
+    // tear down first: their callbacks capture `this` and would otherwise
+    // try to reach cross_tab_ / tabs_ via on_results_* helpers.
+    std::unique_ptr<ResultsPanel> results_panel_;
+    std::unique_ptr<Splitter>     splitter_;
+    // 0 = hidden; first Ctrl+Shift+F / F6 seeds to max(200 px, 1/3 client).
+    int                           results_panel_height_px_ = 0;
     std::wstring                  last_find_query_;
     bool                          find_bar_match_case_ = false;
     litepdf::core::MruList        mru_;
