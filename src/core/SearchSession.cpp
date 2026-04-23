@@ -198,6 +198,11 @@ void SearchSession::set_on_update(OnUpdate cb) {
     impl_->state->on_update = std::move(cb);
 }
 
+SearchSession::OnUpdate SearchSession::on_update() const {
+    std::lock_guard<std::mutex> g(impl_->state->m);
+    return impl_->state->on_update;
+}
+
 void SearchSession::set_reference_page(std::size_t page) {
     auto& st = *impl_->state;
     std::lock_guard<std::mutex> g(st.m);

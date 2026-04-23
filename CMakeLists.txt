@@ -28,6 +28,7 @@ add_library(litepdf_core STATIC
     src/core/TabList.cpp
     src/core/SearchSession.cpp     # Phase 6 Task 5
     src/app/SearchDispatcher.cpp   # Phase 6 Task 4
+    src/app/CrossTabSearch.cpp     # Phase 6 Task 11
 )
 
 litepdf_apply_flags(litepdf_core)
