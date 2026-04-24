@@ -94,18 +94,23 @@ Palette make_palette(bool dark) {
             /*border*/         RGB(0x3A, 0x3A, 0x3A),
         };
     }
+    // Light-mode palette. bar_bg is slightly darker than the PDF page
+    // white so the bar reads as a distinct panel when floating over a
+    // rendered page (original 0xF9 was indistinguishable from #FFFFFF
+    // page content). Border is drawn on all 4 edges in WM_ERASEBKGND
+    // to give the bar a visible frame even against white content.
     return {
-        /*bar_bg*/         RGB(0xF9, 0xF9, 0xF9),
+        /*bar_bg*/         RGB(0xEC, 0xEC, 0xEC),
         /*edit_bg*/        RGB(0xFF, 0xFF, 0xFF),
         /*edit_fg*/        RGB(0x1C, 0x1C, 0x1C),
         /*counter_fg*/     RGB(0x60, 0x60, 0x60),
-        /*btn_normal*/     RGB(0xF9, 0xF9, 0xF9),
-        /*btn_hover*/      RGB(0xEA, 0xEA, 0xEA),
-        /*btn_pressed*/    RGB(0xD8, 0xD8, 0xD8),
+        /*btn_normal*/     RGB(0xEC, 0xEC, 0xEC),
+        /*btn_hover*/      RGB(0xDA, 0xDA, 0xDA),
+        /*btn_pressed*/    RGB(0xC4, 0xC4, 0xC4),
         /*btn_fg*/         RGB(0x30, 0x30, 0x30),
         /*close_hover_bg*/ RGB(0xE8, 0x11, 0x23),
         /*close_hover_fg*/ RGB(0xFF, 0xFF, 0xFF),
-        /*border*/         RGB(0xD0, 0xD0, 0xD0),
+        /*border*/         RGB(0xA8, 0xA8, 0xA8),
     };
 }
 
@@ -488,11 +493,19 @@ LRESULT CALLBACK find_bar_wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             RECT rc;
             GetClientRect(hwnd, &rc);
             FillRect(hdc, &rc, impl->bg_brush);
-            // Draw a 1px border at the bottom so the bar reads as a panel.
-            RECT border = rc;
-            border.top = rc.bottom - 1;
+            // Draw a 1px border on ALL 4 edges so the bar reads as a
+            // distinct panel even when floating over white PDF content.
+            // The original bottom-only border relied on bar_bg contrast
+            // against the page, which failed against white pages.
             HBRUSH b = CreateSolidBrush(impl->palette.border);
-            FillRect(hdc, &border, b);
+            RECT top_edge    = { rc.left,  rc.top,        rc.right,    rc.top + 1    };
+            RECT bottom_edge = { rc.left,  rc.bottom - 1, rc.right,    rc.bottom     };
+            RECT left_edge   = { rc.left,  rc.top,        rc.left + 1, rc.bottom     };
+            RECT right_edge  = { rc.right - 1, rc.top,    rc.right,    rc.bottom     };
+            FillRect(hdc, &top_edge,    b);
+            FillRect(hdc, &bottom_edge, b);
+            FillRect(hdc, &left_edge,   b);
+            FillRect(hdc, &right_edge,  b);
             DeleteObject(b);
             return 1;
         }
