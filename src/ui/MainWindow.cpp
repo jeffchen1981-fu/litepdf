@@ -383,6 +383,13 @@ void MainWindow::on_tab_close_request(int index) {
     // weak_sentinel and return early without touching the dying view.
     if (cross_tab_ && results_panel_ && results_panel_->visible()) {
         cross_tab_->clear();
+        // Push the now-empty hit count down to the virtual ListView so it
+        // invalidates any stale row display. Without this the list keeps
+        // SetItemCountEx(N) from the prior dispatch; subsequent paint or
+        // focus events would issue LVN_GETDISPINFO for rows 0..N-1,
+        // which still have proper bounds checks but leave the list
+        // visually stuck on dead rows. Belt-and-braces hygiene.
+        results_panel_->refresh_count();
     }
     tabs_->close_tab(index);
     // close_tab() fires on_switch (with new_active=-1 when the last tab
