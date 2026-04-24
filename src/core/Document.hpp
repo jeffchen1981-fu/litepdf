@@ -118,12 +118,14 @@ public:
     //                    or an equivalent cookie-accepting variant, honor
     //                    abort_flag by feeding it through fz_cookie.abort.
     //
-    // Thread-safety: same contract as page_text() — not safe to call
-    // concurrently on the same Document instance (fz_context is not
-    // thread-safe). Worker threads in core::SearchSession (Task 5) hold
-    // their own cloned fz_context + reopened fz_document, mirroring the
-    // RenderEngine pattern; this entry point serves the foreground thread
-    // and one-shot synchronous queries.
+    // Thread-safety: SAFE to call concurrently from multiple threads on
+    // the same Document instance. An internal std::mutex serializes every
+    // method that touches impl_->ctx (page_hits, page_count, page_text,
+    // page_size, outline) — MuPDF's fz_try/fz_catch uses a per-ctx error
+    // stack that is not thread-safe, so this serialization is mandatory.
+    // Consequence: per-Document search parallelism is bounded to 1;
+    // cross-tab searches still parallelize across distinct Documents.
+    // SearchSession workers (Phase 6 Task 5) rely on this guarantee.
     [[nodiscard]] std::vector<PageHit> page_hits(
         std::size_t page,
         std::string_view needle_utf8,

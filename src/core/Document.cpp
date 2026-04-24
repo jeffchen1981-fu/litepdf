@@ -51,6 +51,25 @@ struct Document::Impl {
     bool authenticated = false;
     std::filesystem::path path;
 
+    // Phase 6 Task 3 / ship-blocker fix: serialize every method that
+    // touches impl_->ctx via fz_try/fz_catch. MuPDF's exception handling
+    // uses a per-fz_context setjmp/longjmp error stack that is NOT
+    // thread-safe — two threads in fz_try on the same ctx corrupt the
+    // stack and crash. The MuPDFLocks table above covers the allocator /
+    // font cache / freetype / glyph cache, but NOT the error stack.
+    // SearchSession workers call page_hits() concurrently during eager
+    // all-pages scans, and UI thread calls page_count() in set_query at
+    // the same time — both race on this ctx. Holding this mutex across
+    // each fz_try ... fz_catch block serializes the error stack usage.
+    //
+    // Performance impact: per-Document search parallelism drops to 1.
+    // Acceptable for Phase 6 because (a) per-page search is ms-scale
+    // and the 2-worker SearchDispatcher was already a soft serializer
+    // for cross-document work, (b) cross-tab searches span multiple
+    // Document instances and therefore multiple doc_mutexes, preserving
+    // tab-level parallelism which §5.4 actually promises.
+    mutable std::mutex doc_mutex;
+
     Impl() : locks(std::make_unique<MuPDFLocks>()) {
         locks->fz.user = locks.get();
         locks->fz.lock = &litepdf_lock;
@@ -231,6 +250,8 @@ bool Document::authenticate(std::string_view password) {
 
 std::size_t Document::page_count() const {
     if (!impl_->doc) throw std::logic_error("page_count called on unopened document");
+    // Serialize with page_hits (worker threads). See Impl::doc_mutex.
+    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
     int n = 0;
     fz_try(impl_->ctx) {
         n = fz_count_pages(impl_->ctx, impl_->doc);
@@ -244,6 +265,9 @@ std::size_t Document::page_count() const {
 PageSize Document::page_size(std::size_t index) const {
     if (!impl_->doc) throw std::logic_error("page_size called on unopened document");
 
+    // Defense in depth: protect impl_->ctx error stack from any concurrent
+    // worker call (page_hits). See Impl::doc_mutex.
+    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
     fz_page* page = nullptr;
     fz_rect bounds = {};
     fz_try(impl_->ctx) {
@@ -265,6 +289,9 @@ PageSize Document::page_size(std::size_t index) const {
 std::string Document::page_text(std::size_t index) const {
     if (!impl_->doc) throw std::logic_error("page_text called on unopened document");
 
+    // Defense in depth: serialize with any concurrent page_hits() call
+    // from a worker thread. See Impl::doc_mutex.
+    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
     fz_page*       page  = nullptr;
     fz_stext_page* stext = nullptr;
     fz_buffer*     buf   = nullptr;
@@ -328,6 +355,13 @@ std::vector<Document::PageHit> Document::page_hits(
 {
     std::vector<PageHit> out;
     if (!is_open() || needle_utf8.empty()) return out;
+
+    // Serialize access to impl_->ctx. See Impl::doc_mutex rationale.
+    // Must cover the entire fz_try ... fz_catch block plus fz_load_page
+    // below, since all of them push/pop frames on the per-ctx error
+    // stack. Also protects against concurrent page_count() from the UI
+    // thread's set_query path.
+    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
 
     // match_case is intentionally ignored on MuPDF 1.24.x — see the header
     // comment on SearchFlags. Silence the unused-parameter warning.
@@ -397,6 +431,9 @@ std::vector<Document::OutlineEntry> Document::outline() const {
     std::vector<OutlineEntry> result;
     if (!impl_->doc) return result;
 
+    // Defense in depth: serialize with page_hits() worker calls.
+    // See Impl::doc_mutex.
+    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
     fz_outline* root = nullptr;
     fz_try(impl_->ctx) {
         root = fz_load_outline(impl_->ctx, impl_->doc);
