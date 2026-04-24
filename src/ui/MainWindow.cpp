@@ -131,8 +131,17 @@ void MainWindow::open_tab_async(std::filesystem::path path) {
         litepdf::core::Document doc;
         auto err = doc.open(path);
         if (err.has_value()) {
-            PostMessageW(hwnd, WM_USER_OPEN_FAILED,
-                         static_cast<WPARAM>(*err), 0);
+            // Heap-allocate the path string so the UI handler can include
+            // it in the MessageBox. Handler adopts ownership and deletes.
+            // Without this, the error dialog says "File not found" but
+            // gives no clue WHICH path failed — a real UX gap when a
+            // relative CLI arg doesn't resolve against the user's cwd.
+            auto* path_copy = new std::wstring(path.wstring());
+            if (!PostMessageW(hwnd, WM_USER_OPEN_FAILED,
+                              static_cast<WPARAM>(*err),
+                              reinterpret_cast<LPARAM>(path_copy))) {
+                delete path_copy;
+            }
             return;
         }
         try {
@@ -780,6 +789,15 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 default:
                     break;
             }
+            // Adopt ownership of the path string the worker allocated.
+            // unique_ptr handles the delete even if MessageBoxW throws.
+            std::unique_ptr<std::wstring> failed_path(
+                reinterpret_cast<std::wstring*>(l));
+            std::wstring full_msg = emsg;
+            if (failed_path && !failed_path->empty()) {
+                full_msg += L"\n\n";
+                full_msg += *failed_path;
+            }
             // Note: MessageBoxW runs a nested message loop. If another
             // worker posts WM_USER_OPEN_OK during the dialog, its
             // add_tab() + on_tab_switch() will run before this case
@@ -787,7 +805,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // changed". Non-fatal; revisit in Phase 5 Task 8 (or
             // Phase 12 crash-protection hardening) if the UX becomes
             // confusing.
-            MessageBoxW(hwnd, emsg, kWindowTitle, MB_ICONWARNING);
+            MessageBoxW(hwnd, full_msg.c_str(), kWindowTitle, MB_ICONWARNING);
             return 0;
         }
         case WM_USER_SEARCH_UPDATE:
