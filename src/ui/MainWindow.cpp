@@ -1103,8 +1103,13 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
 
     HMENU menu = LoadMenuW(hInstance, MAKEINTRESOURCEW(IDM_MAIN_MENU));
 
+    // WS_CLIPCHILDREN: belt-and-braces with WS_CLIPSIBLINGS on PdfCanvas.
+    // Ensures the frame window's paint never touches any child HWND's
+    // area. Important for Phase 6 FindBar, which floats over the canvas
+    // and would otherwise be clobbered by the frame's background paint.
     hwnd_ = CreateWindowExW(
-        0, kWindowClassName, kWindowTitle, WS_OVERLAPPEDWINDOW,
+        0, kWindowClassName, kWindowTitle,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768,
         nullptr, menu, hInstance, this);
     if (!hwnd_) return 1;
