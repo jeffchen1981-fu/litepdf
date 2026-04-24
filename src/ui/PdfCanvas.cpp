@@ -221,9 +221,16 @@ PdfCanvas::PdfCanvas(HINSTANCE hInstance, HWND parent)
     RECT rc;
     GetClientRect(parent, &rc);
 
+    // WS_CLIPSIBLINGS is critical: without it, Direct2D's bitmap blit
+    // in on_paint() overwrites the screen pixels of overlapping sibling
+    // HWNDs (e.g., the Phase 6 FindBar anchored to canvas top-right).
+    // Those siblings are NOT reinvalidated on canvas paint, so they
+    // effectively disappear — only system-rendered chrome (e.g., Edit
+    // caret blink) remains visible. WS_CLIPSIBLINGS tells GDI/D2D to
+    // exclude sibling areas from this window's update region.
     hwnd_ = CreateWindowExW(
         0, kCanvasClassName, L"",
-        WS_CHILD | WS_VISIBLE,
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
         0, 0, rc.right - rc.left, rc.bottom - rc.top,
         parent, nullptr, hInstance, this);
     if (!hwnd_)
