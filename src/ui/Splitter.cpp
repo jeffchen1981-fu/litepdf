@@ -1,6 +1,8 @@
 #include "ui/Splitter.hpp"
 
-#include <dwmapi.h>
+#include "ui/detail/SplitterCore.hpp"
+#include "ui/detail/SplitterMath.hpp"
+
 #include <windowsx.h>
 
 #include <algorithm>
@@ -18,157 +20,139 @@ namespace {
 
 constexpr wchar_t kWndClass[] = L"LitePDFSplitter";
 
-// Clamp bounds for the panel height driven by the drag. Caller can further
-// clamp; these are a sane floor/ceiling so the panel never collapses to 0
-// or pushes the main content off the top of the window.
-constexpr int kMinPanelHeightPx      = 100;
-constexpr int kBottomReservePx       = 200;  // min space above the splitter
-
 std::once_flag g_class_once;
 
-// ----------------------------------------------------------------------------
-// Palette. Kept file-local (same deferred-refactor rationale as FindBar).
-// TODO(phase-6.x): consolidate with FindBar/TabManager Palettes into
-// ui/Theme.hpp.
-// ----------------------------------------------------------------------------
-struct Palette {
-    COLORREF bar_bg;
-    COLORREF bar_hover;
-};
-
-Palette make_palette(bool dark) {
-    if (dark) {
-        return {
-            /*bar_bg*/    RGB(0x3A, 0x3A, 0x3A),
-            /*bar_hover*/ RGB(0x50, 0x50, 0x50),
-        };
-    }
-    return {
-        /*bar_bg*/    RGB(0xD8, 0xD8, 0xD8),
-        /*bar_hover*/ RGB(0xB8, 0xB8, 0xB8),
-    };
-}
-
-bool detect_dark_mode(HWND hwnd) {
-    BOOL dark = FALSE;
-    if (SUCCEEDED(DwmGetWindowAttribute(hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark)))) {
-        if (dark) return true;
-    }
-    HKEY hk = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER,
-            L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-            0, KEY_READ, &hk) == ERROR_SUCCESS) {
-        DWORD val = 1, cb = sizeof(val);
-        LONG r = RegQueryValueExW(hk, L"AppsUseLightTheme", nullptr, nullptr,
-                                  reinterpret_cast<LPBYTE>(&val), &cb);
-        RegCloseKey(hk);
-        if (r == ERROR_SUCCESS) return val == 0;
-    }
-    return false;
-}
+// Forward-declare so the WNDCLASSEX registration below can name it.
+LRESULT CALLBACK splitter_wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l);
 
 }  // namespace
 
-// Forward-declare so Impl can reference via function pointer.
-LRESULT CALLBACK splitter_wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l);
-
 // ----------------------------------------------------------------------------
-// Impl — private state. Stored in GWLP_USERDATA during WM_CREATE.
+// Splitter::Impl — thin shell that owns a detail::SplitterCore. The Core's
+// HWND is the splitter's HWND; the Core is what GWLP_USERDATA points to.
 // ----------------------------------------------------------------------------
 struct Splitter::Impl {
-    HWND hwnd = nullptr;
-
-    // Drag gesture state. `dragging` mirrors GetCapture()==hwnd for clarity
-    // and so we don't repeatedly call the WinAPI during WM_MOUSEMOVE.
-    bool dragging = false;
-    bool hover    = false;
-
-    Splitter::OnDrag on_drag;
-
-    bool    dark_mode = false;
-    Palette palette   = make_palette(false);
+    detail::SplitterCore core;
 };
 
-LRESULT CALLBACK splitter_wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
-    auto* impl = reinterpret_cast<Splitter::Impl*>(
-        GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+}  // namespace litepdf::ui
 
-    if (msg == WM_CREATE) {
-        auto* cs = reinterpret_cast<CREATESTRUCTW*>(l);
-        impl = static_cast<Splitter::Impl*>(cs->lpCreateParams);
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA,
-                          reinterpret_cast<LONG_PTR>(impl));
-        return 0;
-    }
+// ----------------------------------------------------------------------------
+// detail::SplitterCore::handle_message — defined here (rather than in the
+// header) so VerticalSplitter.cpp (Phase 7 T4b) reuses the SAME symbol via
+// the linker. Both Splitter.cpp and VerticalSplitter.cpp include the header
+// and link against this single out-of-line definition.
+//
+// The helpers it calls (make_palette / detect_dark_mode / compute_drag_target_*)
+// are inline in headers, so the dispatcher does not depend on any file-local
+// symbol from Splitter.cpp.
+// ----------------------------------------------------------------------------
+namespace litepdf::ui::detail {
 
-    if (!impl) return DefWindowProcW(hwnd, msg, w, l);
+LRESULT SplitterCore::handle_message(HWND hwnd_in, UINT msg, WPARAM w, LPARAM l) {
+    // Local clamp bounds. Mirrors Splitter.cpp's anonymous-namespace
+    // constants so VerticalSplitter.cpp doesn't have to re-define them.
+    // (Keeping them inside this function — rather than as inline header
+    // constants — keeps the public detail surface minimal.)
+    constexpr int kMinExtentPx     = 100;
+    constexpr int kReservePx       = 200;
 
     switch (msg) {
         case WM_SETCURSOR: {
-            // Show vertical-resize cursor while hovering OR dragging. Returning
-            // TRUE tells Windows we set the cursor so it won't use the class
-            // cursor.
-            SetCursor(LoadCursorW(nullptr, IDC_SIZENS));
+            // Show the resize cursor (vertical for horizontal splitter,
+            // horizontal for vertical splitter) while hovering OR dragging.
+            // Returning TRUE tells Windows we set the cursor so it won't use
+            // the class cursor.
+            LPCWSTR cursor = (orient == Orientation::Horizontal)
+                                 ? IDC_SIZENS
+                                 : IDC_SIZEWE;
+            SetCursor(LoadCursorW(nullptr, cursor));
             return TRUE;
         }
 
         case WM_MOUSEMOVE: {
-            if (!impl->hover) {
-                impl->hover = true;
-                TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
+            if (!hover) {
+                hover = true;
+                TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd_in, 0 };
                 TrackMouseEvent(&tme);
-                InvalidateRect(hwnd, nullptr, FALSE);
+                InvalidateRect(hwnd_in, nullptr, FALSE);
             }
-            if (impl->dragging && impl->on_drag) {
-                // Compute desired panel height = distance from bottom of
-                // parent client to current cursor position. We work in
-                // screen coords so a jitter in hwnd's own position during
-                // the drag doesn't feed back into the delta calculation.
+            if (dragging && on_drag) {
+                // Convert the mouse position to PARENT-CLIENT coords and
+                // delegate the orientation-specific from-edge math + clamp
+                // to compute_drag_target_{x,y}.
+                //
+                // Why parent-client and not screen coords: pre-refactor we
+                // used `bottom_left.y - pt_screen.y`, where both terms were
+                // ClientToScreen-mapped from the parent. Subtracting cancels
+                // the screen-origin offset, so working entirely in parent-
+                // client is bit-equivalent: parent_h - mouse_y_in_parent ==
+                // bottom_y_screen - mouse_y_screen.
                 POINT pt_screen;
                 pt_screen.x = GET_X_LPARAM(l);
                 pt_screen.y = GET_Y_LPARAM(l);
-                ClientToScreen(hwnd, &pt_screen);
+                ClientToScreen(hwnd_in, &pt_screen);
 
-                HWND parent = GetParent(hwnd);
+                HWND parent = GetParent(hwnd_in);
                 if (parent) {
+                    POINT pt_in_parent = pt_screen;
+                    ScreenToClient(parent, &pt_in_parent);
+
                     RECT pr;
                     GetClientRect(parent, &pr);
-                    POINT bottom_left = { 0, pr.bottom };
-                    ClientToScreen(parent, &bottom_left);
 
-                    int new_h = static_cast<int>(bottom_left.y - pt_screen.y);
-                    const int max_h = std::max(
-                        kMinPanelHeightPx,
-                        static_cast<int>(pr.bottom) - kBottomReservePx);
-                    if (new_h < kMinPanelHeightPx) new_h = kMinPanelHeightPx;
-                    if (new_h > max_h)             new_h = max_h;
-                    impl->on_drag(new_h);
+                    if (orient == Orientation::Horizontal) {
+                        // Horizontal splitter: panel anchored at bottom.
+                        // panel_h = parent_h - mouse_y_in_parent_client.
+                        const int max_h = (std::max)(
+                            kMinExtentPx,
+                            static_cast<int>(pr.bottom) - kReservePx);
+                        const int new_h = compute_drag_target_y(
+                            static_cast<int>(pt_in_parent.y),
+                            static_cast<int>(pr.bottom),
+                            kMinExtentPx,
+                            max_h);
+                        on_drag(new_h);
+                    } else {
+                        // Vertical splitter (Phase 7 T4b): pane anchored at
+                        // left. pane_w = mouse_x_in_parent_client. parent_w
+                        // is unused in compute_drag_target_x but passed for
+                        // signature symmetry.
+                        const int max_w = (std::max)(
+                            kMinExtentPx,
+                            static_cast<int>(pr.right) - kReservePx);
+                        const int new_w = compute_drag_target_x(
+                            static_cast<int>(pt_in_parent.x),
+                            static_cast<int>(pr.right),
+                            kMinExtentPx,
+                            max_w);
+                        on_drag(new_w);
+                    }
                 }
             }
             return 0;
         }
 
         case WM_MOUSELEAVE: {
-            if (impl->hover && !impl->dragging) {
-                impl->hover = false;
-                InvalidateRect(hwnd, nullptr, FALSE);
+            if (hover && !dragging) {
+                hover = false;
+                InvalidateRect(hwnd_in, nullptr, FALSE);
             }
             return 0;
         }
 
         case WM_LBUTTONDOWN: {
-            impl->dragging = true;
-            SetCapture(hwnd);
-            InvalidateRect(hwnd, nullptr, FALSE);
+            dragging = true;
+            SetCapture(hwnd_in);
+            InvalidateRect(hwnd_in, nullptr, FALSE);
             return 0;
         }
 
         case WM_LBUTTONUP: {
-            if (impl->dragging) {
-                impl->dragging = false;
-                if (GetCapture() == hwnd) ReleaseCapture();
-                InvalidateRect(hwnd, nullptr, FALSE);
+            if (dragging) {
+                dragging = false;
+                if (GetCapture() == hwnd_in) ReleaseCapture();
+                InvalidateRect(hwnd_in, nullptr, FALSE);
             }
             return 0;
         }
@@ -177,9 +161,9 @@ LRESULT CALLBACK splitter_wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // Another window stole capture (Alt+Tab, dialog). Clear drag
             // state cleanly so we don't keep firing on_drag once capture
             // returns elsewhere.
-            if (impl->dragging) {
-                impl->dragging = false;
-                InvalidateRect(hwnd, nullptr, FALSE);
+            if (dragging) {
+                dragging = false;
+                InvalidateRect(hwnd_in, nullptr, FALSE);
             }
             return 0;
         }
@@ -187,10 +171,10 @@ LRESULT CALLBACK splitter_wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         case WM_ERASEBKGND: {
             HDC  hdc = reinterpret_cast<HDC>(w);
             RECT rc;
-            GetClientRect(hwnd, &rc);
-            const COLORREF col = (impl->hover || impl->dragging)
-                                     ? impl->palette.bar_hover
-                                     : impl->palette.bar_bg;
+            GetClientRect(hwnd_in, &rc);
+            const COLORREF col = (hover || dragging)
+                                     ? palette.bar_hover
+                                     : palette.bar_bg;
             HBRUSH br = CreateSolidBrush(col);
             FillRect(hdc, &rc, br);
             DeleteObject(br);
@@ -199,25 +183,45 @@ LRESULT CALLBACK splitter_wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
 
         case WM_SETTINGCHANGE: {
             // Light theme hot-swap (consistent with FindBar/TabManager).
-            HWND parent = GetParent(hwnd);
-            const bool new_dark = detect_dark_mode(parent ? parent : hwnd);
-            if (new_dark != impl->dark_mode) {
-                impl->dark_mode = new_dark;
-                impl->palette   = make_palette(new_dark);
-                InvalidateRect(hwnd, nullptr, TRUE);
+            HWND parent = GetParent(hwnd_in);
+            const bool new_dark = detect_dark_mode(parent ? parent : hwnd_in);
+            if (new_dark != dark_mode) {
+                dark_mode = new_dark;
+                palette   = make_palette(new_dark);
+                InvalidateRect(hwnd_in, nullptr, TRUE);
             }
             return 0;
         }
 
         case WM_NCDESTROY: {
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            SetWindowLongPtrW(hwnd_in, GWLP_USERDATA, 0);
             break;
         }
     }
-    return DefWindowProcW(hwnd, msg, w, l);
+    return DefWindowProcW(hwnd_in, msg, w, l);
 }
 
+}  // namespace litepdf::ui::detail
+
+namespace litepdf::ui {
+
 namespace {
+
+LRESULT CALLBACK splitter_wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
+    auto* core = reinterpret_cast<detail::SplitterCore*>(
+        GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+    if (msg == WM_CREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(l);
+        core = static_cast<detail::SplitterCore*>(cs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA,
+                          reinterpret_cast<LONG_PTR>(core));
+        return 0;
+    }
+
+    if (!core) return DefWindowProcW(hwnd, msg, w, l);
+    return core->handle_message(hwnd, msg, w, l);
+}
 
 void register_class_once(HINSTANCE hInstance) {
     std::call_once(g_class_once, [hInstance] {
@@ -243,32 +247,33 @@ Splitter::Splitter(HINSTANCE hInstance, HWND parent)
 {
     register_class_once(hInstance);
 
-    impl_->dark_mode = detect_dark_mode(parent);
-    impl_->palette   = make_palette(impl_->dark_mode);
+    impl_->core.orient    = detail::Orientation::Horizontal;
+    impl_->core.dark_mode = detail::detect_dark_mode(parent);
+    impl_->core.palette   = detail::make_palette(impl_->core.dark_mode);
 
-    impl_->hwnd = CreateWindowExW(
+    impl_->core.hwnd = CreateWindowExW(
         0, kWndClass, L"",
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
         0, 0, 0, 0,
-        parent, nullptr, hInstance, impl_.get());
+        parent, nullptr, hInstance, &impl_->core);
 }
 
 Splitter::~Splitter() {
-    if (impl_ && impl_->hwnd) {
-        DestroyWindow(impl_->hwnd);
-        impl_->hwnd = nullptr;
+    if (impl_ && impl_->core.hwnd) {
+        DestroyWindow(impl_->core.hwnd);
+        impl_->core.hwnd = nullptr;
     }
 }
 
-HWND Splitter::hwnd() const { return impl_ ? impl_->hwnd : nullptr; }
+HWND Splitter::hwnd() const { return impl_ ? impl_->core.hwnd : nullptr; }
 
 void Splitter::set_on_drag(OnDrag cb) {
-    if (impl_) impl_->on_drag = std::move(cb);
+    if (impl_) impl_->core.on_drag = std::move(cb);
 }
 
 void Splitter::set_bounds(const RECT& bounds) {
-    if (!impl_ || !impl_->hwnd) return;
-    SetWindowPos(impl_->hwnd, nullptr,
+    if (!impl_ || !impl_->core.hwnd) return;
+    SetWindowPos(impl_->core.hwnd, nullptr,
                  bounds.left, bounds.top,
                  bounds.right - bounds.left, bounds.bottom - bounds.top,
                  SWP_NOZORDER | SWP_NOACTIVATE);
