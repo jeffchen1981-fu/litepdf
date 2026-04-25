@@ -1,4 +1,5 @@
 #pragma once
+// Refactored: Splitter now wraps SplitterCore (Phase 7 prereq).
 // ui::Splitter — horizontal 4-DIP drag bar for resizing the bottom panel.
 // WM_SETCURSOR → IDC_SIZENS; WM_LBUTTONDOWN captures mouse; WM_MOUSEMOVE
 // during capture posts height changes to parent via the OnDrag callback.
@@ -27,12 +28,12 @@ public:
     // (4 DIP tall horizontal bar at y = client_height - panel_height - 4).
     void set_bounds(const RECT& bounds);
 
-    // Impl is forward-declared public only so the free-standing WndProc in
-    // Splitter.cpp can name the type without a friend-declaration gauntlet.
-    // Definition lives in the .cpp (PIMPL with slightly looser name lookup).
-    struct Impl;
-
 private:
+    // Standard PIMPL — Impl is opaque, defined in Splitter.cpp. Post Phase 7
+    // T4a refactor the WndProc retrieves a detail::SplitterCore* directly
+    // from GWLP_USERDATA (not Splitter::Impl), so the historical reason for
+    // Impl being publicly forward-declared no longer applies.
+    struct Impl;
     std::unique_ptr<Impl> impl_;
 };
 
