@@ -40,6 +40,20 @@ build/Release/litepdf.exe tests/fixtures/bookmarks.pdf
 #   PgDn ×3 in canvas → thumb pane highlights pages 1, 2, 3 in turn
 ```
 
+**Pre-flight verification (added per plan-eng-review 1E + 1B):**
+
+This phase plumbs thumbs through the existing `core::RenderEngine` via a new per-request
+`bypass_cache` flag (D3 + D16). Confirm the existing engine has the cache-conditional
+branch we're extending (or add it via the prerequisite step in Task 0.5):
+
+```bash
+grep -n "cache_\b\|cache->\|cache &&" src/core/RenderEngine.cpp | head -20
+```
+
+Expected: at least one `if (cache_)` (or equivalent) branch around the worker's
+pixmap lookup/put. If absent, Task 0.5 below adds the bypass-cache plumbing as a
+~10 LOC prerequisite before any thumb code is written.
+
 ---
 
 ## Architectural Decisions
@@ -48,7 +62,7 @@ build/Release/litepdf.exe tests/fixtures/bookmarks.pdf
 
 **D2. ThumbCache is its own class — NOT a third tier in `core::PageCache`.** Adding `L3 = HBITMAP` to PageCache would tangle thumb lifecycle with main render lifecycle (every render-time eviction would have to reason about thumbs). Instead: a tiny standalone `ThumbCache` keyed by `int page_num`, capacity = (visible_pages + buffer_pages) × 2 ≈ 30 entries by default. `ThumbCache` owns HBITMAP refs (DeleteObject on evict). PageCache stays untouched.
 
-**D3. ThumbnailRenderer wraps `RenderEngine(num_workers=1, cache=nullptr)`.** Phase 2's RenderEngine accepts `cache=nullptr` and falls through to a direct-render path that does not look up or populate L1/L2 — exactly what we need for non-polluting thumb rendering. Single worker because (a) thumbs are low-priority background work, (b) sharing one HDD-friendly serial pipeline avoids contending with the main 2-worker render pool. Each thumb request submits with `priority=3` (below the existing P0/P1/P2 levels), `scale=0.15f` (≈ 11 dpi at 72-baseline → 120-dip-wide thumb on a 1920-px-wide PDF page).
+**D3. ThumbnailRenderer reuses each `DocumentView`'s existing `RenderEngine` via a per-request `bypass_cache` flag** (revised per plan-eng-review 1B; supersedes the original "new RenderEngine(num_workers=1, cache=nullptr) per tab" approach). Task 0.5 adds a `bool bypass_cache` field to `RenderEngine::RenderRequest` plus the two `if (cache_ && !req.bypass_cache)` guards in `RenderEngine.cpp`'s worker loop (~10 LOC). `ThumbnailRenderer` then holds a non-owning `RenderEngine&` and submits with `priority=3` (below main render's P0/P1/P2), `scale=0.15f` (≈ 11 dpi at 72-baseline → 120-dip-wide thumb on a 1920-px-wide PDF page), and `bypass_cache=true` (so thumb pixmaps don't pollute L1/L2 — D2 still holds). Reusing the existing engine avoids the thread-count blowup that would otherwise compound Phase 5 D16's known limitation: 5 tabs would have meant 5 main engines × 2 workers + 5 thumb engines × 1 worker = 15 threads. With the bypass flag, it stays at 10 (the Phase 5 baseline).
 
 **D4. Thumbnail size: 120×160 dip, single column, DPI-aware.** Dip-fixed because (a) UX consistency across DPI scaling; (b) one-column simplifies hit-testing (page = `y / (tile_h + gap)`); (c) eliminates re-flow on splitter resize (only the gutter changes). Tile pixel size = `MulDiv(120, dpi, 96) × MulDiv(160, dpi, 96)`. Pane min-width = `120 + 2 * margin + scrollbar` ≈ 150 dip.
 
@@ -62,7 +76,7 @@ build/Release/litepdf.exe tests/fixtures/bookmarks.pdf
   (a) repaints the (old, new) tile pair to redraw highlight border;
   (b) if the new page is outside `visible_range()`, scrolls so the new page sits at row 1 (one tile above center) — same UX as Sumatra. Scroll is animated only if Phase 12 adds a flag; Phase 7 ships instant scroll.
 
-**D9. VerticalSplitter shares PIMPL skeleton with Phase 6's Splitter.** Refactor in T4 extracts a `SplitterCore` private struct holding `{HWND, drag_state, OnDrag cb}` plus `enum Orientation { Horizontal, Vertical }`. `Splitter::set_bounds`/`VerticalSplitter::set_bounds` differ only in cursor (`IDC_SIZENS` vs `IDC_SIZEWE`) and the axis math. Total LOC delta: +~50 (mostly `VerticalSplitter.{hpp,cpp}` thin wrapper); existing `Splitter` callers see zero behavior change.
+**D9. VerticalSplitter shares PIMPL skeleton with Phase 6's Splitter, refactor lands as a separate prerequisite PR** (revised per plan-eng-review 2A + 2D). The `SplitterCore` Impl owns the WndProc, parameterized by `enum Orientation { Horizontal, Vertical }`. Both `Splitter` and `VerticalSplitter` are thin ~30-line ctors binding orientation + cursor (`IDC_SIZENS` vs `IDC_SIZEWE`) + axis math + callback to the shared `SplitterCore`. **Two-step rule (Beck):** the refactor lands first as Task 4a in its own PR (zero behavior change on the in-production results-panel splitter); only then does Task 4b add `VerticalSplitter` as new code in this Phase 7 PR. Splitting the change preserves `git bisect` resolution: any future regression in either splitter direction lands on the commit that actually introduced it. DRY: WndProc lives once in `SplitterCore`; the two wrapper classes don't duplicate WM_LBUTTONDOWN / WM_MOUSEMOVE / WM_LBUTTONUP / WM_CAPTURECHANGED logic.
 
 **D10. F4 toggle and mutual exclusion live in MainWindow, not ThumbnailPane.** Pane just exposes `show()`/`hide()`/`visible()` like OutlinePane. MainWindow's `WM_COMMAND` for `IDM_VIEW_THUMBS` does:
   ```cpp
@@ -84,6 +98,8 @@ build/Release/litepdf.exe tests/fixtures/bookmarks.pdf
 **D14. Color palette reuses TabManager's `Palette` struct + dark-mode detection.** Tab strip already has light/dark hot-switching on `WM_SETTINGCHANGE`. Pane subscribes to the same change. Border on current page = `palette.accent`; placeholder background = `palette.tab_bg`; text = `palette.text`.
 
 **D15. Tag at end: `v0.0.8-phase7`.** Mirrors phase5 / phase6 convention. Version bump in CMakeLists.txt + About dialog + VERSION file. No fast-follow tags planned — if something surfaces post-tag, follow `phase7.1` pattern.
+
+**D16. ThumbnailRenderer adopts Phase 6 C1's task-drain pattern** (added per plan-eng-review 1A). Worker callbacks reach into `ThumbnailPane` (via the `OnDone` lambda → `PostMessageW` → cache put). When a tab is closed mid-render, `DocumentView` (and therefore `ThumbnailPane`, `ThumbCache`, `ThumbnailRenderer`) is destroyed. Without a drain, an in-flight worker can complete its render after destruction and either (a) leak the produced HBITMAP via PostMessage to a dead HWND, or (b) UAF if the lambda holds a captured raw pointer. `ThumbnailRenderer::Impl` holds an `std::atomic<int> pending_tasks{0}` that is incremented at `submit()` and RAII-decremented at the top of each `on_complete` lambda; `~Impl()` spin-waits to zero before returning. Mirrors the fix in commit `8e11f39` for `core::SearchSession`. Self-check at T3 implementation review: any `submit()` lambda that captures a non-owning UI/cache pointer MUST go through this drain.
 
 ---
 
@@ -130,6 +146,93 @@ Expected: View menu shows the new "Toggle Thumbnails F4" item, grayed/no-op (no 
 ```bash
 git add resources/
 git commit -m "feat(ui): reserve menu IDs for thumbnail pane (Phase 7 Task 0)"
+```
+
+---
+
+### Task 0.5: Add `bypass_cache` per-request flag to `core::RenderEngine` (added per plan-eng-review 1B)
+
+**Goal:** Extend `RenderEngine::RenderRequest` with an opt-in flag that suppresses `PageCache` lookup AND population for that request. This is the enabling change that lets `ThumbnailRenderer` (T3) reuse each `DocumentView`'s existing `RenderEngine` without polluting L1/L2. ~10 LOC.
+
+**Files:**
+- Modify: `src/core/RenderEngine.hpp` — add `bool bypass_cache` field.
+- Modify: `src/core/RenderEngine.cpp` — guard the two cache touch points.
+- Modify: `tests/unit/test_render_engine.cpp` (or equivalent existing render-engine test file) — add one test confirming `bypass_cache=true` neither reads nor writes the cache.
+
+**Step 0.5.1: Edit `src/core/RenderEngine.hpp`.** In the `RenderRequest` struct, after `scale`:
+
+```cpp
+struct RenderRequest {
+    int   page_num    = 0;
+    int   priority    = 0;
+    float scale       = 1.0f;
+    bool  bypass_cache = false;  // (Phase 7) when true, this request neither
+                                 // reads from nor populates the L1/L2 cache.
+                                 // Used by ThumbnailRenderer so thumb pixmaps
+                                 // never displace main-render entries.
+    std::function<void(fz_pixmap*, fz_context*)> on_complete;
+};
+```
+
+**Step 0.5.2: Edit `src/core/RenderEngine.cpp`.** Find the existing worker loop's cache lookup and cache-put. Pre-flight grep already confirmed which file/line to touch:
+
+```bash
+grep -n "cache_\b\|cache->\|cache &&" src/core/RenderEngine.cpp | head
+```
+
+Wrap both `if (cache_)` paths with the new flag:
+
+```cpp
+// At cache-lookup site:
+if (cache_ && !req.bypass_cache) {
+    if (auto* hit = cache_->get_pixmap(req.page_num, req.scale)) {
+        // ... existing fast-path ...
+    }
+}
+
+// At cache-put site (after render completes):
+if (cache_ && !req.bypass_cache) {
+    cache_->put_pixmap(req.page_num, req.scale, fz_keep_pixmap(ctx, pix));
+}
+```
+
+**Step 0.5.3: Add a unit test.** In whichever test file already covers RenderEngine (Phase 2 test file likely under `tests/unit/`), add one case:
+
+```cpp
+TEST_CASE("RenderEngine: bypass_cache=true neither reads nor populates cache",
+          "[render_engine][bypass]") {
+    Document doc; REQUIRE(doc.open(L"tests/fixtures/simple.pdf"));
+    PageCache cache(/*l1=*/4, /*l2=*/4, doc.ui_ctx());
+    RenderEngine eng(doc, /*workers=*/1, &cache);
+
+    std::atomic<int> done{0};
+    RenderEngine::RenderRequest req;
+    req.page_num     = 0;
+    req.priority     = 0;
+    req.scale        = 0.15f;
+    req.bypass_cache = true;
+    req.on_complete  = [&](fz_pixmap* pix, fz_context* ctx) {
+        if (pix) fz_drop_pixmap(ctx, pix);
+        done.fetch_add(1, std::memory_order_release);
+    };
+    eng.submit(std::move(req));
+
+    for (int i = 0; i < 500 && done.load() == 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    REQUIRE(done.load() == 1);
+
+    // The defining assertion: cache was untouched.
+    REQUIRE(cache.get_pixmap(0, 0.15f) == nullptr);
+}
+```
+
+**Step 0.5.4: Build + tests.** Expected: existing render-engine tests still pass; one new [render_engine][bypass] case adds. Total ctest count: 101 → 102 (before any T1+ work).
+
+**Step 0.5.5: Commit.**
+
+```bash
+git add src/core/RenderEngine.hpp src/core/RenderEngine.cpp tests/unit/<render_engine_test_file>.cpp
+git commit -m "feat(core): RenderEngine bypass_cache per-request flag (Phase 7 Task 0.5 / D3)"
 ```
 
 ---
@@ -503,6 +606,23 @@ TEST_CASE("ThumbCache: replacing same key drops old bitmap", "[thumb_cache]") {
     // without a leak detector, but logical state must show b only.
 }
 
+TEST_CASE("ThumbCache: put with same page+same handle is a no-op",
+          "[thumb_cache]") {
+    // Added per plan-eng-review 2B: defensive test against accidental
+    // double-DeleteObject on idempotent puts.
+    ThumbCache c(4);
+    HBITMAP a = make_dummy_bitmap();
+    c.put(3, a);
+    c.put(3, a);  // same key + same handle → must NOT DeleteObject(a)
+    REQUIRE(c.get(3) == a);
+    REQUIRE(c.size() == 1);
+    // No way to assert DeleteObject wasn't called from this side, but the
+    // implementation's same-handle short-circuit means logical state is
+    // intact. If put() ever drops same-handle, get(3) would still return
+    // a stale pointer that BitBlt would crash on — surfaces under the
+    // smoke-test handle-count check in T9.
+}
+
 TEST_CASE("ThumbCache: capacity overflow evicts least-recently-used", "[thumb_cache]") {
     ThumbCache c(2);
     c.put(1, make_dummy_bitmap());
@@ -630,7 +750,7 @@ void ThumbCache::clear() {
 }  // namespace litepdf::core
 ```
 
-**Step 2.5: CMake + run tests.** Expected: 5/5 [thumb_cache] cases pass; total 109 → 114.
+**Step 2.5: CMake + run tests.** Expected: 6/6 [thumb_cache] cases pass; total 110 → 116. (Counts assume Task 0.5 already added one [render_engine][bypass] case, taking baseline 101 → 102.)
 
 **Step 2.6: Commit.**
 
@@ -641,9 +761,9 @@ git commit -m "feat(core): ThumbCache HBITMAP LRU (Phase 7 D2)"
 
 ---
 
-### Task 3: `core::ThumbnailRenderer` — single-worker bypass-cache renderer
+### Task 3: `core::ThumbnailRenderer` — thumb-friendly wrapper around the existing per-tab `RenderEngine`
 
-**Goal:** Wrap `RenderEngine(num_workers=1, cache=nullptr)` with a thumb-friendly API: `submit(page, on_done)` where `on_done(HBITMAP)` fires on UI thread (post-marshaled).
+**Goal:** Provide a `submit(page, on_done)` API that submits to each `DocumentView`'s **existing** `RenderEngine` with `priority=3` and `bypass_cache=true` (the flag added in Task 0.5). On completion, the worker's pixmap is converted to `HBITMAP` and delivered to `on_done`. **Lifetime safety**: adopt Phase 6 C1's task-drain pattern (D16) so a tab close mid-render cannot UAF.
 
 **Files:**
 - Create: `src/core/ThumbnailRenderer.hpp` (~50 LOC).
@@ -655,6 +775,8 @@ git commit -m "feat(core): ThumbCache HBITMAP LRU (Phase 7 D2)"
 
 ```cpp
 #include "core/Document.hpp"
+#include "core/PageCache.hpp"
+#include "core/RenderEngine.hpp"
 #include "core/ThumbnailRenderer.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -664,44 +786,76 @@ git commit -m "feat(core): ThumbCache HBITMAP LRU (Phase 7 D2)"
 
 using namespace std::chrono_literals;
 using litepdf::core::Document;
+using litepdf::core::PageCache;
+using litepdf::core::RenderEngine;
 using litepdf::core::ThumbnailRenderer;
 
-TEST_CASE("ThumbnailRenderer: produces HBITMAP for a real page", "[thumb_renderer]") {
-    Document doc;
-    REQUIRE(doc.open(L"tests/fixtures/simple.pdf"));
-    ThumbnailRenderer r(doc);
+TEST_CASE("ThumbnailRenderer: produces HBITMAP for a real page",
+          "[thumb_renderer]") {
+    Document doc; REQUIRE(doc.open(L"tests/fixtures/simple.pdf"));
+    PageCache cache(4, 4, doc.ui_ctx());
+    RenderEngine eng(doc, /*workers=*/2, &cache);
+    ThumbnailRenderer r(eng);  // borrow the doc's engine
+
     std::atomic<int> got{0};
     HBITMAP captured = nullptr;
     r.submit(0, [&](HBITMAP bm) {
         captured = bm;
         got.fetch_add(1, std::memory_order_release);
     });
-    // Spin-wait up to 5 s.
     for (int i = 0; i < 500 && got.load(std::memory_order_acquire) == 0; ++i) {
         std::this_thread::sleep_for(10ms);
     }
     REQUIRE(got.load() == 1);
     REQUIRE(captured != nullptr);
-    DeleteObject(captured);  // test owns the result
+    DeleteObject(captured);
+    // D2 invariant: thumb pass must not have polluted the main cache.
+    REQUIRE(cache.get_pixmap(0, 0.15f) == nullptr);
 }
 
-TEST_CASE("ThumbnailRenderer: cancel_pending stops in-flight work", "[thumb_renderer]") {
-    Document doc;
-    REQUIRE(doc.open(L"tests/fixtures/simple.pdf"));
-    ThumbnailRenderer r(doc);
+TEST_CASE("ThumbnailRenderer: dtor drains in-flight tasks (D16 / 1A)",
+          "[thumb_renderer]") {
+    // Submits N requests then immediately destroys the renderer.
+    // Without D16's pending_tasks drain, the worker callback could fire
+    // after Impl is gone and either UAF-touch impl_->pending_tasks or
+    // PostMessage to a destroyed HWND in real use. Test contract:
+    // dtor MUST NOT return until every in-flight on_complete has run.
+    Document doc; REQUIRE(doc.open(L"tests/fixtures/simple.pdf"));
+    PageCache cache(4, 4, doc.ui_ctx());
+    RenderEngine eng(doc, /*workers=*/1, &cache);
+
+    std::atomic<int> completed{0};
+    {
+        ThumbnailRenderer r(eng);
+        for (int i = 0; i < 3; ++i) {
+            r.submit(0, [&](HBITMAP bm) {
+                if (bm) DeleteObject(bm);
+                completed.fetch_add(1, std::memory_order_release);
+            });
+        }
+        // Renderer dtor here MUST wait for all 3 callbacks to complete.
+    }
+    // After dtor returns, no callback should be in flight.
+    REQUIRE(completed.load() == 3);
+}
+
+TEST_CASE("ThumbnailRenderer: cancel_pending stops not-yet-started work",
+          "[thumb_renderer]") {
+    Document doc; REQUIRE(doc.open(L"tests/fixtures/simple.pdf"));
+    PageCache cache(4, 4, doc.ui_ctx());
+    RenderEngine eng(doc, /*workers=*/1, &cache);
+    ThumbnailRenderer r(eng);
+
     std::atomic<int> seen{0};
-    for (int i = 0; i < 3; ++i) {
-        r.submit(0, [&](HBITMAP bm) {
+    for (int i = 0; i < 5; ++i) {
+        r.submit(i, [&](HBITMAP bm) {
             seen.fetch_add(1, std::memory_order_release);
             if (bm) DeleteObject(bm);
         });
     }
     r.cancel_pending();
     std::this_thread::sleep_for(200ms);
-    // At least 0, at most 3 should have completed. The contract is
-    // "cancel_pending makes no further callbacks for not-yet-started
-    // work." We can't pin an exact count; verify no UB / no crash.
-    REQUIRE(seen.load() <= 3);
+    REQUIRE(seen.load() <= 5);  // some may have started before cancel
 }
 ```
 
@@ -712,14 +866,16 @@ TEST_CASE("ThumbnailRenderer: cancel_pending stops in-flight work", "[thumb_rend
 ```cpp
 #pragma once
 
-// core::ThumbnailRenderer — low-priority single-worker page renderer
-// for the thumbnail pane. Wraps RenderEngine(num_workers=1,
-// cache=nullptr) so thumbs do NOT pollute PageCache L1/L2.
+// core::ThumbnailRenderer — thumb-friendly facade over the existing
+// per-tab RenderEngine. Submits at priority=3 with bypass_cache=true
+// so the main render cache (L1/L2) is never touched.
 //
-// Lifetime contract: on_done callback runs on a worker thread; the
-// HBITMAP it delivers is owned by the callback. ThumbnailPane
-// (the typical caller) immediately puts the HBITMAP into ThumbCache,
-// which then owns it.
+// Lifetime contract: on_done runs on a worker thread and receives an
+// HBITMAP (or nullptr on render failure); caller takes ownership.
+// Adopts Phase 6 C1's task-drain pattern (D16): the dtor blocks until
+// every in-flight on_done has completed, so it is safe to destroy the
+// renderer (and any objects captured by on_done lambdas) right after
+// submitting work. Mirrors the fix in commit 8e11f39 for SearchSession.
 
 #include "core/RenderEngine.hpp"
 
@@ -729,25 +885,26 @@ TEST_CASE("ThumbnailRenderer: cancel_pending stops in-flight work", "[thumb_rend
 
 namespace litepdf::core {
 
-class Document;
-
 class ThumbnailRenderer {
 public:
     using OnDone = std::function<void(HBITMAP)>;
 
-    explicit ThumbnailRenderer(Document& doc, float scale = 0.15f);
+    // `engine` must outlive this ThumbnailRenderer. Typically each
+    // DocumentView owns one RenderEngine and one ThumbnailRenderer
+    // that borrows the engine. Default scale = 0.15 (~ 11 dpi at the
+    // 72-baseline, producing 120-dip-wide thumbs on letter pages).
+    explicit ThumbnailRenderer(RenderEngine& engine, float scale = 0.15f);
     ~ThumbnailRenderer();
 
     ThumbnailRenderer(const ThumbnailRenderer&)            = delete;
     ThumbnailRenderer& operator=(const ThumbnailRenderer&) = delete;
 
-    // Submits page render at low priority. On completion, on_done
-    // fires on a worker thread with an HBITMAP (or nullptr on render
-    // failure). Caller takes ownership of the HBITMAP.
+    // Submits page render at priority=3, bypass_cache=true. On completion,
+    // on_done fires on a worker thread.
     void submit(int page, OnDone on_done);
 
-    // Cancels all not-yet-started requests. In-flight ones still
-    // complete (cooperative cancellation, same as RenderEngine).
+    // Cancels all not-yet-started priority=3 requests. In-flight ones
+    // still complete (cooperative cancellation, same as RenderEngine).
     void cancel_pending();
 
 private:
@@ -758,12 +915,14 @@ private:
 }  // namespace litepdf::core
 ```
 
-**Step 3.4: Write `ThumbnailRenderer.cpp`** — wires `RenderEngine.submit` with priority 3 + scale 0.15, converts the resulting `fz_pixmap` to `HBITMAP` via `CreateDIBSection` + memcpy of pixmap rows. Implementation skeleton:
+**Step 3.4: Write `ThumbnailRenderer.cpp`** — submits via the borrowed engine with `priority=3` and `bypass_cache=true`, converts the resulting `fz_pixmap` to `HBITMAP` via `CreateDIBSection`, and gates dtor on a `pending_tasks` drain (D16). Pixmap component handling expanded per plan-eng-review 2C: MuPDF's render output is normally 4-component (RGBA), but ePub or some grayscale PDFs may produce 1- or 2-component pixmaps; T3 expands those to BGRA on the fly rather than silently returning nullptr.
 
 ```cpp
 #include "core/ThumbnailRenderer.hpp"
 
-#include "core/Document.hpp"
+#include <atomic>
+#include <chrono>
+#include <thread>
 
 extern "C" {
 #include <mupdf/fitz.h>
@@ -772,12 +931,16 @@ extern "C" {
 namespace litepdf::core {
 
 namespace {
+// Convert an MuPDF pixmap to a Win32 32-bit BGRA top-down DIBSection.
+// Handles 1-component (gray), 2-component (gray+alpha), 3-component (rgb),
+// and 4-component (rgba) inputs. Returns nullptr only on width/height
+// validation failure or DIBSection allocation failure.
 HBITMAP pixmap_to_hbitmap(fz_pixmap* pix, fz_context* ctx) {
     if (!pix) return nullptr;
     const int w = fz_pixmap_width(ctx, pix);
     const int h = fz_pixmap_height(ctx, pix);
     const int n = fz_pixmap_components(ctx, pix);
-    if (w <= 0 || h <= 0 || n != 4) return nullptr;
+    if (w <= 0 || h <= 0 || n < 1 || n > 4) return nullptr;
 
     BITMAPINFO bi{};
     bi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
@@ -802,12 +965,20 @@ HBITMAP pixmap_to_hbitmap(fz_pixmap* pix, fz_context* ctx) {
         const unsigned char* sr = src + y * src_stride;
         unsigned char* dr = dst + y * dst_stride;
         for (int x = 0; x < w; ++x) {
-            // MuPDF RGBA → Win32 BGRA
-            dr[0] = sr[2];
-            dr[1] = sr[1];
-            dr[2] = sr[0];
-            dr[3] = sr[3];
-            sr += 4;
+            // Per-component mapping. Goal: produce BGRA always.
+            unsigned char r, g, b, a;
+            switch (n) {
+                case 1:  // gray
+                    r = g = b = sr[0]; a = 0xFF; break;
+                case 2:  // gray + alpha
+                    r = g = b = sr[0]; a = sr[1]; break;
+                case 3:  // rgb (no alpha)
+                    r = sr[0]; g = sr[1]; b = sr[2]; a = 0xFF; break;
+                default: // case 4 = rgba
+                    r = sr[0]; g = sr[1]; b = sr[2]; a = sr[3]; break;
+            }
+            dr[0] = b; dr[1] = g; dr[2] = r; dr[3] = a;
+            sr += n;
             dr += 4;
         }
     }
@@ -816,67 +987,127 @@ HBITMAP pixmap_to_hbitmap(fz_pixmap* pix, fz_context* ctx) {
 }  // namespace
 
 struct ThumbnailRenderer::Impl {
-    RenderEngine engine;
-    float        scale;
-    explicit Impl(Document& doc, float s)
-      : engine(doc, /*num_workers=*/1, /*cache=*/nullptr), scale(s) {}
+    RenderEngine&   engine;
+    float           scale;
+    std::atomic<int> pending_tasks{0};
+
+    Impl(RenderEngine& e, float s) : engine(e), scale(s) {}
+
+    // D16: spin-wait until every in-flight on_complete has decremented
+    // pending_tasks. Mirrors Phase 6 C1's pattern in core::SearchSession.
+    ~Impl() {
+        while (pending_tasks.load(std::memory_order_acquire) > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
 };
 
-ThumbnailRenderer::ThumbnailRenderer(Document& doc, float scale)
-  : impl_(std::make_unique<Impl>(doc, scale)) {}
+ThumbnailRenderer::ThumbnailRenderer(RenderEngine& engine, float scale)
+  : impl_(std::make_unique<Impl>(engine, scale)) {}
 
 ThumbnailRenderer::~ThumbnailRenderer() = default;
 
 void ThumbnailRenderer::submit(int page, OnDone on_done) {
+    impl_->pending_tasks.fetch_add(1, std::memory_order_relaxed);
     RenderEngine::RenderRequest req;
-    req.page_num = page;
-    req.priority = 3;
-    req.scale    = impl_->scale;
-    req.on_complete = [cb = std::move(on_done)](fz_pixmap* pix, fz_context* ctx) {
+    req.page_num     = page;
+    req.priority     = 3;
+    req.scale        = impl_->scale;
+    req.bypass_cache = true;  // Task 0.5: thumb pixmaps don't touch L1/L2.
+    req.on_complete = [impl = impl_.get(), cb = std::move(on_done)]
+                      (fz_pixmap* pix, fz_context* ctx) {
         HBITMAP bm = pixmap_to_hbitmap(pix, ctx);
         if (pix) fz_drop_pixmap(ctx, pix);
         cb(bm);
+        // RAII-decrement at the end so the dtor's spin-wait observes
+        // completion only after the user callback has fully run.
+        impl->pending_tasks.fetch_sub(1, std::memory_order_release);
     };
     impl_->engine.submit(std::move(req));
 }
 
 void ThumbnailRenderer::cancel_pending() {
-    impl_->engine.cancel_all_below_priority(0);  // cancel everything (priority 0 is highest)
+    // Cancel anything currently below priority 3 in the engine's queue.
+    // In-flight workers cooperatively check the cancel flag at safe
+    // points; their on_complete still fires (with pix possibly null),
+    // so pending_tasks still decrements correctly.
+    impl_->engine.cancel_all_below_priority(3);
 }
 
 }  // namespace litepdf::core
 ```
 
-**Step 3.5: CMake + tests.** Expected: 2/2 [thumb_renderer] cases pass; total 114 → 116.
+**Step 3.5: CMake + tests.** Expected: 3/3 [thumb_renderer] cases pass (added drain-on-dtor case per D16); total 116 → 119.
 
 **Step 3.6: Commit.**
 
 ```bash
 git add src/core/ThumbnailRenderer.* src/CMakeLists.txt tests/unit/ThumbnailRendererTests.cpp tests/unit/CMakeLists.txt
-git commit -m "feat(core): ThumbnailRenderer (RenderEngine bypass-cache wrapper) (Phase 7 D3)"
+git commit -m "feat(core): ThumbnailRenderer reuses engine + task drain (Phase 7 D3/D16)"
 ```
 
 ---
 
-### Task 4: `ui::VerticalSplitter` — extract orientation-agnostic core from existing Splitter
+### Task 4a: Refactor existing `ui::Splitter` to expose a shared `SplitterCore` (PREREQUISITE PR — lands separately, before Phase 7)
 
-**Goal:** Refactor existing `ui::Splitter` to share PIMPL skeleton with new `ui::VerticalSplitter`. No behavior change to existing horizontal use; total LOC delta ~+50.
+> Per plan-eng-review 2A + 2D: Beck's "make the change easy, then make the easy change" — refactor first as its own PR, then add VerticalSplitter as a new file in the Phase 7 PR. Splitting preserves `git bisect` resolution if the in-production results-panel splitter ever regresses.
+
+**Goal:** Extract the WndProc / drag-state / dispatch logic from `ui::Splitter` into a shared `SplitterCore` Impl that both `Splitter` (horizontal — unchanged behavior) and the future `VerticalSplitter` (T4b) will compose. **Zero behavior change** for the in-production results-panel splitter.
 
 **Files:**
-- Modify: `src/ui/Splitter.hpp` (add `Orientation` enum, but keep `Splitter` class as a horizontal-only thin wrapper for callers).
-- Modify: `src/ui/Splitter.cpp` (parameterize WndProc on orientation).
-- Create: `src/ui/VerticalSplitter.hpp` + `.cpp` (thin wrapper over the shared core, with `IDC_SIZEWE` cursor).
-- Create: `tests/unit/VerticalSplitterTests.cpp` — tests are minimal because Splitter is heavy on Win32; we test the shared `compute_drag_target` math only.
+- Modify: `src/ui/Splitter.hpp` — keep `class Splitter` API byte-identical; add `// Refactored: Splitter now wraps SplitterCore (Phase 7 prereq).` comment.
+- Modify: `src/ui/Splitter.cpp` — extract `SplitterCore` private struct holding `{HWND, drag_state, OnDrag cb, Orientation orient}` plus `enum class Orientation { Horizontal, Vertical }`. Move the WM_LBUTTONDOWN / WM_MOUSEMOVE / WM_LBUTTONUP / WM_CAPTURECHANGED / WM_SETCURSOR handlers into `SplitterCore::handle_message(...)`. `Splitter::Impl` becomes a thin shell that owns a `SplitterCore` constructed with `Orientation::Horizontal` and `IDC_SIZENS`.
+- Create: `src/ui/detail/SplitterMath.hpp` — extract clamp math as free functions:
+  ```cpp
+  namespace litepdf::ui::detail {
+  inline int compute_drag_target_y(int mouse_y, int parent_h, int min_h, int max_h);
+  inline int compute_drag_target_x(int mouse_x, int parent_w, int min_w, int max_w);
+  }
+  ```
+  Used by `SplitterCore::handle_message` based on orientation.
+- Modify: `tests/unit/CMakeLists.txt`, optionally add `tests/unit/SplitterMathTests.cpp` (~30 LOC) covering clamp boundaries for both axes.
+
+**Step 4a.1: Extract `SplitterMath.hpp`** with two pure clamp helpers. Add 4 unit cases ([splitter_math]) covering low/high clamps for both axes.
+
+**Step 4a.2: Refactor `Splitter.cpp`.** All WndProc message handlers move into a `SplitterCore` member. `Splitter::Impl` retains its `HWND` ownership but delegates message dispatch. Public `Splitter` API and the existing horizontal-Splitter behavior are unchanged.
+
+**Step 4a.3: Verify zero regression.**
+```bash
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
+build/Release/litepdf.exe tests/fixtures/bookmarks.pdf
+# Press Ctrl+Shift+F to open the results panel, then drag the splitter
+# bar. Behavior must be identical to pre-refactor: cursor = IDC_SIZENS,
+# results-panel height resizes smoothly, capture release on alt+tab.
+```
+
+**Step 4a.4: Open prerequisite PR.** Branch `refactor/splitter-core`, single commit, PR title:
+```
+refactor(ui): extract SplitterCore for orientation reuse (Phase 7 prereq)
+```
+PR body should reference Phase 7 plan §D9 + 2A. CI gate + manual smoke. Land before any Phase 7 task starts.
+
+**Step 4a.5: After PR-4a merges, rebase the Phase 7 implementation branch onto the new `origin/main`.** `git rebase` patch-id detection will handle this cleanly (same as the Phase 6 rebase on Phase 5.4).
+
+---
+
+### Task 4b: Add `ui::VerticalSplitter` as a thin wrapper over `SplitterCore` (lands in the Phase 7 PR)
+
+**Goal:** With `SplitterCore` already extracted in T4a, T4b is purely additive: a new file thin-wraps the shared core with `Orientation::Vertical` + `IDC_SIZEWE`. No existing code is touched.
+
+**Files:**
+- Create: `src/ui/VerticalSplitter.hpp` + `.cpp` (~30 LOC each — both ctor + dtor + 3 forwarders to `Impl`).
+- Create: `tests/unit/VerticalSplitterTests.cpp` — exercises `detail::compute_drag_target_x` directly via the free helper added in T4a, plus a smoke unit case constructing/destroying VerticalSplitter without a parent window (confirms ctor doesn't blow up on minimal init).
 - Modify: `src/CMakeLists.txt`, `tests/unit/CMakeLists.txt`.
 
-**Step 4.1: Refactor.** In `src/ui/Splitter.hpp`, extract a private `enum class Orientation { Horizontal, Vertical }` into the `Impl` struct. Keep `class Splitter` exactly as before but add a `// Phase 7 refactor: shared core with VerticalSplitter.` doc-comment. Add new file `VerticalSplitter.hpp`:
+**Step 4b.1: VerticalSplitter.hpp:**
 
 ```cpp
 #pragma once
 
 // ui::VerticalSplitter — vertical 4-DIP drag bar for resizing the
-// left thumbnail/outline pane. Shares Impl skeleton with Splitter
-// (horizontal). See Phase 7 D9.
+// left thumbnail/outline pane. Thin wrapper over SplitterCore; see
+// Phase 7 D9 + Task 4a (the prerequisite refactor).
 
 #include <functional>
 #include <memory>
@@ -905,29 +1136,31 @@ private:
 }  // namespace litepdf::ui
 ```
 
-**Step 4.2: Implementation** — copy `src/ui/Splitter.cpp`, change cursor to `IDC_SIZEWE`, change `WM_MOUSEMOVE` to use the X-axis instead of Y, callback delivers `new_width_px = mouse_x` (clamped).
+**Step 4b.2: VerticalSplitter.cpp** — Impl owns a `SplitterCore` constructed with `Orientation::Vertical` + `IDC_SIZEWE`. All message handling reuses `SplitterCore::handle_message`. `set_bounds` rect interpretation flips axes (the bar lives at x = pane_width, full client-height) but the call to SplitterCore is identical.
 
-**Step 4.3: Tests.** Math-only test: `compute_drag_target_x(mouse_x, parent_w, min_w, max_w)` returns clamped width. (If it's a free function, test it directly; if it's a private member, expose via friend or a free helper in an anonymous namespace's test-only header.)
+**Step 4b.3: Tests.**
 
 ```cpp
-#include "ui/VerticalSplitter.hpp"
-// ... or test a free helper in detail/SplitterMath.hpp ...
+#include "ui/detail/SplitterMath.hpp"
+#include <catch2/catch_test_macros.hpp>
 
-TEST_CASE("VerticalSplitter: clamps below min", "[vsplitter]") {
-    REQUIRE(litepdf::ui::compute_drag_target_x(50, 1000, 150, 800) == 150);
+using litepdf::ui::detail::compute_drag_target_x;
+
+TEST_CASE("VerticalSplitter math: clamps below min", "[vsplitter]") {
+    REQUIRE(compute_drag_target_x(50, 1000, 150, 800) == 150);
 }
-TEST_CASE("VerticalSplitter: clamps above max", "[vsplitter]") {
-    REQUIRE(litepdf::ui::compute_drag_target_x(900, 1000, 150, 800) == 800);
+TEST_CASE("VerticalSplitter math: clamps above max", "[vsplitter]") {
+    REQUIRE(compute_drag_target_x(900, 1000, 150, 800) == 800);
 }
 ```
 
-**Step 4.4: CMake + tests.** Expected: 2/2 [vsplitter] pass; total 116 → 118.
+**Step 4b.4: CMake + tests.** Expected: 2/2 new [vsplitter] pass; baseline already includes T4a's [splitter_math] cases, so total grows by exactly 2 here.
 
-**Step 4.5: Commit.**
+**Step 4b.5: Commit (within Phase 7 PR).**
 
 ```bash
-git add src/ui/Splitter.* src/ui/VerticalSplitter.* src/CMakeLists.txt tests/unit/VerticalSplitterTests.cpp tests/unit/CMakeLists.txt
-git commit -m "refactor(ui): VerticalSplitter shares core with Splitter (Phase 7 D9)"
+git add src/ui/VerticalSplitter.* src/CMakeLists.txt tests/unit/VerticalSplitterTests.cpp tests/unit/CMakeLists.txt
+git commit -m "feat(ui): VerticalSplitter wraps SplitterCore (Phase 7 D9 / Task 4b)"
 ```
 
 ---
@@ -972,9 +1205,37 @@ private:
 
 **Step 5.2:** Implementation skeleton — `Impl` owns `HWND list_hwnd_`, `ThumbnailModel model_`, `NavigateCb nav_cb_`. Subclass the ListView's WndProc to handle `WM_SIZE` (recompute viewport_h_px in model), `WM_VSCROLL` (update model.scroll_y), `WM_LBUTTONDOWN` (call `model_.page_at_y(pt.y)` → if some, call `nav_cb_`). Owner-draw via `WM_DRAWITEM`: paint placeholder rectangle (palette.tab_bg fill + palette.text border + page-number text via `DrawTextW`).
 
-**Step 5.3:** Manual smoke. Build, launch with `bookmarks.pdf`, push a placeholder F4 handler in MainWindow that just calls `thumb_pane_->show()` (full handler comes in T8). Verify pane shows, page-number rectangles appear for visible pages, scroll works, click logs the page (printf or OutputDebugString — temporary).
+**Step 5.3 (added per plan-eng-review 1D): DPI hot-switch handling.** Add a public `void on_dpi_changed(unsigned new_dpi)` method to `ThumbnailPane`:
 
-**Step 5.4:** Commit.
+```cpp
+void ThumbnailPane::on_dpi_changed(unsigned new_dpi) {
+    impl_->model_.set_dpi(new_dpi);
+    // Cached HBITMAPs are baked to old pixel sizes; nuke them.
+    if (impl_->cache_) impl_->cache_->clear();
+    // Pending renders encode stale dpi-derived sizes via tile rect math
+    // upstream; cancel them so we don't paint stretched results.
+    if (impl_->renderer_) impl_->renderer_->cancel_pending();
+    InvalidateRect(impl_->list_hwnd_, nullptr, TRUE);
+}
+```
+
+`MainWindow` already handles `WM_DPICHANGED` for the tab strip (Phase 5.4). Extend that handler:
+
+```cpp
+case WM_DPICHANGED: {
+    // ... existing tab-strip handling ...
+    if (active_view_) {
+        if (auto* tp = active_view_->thumb_pane()) {
+            tp->on_dpi_changed(HIWORD(wParam));
+        }
+    }
+    return 0;
+}
+```
+
+**Step 5.4:** Manual smoke. Build, launch with `bookmarks.pdf`, push a placeholder F4 handler in MainWindow that just calls `thumb_pane_->show()` (full handler comes in T8). Verify pane shows, page-number rectangles appear for visible pages, scroll works, click logs the page (printf or OutputDebugString — temporary). DPI smoke: drag the window between two monitors at different scaling (e.g. 100% ↔ 200%); pane content invalidates and re-renders at the new size; no stretched/squished tiles.
+
+**Step 5.5:** Commit.
 
 ```bash
 git add src/ui/ThumbnailPane.* src/CMakeLists.txt
@@ -1009,7 +1270,17 @@ case WM_USER_THUMB_READY: {
 }
 ```
 
-**Step 6.2:** In `WM_DRAWITEM`, walk `model.visible_range_with_buffer()`. For each page: if `cache_->get(page)` returns non-null → `BitBlt` the HBITMAP into the tile rect. Otherwise paint placeholder, and if not yet pending in `pending_renders_` set, submit `renderer_->submit(page, ...)` and insert into `pending_renders_`. Pending set is cleared on tab close / set_page_count change / clear().
+**Step 6.2:** In `WM_DRAWITEM`, walk `model.visible_range_with_buffer()`. For each page: if `cache_->get(page)` returns non-null → `BitBlt` the HBITMAP into the tile rect. Otherwise paint placeholder, and if not yet pending in `pending_renders_` set, submit `renderer_->submit(page, ...)` and insert into `pending_renders_`.
+
+**`pending_renders_` lifecycle (added per plan-eng-review 4A):** the set MUST be mutated at exactly these 5 points, all on the UI thread:
+
+1. **Insert** — when `WM_DRAWITEM` submits a render for a cache miss.
+2. **Erase** — when `WM_USER_THUMB_READY` arrives for a given page (regardless of whether HBITMAP is non-null; null lParam signals render failure but the request is no longer pending).
+3. **Erase + cancel** — on `set_page_count(n)` change (document swapped or cleared); call `renderer_->cancel_pending()` then `pending_renders_.clear()`.
+4. **Erase + cancel** — on `clear()` (explicit reset); same as above.
+5. **Erase + cancel** — on dtor; `~Impl()` calls `cancel_pending` and then drops the set. Note that `ThumbnailRenderer::~Impl` will block on its own task drain (D16) so by the time the pane's dtor returns, no `WM_USER_THUMB_READY` is in flight that could touch a freed pane.
+
+If `pending_renders_` is mutated outside these points (especially from a worker thread), the dedupe guarantee breaks and the same page can re-submit while a render is in flight, wasting CPU. Code review focus area in T6.
 
 **Step 6.3:** Hover state (optional polish, copy from TabManager pattern): on `WM_MOUSEMOVE` track `hot_page_`, draw a 1-px palette.accent border. Skip if scope tightens.
 
@@ -1111,15 +1382,16 @@ git commit -m "feat(ui): wire ThumbnailPane into MainWindow with F4 + mutual exc
 
 ---
 
-### Task 9: Smoke test + version bump + tag
+### Task 9: Smoke test + version bump + design-doc sync + tag
 
-**Goal:** Add a thumb-pane case to `scripts/smoke-test.ps1`. Bump `VERSION` and `About` dialog to `0.0.8`. Tag `v0.0.8-phase7`.
+**Goal:** Add a thumb-pane case to `scripts/smoke-test.ps1`. Bump `VERSION` and `About` dialog to `0.0.8`. Sync `docs/plans/2026-04-15-litepdf-design.md` §4.1 row 7 with reality (per plan-eng-review 2E). Tag `v0.0.8-phase7`.
 
 **Files:**
 - Modify: `scripts/smoke-test.ps1`.
 - Modify: `VERSION` (`0.0.7` → `0.0.8`).
 - Modify: `src/ui/MainWindow.cpp` (About dialog string `v0.0.7` → `v0.0.8`).
 - Modify: `CMakeLists.txt` if version is duplicated there (check before editing).
+- Modify: `docs/plans/2026-04-15-litepdf-design.md` §4.1 row 7 — replace the original "ui/ThumbnailPane | 350" entry to reflect actual Phase 7 footprint (model + cache + renderer + splitter + integration).
 
 **Step 9.1:** Smoke-test addition (`scripts/smoke-test.ps1`):
 
@@ -1134,11 +1406,23 @@ Test-Step "F4 opens thumb pane" {
 }
 ```
 
-**Step 9.2:** Bump version:
+**Step 9.2:** Bump version + sync design doc:
 
 ```bash
 echo 0.0.8-dev > VERSION
 # Edit src/ui/MainWindow.cpp About dialog: "LitePDF v0.0.7" → "LitePDF v0.0.8"
+```
+
+In `docs/plans/2026-04-15-litepdf-design.md` §4.1, replace row 7:
+
+```
+| 7 | `ui/ThumbnailPane` | 350 | Lazy-rendered thumbnails, owner-draw |
+```
+
+with:
+
+```
+| 7 | `ui/ThumbnailPane` + `core/ThumbnailModel` + `core/ThumbCache` + `core/ThumbnailRenderer` + `ui/VerticalSplitter` | ~1275 | Lazy-rendered thumbnail pane (model, HBITMAP cache, renderer borrow of RenderEngine, vertical splitter, MainWindow integration) |
 ```
 
 **Step 9.3:** Build + full ctest:
@@ -1148,7 +1432,9 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Expected: 118/118 pass (101 baseline + 8 thumbnail_model + 5 thumb_cache + 2 thumb_renderer + 2 vsplitter = 118).
+Expected: 122/122 pass (101 baseline + 1 render_engine bypass + 8 thumbnail_model + 6 thumb_cache + 3 thumb_renderer + 4 splitter_math + 2 vsplitter — but T4a's splitter_math + 1 of its setup are landed in the prerequisite PR, so this Phase 7 PR's CI sees the post-T4a baseline, not 101).
+
+**Note** on the test count: T4a (refactor) lands its 4 [splitter_math] cases on `main` before this PR is rebased. Post-rebase baseline becomes ~105. This Phase 7 PR adds 17 more cases (1 + 8 + 6 + 3 + 2 — the [vsplitter] math reuses the helpers from T4a so VerticalSplitter only adds 2 cases beyond the shared math) for a final 122/122.
 
 **Step 9.4:** Commit + tag.
 
@@ -1164,54 +1450,74 @@ git tag v0.0.8-phase7
 
 ## Summary Table
 
+Phase 7 lands in two PRs to honor Beck's two-step rule (refactor first, add second):
+
+**Prerequisite PR (refactor only, lands separately on `main`):**
+
+| Task | Component | LOC | New tests | Notes |
+|---|---|---|---|---|
+| 4a | `ui::SplitterCore` extract from existing Splitter + `detail/SplitterMath.hpp` | ~120 | 4 | Zero behavior change for in-production results-panel splitter |
+
+**Phase 7 PR (the main feature work, branched off post-T4a `main`):**
+
 | Task | Component | LOC | New tests | Notes |
 |---|---|---|---|---|
 | 0 | Menu IDs + F4 accel | ~5 | — | resource only |
+| 0.5 | `RenderEngine::RenderRequest::bypass_cache` flag (D3 enabling change per 1B) | ~10 | 1 | Phase 2 engine extension |
 | 1 | `core::ThumbnailModel` | ~180 | 8 | pure logic, TDD |
-| 2 | `core::ThumbCache` | ~130 | 5 | HBITMAP LRU |
-| 3 | `core::ThumbnailRenderer` | ~170 | 2 | RenderEngine wrapper |
-| 4 | `ui::VerticalSplitter` | ~150 | 2 | shared core w/ Splitter |
-| 5 | `ui::ThumbnailPane` skeleton | ~310 | — | manual smoke |
-| 6 | Pane render + cache wire | ~110 | — | manual smoke |
+| 2 | `core::ThumbCache` | ~130 | 6 | HBITMAP LRU (incl. same-handle no-op test per 2B) |
+| 3 | `core::ThumbnailRenderer` (borrows engine + D16 task drain) | ~190 | 3 | wraps existing RenderEngine; n-component pixmap handling per 2C |
+| 4b | `ui::VerticalSplitter` (thin wrapper over T4a's SplitterCore) | ~70 | 2 | new file only; shared math reused |
+| 5 | `ui::ThumbnailPane` skeleton + `WM_DPICHANGED` (per 1D) | ~330 | — | manual smoke |
+| 6 | Pane render + cache wire + `pending_renders_` 5-point lifecycle (per 4A) | ~120 | — | manual smoke |
 | 7 | Current-page sync | ~80 | — | observer chain |
 | 8 | MainWindow integration | ~120 | — | layout + F4 handler |
-| 9 | Smoke + version + tag | ~20 | — | release prep |
-| **Total** | — | **~1275** | **17** | est vs design ~350 was for ThumbnailPane only — full Phase 7 with model, cache, renderer, splitter refactor, integration is realistically ~1275 |
+| 9 | Smoke + version + design-doc §4.1 sync (per 2E) + tag | ~25 | — | release prep |
+| **Phase 7 PR subtotal** | — | **~1260** | **20** | excludes T4a (separate PR) |
+| **Combined (T4a + Phase 7 PR)** | — | **~1380** | **24** | total surface across both PRs |
 
-LOC budget overrun (~3.6× design's `ui/ThumbnailPane: 350`): the design row counts only the pane widget; this plan's 1275 includes model, cache, renderer, splitter refactor, integration. Comparable to Phase 6's overrun (~750 vs roadmap 500 for similar reasons — model + dispatcher + UI plumbing).
+LOC budget overrun (~3.9× design's `ui/ThumbnailPane: 350`): the design row counted only the pane widget; reality includes model, cache, renderer, RenderEngine bypass-cache flag, splitter refactor + new vertical splitter, and integration. Comparable to Phase 6's overrun (~750 vs roadmap 500 for similar reasons — model + dispatcher + UI plumbing).
 
-Test count: 101 → 118 (+17).
+Test count: 101 (post-Phase-6 baseline) → 105 (after T4a merges to main) → 122 (Phase 7 PR end). +20 from this PR; +4 from T4a's prerequisite PR; +24 combined.
 
 ---
 
 ## Risk Annotations
 
-- **R1: `RenderEngine(cache=nullptr)` direct-render path.** The Phase 2 plan's D-line about `cache=nullptr` is documented but the code path is rarely exercised (production always passes a cache). Verify at T3 smoke that pixmap delivery + ownership transfer works correctly without cache. If broken, the RenderEngine work to fix is small (it's a single `if (cache_)` branch).
+> Status legend: **[OPEN]** = monitored at implementation. **[MITIGATED]** = upgraded to a concrete design decision or task step during plan-eng-review.
 
-- **R2: HBITMAP lifetime in ThumbCache eviction.** Win32 GDI handles are notoriously easy to leak. T2 tests verify map state but cannot directly assert `DeleteObject` was called. Mitigation: keep ThumbCache code minimal and review against `ThumbCache::clear()` invariant ("after clear, every put-ed handle has been DeleteObject'd"). Optional: add a debug build assertion using `GdiGetThumbHandleCount` if debugging leaks ever surfaces.
+- **R1 [MITIGATED]: `RenderEngine` bypass-cache path.** Original concern: cache=nullptr direct-render path in Phase 2 RenderEngine was rarely exercised in production. **Resolution per plan-eng-review 1B + 1E**: instead of relying on the rare nullptr branch, Phase 7 introduces a per-request `bypass_cache` flag (Task 0.5, ~10 LOC core/ change) that gates both cache lookup AND population. The Pre-flight grep verifies the cache-conditional sites; T0.5 wraps them. One [render_engine][bypass] unit case asserts the contract.
 
-- **R3: Re-entrance during `WM_USER_THUMB_READY`.** If the UI thread is mid-paint and `WM_USER_THUMB_READY` arrives, the `cache_->put` might evict a tile currently being blitted. Mitigation: `WM_USER_THUMB_READY` is processed only between `WM_DRAWITEM` calls (PostMessage queues; it can't preempt). But if a `BitBlt` happens to run with a stale HBITMAP that was just `DeleteObject`'d on eviction... hmm. Cheap fix: never evict on `put` if `pending_renders_.contains(page)` — but then capacity is soft. Better: paint via `BitBlt` is synchronous, so by the time `WndProc` returns from `WM_DRAWITEM` the BitBlt is done; subsequent eviction is safe. Verify in T6.
+- **R2 [OPEN]: HBITMAP lifetime in ThumbCache eviction.** Win32 GDI handles are notoriously easy to leak. T2 tests verify map state but cannot directly assert `DeleteObject` was called (no public Win32 handle counter). Mitigations: (a) added [thumb_cache] same-page+same-handle no-op test (per 2B) catches double-DeleteObject pattern; (b) keep `ThumbCache` code minimal; review against the `~ThumbCache()` invariant — every `put`-ed handle is `DeleteObject`'d on eviction OR on dtor; (c) acceptance smoke in T9 includes a Task Manager handle-count check after a tab-close-mid-render stress.
 
-- **R4: Splitter refactor regression.** Phase 6's `Splitter` is currently used for the bottom results panel. The T4 refactor must not change its behavior. Mitigation: T4 keeps existing tests passing, leaves the public Splitter API byte-identical, only adds VerticalSplitter as new code path. Manual smoke after T4: open results panel, drag splitter — must work as before.
+- **R3 [MITIGATED]: Re-entrance / cache eviction during paint.** Original concern: `WM_USER_THUMB_READY` arriving mid-paint could DeleteObject an HBITMAP currently being BitBlt'd. **Resolution**: `BitBlt` is synchronous within `WM_DRAWITEM`, and PostMessage'd `WM_USER_THUMB_READY` cannot preempt — it queues until WndProc returns. Plus the `pending_renders_` 5-point lifecycle (T6 §6.2 per 4A) ensures no double-submission. Plus, ThumbnailRenderer's D16 task-drain pattern (per 1A) blocks pane destruction until callbacks unwind, eliminating the more dangerous tab-close-mid-render variant. **Verify in T6 manual smoke.**
 
-- **R5: Lazy-creation race on F4 spam.** If user mashes F4 fast, `ensure_thumb_pane` could be called multiple times before construction completes. Mitigation: `ensure_thumb_pane` checks for existing instance under a single-threaded UI-thread invariant (which holds — all WM_COMMAND is serialized).
+- **R4 [MITIGATED]: Splitter refactor regression.** Original concern: refactoring the in-production `ui::Splitter` (used by Phase 6 results panel) inside the same PR as adding `VerticalSplitter` couples concerns and breaks `git bisect`. **Resolution per plan-eng-review 2A**: split into Task 4a (refactor only, lands as a separate prerequisite PR with zero behavior change) and Task 4b (new file VerticalSplitter, lands in Phase 7 PR). T4a has its own CI gate + manual smoke pass on the results-panel splitter before merging.
 
-- **R6: DPI hot-switch.** `WM_DPICHANGED` arrives when user moves window between monitors. ThumbnailModel.set_dpi must be called; pane invalidates all tiles in cache (since pixel size changed). T5/T6 should handle this — easy to forget. Add to acceptance checklist.
+- **R5 [OPEN]: Lazy-creation race on F4 spam.** If user mashes F4 fast, `ensure_thumb_pane` could be called multiple times before construction completes. Mitigation: `ensure_thumb_pane` checks for existing instance under a single-threaded UI-thread invariant (which holds — all `WM_COMMAND` is serialized through one WndProc).
+
+- **R6 [MITIGATED]: DPI hot-switch.** Original concern: a one-line acceptance reminder without a concrete handling step. **Resolution per plan-eng-review 1D**: T5 §5.3 now spells out `ThumbnailPane::on_dpi_changed(unsigned new_dpi)` (model.set_dpi → cache.clear → renderer.cancel_pending → InvalidateRect) plus the MainWindow `WM_DPICHANGED` extension that calls into the active view's pane. Done When entry verifies on dual-monitor drag.
+
+- **R7 [OPEN]: T4a prerequisite PR slips.** If the T4a refactor PR has unexpected fallout in production results-panel splitter (regression caught in CI or manual smoke), Phase 7 PR is blocked behind it. Mitigation: T4a is a tiny refactor (~120 LOC, zero behavior delta target), single-purpose PR, single commit, low review surface. Worst case: revert T4a, fold the SplitterCore extraction into Phase 7 PR (back to monolithic T4) with R4 reverting to [OPEN].
 
 ---
 
 ## Done When
 
-1. `ctest` 118/118 green on Release build.
-2. `scripts/smoke-test.ps1` passes the new "F4 opens thumb pane" step.
-3. F4 toggles thumb pane open/closed; first thumb visible within 1 s on `bookmarks.pdf` (HDD-warm).
-4. F4 ↔ F5 mutual exclusion verified manually (one pane at a time).
-5. PgDn ×N in canvas highlights pages 1..N in thumb pane and auto-scrolls.
-6. VerticalSplitter drag resizes pane; canvas reflows; persists across F4-cycle.
-7. Per-tab independence verified: open 3 tabs, F4-toggle each independently.
-8. No regression: existing `Splitter` (bottom results panel) still works.
-9. Tag `v0.0.8-phase7` on the final commit; PR opened (rebase merge per repo precedent).
-10. About dialog shows `v0.0.8`; VERSION file `0.0.8-dev` (will become `0.0.8` post-release per current convention).
+1. **Test count:** `ctest` 122/122 green on Release build (post T4a + Phase 7 PR; T4a contributes +4 [splitter_math] cases that land first).
+2. **Smoke test:** `scripts/smoke-test.ps1` passes the new "F4 opens thumb pane" step.
+3. **First-thumb latency:** F4 toggles thumb pane open/closed; first thumb visible within 1 s on `bookmarks.pdf` (HDD-warm). Subsequent visible tiles render serially behind the existing 2-worker main pool (per 4B / D3) — second tile lands ~150–300 ms after first; this is expected single-worker behavior, not a regression.
+4. **Mutual exclusion:** F4 ↔ F5 verified manually — exactly one of {outline, thumbs} visible in the left dock at any time.
+5. **Current-page sync:** PgDn ×N in canvas highlights pages 1..N in thumb pane and auto-scrolls when the new page leaves the visible range.
+6. **Splitter:** VerticalSplitter drag resizes pane; canvas reflows; width persists across F4-cycle within the same session.
+7. **Per-tab independence:** open 3 tabs, F4-toggle each independently — each `DocumentView` owns its own pane state.
+8. **No regression in horizontal Splitter:** Phase 6 results panel still drags + resizes correctly after T4a refactor lands. (CI'd separately as part of T4a PR; re-verified post Phase 7 merge.)
+9. **DPI hot-switch (per 1D):** drag the main window between two monitors at different scaling (e.g. 100% ↔ 200%). Pane content invalidates; thumbs re-render at the correct pixel size; no stretched/squished tiles persist.
+10. **D2 invariant:** after an F4 session with thumb scrolling, returning to canvas shows the same main-render cache content as before F4 (no cache pollution). The new [render_engine][bypass] unit test asserts this in isolation; manual smoke confirms end-to-end.
+11. **No HBITMAP leak under stress:** open large `bookmarks.pdf`, F4, immediately Ctrl+W on the active tab during thumb-render burst. Repeat 10×. GDI handle count (Task Manager → Details → GDI Objects column) returns to baseline within ~2 s.
+12. **Versioning:** Tag `v0.0.8-phase7` on the final commit; PR-3 (plan) merged before T0 starts; T4a prerequisite PR merged before any of T0–T9 starts; Phase 7 PR opened with rebase merge (per Phase 5/6 precedent).
+13. About dialog shows `v0.0.8`; VERSION file `0.0.8-dev` (becomes `0.0.8` post-release per current convention).
+14. Design doc `docs/plans/2026-04-15-litepdf-design.md` §4.1 row 7 updated to reflect the realized 5-class footprint (per 2E).
 
 ---
 
@@ -1224,16 +1530,18 @@ Test count: 101 → 118 (+17).
 - **No dual-page thumbnails.** Phase 8 will revisit when dual-page spread lands.
 - **HBITMAP path uses CreateDIBSection.** This is RAM-cheap but slower than `D2D1Bitmap` for blit. If profiling shows BitBlt cost hurts paint frame rate, consider migrating to D2D bitmap upload (mirrors PdfCanvas main render path). Defer until measured.
 - **ThumbnailPane assumes single-column layout.** Multi-column grid layout is post-v1 — model + pane both encode single-column geometry.
+- **F4 ↔ F5 mutual exclusion does not generalize to N panes (per plan-eng-review 1C).** Phase 7's D10 mutual-exclusion handler is hard-coded for `{outline, thumbs}`. If a future phase adds a third left-dock widget (e.g. bookmarks-only view, debug tools pane), the N-way exclusion logic explodes. Revisit at that point: either (a) generalize MainWindow's left-pane slot to a `LeftPaneRegistry` enumerating all panes, or (b) introduce an internal tab control inside the dock so multiple panes coexist (matches Acrobat / Foxit). Not blocking v1.0.
 - **Stale Phase-3/4 comments in `PdfCanvas.cpp` (lines 84, 381–382)** still present — orthogonal to this phase. Optional fold-in: a 1-line cleanup commit during T8 if convenient.
 
 ---
 
 ## Re-Planning Lessons Carried From Phase 6
 
-- **C1-style task drain pattern**: ThumbnailRenderer currently has no analog because callbacks are simple (deliver HBITMAP, no ref to Document). If this changes in T6 (e.g. callback captures `&document`), apply Phase 6's atomic `pending_tasks` + dtor spin-wait pattern. **Self-check at T6 review.**
-- **Observer chain pattern**: Phase 6's CrossTabSearch wraps SearchSession's `on_update`. Phase 7's `PdfCanvas::on_page_changed` should NOT be similarly wrapped — only one consumer at a time (the thumb pane). If a future feature wants to subscribe (e.g. status bar showing "Page X of Y"), introduce `multi_observer<>` infrastructure then.
-- **PostMessage vs SendMessage**: Phase 6 used PostMessage for cross-thread cb's because Send risks UI re-entrancy. Phase 7 follows: `WM_USER_THUMB_READY` is PostMessage'd from worker.
-- **Don't wrap MuPDF calls in lambdas that out-live the cloned context**: T3 is careful — `pixmap_to_hbitmap` runs entirely inside the on_complete callback while `ctx` is still valid.
+- **C1-style task drain pattern (applied, not deferred):** Phase 7 directly adopts Phase 6 commit `8e11f39`'s atomic `pending_tasks` + dtor spin-wait pattern in `ThumbnailRenderer::Impl` (D16 / Task 3 implementation). **Lesson learned in plan-eng-review:** the original plan deferred this with a "self-check at T6 review" note that masked a real UAF risk (worker callback touching destroyed `ThumbnailPane` on tab close mid-render). Mechanical takeaway for any future "worker callback touches non-owning UI/cache pointer" subsystem: copy the C1 pattern up front; don't defer to "self-check."
+- **Observer chain pattern:** Phase 6's `CrossTabSearch` wraps `SearchSession`'s `on_update`. Phase 7's `PdfCanvas::on_page_changed` is intentionally a single-observer slot — only one consumer at a time (the active view's thumb pane). If a future feature wants to subscribe (e.g. status bar showing "Page X of Y"), introduce `multi_observer<>` infrastructure then. Don't pre-build for one consumer.
+- **PostMessage vs SendMessage:** Phase 6 used PostMessage for cross-thread callbacks because Send risks UI re-entrancy. Phase 7 follows: `WM_USER_THUMB_READY` is PostMessage'd from worker.
+- **Don't wrap MuPDF calls in lambdas that out-live the cloned context:** T3's `pixmap_to_hbitmap` runs entirely inside the `on_complete` callback while `ctx` is still valid; the resulting HBITMAP is GDI-managed (no MuPDF context dependency) so it's safe to ferry through PostMessage.
+- **"Documentation is not implementation" — verified via Pre-flight grep (per plan-eng-review 1E):** the original D3 took `RenderEngine(cache=nullptr)` direct-render path as gospel based on a header comment without verifying the .cpp branch existed. Pre-flight grep step now confirms the cache-conditional sites before T0.5 wraps them. Mechanical takeaway: when a plan depends on a "rarely exercised but documented" code path, verify implementation actually matches docs before building on it.
 
 ---
 
