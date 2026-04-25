@@ -35,7 +35,7 @@ Document open_search_fixture() {
 }
 }  // namespace
 
-TEST_CASE("Ctrl+W during cross-tab scan — no crash", "[crosstab][stress][threads]") {
+TEST_CASE("Ctrl-W during cross-tab scan - no crash", "[crosstab][stress][threads]") {
     for (int iter = 0; iter < 20; ++iter) {
         ThreadPoolDispatcher pool(2);
         auto v1 = std::make_unique<DocumentView>(open_search_fixture(), pool);
@@ -62,7 +62,7 @@ TEST_CASE("Ctrl+W during cross-tab scan — no crash", "[crosstab][stress][threa
     }
 }
 
-TEST_CASE("Ctrl+W during cross-tab scan — close BEFORE xts.clear()",
+TEST_CASE("Ctrl-W during cross-tab scan - close BEFORE xts.clear()",
           "[crosstab][stress][threads]") {
     // Intentionally reverse the order that MainWindow uses. If the crash
     // only happens here (not in the test above), the bug is in the
