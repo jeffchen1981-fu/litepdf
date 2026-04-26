@@ -9,6 +9,7 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cwchar>
 #include <stdexcept>
 #include <string>
@@ -23,8 +24,21 @@ namespace {
 // Distinct IDs so the ListView subclass + the parent-WM_DRAWITEM subclass
 // can coexist with TabManager's parent-side WM_DRAWITEM handler. Using
 // hand-picked magic numbers (mirrors TabManager's kTabSubclassId style).
-constexpr UINT_PTR kListSubclassId   = 0xAB02;
-constexpr UINT_PTR kParentSubclassId = 0xAB03;
+//
+// kListSubclassId is shared safely across instances because each pane
+// owns its own list HWND — SetWindowSubclass keys on (window, proc, id)
+// so different windows don't collide.
+//
+// The parent subclass id, by contrast, MUST be unique per ThumbnailPane:
+// per D11 each tab gets its own pane and they all subclass the SAME
+// MainWindow HWND. Reusing one id across instances would make the second
+// SetWindowSubclass overwrite the first pane's ref_data (MSDN: "If this
+// function is called twice with the same uIdSubclass and pfnSubclass
+// values, the second call replaces the data..."), and the dtor's
+// RemoveWindowSubclass would strip a sibling pane's hook. We hand out
+// fresh ids from an atomic counter so multi-tab is correct by design.
+constexpr UINT_PTR kListSubclassId = 0xAB02;
+std::atomic<UINT_PTR> g_next_parent_subclass_id{0xAB03};
 
 // Tile geometry: matches ThumbnailModel defaults (120x160 dip) plus a small
 // margin on each edge and a single label line below the placeholder.
@@ -115,6 +129,12 @@ struct ThumbnailPane::Impl {
     HWND                       parent    = nullptr;
     litepdf::core::ThumbnailModel model;
     ThumbnailPane::NavigateCb  on_navigate;
+
+    // Allocated in the ctor from g_next_parent_subclass_id so each pane
+    // has its own (proc, id) key on the shared parent HWND. Stored here
+    // so the dtor can RemoveWindowSubclass with the same id without
+    // stomping on a sibling pane's entry.
+    UINT_PTR                   parent_subclass_id = 0;
 
     // Populated by T6's set_cache / set_renderer. Held as nullable raw
     // pointers because the cache + renderer are owned by DocumentView and
@@ -236,8 +256,10 @@ ThumbnailPane::ThumbnailPane(HINSTANCE hInstance, HWND parent)
     SetWindowSubclass(impl_->list_hwnd, thumb_list_subclass_proc,
                       kListSubclassId,
                       reinterpret_cast<DWORD_PTR>(this));
+    impl_->parent_subclass_id =
+        g_next_parent_subclass_id.fetch_add(1, std::memory_order_relaxed);
     SetWindowSubclass(parent, thumb_parent_subclass_proc,
-                      kParentSubclassId,
+                      impl_->parent_subclass_id,
                       reinterpret_cast<DWORD_PTR>(this));
 }
 
@@ -245,7 +267,7 @@ ThumbnailPane::~ThumbnailPane() {
     if (impl_) {
         if (impl_->parent) {
             RemoveWindowSubclass(impl_->parent, thumb_parent_subclass_proc,
-                                 kParentSubclassId);
+                                 impl_->parent_subclass_id);
         }
         if (impl_->list_hwnd) {
             RemoveWindowSubclass(impl_->list_hwnd, thumb_list_subclass_proc,
