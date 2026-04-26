@@ -55,3 +55,6 @@
 
 // Next free ID: 40048. Reserve 40048-40059 for future search commands
 // (e.g., IDM_FIND_ALL_HIGHLIGHT, IDM_FIND_CASE_TOGGLE, IDM_FIND_REGEX).
+
+// Phase 7: thumbnail pane.
+#define IDM_VIEW_THUMBS 40060   // F4
