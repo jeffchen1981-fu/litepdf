@@ -99,7 +99,7 @@ main.cpp
 | 4 | `ui/DocumentView` | 500 | Per-doc layout (canvas + outline + thumbs) |
 | 5 | `ui/PdfCanvas` | 900 | Direct2D paint, pan, zoom, text selection, search highlight |
 | 6 | `ui/OutlinePane` | 250 | TreeView + click-to-navigate |
-| 7 | `ui/ThumbnailPane` | 350 | Lazy-rendered thumbnails, owner-draw |
+| 7 | `ui/ThumbnailPane` + `core/ThumbnailModel` + `core/ThumbCache` + `core/ThumbnailRenderer` + `ui/VerticalSplitter` | ~1275 | Lazy-rendered thumbnail pane (model, HBITMAP cache, renderer borrow of RenderEngine, vertical splitter, MainWindow integration) |
 | 8 | `core/Document` | 400 | MuPDF abstraction, format detection, password, outline parse |
 | 9 | `core/RenderEngine` + `PageCache` | 500 | Background rendering, LRU cache |
 | 10 | `common/` | 300 | Utils, errors, config, log |

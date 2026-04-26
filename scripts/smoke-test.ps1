@@ -359,4 +359,62 @@ try {
 Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 500
 
+# Phase 7 Task 9: thumbnail pane open/close smoke. Launch with bookmarks.pdf
+# (multi-page so the thumb model has rows to render), post WM_COMMAND
+# IDM_VIEW_THUMBS (40060) to show the pane via the F4 path, then post it
+# again to hide. Liveness-only — same pattern as the find-bar smoke above:
+# the ThumbnailPane is a plain SysListView32 (no bespoke window class), so
+# distinguishing it from the cross-tab ResultsPanel ListView via FindWindowEx
+# isn't worth the complexity here. No-crash + accelerator+toggle round-trip
+# is sufficient evidence that lazy ensure_thumb_pane(), ThumbnailRenderer,
+# and ThumbCache wire up cleanly. Per-row paint correctness is covered by
+# unit tests + manual QA.
+Write-Host "Launching for thumb-pane smoke: $exe $bookmarksFixture"
+$proc6 = Start-Process -FilePath $exe `
+    -ArgumentList @($bookmarksFixture) `
+    -PassThru -NoNewWindow
+$deadline6 = (Get-Date).AddSeconds(5)
+$hwnd6 = [IntPtr]::Zero
+while ((Get-Date) -lt $deadline6) {
+    Start-Sleep -Milliseconds 100
+    if ($proc6.HasExited) {
+        throw "litepdf.exe exited during thumb-pane startup (code $($proc6.ExitCode))"
+    }
+    $proc6.Refresh()
+    if ($proc6.MainWindowHandle -ne [IntPtr]::Zero) {
+        $hwnd6 = $proc6.MainWindowHandle
+        break
+    }
+}
+if ($hwnd6 -eq [IntPtr]::Zero) {
+    Stop-Process -Id $proc6.Id -Force -ErrorAction SilentlyContinue
+    throw "litepdf.exe did not create a main window for thumb-pane smoke"
+}
+# Let the first tab finish opening + Direct2D first frame land before we
+# fire F4 — ensures DocumentView is fully constructed.
+Start-Sleep -Seconds 1
+
+# Post IDM_VIEW_THUMBS (40060). First press lazy-creates the ThumbnailPane,
+# kicks off ThumbnailRenderer for visible rows, and shows the pane.
+& $uxProbe send-cmd 40060 | Out-Null
+Start-Sleep -Milliseconds 800
+$proc6.Refresh()
+if ($proc6.HasExited) {
+    throw "litepdf.exe exited after first F4 press (code $($proc6.ExitCode))"
+}
+Write-Host "[OK] thumb pane shown via F4 (process alive)"
+
+# Second press should hide the pane (mutual-exclusion D10 path: thumb visible
+# -> hide thumb). Process still alive == toggle path doesn't crash.
+& $uxProbe send-cmd 40060 | Out-Null
+Start-Sleep -Milliseconds 400
+$proc6.Refresh()
+if ($proc6.HasExited) {
+    throw "litepdf.exe exited after second F4 press (code $($proc6.ExitCode))"
+}
+Write-Host "[OK] thumb pane hidden via F4 toggle (process alive)"
+
+Stop-Process -Id $proc6.Id -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 500
+
 Write-Host "[OK] smoke test passed."
