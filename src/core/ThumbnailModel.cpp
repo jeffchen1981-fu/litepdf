@@ -13,7 +13,15 @@ inline int dip_to_px(int dip, unsigned dpi) {
 }
 }  // namespace
 
-void ThumbnailModel::set_page_count(int n)   { page_count_ = std::max(0, n); }
+void ThumbnailModel::set_page_count(int n)   {
+    page_count_ = std::max(0, n);
+    // Clamp current_page_ so callers that shrink the document (e.g. close +
+    // open a smaller PDF, or T6's set_page_count after a tab swap) don't end
+    // up with a stale highlight pointing past the new last page. Empty docs
+    // collapse current_page_ to 0 — the highlight is suppressed at paint time
+    // anyway when page_count_ == 0 (see ThumbnailPane::paint_placeholder).
+    current_page_ = std::clamp(current_page_, 0, std::max(0, page_count_ - 1));
+}
 void ThumbnailModel::set_dpi(unsigned dpi)   { dpi_ = (dpi > 0 ? dpi : 96); }
 void ThumbnailModel::set_tile_dip(DipSize d) { tile_dip_ = d; }
 void ThumbnailModel::set_gap_dip(int g)      { gap_dip_ = std::max(0, g); }

@@ -13,6 +13,7 @@
 #include <cwchar>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "dwmapi.lib")
@@ -40,6 +41,18 @@ namespace {
 constexpr UINT_PTR kListSubclassId = 0xAB02;
 std::atomic<UINT_PTR> g_next_parent_subclass_id{0xAB03};
 
+// T6 worker->UI marshalling. The renderer's on_done callback fires on a
+// worker thread; it cannot touch HWND / HBITMAP cache / pending_renders_
+// directly, so it PostMessageWs this user message back to the pane's list
+// HWND. The UI thread handler unpacks (page, HBITMAP) and updates state
+// atomically with respect to other UI-thread work.
+//
+//   wParam = page index (int)
+//   lParam = HBITMAP (may be null for cancelled/failed renders; the handler
+//            still erases the page from pending_renders_ but does NOT put a
+//            null HBITMAP into the cache)
+constexpr UINT WM_USER_THUMB_READY = WM_USER + 17;
+
 // Tile geometry: matches ThumbnailModel defaults (120x160 dip) plus a small
 // margin on each edge and a single label line below the placeholder.
 constexpr int kTileMarginDip   = 6;   // padding inside each row, all sides
@@ -53,6 +66,18 @@ struct Palette {
     COLORREF tile_border;   // placeholder rectangle outline
     COLORREF text;          // page-number label color
     COLORREF current_border;// current-page highlight border (uses accent)
+};
+
+// M2 carry-over: pre-created GDI brushes for the four palette colors used
+// per row paint. Defined at namespace scope (rather than nested inside
+// Impl) so the anonymous-namespace painters can take it by reference
+// without having to friend `Impl`. Owned by Impl; rebuilt whenever
+// `palette` changes (ctor / on_dpi_changed / future WM_SETTINGCHANGE).
+struct PaletteBrushes {
+    HBRUSH pane_bg        = nullptr;
+    HBRUSH tile_fill      = nullptr;
+    HBRUSH tile_border    = nullptr;
+    HBRUSH current_border = nullptr;
 };
 
 COLORREF resolve_accent_color() {
@@ -147,6 +172,55 @@ struct ThumbnailPane::Impl {
     Palette palette   = make_palette(false);
     UINT    cached_dpi = 96;
 
+    // M2 carry-over: pre-create the four brushes paint_placeholder /
+    // paint_thumb use on every row paint. Without caching, a 30-tile
+    // repaint at 4K DPI would CreateSolidBrush / DeleteObject 120-150
+    // times per pass; the GDI object table churn is measurable. Rebuilt
+    // whenever the palette changes (ctor, on_dpi_changed, future
+    // WM_SETTINGCHANGE for dark-mode flip). Type lives at namespace scope
+    // so the anonymous-namespace painters can accept it by reference.
+    PaletteBrushes brushes_;
+
+    // T6: the set of pages for which a render is currently in flight (i.e.
+    // submitted to renderer_ but no WM_USER_THUMB_READY has come back yet).
+    // UI-thread-only: mutated at exactly six points (WM_DRAWITEM submit
+    // path, WM_USER_THUMB_READY handler, set_page_count, clear/hide, dtor).
+    // Worker threads NEVER touch this set.
+    std::unordered_set<int> pending_renders_;
+
+    void rebuild_brushes() {
+        delete_brushes();
+        brushes_.pane_bg        = CreateSolidBrush(palette.pane_bg);
+        brushes_.tile_fill      = CreateSolidBrush(palette.tile_fill);
+        brushes_.tile_border    = CreateSolidBrush(palette.tile_border);
+        brushes_.current_border = CreateSolidBrush(palette.current_border);
+    }
+
+    void delete_brushes() {
+        HBRUSH* slots[] = {
+            &brushes_.pane_bg,
+            &brushes_.tile_fill,
+            &brushes_.tile_border,
+            &brushes_.current_border,
+        };
+        for (HBRUSH* slot : slots) {
+            if (*slot) {
+                DeleteObject(*slot);
+                *slot = nullptr;
+            }
+        }
+    }
+
+    // Cancel any in-flight renders and drop the pending set. Called at
+    // every pending_renders_ "erase + cancel" point (set_page_count,
+    // hide, dtor — and conceptually clear() once that lands). The
+    // renderer pointer is nullptr-guarded because callers (T8 controller)
+    // may legitimately set_page_count before set_renderer.
+    void cancel_in_flight() {
+        if (renderer) renderer->cancel_pending();
+        pending_renders_.clear();
+    }
+
     // Compute the desired row height for the current DPI / tile size.
     // The actual row height is set via WM_MEASUREITEM (reflected from
     // parent) which the parent subclass proc fills in — LVM_SETITEMHEIGHT
@@ -228,6 +302,7 @@ ThumbnailPane::ThumbnailPane(HINSTANCE hInstance, HWND parent)
     impl_->cached_dpi = GetDpiForWindow(impl_->list_hwnd);
     impl_->dark_mode  = detect_dark_mode(parent);
     impl_->palette    = make_palette(impl_->dark_mode);
+    impl_->rebuild_brushes();  // M2: cache GDI brushes, refreshed on DPI / theme change.
 
     ListView_SetBkColor    (impl_->list_hwnd, impl_->palette.pane_bg);
     ListView_SetTextBkColor(impl_->list_hwnd, impl_->palette.pane_bg);
@@ -265,6 +340,17 @@ ThumbnailPane::ThumbnailPane(HINSTANCE hInstance, HWND parent)
 
 ThumbnailPane::~ThumbnailPane() {
     if (impl_) {
+        // pending_renders_ mutation point #6 (dtor): cancel before tearing
+        // down the HWND so any worker that has not yet PostMessageWd a
+        // WM_USER_THUMB_READY observes the cancel and produces nullptr
+        // HBITMAPs (D17). DocumentView (T8) is responsible for ordering
+        // ~ThumbnailPane *before* ~ThumbnailRenderer so renderer_ is still
+        // valid here; the renderer's own dtor then drains its workers
+        // (D16) so by the time ~ThumbnailRenderer returns, no PostMessageW
+        // is in flight that could target the freed HWND.
+        if (impl_->renderer) impl_->renderer->cancel_pending();
+        impl_->pending_renders_.clear();
+
         if (impl_->parent) {
             RemoveWindowSubclass(impl_->parent, thumb_parent_subclass_proc,
                                  impl_->parent_subclass_id);
@@ -275,6 +361,7 @@ ThumbnailPane::~ThumbnailPane() {
             DestroyWindow(impl_->list_hwnd);
             impl_->list_hwnd = nullptr;
         }
+        impl_->delete_brushes();  // M2: release the cached GDI handles.
     }
 }
 
@@ -284,11 +371,55 @@ void ThumbnailPane::set_on_navigate(NavigateCb cb) {
     impl_->on_navigate = std::move(cb);
 }
 
+void ThumbnailPane::set_renderer(litepdf::core::ThumbnailRenderer* renderer) {
+    // UI-thread-only. If we're swapping renderers (or clearing to nullptr),
+    // any pending requests submitted to the OLD renderer become orphans -
+    // their callbacks may still PostMessageW WM_USER_THUMB_READY for the
+    // pages we still consider "pending", which would then re-enter the
+    // renderer pointer to handle the result. That is fine: the handler
+    // just routes the HBITMAP into the cache. But the bookkeeping must
+    // stay in sync, so we cancel against the OLD renderer first if any
+    // requests are outstanding, then drop the pending set. The new
+    // renderer (if non-null) starts with an empty in-flight set; the next
+    // WM_DRAWITEM cycle will re-submit cache misses through it.
+    if (impl_->renderer && impl_->renderer != renderer) {
+        impl_->renderer->cancel_pending();
+        impl_->pending_renders_.clear();
+    }
+    impl_->renderer = renderer;
+}
+
+void ThumbnailPane::set_cache(litepdf::core::ThumbCache* cache) {
+    // UI-thread-only. Switching caches means the previously-rendered tiles
+    // live in a different cache the pane no longer queries; any HBITMAP
+    // already produced for the OLD cache will arrive via WM_USER_THUMB_READY
+    // and be inserted into the NEW one. That is benign (it's still a valid
+    // page->bitmap mapping) but means there's a transient window where the
+    // pane paints placeholders for tiles whose old-cache copies still
+    // exist. We don't try to migrate; T8 only ever swaps caches as part of
+    // a tab-switch, where placeholders flashing momentarily is acceptable.
+    impl_->cache = cache;
+}
+
 void ThumbnailPane::set_page_count(int n) {
     if (!impl_->list_hwnd) return;
     n = std::max(0, n);
+
+    // pending_renders_ mutation point #3 (document swap / page-count change).
+    // Any in-flight render targeting a page that no longer exists in the new
+    // document — or even one that exists but at a different rendered scale —
+    // is wasted work. D17 guarantees the cancelled callbacks still fire with
+    // HBITMAP=nullptr so the renderer's own pending_tasks counter drains.
+    impl_->cancel_in_flight();
+
     impl_->model.set_page_count(n);
     impl_->model.set_scroll_y_px(0);
+
+    // Drop stale thumbs too — the new document's page 0 has a completely
+    // different visual content from the old document's page 0. Without this
+    // the pane would briefly paint the previous document's thumbs at the
+    // new page indices until WM_USER_THUMB_READY messages overwrite them.
+    if (impl_->cache) impl_->cache->clear();
 
     // LVS_OWNERDRAWFIXED still walks the item list to fire WM_DRAWITEM, so
     // we need the listview's item count to match the model's page count.
@@ -335,6 +466,16 @@ void ThumbnailPane::show() {
 
 void ThumbnailPane::hide() {
     if (impl_->list_hwnd) ShowWindow(impl_->list_hwnd, SW_HIDE);
+    // pending_renders_ mutation point #5 (pane hidden). The user is no
+    // longer looking at the pane; finishing in-flight thumb renders would
+    // burn CPU on a hidden tile set. Re-submission is organic: when the
+    // pane is shown again, WM_DRAWITEM walks visible_range and re-queues
+    // cache misses. The dropped HBITMAPs are not leaked — D17 still fires
+    // every cancelled callback with HBITMAP=nullptr so pending_tasks
+    // drains, and any HBITMAP already produced for an in-flight render
+    // arrives via WM_USER_THUMB_READY (HWND remains valid while hidden)
+    // and lands in the cache as usual.
+    impl_->cancel_in_flight();
 }
 
 bool ThumbnailPane::visible() const {
@@ -346,11 +487,17 @@ void ThumbnailPane::on_dpi_changed(unsigned new_dpi) {
     impl_->cached_dpi = new_dpi;
     impl_->model.set_dpi(new_dpi);
 
-    // T6 wires these in via setters. They are nullptr in T5 so the cache
-    // clear / renderer cancel are no-ops; once T6 lands, the same call
-    // does the right thing without any further wiring change.
-    if (impl_->cache)    impl_->cache->clear();
-    if (impl_->renderer) impl_->renderer->cancel_pending();
+    // DPI change implies tile size change → every cached thumb is now the
+    // wrong pixel size. Clear the cache and cancel in-flight renders;
+    // pending_renders_ also clears (mutation behaves like #3 / set_page_count).
+    if (impl_->cache) impl_->cache->clear();
+    impl_->cancel_in_flight();
+
+    // M2: palette colors are DPI-invariant in our scheme, but rebuild
+    // brushes for symmetry with future WM_SETTINGCHANGE handlers — and
+    // because if the dark-mode probe ever runs here we'd otherwise leak
+    // the old brushes when palette swaps.
+    impl_->rebuild_brushes();
 
     impl_->refresh_item_height();
     impl_->sync_column_width();
@@ -366,73 +513,57 @@ void ThumbnailPane::on_dpi_changed(unsigned new_dpi) {
 namespace {
 
 struct PaintArgs {
-    UINT             dpi;
-    int              tile_w_px;
-    int              tile_h_px;
-    int              current_page;
-    int              page_count;
-    const Palette&   palette;
+    UINT                  dpi;
+    int                   tile_w_px;
+    int                   tile_h_px;
+    int                   current_page;
+    int                   page_count;
+    const Palette&        palette;
+    const PaletteBrushes& brushes;  // M2: cached, owned by Impl.
 };
 
-void paint_placeholder(const DRAWITEMSTRUCT* dis, const PaintArgs& args) {
-    HDC hdc = dis->hDC;
-    RECT rc = dis->rcItem;
-    const int page = static_cast<int>(dis->itemID);
-    const UINT dpi = args.dpi;
-    const Palette& pal = args.palette;
-
-    // Pane background (full row).
-    HBRUSH bg = CreateSolidBrush(pal.pane_bg);
-    FillRect(hdc, &rc, bg);
-    DeleteObject(bg);
-
-    // Tile box: centered horizontally, top-aligned with kTileMarginDip
-    // padding above and the label-strip below.
-    const int margin = dp(kTileMarginDip, dpi);
-    const int label_h = dp(kLabelHeightDip, dpi);
-    const int tile_w = args.tile_w_px;
-    const int tile_h = args.tile_h_px;
+// Compute the centered tile rectangle within a row's rcItem. Shared by
+// the placeholder painter and T6's cache-hit blit path so they always
+// agree on tile geometry.
+RECT compute_tile_rect(const RECT& rc, const PaintArgs& args) {
+    const int margin = dp(kTileMarginDip, args.dpi);
     const int row_w  = std::max(0, static_cast<int>(rc.right - rc.left));
-
     RECT tile{};
-    tile.left   = rc.left + std::max(0, (row_w - tile_w) / 2);
+    tile.left   = rc.left + std::max(0, (row_w - args.tile_w_px) / 2);
     tile.top    = rc.top + margin;
-    tile.right  = tile.left + tile_w;
-    tile.bottom = tile.top  + tile_h;
+    tile.right  = tile.left + args.tile_w_px;
+    tile.bottom = tile.top  + args.tile_h_px;
+    return tile;
+}
 
-    // Fill placeholder.
-    HBRUSH fill = CreateSolidBrush(pal.tile_fill);
-    FillRect(hdc, &tile, fill);
-    DeleteObject(fill);
+// Draw the current-page accent frame. Used by both placeholder and
+// cache-hit paths so the highlight tracks the active page regardless of
+// whether the thumb is rendered yet.
+void paint_current_highlight(HDC hdc, const RECT& tile, int page,
+                              const PaintArgs& args) {
+    if (page != args.current_page || args.page_count <= 0) return;
+    const int bw = std::max(1, dp(kBorderWidthDip, args.dpi));
+    HBRUSH hb = args.brushes.current_border;
+    RECT hrc = tile;
+    InflateRect(&hrc, bw, bw);
+    // Top, bottom, left, right strips drawn via FillRect for crisp pixel
+    // alignment (FrameRect's default thickness is 1).
+    RECT t = { hrc.left, hrc.top,            hrc.right,      hrc.top + bw  };
+    RECT b = { hrc.left, hrc.bottom - bw,    hrc.right,      hrc.bottom    };
+    RECT l = { hrc.left, hrc.top,            hrc.left + bw,  hrc.bottom    };
+    RECT r = { hrc.right - bw, hrc.top,      hrc.right,      hrc.bottom    };
+    FillRect(hdc, &t, hb);
+    FillRect(hdc, &b, hb);
+    FillRect(hdc, &l, hb);
+    FillRect(hdc, &r, hb);
+}
 
-    // 1-px placeholder outline. FrameRect uses the brush color.
-    HBRUSH border = CreateSolidBrush(pal.tile_border);
-    RECT outline = tile;
-    InflateRect(&outline, dp(kPlaceholderInsetDip, dpi),
-                          dp(kPlaceholderInsetDip, dpi));
-    FrameRect(hdc, &outline, border);
-    DeleteObject(border);
+// Draw the "Page N" label below the tile. Shared by both paint paths.
+void paint_label(HDC hdc, const RECT& rc, const RECT& tile, int page,
+                 const PaintArgs& args) {
+    const int margin  = dp(kTileMarginDip, args.dpi);
+    const int label_h = dp(kLabelHeightDip, args.dpi);
 
-    // Current-page highlight: thicker accent-colored frame around the tile.
-    if (page == args.current_page && args.page_count > 0) {
-        const int bw = std::max(1, dp(kBorderWidthDip, dpi));
-        HBRUSH hb = CreateSolidBrush(pal.current_border);
-        RECT hrc = tile;
-        InflateRect(&hrc, bw, bw);
-        // Top, bottom, left, right strips drawn via FillRect for crisp
-        // pixel alignment (FrameRect's default thickness is 1).
-        RECT t = { hrc.left, hrc.top, hrc.right, hrc.top + bw };
-        RECT b = { hrc.left, hrc.bottom - bw, hrc.right, hrc.bottom };
-        RECT l = { hrc.left, hrc.top, hrc.left + bw, hrc.bottom };
-        RECT r = { hrc.right - bw, hrc.top, hrc.right, hrc.bottom };
-        FillRect(hdc, &t, hb);
-        FillRect(hdc, &b, hb);
-        FillRect(hdc, &l, hb);
-        FillRect(hdc, &r, hb);
-        DeleteObject(hb);
-    }
-
-    // Page-number label. Display 1-indexed for the user; itemID is 0-based.
     wchar_t buf[32];
     std::swprintf(buf, sizeof(buf) / sizeof(buf[0]), L"%d", page + 1);
 
@@ -443,9 +574,91 @@ void paint_placeholder(const DRAWITEMSTRUCT* dis, const PaintArgs& args) {
     label.bottom = label.top + label_h;
 
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, pal.text);
+    SetTextColor(hdc, args.palette.text);
     DrawTextW(hdc, buf, -1, &label,
               DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+}
+
+void paint_placeholder(const DRAWITEMSTRUCT* dis, const PaintArgs& args) {
+    HDC hdc = dis->hDC;
+    RECT rc = dis->rcItem;
+    const int page = static_cast<int>(dis->itemID);
+
+    // Pane background (full row). M2: cached brushes throughout this fn.
+    FillRect(hdc, &rc, args.brushes.pane_bg);
+
+    const RECT tile = compute_tile_rect(rc, args);
+
+    // Fill placeholder.
+    FillRect(hdc, &tile, args.brushes.tile_fill);
+
+    // 1-px placeholder outline. FrameRect uses the brush color.
+    RECT outline = tile;
+    InflateRect(&outline, dp(kPlaceholderInsetDip, args.dpi),
+                          dp(kPlaceholderInsetDip, args.dpi));
+    FrameRect(hdc, &outline, args.brushes.tile_border);
+
+    paint_current_highlight(hdc, tile, page, args);
+    paint_label(hdc, rc, tile, page, args);
+}
+
+// T6: blit a real thumb HBITMAP into the row. The cache lookup happened
+// in WM_DRAWITEM; here we just composite and add the standard chrome
+// (background fill outside the tile, current-page highlight, label).
+void paint_thumb(const DRAWITEMSTRUCT* dis, HBITMAP bm,
+                 const PaintArgs& args) {
+    HDC hdc = dis->hDC;
+    RECT rc = dis->rcItem;
+    const int page = static_cast<int>(dis->itemID);
+
+    // Background first so any sliver outside the tile rect (e.g. when the
+    // bitmap is narrower than expected) gets the pane color, not GDI's
+    // default white.
+    FillRect(hdc, &rc, args.brushes.pane_bg);
+
+    const RECT tile = compute_tile_rect(rc, args);
+
+    // BitBlt the cached HBITMAP into the tile rect. Use a memory DC to
+    // select the bitmap; SRCCOPY is correct because pixmap_to_hbitmap
+    // produced a 32-bit BGRA top-down DIB section with alpha=1 (opaque).
+    HDC mem_dc = CreateCompatibleDC(hdc);
+    if (mem_dc) {
+        HGDIOBJ prev = SelectObject(mem_dc, bm);
+        BITMAP info{};
+        if (GetObject(bm, sizeof(info), &info)) {
+            const int src_w = info.bmWidth;
+            const int src_h = std::abs(info.bmHeight);  // top-down: negative
+            const int dst_w = tile.right  - tile.left;
+            const int dst_h = tile.bottom - tile.top;
+            // If the cached thumb was rendered at a slightly different
+            // scale (e.g. cached at 96 dpi but pane is now at 144 dpi for
+            // a fraction of a frame mid-DPI-swap), StretchBlt avoids a
+            // crashy out-of-bounds blit. Set HALFTONE for crisper
+            // downscaling; SetBrushOrgEx is the documented prerequisite.
+            if (src_w == dst_w && src_h == dst_h) {
+                BitBlt(hdc, tile.left, tile.top, dst_w, dst_h,
+                       mem_dc, 0, 0, SRCCOPY);
+            } else if (src_w > 0 && src_h > 0) {
+                const int prev_mode = SetStretchBltMode(hdc, HALFTONE);
+                SetBrushOrgEx(hdc, 0, 0, nullptr);
+                StretchBlt(hdc, tile.left, tile.top, dst_w, dst_h,
+                           mem_dc, 0, 0, src_w, src_h, SRCCOPY);
+                SetStretchBltMode(hdc, prev_mode);
+            }
+        }
+        SelectObject(mem_dc, prev);
+        DeleteDC(mem_dc);
+    }
+
+    // Outline the rendered thumb so it sits cleanly inside the row,
+    // matching the placeholder visual rhythm.
+    RECT outline = tile;
+    InflateRect(&outline, dp(kPlaceholderInsetDip, args.dpi),
+                          dp(kPlaceholderInsetDip, args.dpi));
+    FrameRect(hdc, &outline, args.brushes.tile_border);
+
+    paint_current_highlight(hdc, tile, page, args);
+    paint_label(hdc, rc, tile, page, args);
 }
 
 }  // namespace
@@ -461,6 +674,38 @@ LRESULT CALLBACK thumb_list_subclass_proc(HWND hwnd, UINT msg, WPARAM w,
     auto& impl = *self->impl_;
 
     switch (msg) {
+        case WM_USER_THUMB_READY: {
+            // T6 worker->UI bridge. Runs on UI thread (PostMessageW guarantee).
+            // pending_renders_ mutation point #2: erase the page regardless
+            // of HBITMAP success/null. Either the render succeeded (insert
+            // into cache) or it failed/was cancelled (D17 fires on_complete
+            // with nullptr) — in both cases the request is no longer pending,
+            // so a future WM_DRAWITEM may re-queue it if needed.
+            const int     page = static_cast<int>(w);
+            const HBITMAP bm   = reinterpret_cast<HBITMAP>(l);
+            impl.pending_renders_.erase(page);
+            if (bm) {
+                if (impl.cache) {
+                    // Cache takes ownership (ThumbCache::put contract).
+                    impl.cache->put(page, bm);
+                } else {
+                    // Defensive: if the cache was unset between submit and
+                    // completion (e.g. set_cache(nullptr) during tab swap),
+                    // we must DeleteObject ourselves or the bitmap leaks.
+                    DeleteObject(bm);
+                }
+                // Repaint just this row — no need to invalidate the whole
+                // pane. ListView_RedrawItems queues a paint on the UI thread
+                // which will re-enter WM_DRAWITEM, hit the cache, and blit.
+                if (page >= 0 && page < impl.model.page_count()) {
+                    ListView_RedrawItems(hwnd, page, page);
+                }
+            }
+            // Null bm path: cancelled / failed render. No repaint needed —
+            // the placeholder is already on screen and we'll re-queue when
+            // the row scrolls back into view.
+            return 0;
+        }
         case WM_SIZE: {
             const int new_h = HIWORD(l);
             impl.model.set_viewport_h_px(new_h);
@@ -511,7 +756,15 @@ LRESULT CALLBACK thumb_list_subclass_proc(HWND hwnd, UINT msg, WPARAM w,
             impl.model.set_scroll_y_px(new_pos);
             impl.sync_scroll_pos();
             InvalidateRect(hwnd, nullptr, FALSE);
-            return 0;  // we handled it; suppress DefSubclassProc's own scroll
+            // M4 carry-over: fall through to DefSubclassProc instead of
+            // `return 0`. The listview's internal iTopIndex must move so
+            // that the WM_DRAWITEM messages it queues for the next paint
+            // pass come in for the rows we want; without this, the model's
+            // scroll_y_ moved but the listview kept its old iTopIndex, so
+            // `dis->rcItem` arrived at stale coordinates and tiles did not
+            // visually move. Letting Def... run keeps the two scroll
+            // sources of truth in sync.
+            break;
         }
         case WM_MOUSEWHEEL: {
             const int delta = GET_WHEEL_DELTA_WPARAM(w);
@@ -523,7 +776,9 @@ LRESULT CALLBACK thumb_list_subclass_proc(HWND hwnd, UINT msg, WPARAM w,
             impl.model.set_scroll_y_px(impl.model.scroll_y_px() + dy);
             impl.sync_scroll_pos();
             InvalidateRect(hwnd, nullptr, FALSE);
-            return 0;
+            // M4: fall through (see WM_VSCROLL note) so the listview's
+            // iTopIndex tracks the model.
+            break;
         }
         case WM_LBUTTONDOWN: {
             const int y = GET_Y_LPARAM(l);
@@ -556,8 +811,52 @@ LRESULT CALLBACK thumb_parent_subclass_proc(HWND hwnd, UINT msg, WPARAM w,
                     impl.model.current_page(),
                     impl.model.page_count(),
                     impl.palette,
+                    impl.brushes_,
                 };
-                paint_placeholder(dis, args);
+
+                // T6: cache hit → blit; miss → placeholder + submit.
+                HBITMAP bm = impl.cache ? impl.cache->get(page) : nullptr;
+                if (bm) {
+                    paint_thumb(dis, bm, args);
+                } else {
+                    paint_placeholder(dis, args);
+
+                    // pending_renders_ mutation point #1 (cache miss).
+                    // Insert BEFORE submit so a fast worker that fires the
+                    // callback synchronously cannot PostMessage WM_USER_THUMB_READY
+                    // before we've recorded the page as in-flight (which would
+                    // let the next WM_DRAWITEM iteration re-submit a duplicate).
+                    if (impl.renderer && impl.cache &&
+                        impl.pending_renders_.insert(page).second) {
+                        // Capture the list HWND, NOT `self` or `&impl`. The
+                        // worker thread fires the callback after the renderer's
+                        // own dtor (D16) has guaranteed liveness — but the pane
+                        // could have already null'd its renderer pointer or
+                        // even moved cache references in between. Targeting
+                        // the HWND is safe across pane recovery: Win32
+                        // PostMessageW gracefully fails (returns FALSE) if the
+                        // HWND is destroyed, in which case we DeleteObject the
+                        // bitmap immediately to avoid a leak.
+                        HWND target = impl.list_hwnd;
+                        impl.renderer->submit(page,
+                            [target, page](HBITMAP rendered) {
+                                // Worker thread. Do NOT touch any pane state
+                                // here — only the message queue.
+                                if (!PostMessageW(target,
+                                                  WM_USER_THUMB_READY,
+                                                  static_cast<WPARAM>(page),
+                                                  reinterpret_cast<LPARAM>(rendered))) {
+                                    // HWND gone (pane destroyed mid-render or
+                                    // posted-message queue full). Drop the
+                                    // bitmap so it does not leak. nullptr is
+                                    // fine — D17 cancellations send nullptr
+                                    // here too and DeleteObject(nullptr) is a
+                                    // no-op per MSDN.
+                                    if (rendered) DeleteObject(rendered);
+                                }
+                            });
+                    }
+                }
             }
             return TRUE;
         }

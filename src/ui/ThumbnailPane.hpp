@@ -50,9 +50,21 @@ public:
     // is safe to call before T6 wires those in), and invalidates the pane.
     void on_dpi_changed(unsigned new_dpi);
 
-    // Phase 7 Task 6 will add:
-    //   void set_renderer(litepdf::core::ThumbnailRenderer*);
-    //   void set_cache(litepdf::core::ThumbCache*);
+    // Wire in the per-tab cache + renderer (owned by DocumentView; D6/D7).
+    // The pointers are nullable: callers may set them in any order, may
+    // null them out before tearing down, and may call paint-driving setters
+    // (set_page_count, set_current_page, on_dpi_changed) before either
+    // pointer is set — the pane falls back to placeholder painting in that
+    // case. Both must be set on the UI thread; the pane records the current
+    // value lock-free for use by WM_DRAWITEM.
+    //
+    // The pane MUST be owned by the same object that owns the cache and
+    // the renderer (DocumentView in T8) so the destruction order can be
+    // controlled: cache + renderer outlive the pane, the pane's dtor
+    // cancels in-flight renders before they can post WM_USER_THUMB_READY
+    // back to a destroyed HWND.
+    void set_renderer(litepdf::core::ThumbnailRenderer* renderer);
+    void set_cache(litepdf::core::ThumbCache* cache);
 
 private:
     struct Impl;

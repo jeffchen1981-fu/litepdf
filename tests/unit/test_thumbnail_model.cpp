@@ -111,6 +111,20 @@ TEST_CASE("ThumbnailModel: set_current_page reports old/new pair", "[thumbnail_m
     REQUIRE(same.second == -1);
 }
 
+TEST_CASE("ThumbnailModel: set_page_count clamps current_page if shrunk",
+          "[thumbnail_model]") {
+    ThumbnailModel m;
+    m.set_page_count(20);
+    m.set_current_page(15);
+    REQUIRE(m.current_page() == 15);
+    m.set_page_count(10);   // shrink past current
+    REQUIRE(m.current_page() == 9);   // clamped to new last index
+    m.set_page_count(0);    // empty document
+    REQUIRE(m.current_page() == 0);   // clamp to zero (no negative index)
+    m.set_page_count(5);    // grow back: stale 0 stays valid
+    REQUIRE(m.current_page() == 0);
+}
+
 TEST_CASE("ThumbnailModel: scroll_to_make_visible brings offscreen page into view at viewport top",
           "[thumbnail_model]") {
     ThumbnailModel m;
