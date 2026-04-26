@@ -40,15 +40,22 @@ TEST_CASE("RenderEngine::cancel before worker picks up skips callback", "[core][
     }
 
     std::atomic<int> calls{0};
+    std::atomic<int> nulls{0};
     auto tok = engine.submit({1, 2, 1.0f, [&](fz_pixmap* p, fz_context* ctx){
         ++calls;
+        if (!p) ++nulls;
         if (p) fz_drop_pixmap(ctx, p);
     }});
     engine.cancel(tok);
 
     // Wait for gate to drain + cancelation to process
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
-    REQUIRE(calls.load() == 0);
+    // Phase 7 D17: cancellation invokes on_complete with nullptr exactly once
+    // so callers tracking pending_tasks (e.g. ThumbnailRenderer drain) can
+    // decrement on the cancel path. The pre-D17 contract was "no callback on
+    // cancel"; the new contract is "exactly one callback, with pix=nullptr".
+    REQUIRE(calls.load() == 1);
+    REQUIRE(nulls.load() == 1);
 }
 
 TEST_CASE("RenderEngine::cancel_all_below_priority cancels less-urgent queued tasks",
@@ -78,16 +85,20 @@ TEST_CASE("RenderEngine::cancel_all_below_priority cancels less-urgent queued ta
     std::atomic<int> p1_calls{0};
     std::atomic<int> p2_calls{0};
     std::atomic<int> p3_calls{0};
+    std::atomic<int> p2_nulls{0};
+    std::atomic<int> p3_nulls{0};
     engine.submit({1, 1, 1.0f, [&](fz_pixmap* p, fz_context* ctx){
         ++p1_calls;
         if (p) fz_drop_pixmap(ctx, p);
     }});
     engine.submit({2, 2, 1.0f, [&](fz_pixmap* p, fz_context* ctx){
         ++p2_calls;
+        if (!p) ++p2_nulls;
         if (p) fz_drop_pixmap(ctx, p);
     }});
     engine.submit({3, 3, 1.0f, [&](fz_pixmap* p, fz_context* ctx){
         ++p3_calls;
+        if (!p) ++p3_nulls;
         if (p) fz_drop_pixmap(ctx, p);
     }});
 
@@ -98,8 +109,13 @@ TEST_CASE("RenderEngine::cancel_all_below_priority cancels less-urgent queued ta
     // Drain
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     REQUIRE(p1_calls.load() == 1);
-    REQUIRE(p2_calls.load() == 0);
-    REQUIRE(p3_calls.load() == 0);
+    // Phase 7 D17: cancelled requests now invoke the callback once with
+    // pix=nullptr (was "no callback at all" pre-D17). Both P2 and P3 fire
+    // their callback exactly once with a nullptr pixmap.
+    REQUIRE(p2_calls.load() == 1);
+    REQUIRE(p3_calls.load() == 1);
+    REQUIRE(p2_nulls.load() == 1);
+    REQUIRE(p3_nulls.load() == 1);
 }
 
 TEST_CASE("RenderEngine::cancel on empty token is a no-op", "[core][render][cancel]") {

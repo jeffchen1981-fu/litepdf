@@ -105,12 +105,19 @@ struct RenderEngine::Impl {
             }
 
             // Checkpoint A: pre-MuPDF cancel check.
-            if (canceled && canceled->load()) continue;
+            // D17: even on cancel, callback must fire (with nullptr) so callers
+            // tracking pending_tasks can decrement (e.g. ThumbnailRenderer drain).
+            if (canceled && canceled->load()) {
+                if (req.on_complete) req.on_complete(nullptr, ctx);
+                continue;
+            }
 
             // L1 check — pixmap cache hit. On hit, cache has kept a ref for
             // us; we're the caller and must drop (or hand to callback, which
             // then owns the drop).
-            if (impl->cache) {
+            // D18: bypass_cache requests skip L1 read entirely so thumb pixmaps
+            // never displace main-render entries.
+            if (impl->cache && !req.bypass_cache) {
                 fz_pixmap* cached = impl->cache->get_pixmap(req.page_num, req.scale);
                 if (cached) {
                     // D3: L1-hit fast path still honors late cancellation before callback.
@@ -125,8 +132,10 @@ struct RenderEngine::Impl {
             }
 
             // L2 check — display list cache hit; else build one.
+            // D18: bypass_cache requests skip L2 read so thumb display lists
+            // never displace main-render entries.
             fz_display_list* dlist = nullptr;
-            if (impl->cache) {
+            if (impl->cache && !req.bypass_cache) {
                 dlist = impl->cache->get_display_list(req.page_num);
                 // On hit, cache has kept a ref for us. We own this ref and
                 // will drop it after rasterize.
@@ -152,15 +161,19 @@ struct RenderEngine::Impl {
                 //   put_display_list takes our "original" ref → cache holds 1.
                 //   We retain the bump; dlist still points to same object.
                 //   After rasterize, fz_drop_display_list → cache's ref stays.
-                if (dlist && impl->cache) {
+                // D18: bypass_cache also skips L2 write.
+                if (dlist && impl->cache && !req.bypass_cache) {
                     fz_keep_display_list(ctx, dlist);
                     impl->cache->put_display_list(req.page_num, dlist);
                 }
             }
 
             // Checkpoint B: post-load / pre-rasterize cancel check.
+            // D17: invoke callback with nullptr before continuing so the
+            // ThumbnailRenderer pending_tasks drain stays balanced.
             if (canceled && canceled->load()) {
                 if (dlist) fz_drop_display_list(ctx, dlist);
+                if (req.on_complete) req.on_complete(nullptr, ctx);
                 continue;
             }
 
@@ -189,7 +202,8 @@ struct RenderEngine::Impl {
             //   fz_keep_pixmap                  → refcount 2.
             //   put_pixmap takes our "original" ref → cache holds 1.
             //   We retain the bump; hand to callback (caller owns) or drop.
-            if (pix && impl->cache) {
+            // D18: bypass_cache also skips L1 write.
+            if (pix && impl->cache && !req.bypass_cache) {
                 fz_keep_pixmap(ctx, pix);
                 impl->cache->put_pixmap(req.page_num, req.scale, pix);
             }
@@ -198,8 +212,11 @@ struct RenderEngine::Impl {
             // canceled after we already paid to rasterize, drop the pixmap
             // and skip the callback — the consumer no longer wants the work.
             // (Cache still holds its own ref from put_pixmap above.)
+            // D17: still invoke callback with nullptr so pending_tasks drain
+            // can decrement on the cancel path.
             if (canceled && canceled->load()) {
                 if (pix) fz_drop_pixmap(ctx, pix);
+                if (req.on_complete) req.on_complete(nullptr, ctx);
                 continue;
             }
 

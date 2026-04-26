@@ -44,6 +44,12 @@ public:
         int   priority  = 0;     // 0 = highest; 1 = adjacent; 2 = prefetch
         float scale     = 1.0f;  // 1.0 = 72 dpi
         std::function<void(fz_pixmap*, fz_context*)> on_complete;
+        // (Phase 7) when true, this request neither reads from nor populates
+        // L1 OR L2. Used by ThumbnailRenderer so thumb pixmaps and their
+        // display lists never displace main-render entries. Placed AFTER
+        // on_complete so existing 4-element aggregate-init call sites
+        // (`{page, prio, scale, callback}`) keep compiling unchanged.
+        bool  bypass_cache = false;
     };
 
     // Construct a RenderEngine.
