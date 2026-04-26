@@ -1122,7 +1122,9 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
     if (!hwnd_) return 1;
 
     // Accelerators: Ctrl+O for Open; Ctrl+= / Ctrl+- / Ctrl+0 for zoom;
-    // F5 toggles the outline pane. Phase 5 adds tab management:
+    // F5 toggles the outline pane; F4 reserved for the Phase 7 thumbnail
+    // pane (registered now so the accelerator slot is taken — handler
+    // lands in Phase 7 Task 8). Phase 5 adds tab management:
     // Ctrl+W closes active tab, Ctrl+Tab / Ctrl+Shift+Tab cycles,
     // Ctrl+1..9 jumps to tab N.
     ACCEL accels[] = {
@@ -1130,6 +1132,7 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
         { FCONTROL | FVIRTKEY, VK_OEM_PLUS,  IDM_ZOOM_IN       },  // Ctrl+=
         { FCONTROL | FVIRTKEY, VK_OEM_MINUS, IDM_ZOOM_OUT      },  // Ctrl+-
         { FCONTROL | FVIRTKEY, '0',          IDM_ZOOM_RESET    },
+        { FVIRTKEY,            VK_F4,        IDM_VIEW_THUMBS   },
         { FVIRTKEY,            VK_F5,        IDM_VIEW_OUTLINE  },
         // Phase 5: tab management.
         { FCONTROL | FVIRTKEY,          'W',     IDM_TAB_CLOSE  },
