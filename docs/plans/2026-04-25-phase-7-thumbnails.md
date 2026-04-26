@@ -316,11 +316,11 @@ git commit -m "feat(core): RenderEngine bypass_cache flag + cancel-path callback
 **Files:**
 - Create: `src/core/ThumbnailModel.hpp` (~80 LOC).
 - Create: `src/core/ThumbnailModel.cpp` (~100 LOC).
-- Create: `tests/unit/ThumbnailModelTests.cpp` (~120 LOC).
+- Create: `tests/unit/test_thumbnail_model.cpp` (~120 LOC).
 - Modify: `tests/CMakeLists.txt` (add new test source).
 - Modify: top-level `CMakeLists.txt` (add `src/core/ThumbnailModel.cpp` to `litepdf_core`).
 
-**Step 1.1: Write the failing tests.** Create `tests/unit/ThumbnailModelTests.cpp`:
+**Step 1.1: Write the failing tests.** Create `tests/unit/test_thumbnail_model.cpp`:
 
 ```cpp
 #include "core/ThumbnailModel.hpp"
@@ -620,7 +620,7 @@ Expected: 8/8 [thumbnail_model] cases pass. Total ctest count: 101 → 109.
 **Step 1.7: Commit.**
 
 ```bash
-git add src/core/ThumbnailModel.* src/CMakeLists.txt tests/unit/ThumbnailModelTests.cpp tests/unit/CMakeLists.txt
+git add src/core/ThumbnailModel.* CMakeLists.txt tests/unit/test_thumbnail_model.cpp tests/CMakeLists.txt
 git commit -m "feat(core): ThumbnailModel pure-logic pane geometry (Phase 7 D5)"
 ```
 
@@ -633,10 +633,10 @@ git commit -m "feat(core): ThumbnailModel pure-logic pane geometry (Phase 7 D5)"
 **Files:**
 - Create: `src/core/ThumbCache.hpp` (~50 LOC).
 - Create: `src/core/ThumbCache.cpp` (~80 LOC).
-- Create: `tests/unit/ThumbCacheTests.cpp` (~80 LOC).
-- Modify: `src/CMakeLists.txt`, `tests/unit/CMakeLists.txt`.
+- Create: `tests/unit/test_thumb_cache.cpp` (~80 LOC).
+- Modify: `CMakeLists.txt`, `tests/CMakeLists.txt`.
 
-**Step 2.1: Write tests.** Create `tests/unit/ThumbCacheTests.cpp`:
+**Step 2.1: Write tests.** Create `tests/unit/test_thumb_cache.cpp`:
 
 ```cpp
 #include "core/ThumbCache.hpp"
@@ -827,7 +827,7 @@ void ThumbCache::clear() {
 **Step 2.6: Commit.**
 
 ```bash
-git add src/core/ThumbCache.* src/CMakeLists.txt tests/unit/ThumbCacheTests.cpp tests/unit/CMakeLists.txt
+git add src/core/ThumbCache.* CMakeLists.txt tests/unit/test_thumb_cache.cpp tests/CMakeLists.txt
 git commit -m "feat(core): ThumbCache HBITMAP LRU (Phase 7 D2)"
 ```
 
@@ -840,10 +840,10 @@ git commit -m "feat(core): ThumbCache HBITMAP LRU (Phase 7 D2)"
 **Files:**
 - Create: `src/core/ThumbnailRenderer.hpp` (~50 LOC).
 - Create: `src/core/ThumbnailRenderer.cpp` (~120 LOC).
-- Create: `tests/unit/ThumbnailRendererTests.cpp` (~60 LOC, integration with real Document fixture).
-- Modify: `src/CMakeLists.txt`, `tests/unit/CMakeLists.txt`.
+- Create: `tests/unit/test_thumbnail_renderer.cpp` (~60 LOC, integration with real Document fixture).
+- Modify: `CMakeLists.txt`, `tests/CMakeLists.txt`.
 
-**Step 3.1: Write tests.** Create `tests/unit/ThumbnailRendererTests.cpp`:
+**Step 3.1: Write tests.** Create `tests/unit/test_thumbnail_renderer.cpp`:
 
 ```cpp
 #include "core/Document.hpp"
@@ -1100,7 +1100,7 @@ void ThumbnailRenderer::cancel_pending() {
 **Step 3.6: Commit.**
 
 ```bash
-git add src/core/ThumbnailRenderer.* src/CMakeLists.txt tests/unit/ThumbnailRendererTests.cpp tests/unit/CMakeLists.txt
+git add src/core/ThumbnailRenderer.* CMakeLists.txt tests/unit/test_thumbnail_renderer.cpp tests/CMakeLists.txt
 git commit -m "feat(core): ThumbnailRenderer reuses engine + task drain (Phase 7 D3/D16)"
 ```
 
@@ -1123,7 +1123,7 @@ git commit -m "feat(core): ThumbnailRenderer reuses engine + task drain (Phase 7
   }
   ```
   Used by `SplitterCore::handle_message` based on orientation.
-- Modify: `tests/unit/CMakeLists.txt`, optionally add `tests/unit/SplitterMathTests.cpp` (~30 LOC) covering clamp boundaries for both axes.
+- Modify: `tests/CMakeLists.txt`, optionally add `tests/unit/test_splitter_math.cpp` (~30 LOC) covering clamp boundaries for both axes.
 
 **Step 4a.1: Extract `SplitterMath.hpp`** with two pure clamp helpers. Add 4 unit cases ([splitter_math]) covering low/high clamps for both axes.
 
@@ -1155,8 +1155,8 @@ PR body should reference Phase 7 plan §D9 + 2A. CI gate + manual smoke. Land be
 
 **Files:**
 - Create: `src/ui/VerticalSplitter.hpp` + `.cpp` (~30 LOC each — both ctor + dtor + 3 forwarders to `Impl`).
-- Create: `tests/unit/VerticalSplitterTests.cpp` — exercises `detail::compute_drag_target_x` directly via the free helper added in T4a, plus a smoke unit case constructing/destroying VerticalSplitter without a parent window (confirms ctor doesn't blow up on minimal init).
-- Modify: `src/CMakeLists.txt`, `tests/unit/CMakeLists.txt`.
+- Create: `tests/unit/test_vertical_splitter.cpp` — exercises `detail::compute_drag_target_x` directly via the free helper added in T4a, plus a smoke unit case constructing/destroying VerticalSplitter without a parent window (confirms ctor doesn't blow up on minimal init).
+- Modify: `CMakeLists.txt`, `tests/CMakeLists.txt`.
 
 **Step 4b.1: VerticalSplitter.hpp:**
 
@@ -1217,7 +1217,7 @@ TEST_CASE("VerticalSplitter math: clamps above max", "[vsplitter]") {
 **Step 4b.5: Commit (within Phase 7 PR).**
 
 ```bash
-git add src/ui/VerticalSplitter.* src/CMakeLists.txt tests/unit/VerticalSplitterTests.cpp tests/unit/CMakeLists.txt
+git add src/ui/VerticalSplitter.* CMakeLists.txt tests/unit/test_vertical_splitter.cpp tests/CMakeLists.txt
 git commit -m "feat(ui): VerticalSplitter wraps SplitterCore (Phase 7 D9 / Task 4b)"
 ```
 
@@ -1230,7 +1230,7 @@ git commit -m "feat(ui): VerticalSplitter wraps SplitterCore (Phase 7 D9 / Task 
 **Files:**
 - Create: `src/ui/ThumbnailPane.hpp` (~60 LOC).
 - Create: `src/ui/ThumbnailPane.cpp` (~250 LOC).
-- Modify: `src/CMakeLists.txt`.
+- Modify: `CMakeLists.txt`.
 - (No new tests in this task — Win32 widget is exercised via T8 smoke + manual.)
 
 **Step 5.1:** Header API mirrors `OutlinePane`:
@@ -1307,7 +1307,7 @@ case WM_DPICHANGED: {
 **Step 5.5:** Commit.
 
 ```bash
-git add src/ui/ThumbnailPane.* src/CMakeLists.txt
+git add src/ui/ThumbnailPane.* CMakeLists.txt
 git commit -m "feat(ui): ThumbnailPane skeleton (owner-draw ListView + hit test)"
 ```
 
