@@ -54,6 +54,7 @@ add_executable(litepdf WIN32
     src/ui/ResultsPanel.cpp      # Phase 6 Task 13
     src/ui/Splitter.cpp          # Phase 6 Task 12
     src/ui/TabManager.cpp
+    src/ui/ThumbnailPane.cpp     # Phase 7 Task 5
     resources/litepdf.rc
 )
 
