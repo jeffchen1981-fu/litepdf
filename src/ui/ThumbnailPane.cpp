@@ -447,45 +447,52 @@ void ThumbnailPane::set_page_count(int n) {
 void ThumbnailPane::set_current_page(int page) {
     if (!impl_->list_hwnd) return;
     auto change = impl_->model.set_current_page(page);
-    if (change.first < 0 && change.second < 0) return;  // no-op
+    if (change.first < 0 && change.second < 0) return;  // model no-op
 
-    // T7: scroll the new page into view if it is currently outside the
-    // visible range. We use the native ListView_EnsureVisible because:
-    //   1. It both updates iTopIndex AND drives the listview's scrollbar
-    //      atomically — no need to compute pixel scroll ourselves.
-    //   2. Internally it sends WM_VSCROLL / SB_THUMBPOSITION through the
-    //      window proc, which the M4 subclass intercepts: that handler
-    //      reads the new SCROLLINFO position, calls model.set_scroll_y_px
-    //      (clamped) and impl.sync_scroll_pos, then falls through to
-    //      DefSubclassProc — so the model and the listview stay in sync
-    //      via the same well-tested pathway as user-driven scrolls.
-    //
-    // PartialOK = FALSE so a tile that's only partially clipped at the
-    // edge still scrolls fully into view (matches the model's
-    // scroll_to_make_visible semantics: "in visible_range" means fully
-    // counted, not just any pixel on screen).
-    //
-    // Skip the call when the page is already in the visible range to
-    // avoid spurious scroll-position changes (and the WM_VSCROLL the
-    // listview would synthesize for a no-op scroll could nudge the
-    // pixel position to round-trip through SCROLLINFO precision).
-    {
-        const auto vr = impl_->model.visible_range();
-        const bool already_visible =
-            (vr.last >= vr.first) && (page >= vr.first) && (page <= vr.last);
-        if (!already_visible) {
-            ListView_EnsureVisible(impl_->list_hwnd, change.second, FALSE);
-        }
-    }
-
-    // Invalidate both the previous and new tile rects so the highlight
-    // border repaints. tile_rect returns coords relative to the listview
-    // client, but using ListView_RedrawItems is cleaner because it accounts
-    // for the row layout the control owns.
+    // Repaint old + new highlight tiles. ListView_RedrawItems handles
+    // the row-coordinate translation correctly via the listview's own
+    // layout (more robust than InvalidateRect with a model-derived
+    // tile_rect, given the model/listview pitch discrepancy).
     if (change.first  >= 0) ListView_RedrawItems(impl_->list_hwnd,
                                                   change.first,  change.first);
     if (change.second >= 0) ListView_RedrawItems(impl_->list_hwnd,
                                                   change.second, change.second);
+
+    // T7: auto-scroll to make the new page visible.
+    // Approach A (per plan line 1377):
+    //   1. Update the model's scroll_y_ via scroll_to_make_visible —
+    //      no-op if already in visible_range (see ThumbnailModel.cpp).
+    //   2. Push model.scroll_y_px to the listview's SCROLLINFO via
+    //      sync_scroll_pos() so the scrollbar thumb tracks the model.
+    //   3. Call ListView_EnsureVisible to move the listview's internal
+    //      iTopIndex (SCROLLINFO alone does NOT move items).
+    //   4. Invalidate to force a repaint with the new state.
+    //
+    // CRITICAL: ListView_EnsureVisible does NOT synthesize WM_VSCROLL
+    // (verified empirically by reviewer Win32 probe — the listview
+    // bypasses the WM_VSCROLL pathway and calls Scroll/Invalidate
+    // directly). M4's WM_VSCROLL fall-through therefore does NOT update
+    // the model for us, so we must drive the model side explicitly
+    // here to keep both sources of truth in sync. Without this, a
+    // subsequent WM_MOUSEWHEEL would compute deltas off a stale
+    // model.scroll_y_ == 0 and snap the listview back near the top.
+    //
+    // The prev/new scroll guard preserves the "already visible -> no
+    // scroll work" early-exit: scroll_to_make_visible no-ops in that
+    // case, leaving scroll_y_ unchanged, and we skip sync/scroll/
+    // invalidate. The highlight repaint above still runs, which is
+    // correct (the highlight moved even if no scroll was needed).
+    if (change.second >= 0) {
+        const int prev_scroll = impl_->model.scroll_y_px();
+        impl_->model.scroll_to_make_visible(change.second);
+        const int new_scroll = impl_->model.scroll_y_px();
+        if (new_scroll != prev_scroll) {
+            impl_->sync_scroll_pos();
+            ListView_EnsureVisible(impl_->list_hwnd, change.second, FALSE);
+            InvalidateRect(impl_->list_hwnd, nullptr, FALSE);
+        }
+    }
+
     UpdateWindow(impl_->list_hwnd);
 }
 
