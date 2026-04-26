@@ -380,7 +380,15 @@ void MainWindow::toggle_thumbs() {
         }
     } else {
         // Mutual exclusion: hide outline if it was the visible left pane.
-        if (outline_ && outline_->visible()) outline_->hide();
+        // Reset outline_visible too so on_tab_switch's restore path
+        // doesn't bring outline back on a tab-switch round-trip.
+        // Symmetric with toggle_outline()'s thumb_visible=false reset.
+        if (outline_ && outline_->visible()) {
+            outline_->hide();
+            if (auto* t = tabs_ ? tabs_->active_tab() : nullptr) {
+                t->outline_visible = false;
+            }
+        }
         tp->show();
         if (auto* t = tabs_ ? tabs_->active_tab() : nullptr) {
             t->thumb_visible = true;
