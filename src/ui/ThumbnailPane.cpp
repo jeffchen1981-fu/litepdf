@@ -449,6 +449,35 @@ void ThumbnailPane::set_current_page(int page) {
     auto change = impl_->model.set_current_page(page);
     if (change.first < 0 && change.second < 0) return;  // no-op
 
+    // T7: scroll the new page into view if it is currently outside the
+    // visible range. We use the native ListView_EnsureVisible because:
+    //   1. It both updates iTopIndex AND drives the listview's scrollbar
+    //      atomically — no need to compute pixel scroll ourselves.
+    //   2. Internally it sends WM_VSCROLL / SB_THUMBPOSITION through the
+    //      window proc, which the M4 subclass intercepts: that handler
+    //      reads the new SCROLLINFO position, calls model.set_scroll_y_px
+    //      (clamped) and impl.sync_scroll_pos, then falls through to
+    //      DefSubclassProc — so the model and the listview stay in sync
+    //      via the same well-tested pathway as user-driven scrolls.
+    //
+    // PartialOK = FALSE so a tile that's only partially clipped at the
+    // edge still scrolls fully into view (matches the model's
+    // scroll_to_make_visible semantics: "in visible_range" means fully
+    // counted, not just any pixel on screen).
+    //
+    // Skip the call when the page is already in the visible range to
+    // avoid spurious scroll-position changes (and the WM_VSCROLL the
+    // listview would synthesize for a no-op scroll could nudge the
+    // pixel position to round-trip through SCROLLINFO precision).
+    {
+        const auto vr = impl_->model.visible_range();
+        const bool already_visible =
+            (vr.last >= vr.first) && (page >= vr.first) && (page <= vr.last);
+        if (!already_visible) {
+            ListView_EnsureVisible(impl_->list_hwnd, change.second, FALSE);
+        }
+    }
+
     // Invalidate both the previous and new tile rects so the highlight
     // border repaints. tile_rect returns coords relative to the listview
     // client, but using ListView_RedrawItems is cleaner because it accounts

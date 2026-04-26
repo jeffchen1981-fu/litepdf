@@ -98,6 +98,13 @@ struct PdfCanvas::Impl {
     // overlay". current_hit is std::nullopt when no hit is selected.
     PdfCanvas::HitsFn             hits_fn;
     std::optional<litepdf::core::SearchSession::Hit> current_hit;
+
+    // --- Phase 7 Task 7: page-change observer ---
+    // Fired by change_current_page() after a real page transition, and
+    // by set_view() when a non-null view is installed (so a freshly
+    // switched tab's listener learns the page immediately, not "stale
+    // until first PgDn"). May be null — checked at the fire site.
+    PdfCanvas::PageChangedCb      on_page_changed;
 };
 
 void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
@@ -113,7 +120,32 @@ void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
         // the cleared background.
         impl_->current_bitmap.Reset();
         if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
     }
+
+    // T7: tab-switch fire-point. The new tab's DocumentView already has
+    // its own current_page_ (carried across switches) — broadcast it so
+    // a per-tab listener (T8 will wire ThumbnailPane here) shows the
+    // correct highlight immediately rather than waiting for the next
+    // page-change event. The listener is responsible for no-op'ing if
+    // the value matches what it already has.
+    if (impl_->on_page_changed) {
+        impl_->on_page_changed(view->current_page());
+    }
+}
+
+void PdfCanvas::set_on_page_changed(PageChangedCb cb) {
+    if (!impl_) return;
+    impl_->on_page_changed = std::move(cb);
+}
+
+bool PdfCanvas::change_current_page(int idx) {
+    if (!impl_ || !impl_->view) return false;
+    const bool changed = impl_->view->set_current_page(idx);
+    if (changed && impl_->on_page_changed) {
+        impl_->on_page_changed(impl_->view->current_page());
+    }
+    return changed;
 }
 
 PdfCanvas::Pan PdfCanvas::pan() const {
@@ -146,7 +178,9 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     // Page switch if needed. Caller drives kick_render afterwards.
     const int target_pg = static_cast<int>(h.page);
     if (impl_->view->current_page() != target_pg) {
-        impl_->view->set_current_page(target_pg);
+        // Route through change_current_page so the T7 observer fires —
+        // search-jump is a real page transition just like PgUp/PgDn.
+        change_current_page(target_pg);
         // Reset pan so the new page lands at its natural fit origin;
         // new_pan_y below will then recenter on the hit once the fresh
         // bitmap arrives. Without this, a large stale pan from the old
@@ -478,16 +512,16 @@ LRESULT PdfCanvas::on_key_down(WPARAM key) {
     bool changed = false;
     switch (key) {
         case VK_NEXT:   // PgDn
-            changed = impl_->view->set_current_page(cur + 1);
+            changed = change_current_page(cur + 1);
             break;
         case VK_PRIOR:  // PgUp
-            changed = impl_->view->set_current_page(cur - 1);
+            changed = change_current_page(cur - 1);
             break;
         case VK_HOME:
-            changed = impl_->view->set_current_page(0);
+            changed = change_current_page(0);
             break;
         case VK_END:
-            changed = impl_->view->set_current_page(max_idx);
+            changed = change_current_page(max_idx);
             break;
         // Arrow keys: pan the bitmap by 100 DIPs. No clamping in Phase 3 —
         // user can pan off-canvas; clamping is Phase 4 polish.

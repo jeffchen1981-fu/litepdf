@@ -85,6 +85,29 @@ public:
     // yellow. Pass std::nullopt to clear current highlight.
     void set_current_hit(std::optional<litepdf::core::SearchSession::Hit> h);
 
+    // --- Phase 7 Task 7: page-change observer ---
+    //
+    // Fires whenever the canvas's tracked current-page changes — covers
+    // PgUp/PgDn/Home/End key nav, outline-navigate, search-jump
+    // (scroll_into_view), cross-tab search results, AND tab switches
+    // (set_view), so a per-tab listener (e.g. ThumbnailPane in T8) sees
+    // the correct page on switch instead of going stale until the next
+    // page-change event. The callback fires AFTER DocumentView's
+    // current_page_ has been updated, with the new page index.
+    //
+    // Lifetime: caller owns the captured state. Pass nullptr (default
+    // construction) to clear. Overwriting replaces the previous binding.
+    using PageChangedCb = std::function<void(int new_page)>;
+    void set_on_page_changed(PageChangedCb cb);
+
+    // Page-change entry point for external callers (MainWindow's
+    // outline-navigate and cross-tab search-results paths). Wraps
+    // `view->set_current_page(idx)` and fires the page-change observer
+    // when the page actually moves, so all mutation sites flow through
+    // one observer fire-point. Returns true iff the page changed.
+    // Safe to call before set_view (returns false).
+    bool change_current_page(int idx);
+
     // Scroll / page-change such that `h`'s quad is visible with a 24 DIP
     // margin. If already visible, no scroll — only the invalidate. If
     // target page differs from current, page is switched via

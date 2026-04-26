@@ -295,8 +295,12 @@ void MainWindow::toggle_outline() {
 
 void MainWindow::on_outline_navigate(int page) {
     auto* view = active_view();
-    if (!view) return;
-    if (view->set_current_page(page)) {
+    if (!view || !canvas_) return;
+    // Route through PdfCanvas::change_current_page so the T7 page-change
+    // observer fires (T8 wires this to the per-tab thumbnail pane).
+    // Falls back to true == "page actually moved" — same semantics as
+    // the prior direct view->set_current_page call.
+    if (canvas_->change_current_page(page)) {
         kick_render(page);
     }
 }
@@ -1031,8 +1035,13 @@ void MainWindow::on_results_row_click(std::size_t idx) {
 
     tabs_->set_active(target_idx);
     auto* v = active_view();
-    if (!v) return;
-    v->set_current_page(static_cast<int>(h.page));
+    if (!v || !canvas_) return;
+    // Route through PdfCanvas::change_current_page so the T7 page-change
+    // observer fires for cross-tab search jumps too. set_active above
+    // already triggered on_tab_switch -> canvas_->set_view, which fired
+    // the observer with the incoming tab's stored page; this second
+    // fire reflects the search-jump's target page.
+    canvas_->change_current_page(static_cast<int>(h.page));
 
     // Recompose a Hit for the canvas overlay + scroll. SearchSession::Hit
     // and CrossTabSearch::Hit share the (page, geom) pair; we copy into
