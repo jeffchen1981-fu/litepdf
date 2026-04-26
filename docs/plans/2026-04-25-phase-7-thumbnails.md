@@ -1085,11 +1085,13 @@ void ThumbnailRenderer::submit(int page, OnDone on_done) {
 }
 
 void ThumbnailRenderer::cancel_pending() {
-    // Cancel anything currently below priority 3 in the engine's queue.
-    // In-flight workers cooperatively check the cancel flag at safe
-    // points; their on_complete still fires (with pix possibly null),
-    // so pending_tasks still decrements correctly.
-    impl_->engine.cancel_all_below_priority(3);
+    // Cancel any not-yet-started priority=3 thumb requests. The engine's
+    // cancel_all_below_priority(p) cancels entries with priority > p
+    // (lower-importance), so we pass 2 to hit our own priority=3 work.
+    // In-flight workers cooperatively observe the cancel flag at safe
+    // points; their on_complete still fires (D17, with pix=nullptr on
+    // cancel paths), so pending_tasks still decrements correctly.
+    impl_->engine.cancel_all_below_priority(2);
 }
 
 }  // namespace litepdf::core
