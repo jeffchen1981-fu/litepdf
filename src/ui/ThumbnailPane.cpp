@@ -351,14 +351,26 @@ ThumbnailPane::~ThumbnailPane() {
         if (impl_->renderer) impl_->renderer->cancel_pending();
         impl_->pending_renders_.clear();
 
-        if (impl_->parent) {
+        // Phase 7 Task 8 (T5 I1 carry-over): IsWindow-guard the parent
+        // subclass removal. The pane is destroyed during ~DocumentView,
+        // which runs from ~MainWindow → ~TabManager → ~Tab. By that
+        // time, the OS may have already sent WM_NCDESTROY to the parent
+        // HWND in response to the user closing the window, so
+        // impl_->parent is a dangling handle. RemoveWindowSubclass on
+        // a dead HWND is documented as a silent no-op (returns FALSE),
+        // but the IsWindow check makes the intent explicit and avoids
+        // any unspecified-behavior worry. Same guard pattern for the
+        // ListView HWND (also a child, also destroyed by the cascade).
+        if (impl_->parent && IsWindow(impl_->parent)) {
             RemoveWindowSubclass(impl_->parent, thumb_parent_subclass_proc,
                                  impl_->parent_subclass_id);
         }
         if (impl_->list_hwnd) {
-            RemoveWindowSubclass(impl_->list_hwnd, thumb_list_subclass_proc,
-                                 kListSubclassId);
-            DestroyWindow(impl_->list_hwnd);
+            if (IsWindow(impl_->list_hwnd)) {
+                RemoveWindowSubclass(impl_->list_hwnd, thumb_list_subclass_proc,
+                                     kListSubclassId);
+                DestroyWindow(impl_->list_hwnd);
+            }
             impl_->list_hwnd = nullptr;
         }
         impl_->delete_brushes();  // M2: release the cached GDI handles.

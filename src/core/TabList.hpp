@@ -31,6 +31,13 @@ struct Tab {
     float pan_x            = 0.0f;
     float pan_y            = 0.0f;
     bool  outline_visible  = false;
+    // Phase 7 Task 8 / D11: per-tab thumbnail pane visibility. Default
+    // hidden on new tabs (D12). The actual pane is lazily created by
+    // DocumentView::ensure_thumb_pane on first F4 press, so this flag
+    // can be true with view->thumb_pane() == nullptr only for a brief
+    // window inside the F4 handler — we defensively read the live
+    // pane->visible() snapshot when switching away.
+    bool  thumb_visible    = false;
 
     // Out-of-line so DocumentView can stay forward-declared here: the
     // unique_ptr<DocumentView> member needs the full type to destroy.

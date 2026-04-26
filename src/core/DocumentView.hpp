@@ -31,6 +31,8 @@
 #include <functional>
 #include <memory>
 
+#include <windows.h>  // HINSTANCE / HWND — Phase 7 Task 8 ensure_thumb_pane.
+
 #include "core/Document.hpp"
 
 // Forward decls — keep this header MuPDF-free. Callers that need to
@@ -40,12 +42,15 @@ struct fz_pixmap;
 struct fz_context;
 
 namespace litepdf::app { class ISearchDispatcher; }
+namespace litepdf::ui  { class ThumbnailPane; }
 
 namespace litepdf::core {
 
 class RenderEngine;
 class PageCache;
 class SearchSession;
+class ThumbCache;
+class ThumbnailRenderer;
 
 class DocumentView {
 public:
@@ -128,6 +133,29 @@ public:
     // of this DocumentView; do NOT cache across tab close/reopen.
     SearchSession&       search();
     const SearchSession& search() const;
+
+    // Phase 7 Task 8: per-tab thumbnail pane (D2/D3/D11 — each tab has
+    // its own ThumbCache, ThumbnailRenderer, and ThumbnailPane). The
+    // pane and its cache + renderer are LAZILY created on first F4 press
+    // for the tab — saves ~50 KB per never-thumbed tab. Subsequent calls
+    // return the existing pane.
+    //
+    // The pane subclasses `parent_hwnd`'s WndProc; caller (MainWindow)
+    // must guarantee `parent_hwnd` outlives the pane, which is enforced
+    // by destruction order: ~DocumentView (via Impl) destroys the pane
+    // before MainWindow's HWND tear-down.
+    //
+    // Returns the (possibly newly-created) pane. Never null after this
+    // call. Set up with set_renderer + set_cache + set_page_count(...)
+    // so the first F4 press already shows thumbs.
+    litepdf::ui::ThumbnailPane* ensure_thumb_pane(HINSTANCE hInstance,
+                                                  HWND parent_hwnd);
+
+    // Returns the pane if it exists, or nullptr if F4 has never been
+    // pressed for this tab. Safe to call any time. Used by MainWindow's
+    // page-change observer + WM_DPICHANGED dispatcher to skip the pane
+    // when the tab has never thumbed.
+    litepdf::ui::ThumbnailPane* thumb_pane() const noexcept;
 
 private:
     struct Impl;

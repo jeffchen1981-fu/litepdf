@@ -32,6 +32,15 @@ add_library(litepdf_core STATIC
     src/core/ThumbnailModel.cpp    # Phase 7 Task 1
     src/core/ThumbCache.cpp        # Phase 7 Task 2
     src/core/ThumbnailRenderer.cpp # Phase 7 Task 3
+    # Phase 7 Task 8: DocumentView owns one ThumbnailPane per tab
+    # (D11), so DocumentView.cpp's translation unit references
+    # ThumbnailPane symbols. Linking ThumbnailPane.cpp into litepdf_core
+    # keeps the static library self-contained and lets unit tests link
+    # litepdf_core without pulling in the entire litepdf.exe target.
+    # ThumbnailPane is Win32-aware; the rest of litepdf_core's headers
+    # already include <windows.h> (ThumbCache, ThumbnailRenderer,
+    # ThumbnailModel) so this isn't a new layering breach.
+    src/ui/ThumbnailPane.cpp       # Phase 7 Task 5 + 6
 )
 
 litepdf_apply_flags(litepdf_core)
@@ -54,7 +63,6 @@ add_executable(litepdf WIN32
     src/ui/ResultsPanel.cpp      # Phase 6 Task 13
     src/ui/Splitter.cpp          # Phase 6 Task 12
     src/ui/TabManager.cpp
-    src/ui/ThumbnailPane.cpp     # Phase 7 Task 5
     src/ui/VerticalSplitter.cpp  # Phase 7 Task 4b
     resources/litepdf.rc
 )

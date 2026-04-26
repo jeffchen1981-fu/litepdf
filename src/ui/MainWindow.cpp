@@ -9,6 +9,7 @@
 #include "core/SearchSession.hpp"
 #include "core/TabList.hpp"
 #include "ui/ColdStartTimer.hpp"
+#include "ui/ThumbnailPane.hpp"  // Phase 7 Task 8: F4 toggle uses ThumbnailPane methods.
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -192,6 +193,20 @@ void MainWindow::kick_render(int page) {
         });
 }
 
+HWND MainWindow::left_pane_hwnd() const {
+    // Phase 7 Task 8: return whichever left-dock pane is visible.
+    // Mutual exclusion (F4/F5 handlers) guarantees at most one is
+    // visible at a time, so order of these checks doesn't matter.
+    if (outline_ && outline_->visible()) return outline_->hwnd();
+    auto* v = const_cast<MainWindow*>(this)->active_view();
+    if (v) {
+        if (auto* tp = v->thumb_pane(); tp && tp->visible()) {
+            return tp->hwnd();
+        }
+    }
+    return nullptr;
+}
+
 void MainWindow::on_layout() {
     if (!hwnd_) return;
     RECT rc; GetClientRect(hwnd_, &rc);
@@ -224,22 +239,46 @@ void MainWindow::on_layout() {
     const int canvas_bottom = h - panel_h - splitter_h;
     const int row_h = std::max(0, canvas_bottom - row_y);
 
-    const int outline_w = MulDiv(250, static_cast<int>(dpi), 96);
+    // Phase 7 Task 8: left dock — at most one of outline / thumb pane
+    // is visible at a time (F4/F5 mutual exclusion). When either is
+    // visible, the VerticalSplitter (4 DIP wide) sits immediately to
+    // its right and the canvas takes the remaining width.
+    HWND left_hwnd = left_pane_hwnd();
+    const int v_splitter_w = (left_hwnd != nullptr)
+                              ? MulDiv(4, static_cast<int>(dpi), 96) : 0;
+    // Clamp left_pane_width_px_ to the live client width — handles
+    // window-shrink races where the saved width would push the canvas
+    // off-screen. Same min/max as the v_splitter_->set_on_drag clamp.
+    int left_w = 0;
+    if (left_hwnd != nullptr) {
+        const int min_w = MulDiv(120, static_cast<int>(dpi), 96);
+        const int max_w = std::max(min_w + 1, w - 100);
+        left_w = std::clamp(left_pane_width_px_, min_w, max_w);
+    }
 
-    if (outline_ && outline_->visible()) {
-        SetWindowPos(outline_->hwnd(), nullptr,
-                     0, row_y, outline_w, row_h,
+    if (left_hwnd != nullptr) {
+        SetWindowPos(left_hwnd, nullptr,
+                     0, row_y, left_w, row_h,
                      SWP_NOZORDER | SWP_NOACTIVATE);
+        if (v_splitter_ && v_splitter_->hwnd()) {
+            RECT vr = { left_w, row_y,
+                        left_w + v_splitter_w, row_y + row_h };
+            v_splitter_->set_bounds(vr);
+            ShowWindow(v_splitter_->hwnd(), SW_SHOW);
+        }
         if (canvas_) {
-            // Guard: if window is narrower than the outline pane, clamp
-            // canvas width to 0 rather than passing a negative value to
-            // SetWindowPos (undefined behavior).
-            const int canvas_w = std::max(0, w - outline_w);
+            // Guard: if window is narrower than the left dock + splitter,
+            // clamp canvas width to 0 rather than passing a negative
+            // value to SetWindowPos (undefined behavior).
+            const int canvas_w = std::max(0, w - left_w - v_splitter_w);
             SetWindowPos(canvas_->hwnd(), nullptr,
-                         outline_w, row_y, canvas_w, row_h,
+                         left_w + v_splitter_w, row_y, canvas_w, row_h,
                          SWP_NOZORDER | SWP_NOACTIVATE);
         }
     } else {
+        if (v_splitter_ && v_splitter_->hwnd()) {
+            ShowWindow(v_splitter_->hwnd(), SW_HIDE);
+        }
         if (canvas_) {
             SetWindowPos(canvas_->hwnd(), nullptr,
                          0, row_y, w, row_h,
@@ -284,13 +323,72 @@ void MainWindow::on_layout() {
 
 void MainWindow::toggle_outline() {
     if (!outline_) return;
-    if (outline_->visible()) outline_->hide(); else outline_->show();
+    if (outline_->visible()) {
+        outline_->hide();
+    } else {
+        // Phase 7 Task 8: F4/F5 mutual exclusion — hide the active tab's
+        // thumb pane (if currently visible) before showing outline.
+        if (auto* v = active_view()) {
+            if (auto* tp = v->thumb_pane(); tp && tp->visible()) {
+                tp->hide();
+                if (auto* t = tabs_->active_tab()) t->thumb_visible = false;
+            }
+        }
+        outline_->show();
+    }
     on_layout();
     // Rendering follows the new canvas size so FitWidth stays correct.
     // on_tab_switch's outgoing-snapshot writes outline_visible back into
     // the active Tab when the user switches away -- that's the single
     // source of truth, so we don't write it here.
     if (auto* view = active_view()) kick_render(view->current_page());
+}
+
+void MainWindow::toggle_thumbs() {
+    // Phase 7 Task 8: F4 handler. Implements D10 logic:
+    //   - F4 with thumb visible → hide thumb (no need to touch outline).
+    //   - F4 with thumb hidden  → if outline visible, hide outline; show thumb.
+    //   - VerticalSplitter visibility tracks left_pane_hwnd() (handled in on_layout).
+    auto* v = active_view();
+    if (!v || !hwnd_) return;
+
+    // Lazily create the thumb pane on first F4 for this tab. Construction
+    // also seeds set_renderer / set_cache / set_page_count + current page,
+    // so the very first F4 immediately starts rendering visible thumbs.
+    HINSTANCE hinst = reinterpret_cast<HINSTANCE>(
+        GetWindowLongPtrW(hwnd_, GWLP_HINSTANCE));
+    auto* tp = v->ensure_thumb_pane(hinst, hwnd_);
+    // Click-to-navigate. Re-set on every toggle (idempotent — ThumbnailPane
+    // just overwrites the std::function). Route through
+    // PdfCanvas::change_current_page (same as the outline pane) so the T7
+    // page-change observer fires — keeps the thumb pane's own current-page
+    // highlight in sync with the canvas, and matches the behavior of
+    // every other navigation site (PgUp/PgDn, outline click, search jump).
+    // Capture `this` because MainWindow outlives every DocumentView
+    // (tabs_ is destroyed during ~MainWindow before the HWND tear-down
+    // completes via OS WM_NCDESTROY cascade).
+    tp->set_on_navigate([this](int page) {
+        if (canvas_ && canvas_->change_current_page(page)) {
+            kick_render(page);
+        }
+    });
+
+    if (tp->visible()) {
+        tp->hide();
+        if (auto* t = tabs_ ? tabs_->active_tab() : nullptr) {
+            t->thumb_visible = false;
+        }
+    } else {
+        // Mutual exclusion: hide outline if it was the visible left pane.
+        if (outline_ && outline_->visible()) outline_->hide();
+        tp->show();
+        if (auto* t = tabs_ ? tabs_->active_tab() : nullptr) {
+            t->thumb_visible = true;
+        }
+    }
+    on_layout();
+    // Canvas width may have changed — recompute fit-zoom + resubmit.
+    kick_render(v->current_page());
 }
 
 void MainWindow::on_outline_navigate(int page) {
@@ -318,7 +416,17 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
             outgoing->pan_x = p.x;
             outgoing->pan_y = p.y;
             outgoing->outline_visible = outline_ && outline_->visible();
+            // Phase 7 Task 8 / D11: snapshot outgoing tab's thumb-pane
+            // visibility into the Tab struct. Live pane->visible() is
+            // the source of truth (the Tab struct flag may have lagged
+            // if the pane was hidden via mutual exclusion in the F5
+            // handler), then hide the pane unconditionally so the
+            // incoming tab's pane lifecycle starts clean.
             if (outgoing->view) {
+                if (auto* tp = outgoing->view->thumb_pane()) {
+                    outgoing->thumb_visible = tp->visible();
+                    if (tp->visible()) tp->hide();
+                }
                 outgoing->view->cancel_stale_renders(INT_MAX);
             }
         }
@@ -344,6 +452,39 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
         } else {
             outline_->hide();
         }
+    }
+
+    // Phase 7 Task 8 / D11: restore incoming tab's thumb-pane visibility.
+    // Mutual exclusion still holds — if incoming has BOTH thumb_visible
+    // and outline_visible (shouldn't happen post-T8, but defensive),
+    // outline wins because its show() above already ran.
+    if (incoming && incoming->view && incoming->thumb_visible
+        && (!outline_ || !outline_->visible()))
+    {
+        // Lazy-create the pane if this tab's first F4 was followed by a
+        // tab switch before any second F4. ensure_thumb_pane is
+        // idempotent — returns the existing pane on subsequent calls.
+        HINSTANCE hinst = reinterpret_cast<HINSTANCE>(
+            GetWindowLongPtrW(hwnd_, GWLP_HINSTANCE));
+        auto* tp = incoming->view->ensure_thumb_pane(hinst, hwnd_);
+        // Re-bind navigate callback — see toggle_thumbs for rationale.
+        // Each tab has its own pane instance, so the callback storage
+        // is per-tab; binding once on first show is enough but
+        // re-binding on every show is cheap and trivially correct.
+        tp->set_on_navigate([this](int page) {
+            if (canvas_ && canvas_->change_current_page(page)) {
+                kick_render(page);
+            }
+        });
+        // The page count may have shifted between when ensure_thumb_pane
+        // first ran and now (it shouldn't, since DocumentView's page
+        // count is immutable for a fixed Document, but defense-in-depth
+        // for future re-open paths). set_page_count also clears any
+        // pending in-flight renders, which is fine: WM_DRAWITEM will
+        // re-queue cache misses on the next paint.
+        tp->set_page_count(incoming->view->page_count());
+        tp->set_current_page(incoming->view->current_page());
+        tp->show();
     }
 
     on_layout();
@@ -477,6 +618,58 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 });
             }
 
+            // Phase 7 Task 8: vertical splitter for the left dock
+            // (outline + thumb pane). Singleton — one MainWindow owns
+            // one VerticalSplitter, regardless of which left pane is
+            // visible. Hidden until F4 / F5 toggles a left pane on.
+            v_splitter_ = std::make_unique<VerticalSplitter>(cs->hInstance, hwnd);
+            if (v_splitter_->hwnd()) {
+                ShowWindow(v_splitter_->hwnd(), SW_HIDE);
+            }
+            v_splitter_->set_on_drag([this](int new_w) {
+                // Clamp left dock width: never wider than (client - 100)
+                // so the canvas always has at least ~100 px of room, and
+                // never narrower than ~120 px (below which the thumb
+                // tile placeholders no longer fit centered).
+                RECT client; GetClientRect(hwnd_, &client);
+                const UINT dpi = GetDpiForWindow(hwnd_);
+                const int min_w = MulDiv(120, static_cast<int>(dpi), 96);
+                const int max_w = std::max(min_w + 1,
+                    static_cast<int>(client.right) - 100);
+                left_pane_width_px_ = std::clamp(new_w, min_w, max_w);
+                on_layout();
+            });
+
+            // Seed left_pane_width_px_ to ~250 dip — matches the prior
+            // hard-coded outline_w (no behavior change for users who
+            // never resize). DPI-aware via MulDiv.
+            {
+                const UINT dpi = GetDpiForWindow(hwnd);
+                left_pane_width_px_ = MulDiv(250, static_cast<int>(dpi), 96);
+            }
+
+            // Phase 7 Task 7 (deferred wiring, completed in T8): install
+            // the canvas's page-change observer ONCE here. The callback
+            // closes over `this` and looks up the active view's thumb
+            // pane on every fire — works correctly across tab switches
+            // without re-wiring. The observer is also fired by
+            // PdfCanvas::set_view (T7), so a tab switch into a new
+            // active view broadcasts the new view's current_page() into
+            // its own pane immediately.
+            canvas_->set_on_page_changed([this](int page) {
+                if (auto* v = active_view()) {
+                    if (auto* tp = v->thumb_pane()) {
+                        // ThumbnailPane::set_current_page no-ops when
+                        // the value matches what the model already has,
+                        // so cross-tab search's documented double-fire
+                        // (M2 from T7 review: tabs_->set_active fires,
+                        // then change_current_page fires again) does
+                        // not cause a flash.
+                        tp->set_current_page(page);
+                    }
+                }
+            });
+
             DragAcceptFiles(hwnd, TRUE);
             return 0;
         }
@@ -538,7 +731,24 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // their own zoom on switch, so a single active-tab kick suffices.
             if (auto* view = active_view(); view && canvas_) {
                 kick_render(view->current_page());
+                // Phase 7 Task 8 (T5 deferred): forward the new DPI to
+                // the active tab's thumb pane so its tile geometry +
+                // GDI brushes rebuild for the new DPI. Inactive tabs'
+                // panes (if any) are stale until next tab switch — the
+                // pane's on_dpi_changed clears its cache, so the post-
+                // switch WM_DRAWITEM cycle re-queues at the right
+                // pixel size automatically.
+                if (auto* tp = view->thumb_pane()) {
+                    tp->on_dpi_changed(HIWORD(w));
+                }
             }
+            // The user's left_pane_width_px_ is in physical px at the
+            // OLD DPI. The on_layout clamp will keep it inside [120
+            // dip, client - 100 px] at the NEW DPI; a too-narrow stored
+            // value will snap up to the new min, a too-wide one will
+            // snap down. Re-anchoring to 250 dip would lose the user's
+            // drag — accept the clamp's slight imperfection instead.
+            on_layout();
             return 0;
         }
         case WM_DRAWITEM: {
@@ -645,6 +855,9 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             switch (id) {
                 case IDM_VIEW_OUTLINE:
                     toggle_outline();
+                    return 0;
+                case IDM_VIEW_THUMBS:
+                    toggle_thumbs();
                     return 0;
                 case IDM_TAB_CLOSE:
                     if (tabs_ && tabs_->count() > 0) {

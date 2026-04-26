@@ -8,6 +8,9 @@
 #include "core/PageCache.hpp"
 #include "core/RenderEngine.hpp"
 #include "core/SearchSession.hpp"
+#include "core/ThumbCache.hpp"
+#include "core/ThumbnailRenderer.hpp"
+#include "ui/ThumbnailPane.hpp"
 
 // DocumentView is MuPDF-aware only to the extent of holding an
 // fz_context* and dropping it. Pull in fitz.h here (not in the header)
@@ -59,6 +62,39 @@ struct DocumentView::Impl {
     // `doc` is declared above (destructs after session) ✓.
     // Dispatcher is owned by MainWindow and outlives all DocumentViews ✓.
     std::unique_ptr<SearchSession> session;
+
+    // Phase 7 Task 8: per-tab thumbnail trio. Lazily created on first F4
+    // press for this tab via ensure_thumb_pane(). Member declaration
+    // order (and therefore C++ destruction order) matters:
+    //   thumb_cache    declared FIRST  → destructs LAST  (cache outlives renderer + pane)
+    //   thumb_renderer declared SECOND → destructs MIDDLE (renderer outlives pane)
+    //   thumb_pane     declared LAST   → destructs FIRST  (pane HWND tears down before
+    //                                      renderer dtor's worker drain)
+    //
+    // Why: ThumbnailPane's dtor calls ThumbnailRenderer::cancel_pending(),
+    // so the renderer must still exist when the pane is destroyed. The
+    // renderer's own dtor (D16) then spin-drains its workers — by the
+    // time it returns, no PostMessageW(WM_USER_THUMB_READY) is in flight
+    // that could target the (now-freed) pane HWND. Cache outlives the
+    // renderer because in-flight render callbacks blit into the cache
+    // via the pane's WM_USER_THUMB_READY handler — but since the pane is
+    // destroyed first, that handler can't fire after pane teardown, so
+    // cache could in principle be freed earlier. Keeping cache last is
+    // defense-in-depth against future paint paths that touch the cache
+    // directly.
+    //
+    // These three are constructed together in ensure_thumb_pane(), so
+    // they share a "all-or-none" lifecycle: thumb_pane != nullptr iff
+    // both thumb_cache and thumb_renderer are also non-null.
+    //
+    // The pane subclasses MainWindow's HWND. MainWindow owns `tabs_`
+    // (TabManager), which owns the Tab list, which owns each
+    // DocumentView. tabs_ is declared in MainWindow.hpp BEFORE the HWND
+    // tear-down sites (matches the find_bar_ pattern), so the pane's
+    // RemoveWindowSubclass runs against a still-live HWND.
+    std::unique_ptr<ThumbCache>             thumb_cache;
+    std::unique_ptr<ThumbnailRenderer>      thumb_renderer;
+    std::unique_ptr<litepdf::ui::ThumbnailPane> thumb_pane;
 };
 
 DocumentView::DocumentView(Document doc,
@@ -100,6 +136,17 @@ DocumentView::DocumentView(Document doc,
 
 DocumentView::~DocumentView() {
     if (!impl_) return;
+
+    // Phase 7 Task 8: tear the thumb trio down BEFORE engine/session so
+    // the pane's cancel_in_flight (called from ~ThumbnailPane) reaches
+    // a still-alive renderer, the renderer's worker-drain (D16) reaches
+    // a still-alive RenderEngine, and the cache outlives both. The
+    // explicit reset() ordering mirrors Impl's declaration order so it
+    // is just-in-case redundancy with the natural reverse-declaration
+    // order (thumb_pane → thumb_renderer → thumb_cache).
+    impl_->thumb_pane.reset();
+    impl_->thumb_renderer.reset();
+    impl_->thumb_cache.reset();
 
     // Session first — drops the strong ref to its shared_ptr<State>.
     // Any in-flight worker task keeps its own shared_ptr alive until it
@@ -292,6 +339,46 @@ SearchSession& DocumentView::search() {
 
 const SearchSession& DocumentView::search() const {
     return *impl_->session;
+}
+
+// Phase 7 Task 8: lazy thumbnail trio construction. Saves ~50 KB per
+// tab that never opens the thumbnail pane (no ThumbCache LRU map, no
+// ThumbnailRenderer pending_tasks counter, no Win32 ListView HWND).
+litepdf::ui::ThumbnailPane* DocumentView::ensure_thumb_pane(
+    HINSTANCE hInstance, HWND parent_hwnd)
+{
+    if (impl_->thumb_pane) return impl_->thumb_pane.get();
+
+    // Construction order is the inverse of destruction order: cache
+    // FIRST, then renderer (which references the per-tab RenderEngine
+    // for actual page rasterization at priority=3, bypass_cache=true),
+    // then pane (which records non-owning pointers to both via setters
+    // immediately so the first WM_DRAWITEM cycle hits the renderer).
+    //
+    // Capacity: 64 thumbs ~= 8x what's typically visible at once, leaves
+    // generous headroom for scrolling without re-rendering recently-seen
+    // pages. Tune in a follow-up if memory profiling demands it.
+    constexpr std::size_t kThumbCacheCap = 64;
+    impl_->thumb_cache = std::make_unique<ThumbCache>(kThumbCacheCap);
+    impl_->thumb_renderer =
+        std::make_unique<ThumbnailRenderer>(*impl_->engine);
+    impl_->thumb_pane =
+        std::make_unique<litepdf::ui::ThumbnailPane>(hInstance, parent_hwnd);
+
+    // Wire the pane to its peers + seed with current document state. The
+    // pane is born hidden (LVS-styled WS_CHILD without WS_VISIBLE per
+    // ThumbnailPane.cpp); MainWindow's F4 handler calls show() AFTER
+    // this returns to flip visibility on.
+    impl_->thumb_pane->set_renderer(impl_->thumb_renderer.get());
+    impl_->thumb_pane->set_cache(impl_->thumb_cache.get());
+    impl_->thumb_pane->set_page_count(page_count());
+    impl_->thumb_pane->set_current_page(impl_->current_page);
+
+    return impl_->thumb_pane.get();
+}
+
+litepdf::ui::ThumbnailPane* DocumentView::thumb_pane() const noexcept {
+    return impl_ ? impl_->thumb_pane.get() : nullptr;
 }
 
 }  // namespace litepdf::core

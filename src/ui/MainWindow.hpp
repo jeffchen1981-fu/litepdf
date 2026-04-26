@@ -12,6 +12,7 @@
 #include "ui/ResultsPanel.hpp"
 #include "ui/Splitter.hpp"
 #include "ui/TabManager.hpp"
+#include "ui/VerticalSplitter.hpp"
 
 namespace litepdf::app { class ThreadPoolDispatcher; }
 namespace litepdf::core { class DocumentView; }
@@ -47,7 +48,14 @@ private:
 
     void on_layout();                    // reposition canvas + outline + tab strip
     void toggle_outline();               // F5 handler
+    void toggle_thumbs();                // F4 handler (Phase 7 Task 8)
     void on_outline_navigate(int page);  // callback from OutlinePane
+
+    // Phase 7 Task 8: which left-dock pane (if any) is currently
+    // visible. Returns the pane's HWND for layout, or nullptr if both
+    // outline + thumb pane are hidden. F4/F5 enforce mutual exclusion
+    // so at most one is non-null at any time.
+    HWND left_pane_hwnd() const;
 
     // Phase 6 Task 10: find-bar integration.
     void on_find_open();        // IDM_FIND: show or focus find bar
@@ -123,8 +131,20 @@ private:
     // try to reach cross_tab_ / tabs_ via on_results_* helpers.
     std::unique_ptr<ResultsPanel> results_panel_;
     std::unique_ptr<Splitter>     splitter_;
+    // Phase 7 Task 8: one VerticalSplitter for the left dock (shared by
+    // OutlinePane + per-tab ThumbnailPane). Visible only when one of the
+    // two left panes is. set_on_drag updates left_pane_width_px_ and
+    // re-invokes on_layout. Declared after Splitter for symmetry; the
+    // dtor order doesn't matter (no cross-references).
+    std::unique_ptr<VerticalSplitter> v_splitter_;
     // 0 = hidden; first Ctrl+Shift+F / F6 seeds to max(200 px, 1/3 client).
     int                           results_panel_height_px_ = 0;
+    // Phase 7 D12: width of the left dock (outline / thumb pane) in
+    // device pixels. Single-instance app-wide value — no persistence,
+    // no per-tab override. Seeded to ~250 dip on WM_CREATE; updated by
+    // VerticalSplitter drag events. on_layout reads this; F4/F5 layout
+    // path uses it to position the left pane + the splitter.
+    int                           left_pane_width_px_ = 0;
     std::wstring                  last_find_query_;
     // TODO(phase-6.x): preserve match-case across find-bar reopens once
     // FindBar::show_or_focus grows a second arg. For now each reopen
