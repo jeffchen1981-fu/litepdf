@@ -110,15 +110,25 @@ TEST_CASE("ThumbnailRenderer: cancel_pending stops not-yet-started work",
         ThumbnailRenderer r(eng);
 
         std::atomic<int> seen{0};
+        std::atomic<int> non_null_bm{0};
         for (int i = 0; i < 5; ++i) {
             r.submit(i, [&](HBITMAP bm) {
                 seen.fetch_add(1, std::memory_order_release);
-                if (bm) DeleteObject(bm);
+                if (bm) {
+                    non_null_bm.fetch_add(1, std::memory_order_release);
+                    DeleteObject(bm);
+                }
             });
         }
         r.cancel_pending();
         std::this_thread::sleep_for(200ms);
-        REQUIRE(seen.load() <= 5);  // some may have started before cancel
+        // Some may have started before cancel; with 1 worker, only a small
+        // number can complete in the cancel-window. Strictly < 5 confirms
+        // cancel_pending actually cancelled at least one not-yet-started
+        // submission. (If cancel_pending were a no-op, all 5 would render
+        // through eventually and non_null_bm would be 5; this assertion
+        // catches that regression.)
+        REQUIRE(non_null_bm.load() < 5);
     }
     fz_drop_context(cache_ctx);
 }
