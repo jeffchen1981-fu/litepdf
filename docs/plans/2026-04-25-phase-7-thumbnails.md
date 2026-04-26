@@ -120,7 +120,8 @@ build/Release/litepdf.exe tests/fixtures/bookmarks.pdf
 
 **Files:**
 - Modify: `resources/MainMenu.rc.h` — add `IDM_VIEW_THUMBS`.
-- Modify: `resources/litepdf.rc` — add menu item + accelerator.
+- Modify: `resources/litepdf.rc` — add menu item.
+- Modify: `src/ui/MainWindow.cpp` — add F4 to `ACCEL[]`.
 
 **Step 0.1:** Edit `resources/MainMenu.rc.h`. After the `IDM_FIND_*` block (40047), add:
 
@@ -135,10 +136,10 @@ build/Release/litepdf.exe tests/fixtures/bookmarks.pdf
 MENUITEM "Toggle &Thumbnails\tF4", IDM_VIEW_THUMBS
 ```
 
-In the `IDR_ACCEL` block, add:
+Then edit `src/ui/MainWindow.cpp` — accelerators are built programmatically here (not in a `.rc` `IDR_ACCEL` block, despite earlier plan revisions hinting otherwise; the `.rc` file has no `ACCELERATORS` block). In the `ACCEL accels[]` array (around line 1128), adjacent to the existing `VK_F5 IDM_VIEW_OUTLINE` entry, add:
 
-```rc
-VK_F4,    IDM_VIEW_THUMBS, VIRTKEY
+```cpp
+{ FVIRTKEY,            VK_F4,        IDM_VIEW_THUMBS   },
 ```
 
 **Step 0.3:** Build + smoke-test:
@@ -153,7 +154,7 @@ Expected: View menu shows the new "Toggle Thumbnails F4" item, grayed/no-op (no 
 **Step 0.4:** Commit.
 
 ```bash
-git add resources/
+git add resources/MainMenu.rc.h resources/litepdf.rc src/ui/MainWindow.cpp
 git commit -m "feat(ui): reserve menu IDs for thumbnail pane (Phase 7 Task 0)"
 ```
 
