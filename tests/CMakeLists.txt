@@ -50,7 +50,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_cross_tab_search.cpp   # Phase 6 Task 11
     unit/test_crosstab_ctrlw_race.cpp  # Phase 6 ship-gate repro
     unit/test_splitter_math.cpp      # Phase 7 Task 4a
-    unit/ThumbnailModelTests.cpp       # Phase 7 Task 1
+    unit/test_thumbnail_model.cpp      # Phase 7 Task 1
 )
 target_link_libraries(litepdf_unit_tests PRIVATE litepdf_core)
 

@@ -3,7 +3,6 @@
 // core::ThumbnailModel - pure-logic state for the left thumbnail pane.
 // No Win32, no MuPDF, no threads. UI-thread-only callers; not thread-safe.
 
-#include <cstddef>
 #include <optional>
 #include <utility>
 #include <windows.h>  // RECT only - header is otherwise platform-free.

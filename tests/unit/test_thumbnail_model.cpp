@@ -23,6 +23,22 @@ TEST_CASE("ThumbnailModel: total_height grows with page_count", "[thumbnail_mode
     REQUIRE(m.total_height_px() == 496);
 }
 
+TEST_CASE("ThumbnailModel: DPI doubling scales pitch and total_height proportionally",
+          "[thumbnail_model]") {
+    ThumbnailModel m;
+    m.set_tile_dip({120, 160});
+    m.set_gap_dip(8);
+    m.set_page_count(3);
+    m.set_dpi(96);
+    REQUIRE(m.tile_h_px()        == 160);
+    REQUIRE(m.tile_w_px()        == 120);
+    REQUIRE(m.total_height_px()  == 496);   // 3*168 - 8 = 496 at 96 dpi
+    m.set_dpi(192);                          // 4K-style 200% scaling
+    REQUIRE(m.tile_h_px()        == 320);    // 160 dip * 2
+    REQUIRE(m.tile_w_px()        == 240);    // 120 dip * 2
+    REQUIRE(m.total_height_px()  == 992);    // 3*336 - 16 = 992 at 192 dpi
+}
+
 TEST_CASE("ThumbnailModel: visible_range honors viewport + scroll", "[thumbnail_model]") {
     ThumbnailModel m;
     m.set_dpi(96);
@@ -95,7 +111,8 @@ TEST_CASE("ThumbnailModel: set_current_page reports old/new pair", "[thumbnail_m
     REQUIRE(same.second == -1);
 }
 
-TEST_CASE("ThumbnailModel: scroll_to_make_visible centers offscreen page", "[thumbnail_model]") {
+TEST_CASE("ThumbnailModel: scroll_to_make_visible brings offscreen page into view at viewport top",
+          "[thumbnail_model]") {
     ThumbnailModel m;
     m.set_dpi(96);
     m.set_tile_dip({120, 160});
@@ -107,6 +124,8 @@ TEST_CASE("ThumbnailModel: scroll_to_make_visible centers offscreen page", "[thu
     auto r = m.visible_range();
     REQUIRE(r.first <= 10);
     REQUIRE(r.last  >= 10);
+    // Lock down top-alignment: page 10 sits at top of viewport (10 * pitch = 1680).
+    REQUIRE(m.scroll_y_px() == 10 * 168);
     // Already-visible page is a no-op:
     int prev = m.scroll_y_px();
     m.scroll_to_make_visible(r.first + 1);
