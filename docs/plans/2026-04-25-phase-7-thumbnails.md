@@ -317,8 +317,8 @@ git commit -m "feat(core): RenderEngine bypass_cache flag + cancel-path callback
 - Create: `src/core/ThumbnailModel.hpp` (~80 LOC).
 - Create: `src/core/ThumbnailModel.cpp` (~100 LOC).
 - Create: `tests/unit/ThumbnailModelTests.cpp` (~120 LOC).
-- Modify: `tests/unit/CMakeLists.txt` (add new test source).
-- Modify: `src/CMakeLists.txt` (add `core/ThumbnailModel.cpp` to `litepdf_core`).
+- Modify: `tests/CMakeLists.txt` (add new test source).
+- Modify: top-level `CMakeLists.txt` (add `src/core/ThumbnailModel.cpp` to `litepdf_core`).
 
 **Step 1.1: Write the failing tests.** Create `tests/unit/ThumbnailModelTests.cpp`:
 
@@ -606,7 +606,7 @@ void ThumbnailModel::scroll_to_make_visible(int page) noexcept {
 }  // namespace litepdf::core
 ```
 
-**Step 1.5: Add to CMake.** In `src/CMakeLists.txt`, find the `add_library(litepdf_core STATIC ...)` block and add `core/ThumbnailModel.cpp`. In `tests/unit/CMakeLists.txt`, add `ThumbnailModelTests.cpp` to the test executable sources.
+**Step 1.5: Add to CMake.** In top-level `CMakeLists.txt`, find the `add_library(litepdf_core STATIC ...)` block and add `src/core/ThumbnailModel.cpp`. In `tests/CMakeLists.txt`, add `unit/test_thumbnail_model.cpp` to the test executable sources.
 
 **Step 1.6: Build + run tests.**
 
