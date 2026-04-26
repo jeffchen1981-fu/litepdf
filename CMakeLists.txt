@@ -31,6 +31,7 @@ add_library(litepdf_core STATIC
     src/app/CrossTabSearch.cpp     # Phase 6 Task 11
     src/core/ThumbnailModel.cpp    # Phase 7 Task 1
     src/core/ThumbCache.cpp        # Phase 7 Task 2
+    src/core/ThumbnailRenderer.cpp # Phase 7 Task 3
 )
 
 litepdf_apply_flags(litepdf_core)

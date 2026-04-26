@@ -52,6 +52,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_splitter_math.cpp      # Phase 7 Task 4a
     unit/test_thumbnail_model.cpp      # Phase 7 Task 1
     unit/test_thumb_cache.cpp          # Phase 7 Task 2
+    unit/test_thumbnail_renderer.cpp   # Phase 7 Task 3
 )
 target_link_libraries(litepdf_unit_tests PRIVATE litepdf_core)
 
