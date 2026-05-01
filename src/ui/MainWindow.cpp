@@ -739,15 +739,21 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // their own zoom on switch, so a single active-tab kick suffices.
             if (auto* view = active_view(); view && canvas_) {
                 kick_render(view->current_page());
-                // Phase 7 Task 8 (T5 deferred): forward the new DPI to
-                // the active tab's thumb pane so its tile geometry +
-                // GDI brushes rebuild for the new DPI. Inactive tabs'
-                // panes (if any) are stale until next tab switch — the
-                // pane's on_dpi_changed clears its cache, so the post-
-                // switch WM_DRAWITEM cycle re-queues at the right
-                // pixel size automatically.
-                if (auto* tp = view->thumb_pane()) {
-                    tp->on_dpi_changed(HIWORD(w));
+            }
+            // Phase 7 T8 #2 follow-up: forward new DPI to ALL tabs' thumb
+            // panes, not just the active one. Multi-monitor drag between
+            // mismatched-DPI displays must update inactive panes' cached
+            // tile geometry + GDI brushes too, otherwise switching to an
+            // inactive tab after the drag paints at the previous DPI's
+            // pixel size until that pane next observes a layout event.
+            if (tabs_) {
+                for (int i = 0, n = tabs_->count(); i < n; ++i) {
+                    auto* t = tabs_->tab_at(i);
+                    if (t && t->view) {
+                        if (auto* tp = t->view->thumb_pane()) {
+                            tp->on_dpi_changed(HIWORD(w));
+                        }
+                    }
                 }
             }
             // The user's left_pane_width_px_ is in physical px at the
