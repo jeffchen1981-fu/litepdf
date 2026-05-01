@@ -125,6 +125,28 @@ TEST_CASE("ThumbnailModel: set_page_count clamps current_page if shrunk",
     REQUIRE(m.current_page() == 0);
 }
 
+TEST_CASE("ThumbnailModel: set_tile_dip clamps non-positive w/h to 1",
+          "[thumbnail_model]") {
+    ThumbnailModel m;
+    m.set_dpi(96);
+    m.set_page_count(3);
+
+    m.set_tile_dip({0, 0});
+    // tile_h_px is dip_to_px(>=1, 96) which is at least 1; pitch math must
+    // remain positive so visible_range / page_at_y do not collapse.
+    REQUIRE(m.tile_w_px() >= 1);
+    REQUIRE(m.tile_h_px() >= 1);
+
+    m.set_tile_dip({-50, -100});
+    REQUIRE(m.tile_w_px() >= 1);
+    REQUIRE(m.tile_h_px() >= 1);
+
+    // Sanity: a normal value still flows through unchanged.
+    m.set_tile_dip({120, 160});
+    REQUIRE(m.tile_w_px() == 120);
+    REQUIRE(m.tile_h_px() == 160);
+}
+
 TEST_CASE("ThumbnailModel: scroll_to_make_visible brings offscreen page into view at viewport top",
           "[thumbnail_model]") {
     ThumbnailModel m;
