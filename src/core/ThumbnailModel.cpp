@@ -23,7 +23,12 @@ void ThumbnailModel::set_page_count(int n)   {
     current_page_ = std::clamp(current_page_, 0, std::max(0, page_count_ - 1));
 }
 void ThumbnailModel::set_dpi(unsigned dpi)   { dpi_ = (dpi > 0 ? dpi : 96); }
-void ThumbnailModel::set_tile_dip(DipSize d) { tile_dip_ = d; }
+void ThumbnailModel::set_tile_dip(DipSize d) {
+    // Defense-in-depth: clamp to >= 1 dip so total_height_px / visible_range
+    // pitch math cannot collapse to zero. Plan-driven call sites always pass
+    // 120x160; this guard catches future programmer error or fuzzing input.
+    tile_dip_ = {std::max(1, d.w), std::max(1, d.h)};
+}
 void ThumbnailModel::set_gap_dip(int g)      { gap_dip_ = std::max(0, g); }
 void ThumbnailModel::set_viewport_h_px(int h){ viewport_h_ = std::max(0, h); }
 
