@@ -13,6 +13,20 @@ set(_MUPDF_ROOT        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mupdf")
 set(_MUPDF_SLN         "${_MUPDF_ROOT}/platform/win32/mupdf.sln")
 set(_MUPDF_OUTPUT_DIR  "${_MUPDF_ROOT}/platform/win32/x64/Release")
 
+# Submodule init guard. ExternalProject's BUILD_BYPRODUCTS are not consulted on
+# incremental rebuilds — only stamp files — so a wiped submodule with stale
+# stamps silently no-ops MSBuild and link fails downstream with a confusing
+# "cannot open libmupdf.lib" error. Fail fast at configure time using the .sln
+# as a definitive witness file: it lives in tracked submodule content and is
+# absent iff the submodule is uninitialized or has been emptied.
+if(NOT EXISTS "${_MUPDF_SLN}")
+    message(FATAL_ERROR
+        "MuPDF submodule not initialized — '${_MUPDF_SLN}' not found.\n"
+        "Run from repo root: git submodule update --init --recursive third_party/mupdf\n"
+        "If the submodule was previously initialized, also purge stale ExternalProject stamps:\n"
+        "  Remove-Item ${CMAKE_BINARY_DIR}/mupdf_ext-prefix/src/mupdf_ext-stamp/Release/* -Force")
+endif()
+
 # Locate MSBuild.exe — ship with VS BuildTools. Use vswhere for discovery.
 find_program(_VSWHERE_EXE
     NAMES vswhere.exe
