@@ -334,6 +334,19 @@ void MainWindow::toggle_outline() {
                 if (auto* t = tabs_->active_tab()) t->thumb_visible = false;
             }
         }
+        // Populate from the active tab's outline before showing. The on-
+        // tab-switch restore path (case TCN_SELCHANGE) repopulates from
+        // the incoming tab, but a fresh F5 on a tab that was never
+        // switched away from would otherwise show an empty TreeView —
+        // observed regression (handoff doc 2026-05-01) on bookmarks.pdf
+        // first-launch + F5 with a single tab open. Re-populating on
+        // every show is cheap (O(entries) and outlines are small) and
+        // keeps the F5 and tab-switch paths aligned.
+        if (auto* v = active_view()) {
+            const auto& entries = v->document().outline();
+            outline_->clear();
+            if (!entries.empty()) outline_->populate(entries);
+        }
         outline_->show();
     }
     on_layout();
