@@ -305,6 +305,11 @@ bool PrintJob::run(HWND parent,
 
     // [6] Page loop with MuPDF -> StretchDIBits.
     PrintProgressDlg progress(parent, abort_flag, pages.size() * copies);
+    if (!progress.is_valid()) {
+        AbortDoc(pd.hDC);
+        show_error(parent, L"Failed to create print progress dialog.");
+        return false;
+    }
     std::size_t emitted = 0;
     bool error_aborted = false;
     for (DWORD c = 0; c < copies && !abort_flag.is_aborted() && !error_aborted; ++c) {
@@ -340,7 +345,14 @@ bool PrintJob::run(HWND parent,
                 break;
             }
 
-            EndPage(pd.hDC);
+            if (EndPage(pd.hDC) <= 0) {
+                AbortDoc(pd.hDC);
+                wchar_t buf[96];
+                swprintf_s(buf, L"Printer reported error after page %zu.", p + 1);
+                show_error(parent, buf);
+                error_aborted = true;
+                break;
+            }
         }
     }
 
