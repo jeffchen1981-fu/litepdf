@@ -2,10 +2,42 @@
 
 A lightweight PDF / ePub / CBZ / XPS reader for Windows 11, optimized for mechanical hard drives. Single self-contained executable, no runtime dependencies.
 
-- **Status:** under development (Phase 1 — document core)
+- **Status:** under development (Phase 8 shipped — Tier 3 feature-complete; tag `v0.0.9-phase8`)
 - **License:** [AGPL-3.0](LICENSE)
 - **Design:** [`docs/plans/2026-04-15-litepdf-design.md`](docs/plans/2026-04-15-litepdf-design.md)
 - **Roadmap:** [`docs/plans/2026-04-15-litepdf-roadmap.md`](docs/plans/2026-04-15-litepdf-roadmap.md)
+
+## Features (v0.0.9)
+
+Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab independent state. Cold-start budget under 1 s on SSD; tuned for HDD-friendly I/O patterns.
+
+- **Encrypted PDFs** — modal password prompt with 3-attempt retry (Phase 8)
+- **Search** — in-document find with highlighted hits + cross-tab search panel
+- **Outline / bookmarks** — click-to-navigate side pane (F5)
+- **Thumbnails** — lazy-rendered side pane (F4)
+- **Invert colors** — per-tab dark-mode toggle (Ctrl+Shift+I, Phase 8)
+- **Two-page spread** — book-style side-by-side layout with cover-page rule (Ctrl+Shift+D, Phase 8)
+- **MRU** — recent files in File menu, persisted across runs
+
+## Keyboard shortcuts
+
+| Key                | Action                              |
+|--------------------|-------------------------------------|
+| Ctrl+O             | Open file                           |
+| Ctrl+W             | Close active tab                    |
+| Ctrl+Tab / Ctrl+Shift+Tab | Cycle tabs                   |
+| Ctrl+1..9          | Jump to tab N                       |
+| Ctrl+F             | Find in document                    |
+| F3 / Shift+F3      | Find next / previous                |
+| Ctrl+Shift+F       | Cross-tab search                    |
+| F6                 | Toggle search results panel         |
+| F4                 | Toggle thumbnails pane              |
+| F5                 | Toggle outline pane                 |
+| Ctrl+Shift+I       | Invert colors (per tab)             |
+| Ctrl+Shift+D       | Two-page spread (per tab)           |
+| Ctrl+= / Ctrl+-    | Zoom in / out                       |
+| Ctrl+0             | Reset zoom                          |
+| PgDn / PgUp        | Next / previous page (or pair in spread mode) |
 
 ## Build
 
@@ -25,6 +57,22 @@ cmake --build build --config Release --parallel
 ```
 
 The produced `build/Release/litepdf.exe` is a single self-contained binary.
+
+## Tests
+
+```sh
+ctest --test-dir build -C Release --output-on-failure
+```
+
+149 unit tests at `v0.0.9-phase8`. The CI workflow (`.github/workflows/ci.yml`) runs configure + build + version-sync gate + ctest on `windows-latest` for every push and pull request.
+
+The PowerShell smoke harness exercises the full app via launch-and-poll:
+
+```pwsh
+pwsh scripts/smoke-test.ps1
+```
+
+It opens `simple.pdf`, `bookmarks.pdf`, `search.pdf`, `sample.epub`, `sample.cbz`, and `encrypted.pdf` (modal expected), and exercises Ctrl+F / Ctrl+Shift+F / F4 toggles via a small ux-probe helper.
 
 ## Versioning
 
