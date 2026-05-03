@@ -58,3 +58,9 @@
 
 // Phase 7: thumbnail pane.
 #define IDM_VIEW_THUMBS 40060   // F4
+
+// Phase 8: Tier 3 completion.
+#define IDM_VIEW_INVERT      40061   // Ctrl+Shift+I
+#define IDM_VIEW_DUAL_PAGE   40062   // Ctrl+Shift+D
+
+// Next free ID: 40063. Reserve 40063-40070 for future Phase 8.x cleanups.

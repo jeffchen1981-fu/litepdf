@@ -1383,6 +1383,11 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
         { FCONTROL | FVIRTKEY, '0',          IDM_ZOOM_RESET    },
         { FVIRTKEY,            VK_F4,        IDM_VIEW_THUMBS   },
         { FVIRTKEY,            VK_F5,        IDM_VIEW_OUTLINE  },
+        // Phase 8: Tier 3 view-mode toggles. Modifier-consistent
+        // Ctrl+Shift+_ pair so they read as a deliberate group; bare
+        // Ctrl+D is reserved for a future "Duplicate Tab" affordance.
+        { FCONTROL | FSHIFT | FVIRTKEY, 'I', IDM_VIEW_INVERT    },
+        { FCONTROL | FSHIFT | FVIRTKEY, 'D', IDM_VIEW_DUAL_PAGE },
         // Phase 5: tab management.
         { FCONTROL | FVIRTKEY,          'W',     IDM_TAB_CLOSE  },
         { FCONTROL | FVIRTKEY,          VK_TAB,  IDM_TAB_NEXT   },
