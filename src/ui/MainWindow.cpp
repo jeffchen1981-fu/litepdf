@@ -157,6 +157,14 @@ void MainWindow::open_tab_async(std::filesystem::path path) {
             if (*err == litepdf::core::Document::OpenError::NeedsPassword) {
                 auto* bundle = new PendingPasswordOpen{
                     std::move(doc), std::move(path)};
+                // Mirrors the WM_USER_OPEN_OK handoff pattern below: if
+                // PostMessageW returns FALSE the bundle is freed here.
+                // If it returns TRUE but the HWND is destroyed before
+                // dispatch, the OS drops the queued message and the
+                // bundle leaks. The leak is bounded (at most one bundle
+                // in flight per shutdown) and the OS reclaims process
+                // memory; Phase 12 crash-protection may track in-flight
+                // bundles in MainWindow if the leak window matters.
                 if (!PostMessageW(hwnd, WM_USER_PASSWORD_PROMPT,
                                   reinterpret_cast<WPARAM>(bundle), 0)) {
                     delete bundle;
@@ -489,6 +497,12 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
         canvas_->set_view(incoming ? incoming->view.get() : nullptr);
         if (incoming) canvas_->set_pan(incoming->pan_x, incoming->pan_y);
         else          canvas_->set_pan(0.0f, 0.0f);
+        // (Phase 8 D9) Carry the incoming tab's Invert Colors polarity
+        // onto the canvas chrome so a switch lands on a chrome that
+        // matches the tab's page bitmap. Empty-tabs case clears it.
+        canvas_->set_invert_chrome(incoming && incoming->view
+                                       ? incoming->view->invert_colors()
+                                       : false);
     }
 
     if (outline_) {
@@ -844,8 +858,21 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             if (HIWORD(l) != 0) return 0;
             auto popup = reinterpret_cast<HMENU>(w);
             HMENU main = GetMenu(hwnd);
+            if (!main) return 0;
+            // (Phase 8 T3/T4) View popup (index 1): reflect Invert Colors
+            // and Two-Page Spread state on each show. The flags are
+            // per-tab (D9), so the checkmark is read off active_view().
+            // When no tab is open, both default to unchecked.
+            if (popup == GetSubMenu(main, 1)) {
+                auto* v = active_view();
+                const bool invert_on = v && v->invert_colors();
+                CheckMenuItem(popup, IDM_VIEW_INVERT,
+                              MF_BYCOMMAND
+                              | (invert_on ? MF_CHECKED : MF_UNCHECKED));
+                return 0;
+            }
             // Only rebuild MRU when the File popup (index 0) is about to show.
-            if (!main || popup != GetSubMenu(main, 0)) return 0;
+            if (popup != GetSubMenu(main, 0)) return 0;
             // Remove any existing MRU items + the dynamic SEP (safe when absent).
             DeleteMenu(popup, IDM_MRU_SEPARATOR, MF_BYCOMMAND);
             for (int id = IDM_MRU_1; id <= IDM_MRU_10; ++id) {
@@ -917,6 +944,19 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 case IDM_VIEW_THUMBS:
                     toggle_thumbs();
                     return 0;
+                case IDM_VIEW_INVERT: {
+                    // Phase 8 D7/D9: per-tab Invert Colors toggle. Flips
+                    // the engine flag (which drains in-flight renders at
+                    // the old polarity), flips the canvas chrome
+                    // palette, and kicks a fresh render of the active
+                    // page so the new polarity lands immediately.
+                    auto* v = active_view();
+                    if (!v) return 0;
+                    v->set_invert_colors(!v->invert_colors());
+                    if (canvas_) canvas_->set_invert_chrome(v->invert_colors());
+                    kick_render(v->current_page());
+                    return 0;
+                }
                 case IDM_TAB_CLOSE:
                     if (tabs_ && tabs_->count() > 0) {
                         on_tab_close_request(tabs_->active_index());

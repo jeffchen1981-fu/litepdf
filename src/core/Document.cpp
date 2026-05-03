@@ -8,6 +8,7 @@
 #include <cassert>
 #include <cctype>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <mutex>
 #include <stdexcept>
@@ -232,15 +233,20 @@ const std::filesystem::path& Document::source_path() const noexcept {
 
 bool Document::authenticate(std::string_view password) {
     if (!impl_->doc) return false;
-    // fz_authenticate_password expects NUL-terminated; copy to std::string to ensure it.
+    // fz_authenticate_password expects NUL-terminated; copy to std::string to
+    // ensure it. The copy is wiped before going out of scope so the password
+    // bytes do not linger in freed heap memory (Phase 8 D3 — closes the last
+    // hop in the edit-control → wide buffer → UTF-8 → MuPDF chain).
     std::string pw(password);
     int ok = 0;
     fz_try(impl_->ctx) {
         ok = fz_authenticate_password(impl_->ctx, impl_->doc, pw.c_str());
     }
     fz_catch(impl_->ctx) {
+        if (!pw.empty()) std::memset(pw.data(), 0, pw.size());
         return false;
     }
+    if (!pw.empty()) std::memset(pw.data(), 0, pw.size());
     if (ok != 0) {
         impl_->authenticated = true;
         return true;

@@ -72,6 +72,13 @@ public:
     // ColdStartTimer::emit_if_complete(true) so the line is mirrored to stderr.
     void set_log_timings(bool on) { log_timings_ = on; }
 
+    // (Phase 8 D7) Flip the canvas background palette to dark gray when
+    // the active view is in Invert Colors mode, or back to light when
+    // it isn't. The page bitmap polarity is decided at the engine
+    // (D7) — this method only flips the chrome around the bitmap so the
+    // overall look matches. Triggers an InvalidateRect.
+    void set_invert_chrome(bool on);
+
     // --- Phase 6 Task 9: search hit overlay ---
 
     // Source for overlay hits. PdfCanvas calls this each paint to fetch

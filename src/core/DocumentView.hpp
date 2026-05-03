@@ -106,6 +106,21 @@ public:
     using RenderCb = std::function<void(fz_pixmap*, fz_context*)>;
     void request_render(int page, RenderCb on_complete);
 
+    // ------------------------------------------------------------------
+    // (Phase 8 D7/D9) Per-tab "Invert Colors" toggle.
+    //
+    // When on, all subsequent render requests submitted via this view
+    // carry RenderRequest::invert = true, which causes the engine to
+    // channel-invert the pixmap (fz_invert_pixmap) before caching it.
+    // The L1 cache stores the inverted and non-inverted pixmaps for the
+    // same (page, scale) under separate keys, so toggling does not
+    // invalidate the previous-polarity cache entries.
+    //
+    // Default off; not persisted across app restarts (D9). Per-tab so
+    // each open document keeps its own preference. UI thread only.
+    bool invert_colors() const noexcept;
+    void set_invert_colors(bool on);
+
     // Bulk cancel on rapid nav (Phase 3 Task 11 wiring).
     void cancel_stale_renders(int keep_priority_threshold);
 

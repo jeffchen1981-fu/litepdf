@@ -99,6 +99,10 @@ struct PdfCanvas::Impl {
     PdfCanvas::HitsFn             hits_fn;
     std::optional<litepdf::core::SearchSession::Hit> current_hit;
 
+    // (Phase 8 D7) chrome polarity. Default off (light); flipped on
+    // Ctrl+Shift+I via the active view's set_invert_colors handler.
+    bool                          invert_chrome = false;
+
     // --- Phase 7 Task 7: page-change observer ---
     // Fired by change_current_page() after a real page transition, and
     // by set_view() when a non-null view is installed (so a freshly
@@ -169,6 +173,12 @@ void PdfCanvas::set_hits_source(HitsFn fn) {
 void PdfCanvas::set_current_hit(std::optional<litepdf::core::SearchSession::Hit> h) {
     if (!impl_) return;
     impl_->current_hit = std::move(h);
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void PdfCanvas::set_invert_chrome(bool on) {
+    if (!impl_ || impl_->invert_chrome == on) return;
+    impl_->invert_chrome = on;
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -583,7 +593,10 @@ void PdfCanvas::on_paint() {
     const bool had_bitmap = static_cast<bool>(impl_->current_bitmap);
 
     impl_->rt->BeginDraw();
-    impl_->rt->Clear(D2D1::ColorF(0xF0F0F0));  // light gray
+    // (Phase 8 D7) Chrome polarity flip — dark canvas for Invert Colors,
+    // matches the inverted page bitmap so the surround does not glare.
+    const UINT32 bg_rgb = impl_->invert_chrome ? 0x202020u : 0xF0F0F0u;
+    impl_->rt->Clear(D2D1::ColorF(bg_rgb));
 
     if (impl_->current_bitmap) {
         D2D1_SIZE_F src = impl_->current_bitmap->GetSize();  // DIPs at rt's DPI
