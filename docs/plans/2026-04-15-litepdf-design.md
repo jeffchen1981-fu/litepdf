@@ -463,12 +463,18 @@ IDI_PDFDOC  ICON "icon/litepdf-doc.ico"
 
 ## 10. Out of Scope (v1)
 
-Deferred to later versions:
+Deferred to later versions. Items prefixed with **(commonly requested)** are listed explicitly because users frequently ask about them — their absence in v1 is a deliberate scope choice, not an oversight:
 
 - Annotation authoring (highlight / note / draw)
 - Form filling (AcroForm widgets)
 - Digital signature verification
-- Printing presets beyond the Windows default dialog
+- **(commonly requested)** Printing — no `PrintDlg` / GDI printer-DC integration in v1. A standalone print-support spec is tracked separately under `docs/plans/`.
+- **(commonly requested)** Windows Explorer shell integration:
+  - PDF thumbnail provider (`IThumbnailProvider` shell-extension DLL) — Explorer falls back to the generic PDF document icon registered by the installer
+  - PDF preview handler (`IPreviewHandler` for the Explorer reading pane)
+  - Both require an in-proc COM DLL separate from the main `.exe` plus per-user COM registration; incompatible with the single-binary v1 distribution model
+- **(commonly requested)** OCR for scanned PDFs (no embedded text layer is generated; search returns no hits on image-only pages)
+- **(commonly requested)** Page-level write operations: extract, reorder, rotate-and-save, merge, split (LitePDF is read-only)
 - Accessibility (screen reader, high-contrast themes beyond invert)
 - Automatic updates
 - Telemetry / analytics
