@@ -54,6 +54,25 @@ void show_error(HWND parent, const wchar_t* msg) {
     MessageBoxW(parent, msg, L"Print", MB_OK | MB_ICONERROR);
 }
 
+// Module-static back-pointer so the GDI abort callback (which has no
+// user-data parameter) can find the active flag. Single-instance
+// because PrintJob::run is single-threaded modal -- only one print
+// job at a time. Reset to nullptr after EndDoc / AbortDoc via RAII.
+static PrintAbortFlag* g_active_abort_flag = nullptr;
+
+BOOL CALLBACK abort_proc(HDC, int /*iError*/) {
+    // Pump messages so PrintProgressDlg's Cancel button can be observed
+    // even while a single StretchDIBits is mid-execution (printer drivers
+    // call back into us during long blits).
+    MSG msg;
+    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    return (g_active_abort_flag && g_active_abort_flag->is_aborted())
+           ? FALSE : TRUE;
+}
+
 // RAII wrapper: clones the Document's fz_context and re-opens the source
 // file on the clone. MuPDF forbids sharing fz_document across contexts
 // (RenderEngine pattern). Both context and document are dropped on scope
@@ -261,7 +280,8 @@ bool PrintJob::run(HWND parent,
     // when PD_USEDEVMODECOPIESANDCOLLATE is set.
     DWORD copies = std::max<DWORD>(1, pd.nCopies);
 
-    // [4] StartDoc.
+    // [4] StartDoc + abort callback registration (Task 8).
+    PrintAbortFlag abort_flag;
     DOCINFOW di = { sizeof(di) };
     auto leaf = doc.source_path().filename().wstring();
     di.lpszDocName = leaf.empty() ? L"LitePDF" : leaf.c_str();
@@ -269,6 +289,11 @@ bool PrintJob::run(HWND parent,
         show_error(parent, L"Failed to start print job.");
         return false;
     }
+    g_active_abort_flag = &abort_flag;
+    SetAbortProc(pd.hDC, abort_proc);
+    struct AbortFlagGuard {
+        ~AbortFlagGuard() { g_active_abort_flag = nullptr; }
+    } abort_guard;
 
     // [5] Open a per-job MuPDF context + document (Task 7).
     PrintMupdfHandle mupdf(doc);
@@ -279,7 +304,6 @@ bool PrintJob::run(HWND parent,
     }
 
     // [6] Page loop with MuPDF -> StretchDIBits.
-    PrintAbortFlag abort_flag;
     PrintProgressDlg progress(parent, abort_flag, pages.size() * copies);
     std::size_t emitted = 0;
     bool error_aborted = false;
