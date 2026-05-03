@@ -13,10 +13,11 @@ namespace litepdf::core {
 namespace {
 
 struct L1Key {
-    int page;
+    int   page;
     float scale;
+    bool  invert;  // (Phase 8 D8) third axis on L1; L2 unchanged.
     bool operator==(const L1Key& o) const noexcept {
-        return page == o.page && scale == o.scale;
+        return page == o.page && scale == o.scale && invert == o.invert;
     }
 };
 
@@ -26,7 +27,9 @@ struct L1KeyHash {
         // the raw IEEE-754 bits, so we just need a decent combiner.
         std::size_t h1 = std::hash<int>{}(k.page);
         std::size_t h2 = std::hash<float>{}(k.scale);
-        return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+        std::size_t h3 = k.invert ? 1u : 0u;
+        std::size_t h  = h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+        return h  ^ (h3 + 0x9e3779b97f4a7c15ULL + (h  << 6) + (h  >> 2));
     }
 };
 
@@ -99,9 +102,9 @@ PageCache::~PageCache() {
     impl_->l2_lru.clear();
 }
 
-fz_pixmap* PageCache::get_pixmap(int page_num, float scale) {
+fz_pixmap* PageCache::get_pixmap(int page_num, float scale, bool invert) {
     std::lock_guard<std::mutex> lk(impl_->mtx);
-    L1Key k{page_num, scale};
+    L1Key k{page_num, scale, invert};
     auto it = impl_->l1_map.find(k);
     if (it == impl_->l1_map.end()) return nullptr;
     // Move to front (most recent).
@@ -112,10 +115,10 @@ fz_pixmap* PageCache::get_pixmap(int page_num, float scale) {
     return fz_keep_pixmap(impl_->ctx, it->second.pix);
 }
 
-void PageCache::put_pixmap(int page_num, float scale, fz_pixmap* pix) {
+void PageCache::put_pixmap(int page_num, float scale, bool invert, fz_pixmap* pix) {
     if (!pix) return;  // no-op on null; nothing to take ownership of
     std::lock_guard<std::mutex> lk(impl_->mtx);
-    L1Key k{page_num, scale};
+    L1Key k{page_num, scale, invert};
     auto it = impl_->l1_map.find(k);
     if (it != impl_->l1_map.end()) {
         // Replace at same key: drop old, store new, promote to front.

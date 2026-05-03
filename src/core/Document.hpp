@@ -56,6 +56,10 @@ public:
     void close() noexcept;
 
     // For encrypted documents. Returns true if password accepted.
+    // The internal NUL-terminated copy of the password is wiped before
+    // this method returns (Phase 8 D3). Callers are still responsible
+    // for zeroing the buffer they own; this method only guarantees the
+    // copy MuPDF sees is not retained in heap memory.
     [[nodiscard]] bool authenticate(std::string_view password);
 
     // Metadata

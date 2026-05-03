@@ -48,11 +48,19 @@ public:
     PageCache(PageCache&&) = delete;
     PageCache& operator=(PageCache&&) = delete;
 
-    // L1
-    fz_pixmap* get_pixmap(int page_num, float scale);
-    void       put_pixmap(int page_num, float scale, fz_pixmap* pix);
+    // L1 — pixmap, keyed by (page_num, scale, invert). The `invert` axis
+    // (Phase 8 D8) lets the inverted and non-inverted pixmaps for the
+    // same (page, scale) coexist so toggling Ctrl+Shift+I doesn't blow
+    // away the cache for the previously-shown polarity. Default `false`
+    // matches pre-Phase-8 behavior — callers that don't care about
+    // invert can omit the parameter.
+    fz_pixmap* get_pixmap(int page_num, float scale, bool invert = false);
+    void       put_pixmap(int page_num, float scale, bool invert, fz_pixmap* pix);
 
     // L2 — display list, zoom-independent, keyed by page_num.
+    // (Phase 8 D8) L2 stays single-key — display lists are polarity-
+    // independent, and keying L2 by invert would (a) duplicate identical
+    // entries and (b) lose the display-list build savings on toggle.
     // Refcount contract mirrors L1:
     //   put_display_list: cache TAKES caller's ref; drops on evict/replace/destroy.
     //   get_display_list: nullptr on miss; on hit, returns fz_keep_display_list'd

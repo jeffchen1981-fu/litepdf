@@ -50,6 +50,8 @@ struct DocumentView::Impl {
     float                  vp_w         = 0.0f;
     float                  vp_h         = 0.0f;
     float                  dpi          = 96.0f;
+    bool                   invert_colors = false;  // Phase 8 D7/D9
+    bool                   dual_page     = false;  // Phase 8 D10
 
     // Preset custom zoom levels.
     static constexpr float kPresets[] = {
@@ -273,7 +275,38 @@ void DocumentView::request_render(int page, RenderCb on_complete) {
     req.priority    = 0;
     req.scale       = impl_->scale;
     req.on_complete = std::move(on_complete);
+    req.invert      = impl_->invert_colors;  // Phase 8 D7
     (void)impl_->engine->submit(std::move(req));
+}
+
+bool DocumentView::invert_colors() const noexcept {
+    return impl_->invert_colors;
+}
+
+void DocumentView::set_invert_colors(bool on) {
+    if (impl_->invert_colors == on) return;
+    impl_->invert_colors = on;
+    // (Phase 8 D9 addendum) Drain in-flight renders submitted at the
+    // OLD polarity so their on_complete callbacks do not deliver stale-
+    // polarity pixmaps that briefly flash the wrong colors. Phase 7's
+    // cancel checkpoints invoke on_complete(nullptr) on cancelled
+    // requests, which the canvas treats as a no-paint event. The caller
+    // (MainWindow toggle handler) is then responsible for kicking a
+    // fresh render at the new polarity.
+    impl_->engine->cancel_all_below_priority(0);
+}
+
+bool DocumentView::dual_page() const noexcept {
+    return impl_->dual_page;
+}
+
+void DocumentView::set_dual_page(bool on) {
+    if (impl_->dual_page == on) return;
+    impl_->dual_page = on;
+    // (Phase 8 D9 addendum / D10) Drain in-flight single-page renders
+    // so their bitmaps don't land in the wrong slot of the new layout.
+    // Caller kicks a fresh dual-page render afterwards.
+    impl_->engine->cancel_all_below_priority(0);
 }
 
 void DocumentView::cancel_stale_renders(int keep_priority_threshold) {
@@ -293,6 +326,7 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb) {
         r0.priority    = 0;
         r0.scale       = impl_->scale;
         r0.on_complete = std::move(cb);
+        r0.invert      = impl_->invert_colors;  // Phase 8 D7
         (void)impl_->engine->submit(std::move(r0));
     }
 
@@ -309,6 +343,7 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb) {
         r1.priority    = 1;
         r1.scale       = impl_->scale;
         r1.on_complete = drop_cb;
+        r1.invert      = impl_->invert_colors;  // Phase 8 D7
         (void)impl_->engine->submit(std::move(r1));
     }
     if (page + 1 < total) {
@@ -317,6 +352,7 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb) {
         r1.priority    = 1;
         r1.scale       = impl_->scale;
         r1.on_complete = drop_cb;
+        r1.invert      = impl_->invert_colors;  // Phase 8 D7
         (void)impl_->engine->submit(std::move(r1));
     }
 }

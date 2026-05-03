@@ -28,6 +28,10 @@ namespace litepdf::ui {
 // DocumentView has been swapped or destroyed.
 // Must match the reservation in MainWindow.cpp (WM_USER + 3).
 inline constexpr UINT WM_USER_RENDER_DONE = WM_USER + 3;
+// (Phase 8 D10) Same payload as WM_USER_RENDER_DONE but the bitmap
+// lands in the RIGHT slot of the two-page spread layout instead of the
+// (single / left) slot. Posted by PdfCanvas::post_render_done_right.
+inline constexpr UINT WM_USER_RENDER_DONE_RIGHT = WM_USER + 4;
 
 class PdfCanvas {
 public:
@@ -68,9 +72,30 @@ public:
                                  fz_pixmap* pix,
                                  fz_context* worker_ctx);
 
+    // (Phase 8 D10) Variant that posts to the RIGHT slot of the dual-
+    // page layout. Same refcount discipline as post_render_done.
+    static bool post_render_done_right(HWND target,
+                                       fz_pixmap* pix,
+                                       fz_context* worker_ctx);
+
     // When true, on first real-bitmap paint the canvas calls
     // ColdStartTimer::emit_if_complete(true) so the line is mirrored to stderr.
     void set_log_timings(bool on) { log_timings_ = on; }
+
+    // (Phase 8 D7) Flip the canvas background palette to dark gray when
+    // the active view is in Invert Colors mode, or back to light when
+    // it isn't. The page bitmap polarity is decided at the engine
+    // (D7) — this method only flips the chrome around the bitmap so the
+    // overall look matches. Triggers an InvalidateRect.
+    void set_invert_chrome(bool on);
+
+    // (Phase 8 D10) Switch between single-page and two-page-spread
+    // layout. Discards the right-slot bitmap when going back to single
+    // mode so a stale right-page render does not flash on the next
+    // toggle. Caller (MainWindow) is responsible for kicking the
+    // appropriate render after this returns. Triggers InvalidateRect.
+    void set_dual_page(bool on);
+    bool dual_page() const noexcept;
 
     // --- Phase 6 Task 9: search hit overlay ---
 

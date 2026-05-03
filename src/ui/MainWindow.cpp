@@ -2,6 +2,8 @@
 #include "ui/MainWindow.hpp"
 #include "MainMenu.rc.h"
 
+#include "ui/PdfCanvasLayout.hpp"  // Phase 8 Task 4: dual-page snap helper
+
 #include "app/SearchDispatcher.hpp"
 #include "app/SingleInstance.hpp"
 #include "core/Document.hpp"
@@ -9,6 +11,8 @@
 #include "core/SearchSession.hpp"
 #include "core/TabList.hpp"
 #include "ui/ColdStartTimer.hpp"
+#include "ui/PasswordDialog.hpp"  // Phase 8 Task 1
+#include "ui/password_retry.hpp"  // Phase 8 Task 1
 #include "ui/ThumbnailPane.hpp"  // Phase 7 Task 8: F4 toggle uses ThumbnailPane methods.
 
 #include <commctrl.h>
@@ -34,6 +38,13 @@ constexpr wchar_t kWindowTitle[]     = L"LitePDF";
 constexpr UINT WM_USER_OPEN_OK       = WM_USER + 1;
 constexpr UINT WM_USER_OPEN_FAILED   = WM_USER + 2;
 // WM_USER + 3 is WM_USER_RENDER_DONE, reserved by PdfCanvas.
+// Phase 8 Task 1: encrypted-PDF password handshake. Worker thread can't
+// run a modal dialog (no message pump, no parent HWND), so on
+// OpenError::NeedsPassword the worker posts this message carrying the
+// still-alive Document + path; the UI thread runs the 3-attempt loop,
+// calls authenticate() on the same Document, and either constructs a
+// DocumentView/Tab inline or drops the Document on cancel/exhaustion.
+constexpr UINT WM_USER_PASSWORD_PROMPT = WM_USER + 12;
 // Phase 6 Task 10: per-tab SearchSession on_update() observer fires on a
 // worker thread and PostMessage-marshals to this message on the UI thread.
 // Posted once per completed page scan (plus a final post when
@@ -45,6 +56,14 @@ constexpr UINT WM_USER_SEARCH_UPDATE = WM_USER + 10;
 // PostMessage-marshals to this message on the UI thread so the docked
 // ResultsPanel can ListView_SetItemCountEx without cross-thread UI calls.
 constexpr UINT WM_USER_CROSS_TAB_UPDATE = WM_USER + 11;
+
+// Phase 8 Task 1: bundle handed across the worker→UI thread boundary
+// when Document::open returns NeedsPassword. The worker posts a heap
+// pointer; the UI handler adopts ownership via unique_ptr.
+struct PendingPasswordOpen {
+    litepdf::core::Document doc;        // already opened, awaiting authenticate()
+    std::filesystem::path   path;        // for tab label + status feedback
+};
 
 // "&1 foo.pdf", "&2 foo.pdf", ..., "&9 foo.pdf", "1&0 foo.pdf".
 // The '&' marks the mnemonic character (Alt-shortcut).
@@ -132,6 +151,28 @@ void MainWindow::open_tab_async(std::filesystem::path path) {
         litepdf::core::Document doc;
         auto err = doc.open(path);
         if (err.has_value()) {
+            // Phase 8 Task 1: NeedsPassword is now a non-fatal handshake.
+            // Hand the still-alive Document + path to the UI thread; it
+            // runs the modal + retry loop and either re-enters tab
+            // construction (success) or drops the Document (cancel /
+            // exhaustion).
+            if (*err == litepdf::core::Document::OpenError::NeedsPassword) {
+                auto* bundle = new PendingPasswordOpen{
+                    std::move(doc), std::move(path)};
+                // Mirrors the WM_USER_OPEN_OK handoff pattern below: if
+                // PostMessageW returns FALSE the bundle is freed here.
+                // If it returns TRUE but the HWND is destroyed before
+                // dispatch, the OS drops the queued message and the
+                // bundle leaks. The leak is bounded (at most one bundle
+                // in flight per shutdown) and the OS reclaims process
+                // memory; Phase 12 crash-protection may track in-flight
+                // bundles in MainWindow if the leak window matters.
+                if (!PostMessageW(hwnd, WM_USER_PASSWORD_PROMPT,
+                                  reinterpret_cast<WPARAM>(bundle), 0)) {
+                    delete bundle;
+                }
+                return;
+            }
             // Heap-allocate the path string so the UI handler can include
             // it in the MessageBox. Handler adopts ownership and deletes.
             // Without this, the error dialog says "File not found" but
@@ -187,6 +228,29 @@ void MainWindow::kick_render(int page) {
         static_cast<float>(dpi));
 
     HWND target = canvas_->hwnd();
+    if (view->dual_page()) {
+        // (Phase 8 D10) Spread layout: snap to the LEFT page of the
+        // pair containing `page` (cover-rule + odd-tail handled by the
+        // helper) and submit two render requests.
+        const int left  = litepdf::ui::dual_page_compute_left(
+                              page, view->page_count());
+        const int right = litepdf::ui::dual_page_compute_right(
+                              left, view->page_count());
+        view->cancel_stale_renders(0);
+        view->set_current_page(left);
+        view->request_render(left,
+            [target](fz_pixmap* p, fz_context* worker_ctx) {
+                PdfCanvas::post_render_done(target, p, worker_ctx);
+            });
+        if (right >= 0) {
+            view->request_render(right,
+                [target](fz_pixmap* p, fz_context* worker_ctx) {
+                    PdfCanvas::post_render_done_right(target, p, worker_ctx);
+                });
+        }
+        InvalidateRect(canvas_->hwnd(), nullptr, FALSE);
+        return;
+    }
     view->request_render_with_prefetch(page,
         [target](fz_pixmap* p, fz_context* worker_ctx) {
             PdfCanvas::post_render_done(target, p, worker_ctx);
@@ -458,6 +522,16 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
         canvas_->set_view(incoming ? incoming->view.get() : nullptr);
         if (incoming) canvas_->set_pan(incoming->pan_x, incoming->pan_y);
         else          canvas_->set_pan(0.0f, 0.0f);
+        // (Phase 8 D9) Carry the incoming tab's Invert Colors polarity
+        // onto the canvas chrome so a switch lands on a chrome that
+        // matches the tab's page bitmap. Empty-tabs case clears it.
+        canvas_->set_invert_chrome(incoming && incoming->view
+                                       ? incoming->view->invert_colors()
+                                       : false);
+        // (Phase 8 D10) Same per-tab carry for two-page-spread layout.
+        canvas_->set_dual_page(incoming && incoming->view
+                                   ? incoming->view->dual_page()
+                                   : false);
     }
 
     if (outline_) {
@@ -813,8 +887,25 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             if (HIWORD(l) != 0) return 0;
             auto popup = reinterpret_cast<HMENU>(w);
             HMENU main = GetMenu(hwnd);
+            if (!main) return 0;
+            // (Phase 8 T3/T4) View popup (index 1): reflect Invert Colors
+            // and Two-Page Spread state on each show. The flags are
+            // per-tab (D9), so the checkmark is read off active_view().
+            // When no tab is open, both default to unchecked.
+            if (popup == GetSubMenu(main, 1)) {
+                auto* v = active_view();
+                const bool invert_on = v && v->invert_colors();
+                const bool dual_on   = v && v->dual_page();
+                CheckMenuItem(popup, IDM_VIEW_INVERT,
+                              MF_BYCOMMAND
+                              | (invert_on ? MF_CHECKED : MF_UNCHECKED));
+                CheckMenuItem(popup, IDM_VIEW_DUAL_PAGE,
+                              MF_BYCOMMAND
+                              | (dual_on ? MF_CHECKED : MF_UNCHECKED));
+                return 0;
+            }
             // Only rebuild MRU when the File popup (index 0) is about to show.
-            if (!main || popup != GetSubMenu(main, 0)) return 0;
+            if (popup != GetSubMenu(main, 0)) return 0;
             // Remove any existing MRU items + the dynamic SEP (safe when absent).
             DeleteMenu(popup, IDM_MRU_SEPARATOR, MF_BYCOMMAND);
             for (int id = IDM_MRU_1; id <= IDM_MRU_10; ++id) {
@@ -886,6 +977,37 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 case IDM_VIEW_THUMBS:
                     toggle_thumbs();
                     return 0;
+                case IDM_VIEW_INVERT: {
+                    // Phase 8 D7/D9: per-tab Invert Colors toggle. Flips
+                    // the engine flag (which drains in-flight renders at
+                    // the old polarity), flips the canvas chrome
+                    // palette, and kicks a fresh render of the active
+                    // page so the new polarity lands immediately.
+                    auto* v = active_view();
+                    if (!v) return 0;
+                    v->set_invert_colors(!v->invert_colors());
+                    if (canvas_) canvas_->set_invert_chrome(v->invert_colors());
+                    kick_render(v->current_page());
+                    return 0;
+                }
+                case IDM_VIEW_DUAL_PAGE: {
+                    // Phase 8 D10: per-tab Two-Page Spread toggle. Snap
+                    // current_page to the LEFT page of the pair on
+                    // toggle so the next paint lands cleanly. The
+                    // canvas drops both bitmaps in set_dual_page.
+                    auto* v = active_view();
+                    if (!v) return 0;
+                    v->set_dual_page(!v->dual_page());
+                    if (canvas_) canvas_->set_dual_page(v->dual_page());
+                    int p = v->current_page();
+                    if (v->dual_page()) {
+                        p = litepdf::ui::dual_page_compute_left(
+                                p, v->page_count());
+                        v->set_current_page(p);
+                    }
+                    kick_render(p);
+                    return 0;
+                }
                 case IDM_TAB_CLOSE:
                     if (tabs_ && tabs_->count() > 0) {
                         on_tab_close_request(tabs_->active_index());
@@ -933,7 +1055,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     return 0;
                 case IDM_HELP_ABOUT:
                     MessageBoxW(hwnd,
-                        L"LitePDF v0.0.8\n\n"
+                        L"LitePDF v0.0.9\n\n"
                         L"A lightweight PDF / ePub / CBZ / XPS viewer for Windows.\n\n"
                         L"License: AGPL-3.0\n"
                         L"Engine: MuPDF 1.24.11\n"
@@ -1028,7 +1150,11 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 case OE::UnsupportedFormat:
                     emsg = L"Unsupported file format."; break;
                 case OE::NeedsPassword:
-                    emsg = L"Password-protected PDFs are not yet supported.";
+                    // Phase 8 Task 1: NeedsPassword is now handled inline
+                    // via WM_USER_PASSWORD_PROMPT; reaching this branch
+                    // would mean the worker mis-routed. Fall through to
+                    // the generic message rather than misleading the user.
+                    emsg = L"Failed to open the document.";
                     break;
                 case OE::BadPassword:
                     emsg = L"Incorrect password."; break;
@@ -1057,6 +1183,78 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // Phase 12 crash-protection hardening) if the UX becomes
             // confusing.
             MessageBoxW(hwnd, full_msg.c_str(), kWindowTitle, MB_ICONWARNING);
+            return 0;
+        }
+        case WM_USER_PASSWORD_PROMPT: {
+            // Phase 8 Task 1: encrypted-PDF handshake. We adopt the
+            // Document the worker handed us, run up to 3 prompt+auth
+            // attempts inline on the UI thread (D2 addendum), and either
+            // construct a Tab on success or drop the bundle on cancel /
+            // exhaustion. MRU is NOT pruned on failure (design §6.1).
+            std::unique_ptr<PendingPasswordOpen> bundle(
+                reinterpret_cast<PendingPasswordOpen*>(w));
+            if (!bundle) return 0;
+            const std::wstring basename = bundle->path.filename().wstring();
+
+            auto result = litepdf::ui::try_authenticate_with_retry(
+                [parent = hwnd_, &basename](const std::wstring& status) {
+                    return litepdf::ui::PasswordDialog::prompt(
+                        parent, basename, status);
+                },
+                [&bundle](const std::string& pw) {
+                    return bundle->doc.authenticate(pw);
+                },
+                [](int failed_count) {
+                    // R10: "remaining" reads less anxious than "of 3" and
+                    // matches Acrobat / Foxit phrasing.
+                    const int remaining = 3 - failed_count;
+                    if (remaining == 1) {
+                        return std::wstring{
+                            L"Incorrect password. (1 attempt remaining.)"};
+                    }
+                    return L"Incorrect password. ("
+                         + std::to_wstring(remaining)
+                         + L" attempts remaining.)";
+                });
+
+            if (!result.accepted) {
+                // R11: only notify the user on attempt-exhaustion; Cancel
+                // is a silent close (the user already chose to dismiss).
+                if (result.attempts >= 3) {
+                    std::wstring full_msg =
+                        L"Failed to open " + basename
+                        + L": password incorrect after 3 attempts.";
+                    MessageBoxW(hwnd, full_msg.c_str(), kWindowTitle,
+                                MB_OK | MB_ICONWARNING);
+                }
+                return 0;
+            }
+
+            // Authenticated. Build the Tab + DocumentView on the UI
+            // thread (mirrors the worker-side path of WM_USER_OPEN_OK
+            // but we avoid bouncing back to a worker for the few-µs
+            // construction). If construction throws (clone_context OOM,
+            // worker thread creation), surface the same generic error
+            // path the original worker uses.
+            try {
+                auto tab = std::make_unique<litepdf::core::Tab>();
+                tab->path  = bundle->path;
+                tab->label = basename;
+                tab->view  = std::make_unique<litepdf::core::DocumentView>(
+                    std::move(bundle->doc), *search_dispatcher_);
+
+                ColdStartTimer::mark(2);  // Document fully loaded.
+
+                HWND target = hwnd_;
+                tab->view->search().set_on_update([target]() {
+                    PostMessageW(target, WM_USER_SEARCH_UPDATE, 0, 0);
+                });
+                (void)tabs_->add_tab(std::move(tab));
+            } catch (...) {
+                MessageBoxW(hwnd,
+                            L"Failed to open the document after authentication.",
+                            kWindowTitle, MB_OK | MB_ICONWARNING);
+            }
             return 0;
         }
         case WM_USER_SEARCH_UPDATE:
@@ -1383,6 +1581,11 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
         { FCONTROL | FVIRTKEY, '0',          IDM_ZOOM_RESET    },
         { FVIRTKEY,            VK_F4,        IDM_VIEW_THUMBS   },
         { FVIRTKEY,            VK_F5,        IDM_VIEW_OUTLINE  },
+        // Phase 8: Tier 3 view-mode toggles. Modifier-consistent
+        // Ctrl+Shift+_ pair so they read as a deliberate group; bare
+        // Ctrl+D is reserved for a future "Duplicate Tab" affordance.
+        { FCONTROL | FSHIFT | FVIRTKEY, 'I', IDM_VIEW_INVERT    },
+        { FCONTROL | FSHIFT | FVIRTKEY, 'D', IDM_VIEW_DUAL_PAGE },
         // Phase 5: tab management.
         { FCONTROL | FVIRTKEY,          'W',     IDM_TAB_CLOSE  },
         { FCONTROL | FVIRTKEY,          VK_TAB,  IDM_TAB_NEXT   },

@@ -417,4 +417,71 @@ Write-Host "[OK] thumb pane hidden via F4 toggle (process alive)"
 Stop-Process -Id $proc6.Id -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 500
 
+# ---------------------------------------------------------------- Phase 8 ----
+# Open-path liveness for the Tier 3 formats: ePub, CBZ, encrypted PDF.
+# The encrypted launch leaves the password modal blocking on user input —
+# we just assert the process is still alive 1 s post-launch (a crashed-on-
+# encrypted regression would exit early). ePub and CBZ should reach the
+# main-window state the same way simple.pdf does.
+
+function Start-LitePDFSmokeLaunch {
+    param(
+        [string]$exe,
+        [string]$fixture,
+        [int]$timeoutSeconds = 5
+    )
+    Write-Host "----"
+    Write-Host "Launching: $exe $fixture"
+    $proc = Start-Process -FilePath $exe -ArgumentList @($fixture) -PassThru -NoNewWindow
+    $deadline = (Get-Date).AddSeconds($timeoutSeconds)
+    while ((Get-Date) -lt $deadline -and $proc.MainWindowHandle -eq [IntPtr]::Zero) {
+        Start-Sleep -Milliseconds 100
+        if ($proc.HasExited) {
+            throw "$fixture launch crashed (exit code $($proc.ExitCode))"
+        }
+        $proc.Refresh()
+    }
+    if ($proc.MainWindowHandle -eq [IntPtr]::Zero) {
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        throw "$fixture never showed a window in $timeoutSeconds s"
+    }
+    Write-Host "[OK] $fixture window shown"
+    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 300
+}
+
+$epubFixture = Join-Path $repoRoot "tests/fixtures/sample.epub"
+if (Test-Path $epubFixture) {
+    Start-LitePDFSmokeLaunch -exe $exe -fixture $epubFixture
+} else {
+    Write-Host "[SKIP] sample.epub not found at $epubFixture"
+}
+
+$cbzFixture = Join-Path $repoRoot "tests/fixtures/sample.cbz"
+if (Test-Path $cbzFixture) {
+    Start-LitePDFSmokeLaunch -exe $exe -fixture $cbzFixture
+} else {
+    Write-Host "[SKIP] sample.cbz not found at $cbzFixture"
+}
+
+# Encrypted PDF: cannot drive the modal headlessly. Just verify the
+# process is alive 1 s post-launch — a crashed-on-encrypted regression
+# would exit early. The modal is dismissed by Stop-Process below.
+$encryptedFixture = Join-Path $repoRoot "tests/fixtures/encrypted.pdf"
+if (Test-Path $encryptedFixture) {
+    Write-Host "----"
+    Write-Host "Launching encrypted PDF (modal expected): $exe $encryptedFixture"
+    $procEnc = Start-Process -FilePath $exe -ArgumentList @($encryptedFixture) -PassThru -NoNewWindow
+    Start-Sleep -Seconds 1
+    $procEnc.Refresh()
+    if ($procEnc.HasExited) {
+        throw "encrypted.pdf launch crashed (exit code $($procEnc.ExitCode))"
+    }
+    Write-Host "[OK] encrypted.pdf process alive after 1 s (modal blocking on user input)"
+    Stop-Process -Id $procEnc.Id -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 300
+} else {
+    Write-Host "[SKIP] encrypted.pdf not found at $encryptedFixture"
+}
+
 Write-Host "[OK] smoke test passed."

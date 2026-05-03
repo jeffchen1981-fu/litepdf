@@ -50,6 +50,13 @@ public:
         // on_complete so existing 4-element aggregate-init call sites
         // (`{page, prio, scale, callback}`) keep compiling unchanged.
         bool  bypass_cache = false;
+        // (Phase 8 D7) Channel-invert the pixmap (fz_invert_pixmap) AFTER
+        // rasterize and BEFORE caching. The L1 cache key includes this
+        // axis so the inverted and non-inverted pixmaps for the same
+        // (page, scale) coexist; L2 (display list) stays polarity-
+        // independent (D8). Default false: existing 5-element aggregate
+        // call sites keep compiling unchanged.
+        bool  invert       = false;
     };
 
     // Construct a RenderEngine.

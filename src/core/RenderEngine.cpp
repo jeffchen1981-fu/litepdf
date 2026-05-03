@@ -118,7 +118,7 @@ struct RenderEngine::Impl {
             // D18: bypass_cache requests skip L1 read entirely so thumb pixmaps
             // never displace main-render entries.
             if (impl->cache && !req.bypass_cache) {
-                fz_pixmap* cached = impl->cache->get_pixmap(req.page_num, req.scale);
+                fz_pixmap* cached = impl->cache->get_pixmap(req.page_num, req.scale, req.invert);
                 if (cached) {
                     // D3: L1-hit fast path still honors late cancellation before callback.
                     if (canceled && canceled->load()) {
@@ -197,6 +197,21 @@ struct RenderEngine::Impl {
                 dlist = nullptr;
             }
 
+            // (Phase 8 D7) Channel-invert the pixmap if requested. Memory-
+            // bandwidth-bound (~3 ms on a hot A4 @ 150 DPI; see R3) and
+            // happens BEFORE caching so the L1 entry matches the request's
+            // polarity. The display list (L2) was already cached untouched
+            // — D8 keeps L2 polarity-independent.
+            if (pix && req.invert) {
+                fz_try(ctx) {
+                    fz_invert_pixmap(ctx, pix);
+                }
+                fz_catch(ctx) {
+                    fz_drop_pixmap(ctx, pix);
+                    pix = nullptr;
+                }
+            }
+
             // Populate L1 if we have a cache and a successful render.
             //   fz_new_pixmap_from_display_list → refcount 1 (we own).
             //   fz_keep_pixmap                  → refcount 2.
@@ -205,7 +220,7 @@ struct RenderEngine::Impl {
             // D18: bypass_cache also skips L1 write.
             if (pix && impl->cache && !req.bypass_cache) {
                 fz_keep_pixmap(ctx, pix);
-                impl->cache->put_pixmap(req.page_num, req.scale, pix);
+                impl->cache->put_pixmap(req.page_num, req.scale, req.invert, pix);
             }
 
             // Checkpoint C: post-rasterize cancel check. If the request was

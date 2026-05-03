@@ -41,6 +41,12 @@ add_library(litepdf_core STATIC
     # already include <windows.h> (ThumbCache, ThumbnailRenderer,
     # ThumbnailModel) so this isn't a new layering breach.
     src/ui/ThumbnailPane.cpp       # Phase 7 Task 5 + 6
+    # Phase 8 Task 1: PasswordDialog (Win32 modal) + the pure-logic
+    # 3-attempt retry loop. Both live in litepdf_core so the unit tests
+    # can link them without pulling in the full litepdf.exe target —
+    # same rationale as ThumbnailPane.cpp above.
+    src/ui/PasswordDialog.cpp
+    src/ui/password_retry.cpp
 )
 
 litepdf_apply_flags(litepdf_core)

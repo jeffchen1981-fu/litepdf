@@ -4,6 +4,7 @@
 #include "MainMenu.rc.h"
 #include "core/DocumentView.hpp"
 #include "ui/ColdStartTimer.hpp"
+#include "ui/PdfCanvasLayout.hpp"
 
 #include <d2d1.h>
 #include <d2d1_1.h>
@@ -35,44 +36,45 @@ std::once_flag g_class_registered;
 
 namespace litepdf::ui {
 
-bool PdfCanvas::post_render_done(HWND target,
-                                 fz_pixmap* pix,
-                                 fz_context* worker_ctx) {
+// Internal helper: shared escrow + Post logic for both the LEFT/single
+// slot (msg = WM_USER_RENDER_DONE) and the RIGHT slot (msg =
+// WM_USER_RENDER_DONE_RIGHT). Refcount discipline is identical for both;
+// only the message ID changes.
+namespace {
+bool post_render_done_impl(HWND target, UINT msg,
+                           fz_pixmap* pix, fz_context* worker_ctx) {
     if (!pix) {
-        // A null pixmap signals "render failed / cancelled". Post with
-        // LPARAM=0; the canvas handler invalidates and moves on.
-        PostMessageW(target, WM_USER_RENDER_DONE,
+        PostMessageW(target, msg,
                      reinterpret_cast<WPARAM>(nullptr),
                      static_cast<LPARAM>(0));
         return true;
     }
-
-    // Refcount contract (D2, RenderEngine.cpp:81):
-    //   The worker transfers its ref on `pix` into this callback. After
-    //   on_complete returns, the worker does NOT drop. So the ref we own
-    //   right here IS the shipping ref — we pass it through PostMessage,
-    //   the UI thread drops it. No keep required.
-    //
-    // No fz_try wrapper: fz_clone_context returns nullptr on OOM rather
-    // than longjmp'ing (same contract as Document::clone_context — see
-    // Document.hpp:82); fz_drop_* and fz_drop_context are longjmp-free.
     fz_context* escrow = fz_clone_context(worker_ctx);
     if (!escrow) {
-        // OOM on clone. We still own the transferred ref — drop it via
-        // worker_ctx (still alive inside the callback) so it doesn't leak.
         fz_drop_pixmap(worker_ctx, pix);
         return false;
     }
-
-    if (!PostMessageW(target, WM_USER_RENDER_DONE,
+    if (!PostMessageW(target, msg,
                       reinterpret_cast<WPARAM>(pix),
                       reinterpret_cast<LPARAM>(escrow))) {
-        // Target HWND is invalid (window destroyed). Clean up both halves.
         fz_drop_pixmap(escrow, pix);
         fz_drop_context(escrow);
         return false;
     }
     return true;
+}
+}  // namespace
+
+bool PdfCanvas::post_render_done(HWND target,
+                                 fz_pixmap* pix,
+                                 fz_context* worker_ctx) {
+    return post_render_done_impl(target, WM_USER_RENDER_DONE, pix, worker_ctx);
+}
+
+bool PdfCanvas::post_render_done_right(HWND target,
+                                       fz_pixmap* pix,
+                                       fz_context* worker_ctx) {
+    return post_render_done_impl(target, WM_USER_RENDER_DONE_RIGHT, pix, worker_ctx);
 }
 
 struct PdfCanvas::Impl {
@@ -98,6 +100,18 @@ struct PdfCanvas::Impl {
     // overlay". current_hit is std::nullopt when no hit is selected.
     PdfCanvas::HitsFn             hits_fn;
     std::optional<litepdf::core::SearchSession::Hit> current_hit;
+
+    // (Phase 8 D7) chrome polarity. Default off (light); flipped on
+    // Ctrl+Shift+I via the active view's set_invert_colors handler.
+    bool                          invert_chrome = false;
+
+    // (Phase 8 D10) two-page-spread layout state. The right slot
+    // bitmap is populated by WM_USER_RENDER_DONE_RIGHT handler when
+    // dual_page is on. Reset to null both on dual→single transition
+    // and on every page-change in dual mode (the left slot's
+    // current_bitmap is also reset on page-change).
+    bool                          dual_page = false;
+    ComPtr<ID2D1Bitmap>           right_bitmap;
 
     // --- Phase 7 Task 7: page-change observer ---
     // Fired by change_current_page() after a real page transition, and
@@ -170,6 +184,31 @@ void PdfCanvas::set_current_hit(std::optional<litepdf::core::SearchSession::Hit>
     if (!impl_) return;
     impl_->current_hit = std::move(h);
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void PdfCanvas::set_invert_chrome(bool on) {
+    if (!impl_ || impl_->invert_chrome == on) return;
+    impl_->invert_chrome = on;
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void PdfCanvas::set_dual_page(bool on) {
+    if (!impl_ || impl_->dual_page == on) return;
+    impl_->dual_page = on;
+    // Always discard the right bitmap on toggle: when going dual→single
+    // there is no right slot, and when going single→dual the right slot
+    // must be repopulated by the next WM_USER_RENDER_DONE_RIGHT — until
+    // it lands, paint a blank placeholder. Drop pan too; the page-pair
+    // origin computed by on_paint is different from the single-page
+    // origin and a stale pan would push content off-canvas.
+    impl_->right_bitmap.Reset();
+    impl_->pan_x = 0.0f;
+    impl_->pan_y = 0.0f;
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+bool PdfCanvas::dual_page() const noexcept {
+    return impl_ && impl_->dual_page;
 }
 
 void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
@@ -372,7 +411,9 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // Parent just repositioned us. Invalidate so on_paint rebuilds the rt.
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
-        case WM_USER_RENDER_DONE: {
+        case WM_USER_RENDER_DONE:
+        case WM_USER_RENDER_DONE_RIGHT: {
+            const bool is_right = (msg == WM_USER_RENDER_DONE_RIGHT);
             auto* pix    = reinterpret_cast<fz_pixmap*>(w);
             auto* escrow = reinterpret_cast<fz_context*>(l);
 
@@ -382,20 +423,23 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return 0;
             }
-
-            // Invariant (design §2.1): a non-null pixmap always travels
-            // with an escrow ctx clone. If escrow is null we have a
-            // caller that bypassed post_render_done — defensive drop
-            // against the worst-case leak. Should never fire in practice.
             if (!escrow) {
+                // Defensive: pixmap without escrow indicates a bypassed
+                // post_render_done helper. Don't drop on a guessed ctx.
                 return 0;
             }
 
-            // Use escrow (NOT impl_->view->ui_ctx()) for every fz op so
-            // we stay on the pixmap's own MuPDF root. impl_->view may
-            // point at a different tab by now — it's only consulted for
-            // bitmap placement, which happens implicitly via the canvas
-            // HWND.
+            // (Phase 8 D10) If a RIGHT-slot pixmap arrives but dual mode
+            // is no longer active, drop it instead of letting it land on
+            // the (now-irrelevant) right slot. Same for the corner where
+            // the right slot delivers AFTER a single→dual→single ping-
+            // pong but the cancel hadn't yet drained the worker.
+            if (is_right && !impl_->dual_page) {
+                fz_drop_pixmap(escrow, pix);
+                fz_drop_context(escrow);
+                return 0;
+            }
+
             const int w_px   = fz_pixmap_width(escrow, pix);
             const int h_px   = fz_pixmap_height(escrow, pix);
             const int stride = fz_pixmap_stride(escrow, pix);
@@ -408,8 +452,6 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 return 0;
             }
 
-            // BGRA + IGNORE_ALPHA matches MuPDF's RGBA pixmap output byte-for-byte
-            // on little-endian; we ignore the alpha channel (opaque page output).
             D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
                 D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
                                   D2D1_ALPHA_MODE_IGNORE));
@@ -419,7 +461,6 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                             static_cast<UINT32>(h_px)),
                 samples, static_cast<UINT32>(stride), &props, &bmp);
 
-            // Drop order: pixmap first (escrow still valid), then escrow.
             fz_drop_pixmap(escrow, pix);
             fz_drop_context(escrow);
 
@@ -434,12 +475,18 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 return 0;
             }
 
-            impl_->current_bitmap = std::move(bmp);
-            // Reset pan whenever a new bitmap lands — the page content has
-            // changed, the prior scroll position is meaningless.
-            impl_->pan_x = 0.0f;
-            impl_->pan_y = 0.0f;
-            ColdStartTimer::mark(3);  // first pixmap -> D2D bitmap
+            if (is_right) {
+                impl_->right_bitmap = std::move(bmp);
+            } else {
+                impl_->current_bitmap = std::move(bmp);
+                // Reset pan only when the LEFT slot lands — that's the
+                // page-change anchor. A right-slot delivery during a
+                // dual-mode page transition arrives after the left
+                // bitmap and must NOT clobber the freshly reset pan.
+                impl_->pan_x = 0.0f;
+                impl_->pan_y = 0.0f;
+                ColdStartTimer::mark(3);  // first pixmap -> D2D bitmap
+            }
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         }
@@ -496,6 +543,28 @@ void PdfCanvas::discard_render_target() {
 void PdfCanvas::resubmit_current_page() {
     if (!impl_->view) return;
     HWND target = hwnd_;
+    if (impl_->dual_page) {
+        // (Phase 8 D10) Spread mode: D2DERR_RECREATE_TARGET recovery
+        // also has to cover the right slot or the right page stays
+        // blank until the user pages forward. Same submission shape as
+        // on_key_down's dual branch.
+        const int cur   = impl_->view->current_page();
+        const int total = impl_->view->page_count();
+        const int left  = dual_page_compute_left(cur, total);
+        const int right = dual_page_compute_right(left, total);
+        impl_->view->cancel_stale_renders(0);
+        impl_->view->request_render(left,
+            [target](fz_pixmap* p, fz_context* worker_ctx) {
+                PdfCanvas::post_render_done(target, p, worker_ctx);
+            });
+        if (right >= 0) {
+            impl_->view->request_render(right,
+                [target](fz_pixmap* p, fz_context* worker_ctx) {
+                    PdfCanvas::post_render_done_right(target, p, worker_ctx);
+                });
+        }
+        return;
+    }
     impl_->view->request_render_with_prefetch(
         impl_->view->current_page(),
         [target](fz_pixmap* p, fz_context* worker_ctx) {
@@ -511,12 +580,37 @@ LRESULT PdfCanvas::on_key_down(WPARAM key) {
 
     bool changed = false;
     switch (key) {
-        case VK_NEXT:   // PgDn
-            changed = change_current_page(cur + 1);
+        case VK_NEXT: {  // PgDn
+            int next;
+            if (impl_->dual_page) {
+                // (Phase 8 T4) Snap from the current spread's LEFT page,
+                // letting dual_page_step_next_left handle the cover→1
+                // bootstrap explicitly — a plain `cur_left + 2` stride
+                // overshoots from cover (0+2=2) and skips spread (1,2).
+                const int total    = impl_->view->page_count();
+                const int cur_left = dual_page_compute_left(cur, total);
+                next = dual_page_step_next_left(cur_left, total);
+            } else {
+                next = std::min(cur + 1, max_idx);
+            }
+            changed = change_current_page(next);
             break;
-        case VK_PRIOR:  // PgUp
-            changed = change_current_page(cur - 1);
+        }
+        case VK_PRIOR: {  // PgUp
+            int prev;
+            if (impl_->dual_page) {
+                // Symmetric step-back via the helper. `cur_left == 1`
+                // (first spread) snaps to 0 (cover); `cur_left >= 3`
+                // walks back by 2.
+                const int total    = impl_->view->page_count();
+                const int cur_left = dual_page_compute_left(cur, total);
+                prev = dual_page_step_prev_left(cur_left, total);
+            } else {
+                prev = std::max(cur - 1, 0);
+            }
+            changed = change_current_page(prev);
             break;
+        }
         case VK_HOME:
             changed = change_current_page(0);
             break;
@@ -546,15 +640,48 @@ LRESULT PdfCanvas::on_key_down(WPARAM key) {
     }
 
     if (changed) {
-        // Cancel stale renders from rapid paging, submit P0 for current
-        // page, and prefetch prev/next at P1 (Task 11). Cache fills
-        // happen at the engine level so the next PgUp/PgDn is instant.
         HWND target = hwnd_;
-        impl_->view->request_render_with_prefetch(
-            impl_->view->current_page(),
-            [target](fz_pixmap* p, fz_context* worker_ctx) {
-                PdfCanvas::post_render_done(target, p, worker_ctx);
-            });
+        if (impl_->dual_page) {
+            // (Phase 8 D10) Spread mode: pair changed, so both bitmaps
+            // are stale. Clear them so on_paint shows the chrome
+            // background (and the empty-right placeholder when the new
+            // pair has no right page) until the new renders land.
+            impl_->current_bitmap.Reset();
+            impl_->right_bitmap.Reset();
+            impl_->view->cancel_stale_renders(0);
+            // Defensive re-snap: D15 (programmatic page-jump) and any
+            // future entry point that leaves current_page on a non-LEFT-
+            // aligned page must not silently mis-pair the spread. Snap
+            // the LEFT here (and write it back so observers see the
+            // canonical state) instead of trusting current_page raw.
+            const int total    = impl_->view->page_count();
+            const int left     = dual_page_compute_left(
+                                     impl_->view->current_page(), total);
+            if (left != impl_->view->current_page()) {
+                impl_->view->set_current_page(left);
+            }
+            const int right = dual_page_compute_right(left, total);
+            impl_->view->request_render(left,
+                [target](fz_pixmap* p, fz_context* worker_ctx) {
+                    PdfCanvas::post_render_done(target, p, worker_ctx);
+                });
+            if (right >= 0) {
+                impl_->view->request_render(right,
+                    [target](fz_pixmap* p, fz_context* worker_ctx) {
+                        PdfCanvas::post_render_done_right(target, p, worker_ctx);
+                    });
+            }
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        } else {
+            // Cancel stale renders from rapid paging, submit P0 for current
+            // page, and prefetch prev/next at P1 (Task 11). Cache fills
+            // happen at the engine level so the next PgUp/PgDn is instant.
+            impl_->view->request_render_with_prefetch(
+                impl_->view->current_page(),
+                [target](fz_pixmap* p, fz_context* worker_ctx) {
+                    PdfCanvas::post_render_done(target, p, worker_ctx);
+                });
+        }
     }
     return 0;
 }
@@ -583,7 +710,72 @@ void PdfCanvas::on_paint() {
     const bool had_bitmap = static_cast<bool>(impl_->current_bitmap);
 
     impl_->rt->BeginDraw();
-    impl_->rt->Clear(D2D1::ColorF(0xF0F0F0));  // light gray
+    // (Phase 8 D7) Chrome polarity flip — dark canvas for Invert Colors,
+    // matches the inverted page bitmap so the surround does not glare.
+    const UINT32 bg_rgb = impl_->invert_chrome ? 0x202020u : 0xF0F0F0u;
+    impl_->rt->Clear(D2D1::ColorF(bg_rgb));
+
+    // (Phase 8 D10) Two-page-spread layout. Each page gets a half-
+    // canvas-width slot minus an 8 DIP gutter. Cover-page (page 0) and
+    // odd-tail cases render the LEFT slot only and leave the RIGHT slot
+    // as an empty placeholder rectangle. Search-hit overlay is disabled
+    // in dual mode for v1 (R17 — deferred per plan §"Out of scope").
+    if (impl_->dual_page) {
+        D2D1_SIZE_F vp = impl_->rt->GetSize();
+        const float gutter   = 8.0f;
+        const float slot_w   = std::max(0.0f, (vp.width - gutter) * 0.5f);
+        const float slot_h   = vp.height;
+        const float left_x0  = 0.0f;
+        const float right_x0 = slot_w + gutter;
+
+        auto draw_slot = [&](ID2D1Bitmap* bm, float x0) {
+            if (!bm) return;
+            D2D1_SIZE_F src = bm->GetSize();
+            float fit = (src.width  > 0.0f) ? (slot_w / src.width)  : 1.0f;
+            if (src.height * fit > slot_h && src.height > 0.0f) {
+                fit = slot_h / src.height;
+            }
+            float dst_w = src.width  * fit;
+            float dst_h = src.height * fit;
+            float dx = x0 + (slot_w - dst_w) * 0.5f;
+            float dy = (slot_h - dst_h) * 0.5f;
+            D2D1_RECT_F dst = D2D1::RectF(
+                dx + impl_->pan_x,         dy + impl_->pan_y,
+                dx + dst_w + impl_->pan_x, dy + dst_h + impl_->pan_y);
+            impl_->rt->DrawBitmap(bm, dst, 1.0f,
+                                  D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        };
+        draw_slot(impl_->current_bitmap.Get(), left_x0);
+        draw_slot(impl_->right_bitmap.Get(),   right_x0);
+
+        // Empty-right placeholder when there is no right page (cover or
+        // odd-tail). Without it the user's first Ctrl+Shift+D press on
+        // page 0 looks suspiciously like "nothing happened" — see plan
+        // R15 for the rationale.
+        if (!impl_->right_bitmap) {
+            const D2D1_RECT_F r = D2D1::RectF(
+                right_x0 + 4.0f, 4.0f,
+                right_x0 + slot_w - 4.0f, slot_h - 4.0f);
+            ComPtr<ID2D1SolidColorBrush> placeholder;
+            const UINT32 ph_rgb = impl_->invert_chrome ? 0x404040u : 0xC0C0C0u;
+            if (SUCCEEDED(impl_->rt->CreateSolidColorBrush(
+                    D2D1::ColorF(ph_rgb), &placeholder))) {
+                impl_->rt->DrawRectangle(r, placeholder.Get(), 1.0f);
+            }
+        }
+
+        HRESULT hr_dual = impl_->rt->EndDraw();
+        if (hr_dual == D2DERR_RECREATE_TARGET) {
+            discard_render_target();
+            resubmit_current_page();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        } else if (SUCCEEDED(hr_dual) && had_bitmap) {
+            ColdStartTimer::mark(4);
+            ColdStartTimer::emit_if_complete(log_timings_);
+        }
+        ValidateRect(hwnd_, nullptr);
+        return;
+    }
 
     if (impl_->current_bitmap) {
         D2D1_SIZE_F src = impl_->current_bitmap->GetSize();  // DIPs at rt's DPI
