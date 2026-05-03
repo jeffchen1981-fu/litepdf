@@ -13,6 +13,7 @@
 #include "ui/ColdStartTimer.hpp"
 #include "ui/PasswordDialog.hpp"  // Phase 8 Task 1
 #include "ui/password_retry.hpp"  // Phase 8 Task 1
+#include "printing/PrintJob.hpp"  // Phase 8.5 Task 10
 #include "ui/ThumbnailPane.hpp"  // Phase 7 Task 8: F4 toggle uses ThumbnailPane methods.
 
 #include <commctrl.h>
@@ -1027,6 +1028,15 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                         if (n >= 0) tabs_->set_active(n);
                     }
                     return 0;
+                case IDM_FILE_PRINT: {
+                    auto* view = active_view();
+                    if (view && view->document().is_open()) {
+                        litepdf::printing::PrintJob::run(
+                            hwnd, view->document(),
+                            static_cast<std::size_t>(view->current_page()));
+                    }
+                    return 0;
+                }
                 case IDM_FILE_OPEN: {
                     wchar_t buf[MAX_PATH] = {0};
                     OPENFILENAMEW ofn = {0};
@@ -1576,6 +1586,7 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
     // Ctrl+1..9 jumps to tab N.
     ACCEL accels[] = {
         { FCONTROL | FVIRTKEY, 'O',          IDM_FILE_OPEN     },
+        { FCONTROL | FVIRTKEY, 'P',          IDM_FILE_PRINT    },  // Phase 8.5
         { FCONTROL | FVIRTKEY, VK_OEM_PLUS,  IDM_ZOOM_IN       },  // Ctrl+=
         { FCONTROL | FVIRTKEY, VK_OEM_MINUS, IDM_ZOOM_OUT      },  // Ctrl+-
         { FCONTROL | FVIRTKEY, '0',          IDM_ZOOM_RESET    },

@@ -81,7 +81,7 @@ struct PrintMupdfHandle {
     fz_context*  ctx = nullptr;
     fz_document* doc = nullptr;
 
-    explicit PrintMupdfHandle(litepdf::core::Document& d) {
+    explicit PrintMupdfHandle(const litepdf::core::Document& d) {
         ctx = d.clone_context();
         if (!ctx) return;
         const auto utf8 = d.source_path().u8string();
@@ -206,7 +206,7 @@ bool blit_pixmap_to_hdc(HDC hdc, fz_pixmap* pix, fz_context* ctx,
 } // anonymous namespace
 
 bool PrintJob::run(HWND parent,
-                   litepdf::core::Document& doc,
+                   const litepdf::core::Document& doc,
                    std::size_t /*active_page*/)
 {
     if (!doc.is_open() || doc.page_count() == 0) {

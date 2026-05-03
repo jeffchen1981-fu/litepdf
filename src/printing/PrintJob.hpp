@@ -13,9 +13,10 @@ namespace litepdf::printing {
 
 struct PrintJob {
     // active_page is reserved for future "print current page only" UX;
-    // unused in T2.
+    // unused in T2. doc is taken by const-ref because every method we
+    // call (is_open, page_count, source_path, clone_context) is const.
     [[nodiscard]] static bool run(HWND parent,
-                                  litepdf::core::Document& doc,
+                                  const litepdf::core::Document& doc,
                                   std::size_t active_page);
 };
 

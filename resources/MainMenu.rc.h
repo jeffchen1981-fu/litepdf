@@ -63,4 +63,7 @@
 #define IDM_VIEW_INVERT      40061   // Ctrl+Shift+I
 #define IDM_VIEW_DUAL_PAGE   40062   // Ctrl+Shift+D
 
-// Next free ID: 40063. Reserve 40063-40070 for future Phase 8.x cleanups.
+// Phase 8.5: Print support.
+#define IDM_FILE_PRINT       40063   // Ctrl+P
+
+// Next free ID: 40064. Reserve 40064-40070 for future Phase 8.x cleanups.
