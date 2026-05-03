@@ -41,6 +41,10 @@ constexpr int IDC_RB_CUSTOM    = 1003;
 constexpr int IDC_EDIT_PCT     = 1004;
 constexpr int IDC_LABEL_PCT    = 1005;
 
+// ------------- Progress dialog control IDs ----------------------------
+constexpr int IDC_LABEL_STATUS = 2001;
+constexpr int IDC_BTN_CANCEL   = 2002;
+
 // Build an in-memory DLGTEMPLATE for the pre-flight scale picker.
 // All sizes are dialog units (DLU). Layout: 180 x 110.
 std::vector<uint8_t> build_config_template() {
@@ -185,6 +189,86 @@ INT_PTR CALLBACK config_dialog_proc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
     return FALSE;
 }
 
+// Build an in-memory DLGTEMPLATE for the progress dialog.
+// Layout (DLU): 180 x 60. Single status label + Cancel button.
+std::vector<uint8_t> build_progress_template() {
+    std::vector<uint8_t> out;
+    out.reserve(256);
+
+    DLGTEMPLATE hdr{};
+    hdr.style = DS_MODALFRAME | DS_CENTER | DS_SETFONT |
+                WS_POPUP | WS_CAPTION;
+    hdr.dwExtendedStyle = 0;
+    hdr.cdit = 2;  // status label + Cancel button
+    hdr.x = 0; hdr.y = 0;
+    hdr.cx = 180; hdr.cy = 60;
+    emit_bytes(out, &hdr, sizeof(hdr));
+
+    emit_word(out, 0x0000);  // no menu
+    emit_word(out, 0x0000);  // default windowClass
+    emit_wstring(out, std::wstring(L"Printing"));
+    emit_word(out, 9);                          // DS_SETFONT pointsize
+    emit_wstring(out, std::wstring(L"Segoe UI"));
+
+    // Item 0: Static "Printing page X of Y" (text patched at runtime)
+    {
+        align_to_dword(out);
+        DLGITEMTEMPLATE item{};
+        item.style = WS_CHILD | WS_VISIBLE | SS_LEFT;
+        item.x = 10; item.y = 15; item.cx = 160; item.cy = 10;
+        item.id = IDC_LABEL_STATUS;
+        emit_bytes(out, &item, sizeof(item));
+        emit_word(out, 0xFFFF); emit_word(out, 0x0082);  // STATIC
+        emit_wstring(out, std::wstring(L"Preparing print job..."));
+        emit_word(out, 0x0000);
+    }
+
+    // Item 1: Cancel button
+    {
+        align_to_dword(out);
+        DLGITEMTEMPLATE item{};
+        item.style = WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON;
+        item.x = 65; item.y = 35; item.cx = 50; item.cy = 14;
+        item.id = IDC_BTN_CANCEL;
+        emit_bytes(out, &item, sizeof(item));
+        emit_word(out, 0xFFFF); emit_word(out, 0x0080);  // BUTTON
+        emit_wstring(out, std::wstring(L"Cancel"));
+        emit_word(out, 0x0000);
+    }
+
+    return out;
+}
+
+INT_PTR CALLBACK progress_dialog_proc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp) {
+    auto* self = reinterpret_cast<PrintProgressDlg*>(
+        GetWindowLongPtrW(hDlg, DWLP_USER));
+    switch (msg) {
+        case WM_INITDIALOG:
+            // lp is `this`. Stash it for later messages.
+            SetWindowLongPtrW(hDlg, DWLP_USER, lp);
+            return TRUE;
+
+        case WM_COMMAND:
+            if (self && LOWORD(wp) == IDC_BTN_CANCEL) {
+                // Latch the abort. Don't destroy the dialog yet -- the
+                // print loop closes us after the current page.
+                self->abort_flag_for_dialog().request_abort();
+                EnableWindow(GetDlgItem(hDlg, IDC_BTN_CANCEL), FALSE);
+                SetDlgItemTextW(hDlg, IDC_LABEL_STATUS, L"Cancelling...");
+                return TRUE;
+            }
+            break;
+
+        case WM_CLOSE:
+            // Treat the [x] as Cancel.
+            if (self) {
+                self->abort_flag_for_dialog().request_abort();
+            }
+            return TRUE;
+    }
+    return FALSE;
+}
+
 } // anonymous namespace
 
 std::optional<ScaleChoice> PrintProgressDlg::show_config(HWND parent) {
@@ -203,7 +287,53 @@ std::optional<ScaleChoice> PrintProgressDlg::show_config(HWND parent) {
     return rc == IDOK ? std::optional<ScaleChoice>{chosen} : std::nullopt;
 }
 
-// PrintProgressDlg constructor / destructor / set_progress / close
-// implemented in Task 5.
+// ------------- PrintProgressDlg progress-mode methods (Task 5) ------
+
+PrintProgressDlg::PrintProgressDlg(
+    HWND parent, PrintAbortFlag& abort_flag, std::size_t total_pages)
+    : hwnd_(nullptr)
+    , abort_flag_(abort_flag)
+    , total_pages_(total_pages)
+{
+    auto tmpl = build_progress_template();
+    if (tmpl.empty()) return;
+    hwnd_ = CreateDialogIndirectParamW(
+        GetModuleHandleW(nullptr),
+        reinterpret_cast<DLGTEMPLATE*>(tmpl.data()),
+        parent,
+        progress_dialog_proc,
+        reinterpret_cast<LPARAM>(this));
+    if (hwnd_) {
+        ShowWindow(hwnd_, SW_SHOWNORMAL);
+        if (parent) EnableWindow(parent, FALSE);  // visually modal
+    }
+}
+
+PrintProgressDlg::~PrintProgressDlg() { close(); }
+
+void PrintProgressDlg::set_progress(std::size_t current_1based) {
+    if (!hwnd_) return;
+    wchar_t buf[64];
+    swprintf_s(buf, L"Printing page %zu of %zu...", current_1based, total_pages_);
+    SetDlgItemTextW(hwnd_, IDC_LABEL_STATUS, buf);
+    // Pump pending messages so the Cancel click is observed before the
+    // next page render starts. IsDialogMessage handles tab/enter routing.
+    MSG msg;
+    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        if (!IsDialogMessageW(hwnd_, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
+void PrintProgressDlg::close() {
+    if (hwnd_) {
+        HWND parent = GetParent(hwnd_);
+        if (parent) EnableWindow(parent, TRUE);
+        DestroyWindow(hwnd_);
+        hwnd_ = nullptr;
+    }
+}
 
 } // namespace litepdf::printing
