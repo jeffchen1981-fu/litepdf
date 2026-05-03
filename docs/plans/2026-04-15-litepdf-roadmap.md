@@ -64,6 +64,7 @@ Phase 3  (MainWindow + PdfCanvas, single-tab Tier 1 viewer)  ◄── first dem
 | 6 | Search | In-doc search (Ctrl+F), then cross-tab (Ctrl+Shift+F), dockable results panel | Search finds known fixture hits; panel docks/undocks; click navigates |
 | 7 | Thumbnails | Owner-draw ListView, lazy render, F4 toggle, hidden by default | Thumbnails render on demand; opening doesn't block on thumb generation |
 | 8 | Tier 3 completion | Password dialog, ePub/CBZ/XPS, dark mode, dual-page spread | All fixtures open; toggles work; no format-specific crashes |
+| 8.5 | Print support (T2) | Standard `PrintDlg` + page range + copies + scale modes (fit/actual/custom%) + auto-rotate; new `src/printing/` module | Active doc prints to default printer + Microsoft Print to PDF; cancel mid-job works; spec at `docs/superpowers/specs/2026-05-03-print-support-design.md`; tag `v0.0.10-phase8.5` |
 | 9 | Icons | "Lightning document" app icon + red PDF document variant; 7 sizes each; multi-res `.ico` | Icons visible in Explorer at all DPIs; installer welcome shows icon |
 | 10 | Installer | Inno Setup script, per-user default, optional associations, informational license page (design §8.5), CI release job with source tarball attached | `litepdf-setup.exe` installs/upgrades/uninstalls cleanly on a fresh VM; license page follows design §8.5 wording (no "I agree" radio); release bundles source tarball per AGPL §13 |
 | 11 | Benchmark gate | Cold-start benchmark harness, CI regression threshold (+10 % fails) | Baseline captured; regression PR correctly blocked in CI |
@@ -81,13 +82,14 @@ Phase 3  (MainWindow + PdfCanvas, single-tab Tier 1 viewer)  ◄── first dem
 | 5 | ~400 | 3580 |
 | 6 | ~500 | 4080 |
 | 7 | ~400 | 4480 |
-| 8 | ~500 | 4980 |
-| 9 | ~100 (resource embedding; icons are assets not code) | 5080 |
-| 10 | ~150 (Inno Setup .iss is declarative) | 5230 |
-| 11 | ~200 (benchmark harness) | 5430 |
-| 12 | ~150 | 5580 |
+| 8 | ~500 (roadmap-level estimate; PR #6 plan body refines to ~600) | 4980 |
+| 8.5 | ~345 (`src/printing/` module + wiring) | 5325 |
+| 9 | ~100 (resource embedding; icons are assets not code) | 5425 |
+| 10 | ~150 (Inno Setup .iss is declarative) | 5575 |
+| 11 | ~200 (benchmark harness) | 5775 |
+| 12 | ~150 | 5925 |
 
-Slightly over the design estimate (4500); the 5500-ish range accounts for tests and harness code the design section under-counted.
+Slightly over the design estimate (4500); the 5900-ish range accounts for tests, harness code the design section under-counted, and the Phase 8.5 print module added 2026-05-03 (was excluded from design v1 §10 but determined to be table-stakes for launch — see `docs/superpowers/specs/2026-05-03-print-support-design.md`). Still well under the 8 MB exe budget.
 
 ## Re-Planning Protocol
 
