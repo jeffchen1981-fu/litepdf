@@ -1,9 +1,9 @@
 # LitePDF — Print Support (T2) Design
 
 **Date**: 2026-05-03
-**Status**: Draft — brainstorming output, awaiting user review per `superpowers:brainstorming` HARD-GATE
+**Status**: Approved 2026-05-03 — ready for implementation plan via `superpowers:writing-plans`
 **Tier**: T2 (standard PrintDlg + page range + copies + scale modes + auto-rotate). T1 / T3 explicitly considered and rejected; see §1.
-**Phase placement**: To be decided — see §8.
+**Phase placement**: **Phase 8.5** (between Phase 8 Tier-3 completion and Phase 9 icons). See §8.
 
 ## 1. Goals & Constraints
 
@@ -141,17 +141,17 @@ Printing is a side-effect-heavy domain. Strategy:
 
 CI integration test runs on Windows runners only — "Microsoft Print to PDF" is built into Windows 10+. Project is Windows-only anyway, so no matrix impact.
 
-## 8. Phase Placement Options
+## 8. Phase Placement — Selected: Phase 8.5
 
-Three options; user picks one before this spec is converted into an executable plan:
+**User decision 2026-05-03: Option B (Phase 8.5).**
 
 | Option | Where | Pros | Cons |
 |---|---|---|---|
-| **A. Phase 8.x patch** | Insert after Phase 8 ships v0.0.9-phase8 | Reuses Phase 8's `DLGTEMPLATE` infrastructure (`PasswordDialog`); fastest to ship | Tight against Phase 8's already ~600 LOC; pushes Phase 9 (icons) by ~1 week |
-| **B. New Phase 8.5 (recommended)** | Between Phase 8 and Phase 9 in the roadmap | Clean phase boundary; doesn't pollute Phase 8's "Tier 3 features" theme; cumulative LOC ~5,580 → ~5,925 still well under the original 8 MB exe target | Adds a new entry to the roadmap; one extra `v0.0.10-phase8.5` tag |
-| **C. Post-v1.0** | After Phase 12 release | Keeps v1.0 ship date | Print is "table stakes" for a PDF reader; users will complain on launch day; competing-tool review (SumatraPDF / Foxit / Adobe) all ship Day-1 print |
+| A. Phase 8.x patch | Insert after Phase 8 ships v0.0.9-phase8 | Reuses Phase 8's `DLGTEMPLATE` infrastructure (`PasswordDialog`); fastest to ship | Tight against Phase 8's already ~600 LOC; pushes Phase 9 (icons) by ~1 week |
+| **B. New Phase 8.5 — SELECTED** | Between Phase 8 and Phase 9 in the roadmap | Clean phase boundary; doesn't pollute Phase 8's "Tier 3 features" theme; cumulative LOC ~5,580 → ~5,925 still well under the original 8 MB exe target | Adds a new entry to the roadmap; one extra `v0.0.10-phase8.5` tag |
+| C. Post-v1.0 | After Phase 12 release | Keeps v1.0 ship date | Print is "table stakes" for a PDF reader; users will complain on launch day; competing-tool review (SumatraPDF / Foxit / Adobe) all ship Day-1 print |
 
-**Recommended: B.** Print is a baseline expectation for any PDF reader; deferring to post-v1 risks reputational damage at launch. A dedicated Phase 8.5 keeps Phase 8 cohesive (Tier 3 = password, multi-format, dark, dual-page) and Phase 9 cohesive (icons / installer prep).
+**Rationale.** Print is a baseline expectation for any PDF reader; deferring to post-v1 risks reputational damage at launch. A dedicated Phase 8.5 keeps Phase 8 cohesive (Tier 3 = password, multi-format, dark, dual-page) and Phase 9 cohesive (icons / installer prep). Tag at the end of Phase 8.5 is `v0.0.10-phase8.5`. Roadmap doc `docs/plans/2026-04-15-litepdf-roadmap.md` is updated in the same commit as this status flip.
 
 ## 9. Out of Scope / Deferred
 
@@ -186,4 +186,4 @@ Explicitly **NOT** in T2 (revisit for T3 / post-v1):
 | Module | `src/printing/PrintJob.{hpp,cpp}` + `PrintProgressDlg.{hpp,cpp}` + `PrintGeometry.hpp` |
 | LOC budget | ~345 total (320 print module + 25 wiring) |
 | Tests | +13 (11 unit + 2 integration); 146 → 159 |
-| Phase placement | **Recommended Phase 8.5** between Phase 8 and Phase 9 (option B); A or C also tabled — user decides |
+| Phase placement | **Phase 8.5** between Phase 8 and Phase 9 (option B selected by user 2026-05-03); tag `v0.0.10-phase8.5` |
