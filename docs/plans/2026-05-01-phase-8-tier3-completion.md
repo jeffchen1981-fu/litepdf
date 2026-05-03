@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. Pattern follows Phases 5–7: implementer → spec reviewer → quality reviewer → fix. **After this plan is written, run `/plan-eng-review` + `pr-review-toolkit:review-pr` (or equivalent stacked review per CLAUDE.md rule 14) BEFORE executing.**
 
-**Goal:** Land the four remaining Tier 3 features so v0.0.9 is feature-complete: (1) modal password prompt for encrypted PDF, (2) end-to-end open path verification for ePub / CBZ / XPS via the existing `Document` allowlist, (3) View → Invert Colors dark-mode toggle that re-tints both chrome and rendered page content, (4) View → Two-Page Spread side-by-side layout. Total budget ≈ 500 LOC.
+**Goal:** Land the four remaining Tier 3 features so v0.0.9 is feature-complete: (1) modal password prompt for encrypted PDF, (2) end-to-end open path verification for ePub / CBZ / XPS via the existing `Document` allowlist, (3) View → Invert Colors dark-mode toggle that re-tints both chrome and rendered page content, (4) View → Two-Page Spread side-by-side layout. Total budget ≈ 600 LOC.
 
 **Architecture:** Mirrors prior phases. The password dialog is a small Win32 modal (`DialogBoxParamW` + an in-memory `DLGTEMPLATE`, no new framework), invoked from `MainWindow::open_tab_async` when `Document::open` returns `OpenError::NeedsPassword`. The 3-attempt counter is per-open-attempt and dies when the dialog closes. ePub/CBZ/XPS need no engine change — `Document::looks_like_supported_document` already allowlists the extensions and verifies the ZIP magic bytes; Phase 8 adds fixture-driven unit + smoke coverage and tightens the title-bar / outline-pane fallbacks for non-PDF formats. Dark mode adopts MuPDF's `fz_invert_pixmap` at the worker (cheap, no D2D blend mode change) plus a new `Palette` flip in `PdfCanvas::on_paint` for chrome (background, scrollbar, find-bar pass-through). The flag is per-tab (`DocumentView::invert_colors_`) so each document's preference survives tab switch — same per-tab discipline as F4/F5 panes from Phase 7 D11. Two-page spread is layout-only inside `PdfCanvas`: when enabled, the canvas fits TWO pages side-by-side at the canvas DIP-width budget, ships TWO render requests (current + current+1), and double-buffers both into a single Direct2D draw. PgUp/PgDn step by 2 (clamped). Cover page (page 0) is shown alone — book-style — to match Acrobat / Foxit. Per-tab state (`DocumentView::dual_page_`).
 
@@ -32,7 +32,7 @@ Before starting, confirm:
 - `src/core/Document.{hpp,cpp}` — `OpenError::NeedsPassword`, `Document::authenticate(password)`, and the free function `looks_like_supported_document` in an anonymous namespace inside `Document.cpp` (NOT a `Document::` member). Already wired; Phase 8 just wires the dialog on top.
 - `src/ui/TabManager.cpp` — Palette + `WM_SETTINGCHANGE` reference (lines 33–304); pattern reused by FindBar / ResultsPanel / Splitter / ThumbnailPane.
 - `src/ui/PdfCanvas.cpp` — `WM_USER_RENDER_DONE` handler (lines 375–410), where the inverted bitmap path will piggy-back; D2D bitmap upload currently uses BGRA + `IGNORE_ALPHA`.
-- `src/ui/MainWindow.cpp` — `ACCEL accels[]` at lines 1379-1408 for new accelerator additions; `open_tab_async` for the password handshake site; About-dialog literal at line 936 (will bump to v0.0.9). Note line 917 holds an `OPENFILENAME` field — earlier plan drafts pointed there incorrectly.
+- `src/ui/MainWindow.cpp` — `ACCEL accels[]` at lines 1360-1389 (verify with `grep -n 'ACCEL accels' src/ui/MainWindow.cpp` before edit) for new accelerator additions; `open_tab_async` for the password handshake site; About-dialog literal at line 936 (will bump to v0.0.9). Note line 917 holds an `OPENFILENAME` field — earlier plan drafts pointed there incorrectly.
 - `src/core/DocumentView.{hpp,cpp}` — Phase 7 added `ensure_thumb_pane`/`thumb_pane()`. Pattern reused for two new per-tab flags + their getters/setters.
 - `~/.claude/compact-dumps/litepdf/rationale.md` — read entries 2026-04-26 (plan-defects from Phase 7) + 2026-05-01 (smoke-test build environment notes; OutlinePane empty-content finding deferred from Phase 7).
 
@@ -98,7 +98,7 @@ build/Release/litepdf.exe tests/fixtures/sample.cbz
 
 **D5. No XPS fixture in v1.** The repo has `simple.pdf`, `bookmarks.pdf`, `corrupt.pdf`, `encrypted.pdf`, `sample.cbz`, `sample.epub`, `search.pdf`, `測試.pdf`, plus `sample.png` (negative test). There is no XPS fixture, and procuring or generating a tiny XPS file requires either Windows print-to-XPS (not headless-friendly) or an external XPS authoring tool (not in our toolchain). Phase 8 ships ePub + CBZ verification, asserts the XPS allowlist code path stays intact (extension allowlist check has a unit test that names `.xps` in its parameter list), and defers the real-fixture XPS test to Phase 11 (binary-size regression) where MuPDF's CMaps / fonts will be re-audited anyway. Trade-off: roadmap exit criterion says "All format fixtures open"; at plan time only ePub + CBZ exist as actual files. Roadmap is satisfied because every fixture present DOES open; XPS is not regressed (allowlist unit test guards). Recorded in §"Out of scope" too. Rejected: synthesizing an XPS fixture by zipping the FixedDocument.fdoc XML schema by hand — fragile and test-only; not worth the LOC.
 
-**D6. FB2 and SVG are explicitly out of Phase 8 scope.** Both are MuPDF-supported (allowlist in `Document.cpp`) but design §3 lists them in Tier 3 without a specific phase assignment. Roadmap §"Phase 8" exit criteria mention `ePub/CBZ/XPS` only. FB2 and SVG fixtures don't exist in `tests/fixtures/`; the allowlist code path is exercised by an extension-only assertion, same as XPS. Adding fixtures + tests for both would push Phase 8 beyond its 500-LOC budget for marginal Tier 3 gain. Recorded in §"Out of scope". Rejected: implicit scope expansion by treating "Tier 3 completion" as encompassing every Tier 3 bullet; doing so would conflate roadmap rows.
+**D6. FB2 and SVG are explicitly out of Phase 8 scope.** Both are MuPDF-supported (allowlist in `Document.cpp`) but design §3 lists them in Tier 3 without a specific phase assignment. Roadmap §"Phase 8" exit criteria mention `ePub/CBZ/XPS` only. FB2 and SVG fixtures don't exist in `tests/fixtures/`; the allowlist code path is exercised by an extension-only assertion, same as XPS. Adding fixtures + tests for both would push Phase 8 beyond its 600-LOC budget for marginal Tier 3 gain. Recorded in §"Out of scope". Rejected: implicit scope expansion by treating "Tier 3 completion" as encompassing every Tier 3 bullet; doing so would conflate roadmap rows.
 
 **D7. "Invert Colors" (the menu label) = whole-pixmap channel invert at the render boundary, NOT a Direct2D blend mode and NOT semantic dark-mode.** The user-facing menu label is **"Invert Colors"** (matching SumatraPDF), NOT "Dark Mode" — this is a deliberate UX choice. Phase 8 ships **plain channel invert via `fz_invert_pixmap`**: every pixel including images, logos, and color charts gets `R=255-R, G=255-G, B=255-B`. Documents with photos / colored content will look psychedelic when inverted; that is expected and matches the v1 promise. Foxit-style "Night Mode" (selective invert that preserves images) is a Phase 11 polish target — out of scope for v1. Calling the menu item "Invert Colors" sets the right expectation; calling it "Dark Mode" would over-promise. **D7 mechanism (cont.):** When the per-tab `invert_colors_` flag is set, the worker calls `fz_invert_pixmap(ctx, pix)` immediately after the rasterize at `RenderEngine.cpp:189` (`fz_new_pixmap_from_display_list`) BEFORE the pixmap travels to the UI. (The codebase does NOT call `fz_run_page` directly — the rasterize is via display list. See T3 step 3.1 for the exact hook site.) This adds ≤ ~3 ms per A4 page at 150 DPI (memcpy-bound in cache; benchmarked roughly against a manual loop in a scratch test) and requires zero D2D code change. The chrome (frame background, scrollbar fallback rectangle, find-bar pass-through) is repainted by flipping the per-canvas `Palette` brushes — same mechanism the existing TabManager / FindBar / ResultsPanel / Splitter use for system dark-mode flips. The user-visible result: page renders white-on-black instead of black-on-white; chrome flips to dark. Trade-off: the inverted pixmap occupies a separate cache slot from its non-inverted counterpart — see D8. Rejected: D2D blend-mode invert (would require shaders / `ID2D1Effect` factory chain — bigger LOC + harder DPI story). Rejected: gamma-aware invert (Phase 11 polish; v1 does plain channel-invert per the prompt's "anti-scope-creep" note).
 
@@ -121,6 +121,10 @@ NOT honoring this drain leaves a 50-100 ms window where a stale-polarity pixmap 
 **D12. Two-page spread interaction with cross-tab search: jump to page-PAIR containing the hit.** When `SearchSession::next()` returns a hit on page P and `dual_page_` is on, scroll-into-view computes the page-pair (cover rule: P=0 → spread (0,−); else P odd → (P, P+1); P even → (P-1, P)). `PdfCanvas::scroll_into_view(hit)` already calls `change_current_page(hit.page)` which fires the page-changed observer — observer already updates current_page in the canvas, no extra hook needed; only the *layout* code in T4 reads `dual_page_` to decide spread placement. Trade-off: per-pair semantic is implicit in the layout; explicit `current_page = pair_left_page(hit.page)` happens inside `PdfCanvas::dual_page_compute_left()`. Rejected: introducing a `SpreadHit` overlay path; the existing per-page hit overlay already paints quads in PDF user space which the layout transform handles uniformly.
 
 **D13. Tag at end: `v0.0.9-phase8`.** Mirrors phase 5/6/7 convention. Version bump in `VERSION`, About dialog, `litepdf.rc` VERSIONINFO block (sat at `0.0.6.0` since Phase 5 — Phase 8 picks up two phases of debt and writes `0,0,9,0`). No fast-follow tags planned at write time; if something surfaces post-tag, follow `phase8.1` pattern.
+
+**D14. Thumbnails do NOT render inverted in v1.** The `ThumbnailRenderer` generates pixmaps that are scale-keyed only (no `invert` axis); adding an `invert` axis to the thumb cache would double thumb cache footprint for marginal UX value. When `invert_colors_` is on for a tab, the main canvas renders white-on-black but the thumbnail pane continues to show the original (non-inverted) page appearance. This is intentional: thumbs are navigation affordances, not page-accurate previews — users benefit from recognizing page content even while the main view is inverted. Out of scope for v0.0.9; revisit if user feedback surfaces. **Implementer note:** do NOT pass `invert_colors_` into `ThumbnailRenderer::request_render`. That call site is entirely separate from `DocumentView::request_render` and must remain polarity-agnostic in Phase 8.
+
+**D15. Programmatic page-jump in spread mode uses the same snap rule as PgDn.** OutlinePane clicks, MRU re-open navigation, and search-result jumps (other than the `PdfCanvas::scroll_into_view` path already covered by D12) all call `DocumentView::set_current_page()` or equivalent. In spread mode these must apply the same snap: requested page N becomes spread `(N, N+1)` if N is odd, else `(N-1, N)`. Cover-page exception still applies (page 1 alone). This keeps the snap rule centralized in `DocumentView::set_current_page()` (or a shared `dual_page_compute_left` call at entry) rather than duplicated at every programmatic entry point. Rejected: entry-point-specific snap logic in each caller — fragile and likely to diverge as Phase 9+ adds more navigation entry points.
 
 ---
 
@@ -154,14 +158,14 @@ MENUITEM "&Two-Page Spread\tCtrl+Shift+D", IDM_VIEW_DUAL_PAGE
 
 (Both items will be checkmarked-when-on once T2 / T4 land their `WM_INITMENUPOPUP` handlers; T0 ships them unchecked.)
 
-**Step 0.3:** Edit `src/ui/MainWindow.cpp` `ACCEL accels[]` at lines 1379-1408 (the same array that holds `VK_F4 / VK_F5 / Ctrl+O`). Add adjacent to the existing F4/F5 lines:
+**Step 0.3:** Edit `src/ui/MainWindow.cpp` `ACCEL accels[]` at lines 1360-1389 (the same array that holds `VK_F4 / VK_F5 / Ctrl+O`; verify exact range with `grep -n 'ACCEL accels' src/ui/MainWindow.cpp` before edit). Add adjacent to the existing F4/F5 lines:
 
 ```cpp
 { FCONTROL | FSHIFT | FVIRTKEY, 'I', IDM_VIEW_INVERT    },
 { FCONTROL | FSHIFT | FVIRTKEY, 'D', IDM_VIEW_DUAL_PAGE },
 ```
 
-Verify `Ctrl+Shift+I` and `Ctrl+Shift+D` are not already bound — read lines 1379-1408. Existing Phase 6/7 bindings (verified against `c9f3a7d` HEAD): `Ctrl+F`, `Ctrl+Shift+F`, `Ctrl+1..9` (tab-goto), `Ctrl+W`, `Ctrl+Tab` / `Ctrl+Shift+Tab`, `Ctrl+O`, `F4`, `F5`. `Ctrl+T` is **not** bound (no `IDM_TAB_NEW` exists; new tab is via `Ctrl+O`). Both `Ctrl+Shift+I` and `Ctrl+Shift+D` are free.
+Verify `Ctrl+Shift+I` and `Ctrl+Shift+D` are not already bound — read lines 1360-1389. Existing Phase 6/7 bindings (verified against `c9f3a7d` HEAD): `Ctrl+F`, `Ctrl+Shift+F`, `Ctrl+1..9` (tab-goto), `Ctrl+W`, `Ctrl+Tab` / `Ctrl+Shift+Tab`, `Ctrl+O`, `F4`, `F5`. `Ctrl+T` is **not** bound (no `IDM_TAB_NEW` exists; new tab is via `Ctrl+O`). Both `Ctrl+Shift+I` and `Ctrl+Shift+D` are free.
 
 **Why Ctrl+Shift+D instead of Ctrl+D:** Windows-app convention is `Ctrl+Letter` for file/edit operations (Ctrl+O open, Ctrl+W close, Ctrl+T new tab, etc.) and `Ctrl+Shift+Letter` for view-mode toggles (Ctrl+Shift+W in Adobe for window mode, etc.). Phase 8 ships two view-mode toggles (Invert + Dual-page), so making both use `Ctrl+Shift+_` reads as a deliberate modifier-consistent group. Also reserves the bare `Ctrl+D` for a future "Duplicate Tab" affordance.
 
@@ -634,7 +638,7 @@ TEST_CASE("password_retry: cancel returns immediately, no auth call",
 }
 ```
 
-Cumulative count update: 130 baseline + 3 (T1.2 dialog template) + 4 (T1.5b retry loop) = 137 after T1.
+Cumulative count update: 131 baseline + 3 (T1.2 dialog template) + 4 (T1.5b retry loop) = 138 after T1.
 
 **Step 1.6: Wire `try_authenticate_with_retry` in `MainWindow::open_tab_async`.** When `Document::open` returns `OpenError::NeedsPassword`:
 
@@ -693,7 +697,7 @@ cmake --build build --config Release
 ctest --test-dir build -C Release -R "password_(dialog|retry)" --output-on-failure
 ```
 
-Expected: 3 [password_dialog] + 4 [password_retry] = 7/7 pass. Cumulative count: 130 → **137**.
+Expected: 3 [password_dialog] + 4 [password_retry] = 7/7 pass. Cumulative count: 131 → **138**.
 
 **Step 1.9: Manual smoke.**
 
@@ -760,7 +764,7 @@ TEST_CASE("Document rejects non-allowlisted extension (sample.png)",
 
 **Step 2.2: Run; expect 4 cases pass (2 existing + 2 new) under `[document][formats]`.**
 
-Cumulative count: 137 → **139** (+2 from T2's two NEW cases — anchored to 137 from end of T1).
+Cumulative count: 138 → **140** (+2 from T2's two NEW cases — anchored to 138 from end of T1).
 
 **Step 2.3: Smoke-test extension (`scripts/smoke-test.ps1`).** After the existing simple-PDF smoke block, add two more launch-and-poll blocks for `sample.epub` and `sample.cbz`. Mirror the existing `Start-Process` + `MainWindowHandle` poll pattern; do NOT require timing-line output (only PDFs hit `--log-timings` path).
 
@@ -1015,7 +1019,7 @@ TEST_CASE("RenderEngine invert: same-polarity resubmit hits L1, opposite-polarit
 
 Verify against actual repo before editing: `grep -n "Document::clone_context\|RenderEngine::RenderEngine\|PageCache::l1_size" src/core/*.{hpp,cpp}`. The plan's earlier draft used `d.context()` and a different `RenderEngine` constructor signature — both were wrong; the version above is API-verified.
 
-**Step 3.6: Build + tests.** Cumulative count: 139 → **142** (+1 [page_cache][invert] from T3.2 + 2 [render_engine][invert] from T3.5).
+**Step 3.6: Build + tests.** Cumulative count: 140 → **143** (+1 [page_cache][invert] from T3.2 + 2 [render_engine][invert] from T3.5).
 
 **Step 3.7: Manual smoke.**
 
@@ -1201,9 +1205,9 @@ Mirror in `WM_INITMENUPOPUP`: `MF_CHECKED` if `dual_page()` is on. **R19 — che
 
 **Step 4.5: Thumbnail-pane sync (D11).** No code change needed — the existing page-changed observer (Phase 7 T7) already calls `thumb_pane_->set_current_page(p)`. With `dual_page_` on, `current_page` IS the left page of the pair (per the snap in Step 4.4), so the thumb highlight naturally lands on the left tile. Right-tile highlight is intentionally NOT painted; documented in §"Known Limitations".
 
-**Step 4.6: Search hit-jump (D12) + dual-mode FindBar status.** No render-path code change. `PdfCanvas::scroll_into_view(hit)` ends with `change_current_page(hit.page)`; the `IDM_VIEW_DUAL_PAGE` handler's snap path runs naturally on the next nav since dual-page is active before scroll-into-view fires. **R17 — FindBar status text in dual mode:** when `dual_page_` is on AND a hit is highlighted, the FindBar's existing "Match X of Y on page P" status string should append `(left)` or `(right)` so the user knows which slot of the spread the highlight is in. Locate the format-string call in `FindBar::set_match_index` (or wherever the status is built); when `view_->dual_page()` is true, append based on whether `hit.page == dual_page_compute_left(hit.page, view_->page_count())` (then "left") or otherwise ("right"). Trade-off: ~10 LOC FindBar change. Without it, R6 + D12 are functionally correct but the user can lose track of which slot has the active highlight. Verify in §Smoke step 8.
+**Step 4.6: Search hit-jump (D12).** No render-path code change. `PdfCanvas::scroll_into_view(hit)` ends with `change_current_page(hit.page)`; the `IDM_VIEW_DUAL_PAGE` handler's snap path runs naturally on the next nav since dual-page is active before scroll-into-view fires. R17 (FindBar slot tag in dual mode) is deferred — see §"Out of scope".
 
-**Step 4.7: Build + tests.** Cumulative count: 142 → **145** (+3 [dual_page]).
+**Step 4.7: Build + tests.** Cumulative count: 143 → **146** (+3 [dual_page]).
 
 **Step 4.8: Manual smoke.**
 
@@ -1328,7 +1332,7 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Expected: **145/145** + 1 [!shouldfail] when starting from the current `origin/main` baseline (130 cases as of post-Phase-7 ship). If the `phase-7-polish` PR has merged by Phase 8 start, the baseline is 131 and final is **146**.
+Expected: **146/146** when starting from the 131 baseline (post-Phase-7-polish-PR #5 merged). If Phase 8 starts before PR #5 lands, baseline is 130 and expected is **145/145**. Verify the actual baseline with `grep -rE '^TEST_CASE' tests/unit/ | wc -l` at T0 and pick the matching column in the table below.
 
 Test count derivation:
 
@@ -1342,7 +1346,7 @@ Test count derivation:
 | T3.5: 2 [render_engine][invert] | +2 | 142 | 143 |
 | T4: 3 [dual_page] | +3 | **145** | **146** |
 
-Per-step "Cumulative count:" lines throughout T1-T4 use the 130 baseline. Implementer should re-run the pre-flight `grep -c TEST_CASE tests/unit/*.cpp` check at start and pick the column accordingly.
+Per-step "Cumulative count:" lines throughout T1-T4 use the 131 baseline (Phase 7 polish PR #5 merged). If starting before PR #5 lands, subtract 1 from each cumulative figure. Use `grep -rE '^TEST_CASE' tests/unit/ | wc -l` at T0 to determine the actual baseline and pick the matching column above.
 
 **Step 5.5: Commit + tag.**
 
@@ -1404,7 +1408,7 @@ Per Task 5 above. Final tag: `v0.0.9-phase8`. About dialog literal at `MainWindo
 
 ## Done When
 
-1. **Test count:** ctest **145/145** + 1 [!shouldfail] green on Release build (or 146/146 if `phase-7-polish` PR has merged before Phase 8 start — see test-count derivation table in §"Step 5.4").
+1. **Test count:** ctest **146/146** green on Release build (assuming Phase 7 polish PR #5 has merged; if started before that lands, baseline is 145/145 instead — verify with `grep -rE '^TEST_CASE' tests/unit/ | wc -l` before T0). See test-count derivation table in §"Step 5.4".
 2. **Smoke test:** `scripts/smoke-test.ps1` passes the new ePub / CBZ / encrypted-launch steps. All 10 manual smoke steps pass.
 3. **Encrypted PDF UX:** Dialog modal appears centered, hides password with `ES_PASSWORD`. Wrong password 3× closes the dialog and tab. Correct password opens tab + renders. Cancel closes dialog without tab; MRU intact.
 4. **ePub + CBZ:** Both fixtures open without crash. `page_count() >= 1`. Title bar reflects basename.
@@ -1418,6 +1422,8 @@ Per Task 5 above. Final tag: `v0.0.9-phase8`. About dialog literal at `MainWindo
 ---
 
 ## Out of scope (deferred — note explicitly to guard against scope creep)
+
+- **R17 (FindBar status appends `(left)` or `(right)` in dual-page mode)** is deferred. FindBar currently is layout-agnostic; adding slot-aware feedback requires a coordinate-to-slot reverse-mapping in `PdfCanvas` plus a new `DocumentView::find_hit_slot()` query. This is a non-trivial integration that is unbudgeted within the ~600 LOC Phase 8 target. Out of scope for v0.0.9; track as Phase 8.x follow-up if dual-mode search proves common in practice.
 
 - **XPS fixture + integration test** — D5. Allowlist code path verified by an existence-of-extension test; full real-fixture XPS test deferred to Phase 11.
 - **FB2 fixture + integration test** — D6. Same rationale as XPS.
