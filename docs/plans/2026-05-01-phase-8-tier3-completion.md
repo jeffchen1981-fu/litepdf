@@ -1151,11 +1151,23 @@ The exact field / accessor names (`canvas_w`, `page_w`, etc.) MUST be read out o
 
 ```cpp
 case VK_NEXT: {  // PgDn
-    int step = view_->dual_page() ? 2 : 1;
-    int next = std::min(view_->current_page() + step, view_->page_count() - 1);
+    int next;
     if (view_->dual_page()) {
-        // Snap to the LEFT page of the next pair.
-        next = dual_page_compute_left(next, view_->page_count());
+        // BUG-FIX (d2b583c): advance from the current spread's LEFT, not
+        // from current_page raw.  The old pattern was:
+        //   next = min(current_page + 2, last);  compute_left(next)
+        // That clamps an even page before compute_left fires — e.g. in a
+        // 3-page doc with current spread (1,2), current_page==1:
+        //   min(1+2, 2) = 2  →  compute_left(2,3) = 1  →  STUCK.
+        // Fix: compute cur_left first, then step by 2.  cur_left+2 is
+        // always already the left of the next pair (1→3, 3→5, …), or it
+        // clamps to the last page (which may be an odd-tail shown alone).
+        // No second compute_left call is needed.
+        int cur_left = dual_page_compute_left(view_->current_page(),
+                                              view_->page_count());
+        next = std::min(cur_left + 2, view_->page_count() - 1);
+    } else {
+        next = std::min(view_->current_page() + 1, view_->page_count() - 1);
     }
     if (change_current_page(next)) {
         kick_render_or_repaint();
@@ -1170,9 +1182,17 @@ case VK_NEXT: {  // PgDn
     break;
 }
 case VK_PRIOR: {  // PgUp
-    int step = view_->dual_page() ? 2 : 1;
-    int prev = std::max(view_->current_page() - step, 0);
-    if (view_->dual_page()) prev = dual_page_compute_left(prev, view_->page_count());
+    int prev;
+    if (view_->dual_page()) {
+        // Symmetric fix: step back from cur_left to avoid snap-forward.
+        // cur_left-2 is always already the left of the prior pair, or 0
+        // (cover page, renders alone per D10).
+        int cur_left = dual_page_compute_left(view_->current_page(),
+                                              view_->page_count());
+        prev = std::max(cur_left - 2, 0);
+    } else {
+        prev = std::max(view_->current_page() - 1, 0);
+    }
     if (change_current_page(prev)) {
         kick_render_or_repaint();
     } else {
@@ -1214,7 +1234,7 @@ Mirror in `WM_INITMENUPOPUP`: `MF_CHECKED` if `dual_page()` is on. **R19 — che
 ```bash
 build/Release/litepdf.exe tests/fixtures/bookmarks.pdf
 # Ctrl+Shift+D → spread mode; page 0 renders alone, 1+2 next.
-# PgDn → moves to 1+2 spread. PgDn again → left advances by 2 → left=3,
+# PgDn → moves to 1+2 spread (cur_left=1). PgDn again → cur_left+2=3,
 #         clamp to page_count-1=2; compute_right(2,3)=-1 (odd-tail), so
 #         page 2 renders alone (right slot blank). Status bar flashes.
 # Ctrl+Shift+D again → back to single. Page 2 (the lone odd-tail page)
