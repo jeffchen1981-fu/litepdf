@@ -9,6 +9,8 @@
 #include "core/SearchSession.hpp"
 #include "core/TabList.hpp"
 #include "ui/ColdStartTimer.hpp"
+#include "ui/PasswordDialog.hpp"  // Phase 8 Task 1
+#include "ui/password_retry.hpp"  // Phase 8 Task 1
 #include "ui/ThumbnailPane.hpp"  // Phase 7 Task 8: F4 toggle uses ThumbnailPane methods.
 
 #include <commctrl.h>
@@ -34,6 +36,13 @@ constexpr wchar_t kWindowTitle[]     = L"LitePDF";
 constexpr UINT WM_USER_OPEN_OK       = WM_USER + 1;
 constexpr UINT WM_USER_OPEN_FAILED   = WM_USER + 2;
 // WM_USER + 3 is WM_USER_RENDER_DONE, reserved by PdfCanvas.
+// Phase 8 Task 1: encrypted-PDF password handshake. Worker thread can't
+// run a modal dialog (no message pump, no parent HWND), so on
+// OpenError::NeedsPassword the worker posts this message carrying the
+// still-alive Document + path; the UI thread runs the 3-attempt loop,
+// calls authenticate() on the same Document, and either constructs a
+// DocumentView/Tab inline or drops the Document on cancel/exhaustion.
+constexpr UINT WM_USER_PASSWORD_PROMPT = WM_USER + 12;
 // Phase 6 Task 10: per-tab SearchSession on_update() observer fires on a
 // worker thread and PostMessage-marshals to this message on the UI thread.
 // Posted once per completed page scan (plus a final post when
@@ -45,6 +54,14 @@ constexpr UINT WM_USER_SEARCH_UPDATE = WM_USER + 10;
 // PostMessage-marshals to this message on the UI thread so the docked
 // ResultsPanel can ListView_SetItemCountEx without cross-thread UI calls.
 constexpr UINT WM_USER_CROSS_TAB_UPDATE = WM_USER + 11;
+
+// Phase 8 Task 1: bundle handed across the worker→UI thread boundary
+// when Document::open returns NeedsPassword. The worker posts a heap
+// pointer; the UI handler adopts ownership via unique_ptr.
+struct PendingPasswordOpen {
+    litepdf::core::Document doc;        // already opened, awaiting authenticate()
+    std::filesystem::path   path;        // for tab label + status feedback
+};
 
 // "&1 foo.pdf", "&2 foo.pdf", ..., "&9 foo.pdf", "1&0 foo.pdf".
 // The '&' marks the mnemonic character (Alt-shortcut).
@@ -132,6 +149,20 @@ void MainWindow::open_tab_async(std::filesystem::path path) {
         litepdf::core::Document doc;
         auto err = doc.open(path);
         if (err.has_value()) {
+            // Phase 8 Task 1: NeedsPassword is now a non-fatal handshake.
+            // Hand the still-alive Document + path to the UI thread; it
+            // runs the modal + retry loop and either re-enters tab
+            // construction (success) or drops the Document (cancel /
+            // exhaustion).
+            if (*err == litepdf::core::Document::OpenError::NeedsPassword) {
+                auto* bundle = new PendingPasswordOpen{
+                    std::move(doc), std::move(path)};
+                if (!PostMessageW(hwnd, WM_USER_PASSWORD_PROMPT,
+                                  reinterpret_cast<WPARAM>(bundle), 0)) {
+                    delete bundle;
+                }
+                return;
+            }
             // Heap-allocate the path string so the UI handler can include
             // it in the MessageBox. Handler adopts ownership and deletes.
             // Without this, the error dialog says "File not found" but
@@ -1028,7 +1059,11 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 case OE::UnsupportedFormat:
                     emsg = L"Unsupported file format."; break;
                 case OE::NeedsPassword:
-                    emsg = L"Password-protected PDFs are not yet supported.";
+                    // Phase 8 Task 1: NeedsPassword is now handled inline
+                    // via WM_USER_PASSWORD_PROMPT; reaching this branch
+                    // would mean the worker mis-routed. Fall through to
+                    // the generic message rather than misleading the user.
+                    emsg = L"Failed to open the document.";
                     break;
                 case OE::BadPassword:
                     emsg = L"Incorrect password."; break;
@@ -1057,6 +1092,78 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // Phase 12 crash-protection hardening) if the UX becomes
             // confusing.
             MessageBoxW(hwnd, full_msg.c_str(), kWindowTitle, MB_ICONWARNING);
+            return 0;
+        }
+        case WM_USER_PASSWORD_PROMPT: {
+            // Phase 8 Task 1: encrypted-PDF handshake. We adopt the
+            // Document the worker handed us, run up to 3 prompt+auth
+            // attempts inline on the UI thread (D2 addendum), and either
+            // construct a Tab on success or drop the bundle on cancel /
+            // exhaustion. MRU is NOT pruned on failure (design §6.1).
+            std::unique_ptr<PendingPasswordOpen> bundle(
+                reinterpret_cast<PendingPasswordOpen*>(w));
+            if (!bundle) return 0;
+            const std::wstring basename = bundle->path.filename().wstring();
+
+            auto result = litepdf::ui::try_authenticate_with_retry(
+                [parent = hwnd_, &basename](const std::wstring& status) {
+                    return litepdf::ui::PasswordDialog::prompt(
+                        parent, basename, status);
+                },
+                [&bundle](const std::string& pw) {
+                    return bundle->doc.authenticate(pw);
+                },
+                [](int failed_count) {
+                    // R10: "remaining" reads less anxious than "of 3" and
+                    // matches Acrobat / Foxit phrasing.
+                    const int remaining = 3 - failed_count;
+                    if (remaining == 1) {
+                        return std::wstring{
+                            L"Incorrect password. (1 attempt remaining.)"};
+                    }
+                    return L"Incorrect password. ("
+                         + std::to_wstring(remaining)
+                         + L" attempts remaining.)";
+                });
+
+            if (!result.accepted) {
+                // R11: only notify the user on attempt-exhaustion; Cancel
+                // is a silent close (the user already chose to dismiss).
+                if (result.attempts >= 3) {
+                    std::wstring full_msg =
+                        L"Failed to open " + basename
+                        + L": password incorrect after 3 attempts.";
+                    MessageBoxW(hwnd, full_msg.c_str(), kWindowTitle,
+                                MB_OK | MB_ICONWARNING);
+                }
+                return 0;
+            }
+
+            // Authenticated. Build the Tab + DocumentView on the UI
+            // thread (mirrors the worker-side path of WM_USER_OPEN_OK
+            // but we avoid bouncing back to a worker for the few-µs
+            // construction). If construction throws (clone_context OOM,
+            // worker thread creation), surface the same generic error
+            // path the original worker uses.
+            try {
+                auto tab = std::make_unique<litepdf::core::Tab>();
+                tab->path  = bundle->path;
+                tab->label = basename;
+                tab->view  = std::make_unique<litepdf::core::DocumentView>(
+                    std::move(bundle->doc), *search_dispatcher_);
+
+                ColdStartTimer::mark(2);  // Document fully loaded.
+
+                HWND target = hwnd_;
+                tab->view->search().set_on_update([target]() {
+                    PostMessageW(target, WM_USER_SEARCH_UPDATE, 0, 0);
+                });
+                (void)tabs_->add_tab(std::move(tab));
+            } catch (...) {
+                MessageBoxW(hwnd,
+                            L"Failed to open the document after authentication.",
+                            kWindowTitle, MB_OK | MB_ICONWARNING);
+            }
             return 0;
         }
         case WM_USER_SEARCH_UPDATE:
