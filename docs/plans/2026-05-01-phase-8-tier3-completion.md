@@ -1214,8 +1214,10 @@ Mirror in `WM_INITMENUPOPUP`: `MF_CHECKED` if `dual_page()` is on. **R19 — che
 ```bash
 build/Release/litepdf.exe tests/fixtures/bookmarks.pdf
 # Ctrl+Shift+D → spread mode; page 0 renders alone, 1+2 next.
-# PgDn → moves to 1+2 spread. PgDn again → 3+? (bookmarks.pdf is 3 pages).
-# Ctrl+Shift+D again → back to single. Page 1 (the LEFT of the last spread)
+# PgDn → moves to 1+2 spread. PgDn again → left advances by 2 → left=3,
+#         clamp to page_count-1=2; compute_right(2,3)=-1 (odd-tail), so
+#         page 2 renders alone (right slot blank). Status bar flashes.
+# Ctrl+Shift+D again → back to single. Page 2 (the lone odd-tail page)
 #                       stays current.
 # Open a longer doc (search.pdf is 5 Lorem-ipsum pages):
 # Ctrl+Shift+D → 0 alone, then PgDn → 1+2, PgDn → 3+4, PgDn → 4 stays
@@ -1370,7 +1372,7 @@ Run on a clean build, in order:
 3. **CBZ fixture**: `litepdf.exe tests/fixtures/sample.cbz` → window opens, image page renders. **Pass criterion: no crash, image visible.**
 4. **Invert colors single-tab**: open `simple.pdf`, Ctrl+Shift+I → white-on-black + chrome flips. Menu checked. Ctrl+Shift+I → reverts. **Pass criterion: D7 + D8.**
 5. **Invert colors per-tab independence**: open a second file via Ctrl+O (Ctrl+T is unbound — see C8 in plan-eng-review notes), Ctrl+Shift+I on the second tab; switch back to first → first stays light. Verify BOTH the canvas content AND the chrome (frame background, find-bar accent, scrollbar fallback) flip correctly per tab — the chrome uses the per-canvas `Palette` route from D7, NOT the system-theme route. **Pass criterion: D9 + per-tab chrome polarity.**
-6. **Dual-page**: open `bookmarks.pdf` (3 pages), Ctrl+Shift+D → spread mode; page 0 alone. PgDn → spread (1,2). PgDn again → still (1,2) — no spread (2,?) since 3 is page count. Ctrl+Shift+D → back to single, page 1 (LEFT of last spread). **Pass criterion: D10 cover rule + odd-tail rule.**
+6. **Dual-page**: open `bookmarks.pdf` (3 pages), Ctrl+Shift+D → spread mode; page 0 alone. PgDn → spread (1,2). PgDn again → left advances to 2 (clamped from 3); `compute_right(2,3)=-1` (odd-tail), so page 2 renders alone in left slot with right slot blank; status bar flashes "Already at last page". Ctrl+Shift+D → back to single, page 2 (the odd-tail page) stays current. **Pass criterion: D10 cover rule + odd-tail rule.**
 7. **Dual-page + thumbs**: with dual on, F4 → thumb pane single column; current-page accent border on LEFT page of current spread. **Pass criterion: D11.**
 8. **Dual-page + search**: with dual on, Ctrl+F "Lorem", press Enter → spread that contains the hit becomes visible. **Pass criterion: D12.**
 9. **Dual-page + invert combo**: Ctrl+Shift+D + Ctrl+Shift+I together → both pages render white-on-black side-by-side. Toggle each off and on independently. **Pass criterion: orthogonality.**
