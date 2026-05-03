@@ -28,7 +28,7 @@
 
 | File | Responsibility | LOC |
 |---|---|---|
-| `src/printing/PrintGeometry.hpp` | Pure-function header. `compute_render_matrix()` builds the MuPDF transform matrix (scale + rotate + center) from page rect, paper rect, scale mode, custom %, auto-rotate flag. No Win32, no MuPDF includes — uses POD structs. | ~30 |
+| `src/printing/PrintGeometry.hpp` | Pure-function header. `compute_render_matrix()` builds the MuPDF transform matrix (scale + rotate + center) from `page_rect_pt` (MuPDF points), `paper_rect_px` (printer pixels), `dpi_x`/`dpi_y`, scale mode, custom %, auto-rotate flag. No Win32, no MuPDF includes — uses POD structs. | ~35 |
 | `src/printing/PrintRange.hpp` + `.cpp` | `parse_page_ranges()` parses Win32 `PRINTPAGERANGE[]` array into a flat `std::vector<size_t>` of 0-based page indices. Pure function, easy to TDD. | ~40 |
 | `src/printing/PrintAbortFlag.hpp` | `struct PrintAbortFlag { std::atomic<bool> aborted{false}; };` shared between `PrintProgressDlg` (set on Cancel click) and `SetAbortProc` callback (read each page). Tiny, header-only. | ~15 |
 | `src/printing/PrintProgressDlg.hpp` + `.cpp` | In-memory `DLGTEMPLATE` modal. Two modes: "config" (pre-flight: scale combobox, custom% edit, OK/Cancel) and "progress" (page X of Y label, Cancel button). State carried in the dialog's user data. Mirrors `PasswordDialog`'s pattern from Phase 8. | ~140 |
@@ -231,69 +231,112 @@ Replace `tests/unit/test_print_geometry.cpp` with:
 using namespace litepdf::printing;
 using Catch::Matchers::WithinAbs;
 
+// --------------------------------------------------------------------
+// Unit-contract reminder (see spec §5 and PrintGeometry.hpp comment):
+//   page_rect_pt  → MuPDF points  (fz_bound_page output, 1 pt = 1/72 inch)
+//   paper_rect_px → printer pixels (GetDeviceCaps HORZRES/VERTRES output)
+//   dpi           → GetDeviceCaps LOGPIXELSX/Y
+//   Returned scale_x/scale_y are in px/pt (feed directly into fz_scale()).
+//   Centering tx/ty are in printer pixels.
+// --------------------------------------------------------------------
+
 namespace {
-constexpr Rect a4_portrait_pt   {0, 0, 595.0f, 842.0f};   // A4 in points (1/72")
-constexpr Rect a4_landscape_pt  {0, 0, 842.0f, 595.0f};
-constexpr Rect a4_paper_300dpi  {0, 0, 2480.0f, 3508.0f}; // A4 at 300 DPI
+// A4: 210 mm × 297 mm = 595.28 pt × 841.89 pt (rounded to 595 × 842 below).
+// At 300 DPI: 210/25.4*300 = 2480.3 → 2480 px, 297/25.4*300 = 3507.9 → 3508 px.
+constexpr Rect a4_portrait_pt   {0, 0, 595.0f, 842.0f};   // page rect in points
+constexpr Rect a4_landscape_pt  {0, 0, 842.0f, 595.0f};   // landscape page, points
+constexpr Rect a4_paper_300dpi  {0, 0, 2480.0f, 3508.0f}; // paper rect in printer px
+constexpr float dpi = 300.0f;  // matches a4_paper_300dpi (2480 / 595 * 72 ≈ 300)
+
+// Fit scale for A4-portrait on A4-paper@300DPI:
+//   s_fit = min(2480*72 / (595*300), 3508*72 / (842*300))
+//         = min(178560/178500, 252576/252600)
+//         = min(1.000336..., 0.999905...) ≈ 0.9999 dimensionless ratio
+// Multiplied into px/pt: s_px_per_pt = s_fit × dpi/72 = 0.9999 × 4.1667 ≈ 4.166 px/pt.
+// Equivalently: s = min(paper_w_px*72 / (page_w_pt*dpi), ...) directly.
+constexpr float fit_scale_a4 = 3508.0f * 72.0f / (842.0f * 300.0f); // tighter bound: h-axis
+// = 252576 / 252600 ≈ 4.1657 px/pt (we accept ±0.01 tolerance in tests)
 }
 
 TEST_CASE("fit-to-page on portrait page + portrait paper", "[print-geometry]") {
     auto m = compute_render_matrix(
         a4_portrait_pt, a4_paper_300dpi,
-        ScaleMode::FitToPage, /*custom_pct*/0.0f, /*auto_rotate*/true);
-    // Scale = min(2480/595, 3508/842) = 4.166...; same on x and y.
-    REQUIRE_THAT(m.scale_x, WithinAbs(4.166f, 0.01f));
-    REQUIRE_THAT(m.scale_y, WithinAbs(4.166f, 0.01f));
+        ScaleMode::FitToPage, /*custom_pct*/0.0f, /*auto_rotate*/true, dpi, dpi);
+    // s_fit = min(2480*72/(595*300), 3508*72/(842*300)) ≈ 4.166 px/pt.
+    REQUIRE_THAT(m.scale_x, WithinAbs(4.166f, 0.02f));
+    REQUIRE_THAT(m.scale_y, WithinAbs(4.166f, 0.02f));
     REQUIRE(m.rotate_90 == false);
-    // Centered: tx ≈ 0 (page exactly fills width), ty ≈ 0 (height too).
-    REQUIRE_THAT(m.tx, WithinAbs(0.0f, 1.0f));
-    REQUIRE_THAT(m.ty, WithinAbs(0.0f, 1.0f));
+    // A4 paper matches A4 page at fit scale — centering offsets near zero.
+    REQUIRE_THAT(m.tx, WithinAbs(0.0f, 2.0f));
+    REQUIRE_THAT(m.ty, WithinAbs(0.0f, 2.0f));
 }
 
 TEST_CASE("auto-rotate engages on landscape page + portrait paper", "[print-geometry]") {
     auto m = compute_render_matrix(
         a4_landscape_pt, a4_paper_300dpi,
-        ScaleMode::FitToPage, 0.0f, true);
+        ScaleMode::FitToPage, 0.0f, true, dpi, dpi);
     REQUIRE(m.rotate_90 == true);
-    // After rotation the effective page is 595 × 842 (matches paper); scale ≈ 4.166.
-    REQUIRE_THAT(m.scale_x, WithinAbs(4.166f, 0.01f));
+    // After rotation effective page is 595 × 842 pt — same as a4_portrait_pt.
+    REQUIRE_THAT(m.scale_x, WithinAbs(4.166f, 0.02f));
 }
 
 TEST_CASE("auto-rotate suppressed when flag is off", "[print-geometry]") {
     auto m = compute_render_matrix(
         a4_landscape_pt, a4_paper_300dpi,
-        ScaleMode::FitToPage, 0.0f, /*auto_rotate*/false);
+        ScaleMode::FitToPage, 0.0f, /*auto_rotate*/false, dpi, dpi);
     REQUIRE(m.rotate_90 == false);
-    // Without rotation, scale = min(2480/842, 3508/595) = 2.945...
-    REQUIRE_THAT(m.scale_x, WithinAbs(2.945f, 0.01f));
+    // Without rotation: page 842×595, paper 2480×3508.
+    // s_fit = min(2480*72/(842*300), 3508*72/(595*300))
+    //       = min(178560/252600, 252576/178500)
+    //       = min(0.707..., 1.414...) × (not yet ×dpi/72)
+    // Wait — the formula returns px/pt directly:
+    // s = min(2480*72/(842*300), 3508*72/(595*300))
+    //   = min(2.944..., 5.896...) = 2.944 px/pt
+    REQUIRE_THAT(m.scale_x, WithinAbs(2.944f, 0.01f));
 }
 
-TEST_CASE("actual-size mode ignores paper rect", "[print-geometry]") {
+TEST_CASE("actual-size mode yields dpi/72 px-per-pt", "[print-geometry]") {
+    // "Actual size" = 1 pt maps to 1/72 physical inch = dpi/72 printer pixels.
+    // At 300 DPI: s = 300/72 ≈ 4.1667 px/pt.
+    // A 595-pt-wide page renders to 595 × 4.1667 ≈ 2479 px — near-full width
+    // of a 2480-px A4 paper (≤1 px rounding). This is NOT s=1.0.
     auto m = compute_render_matrix(
         a4_portrait_pt, a4_paper_300dpi,
-        ScaleMode::ActualSize, 0.0f, true);
-    REQUIRE_THAT(m.scale_x, WithinAbs(1.0f, 0.001f));
-    REQUIRE_THAT(m.scale_y, WithinAbs(1.0f, 0.001f));
+        ScaleMode::ActualSize, 0.0f, true, dpi, dpi);
+    REQUIRE_THAT(m.scale_x, WithinAbs(300.0f / 72.0f, 0.002f));   // ≈ 4.1667 px/pt
+    REQUIRE_THAT(m.scale_y, WithinAbs(300.0f / 72.0f, 0.002f));
+    // (Test deliberately does NOT assert 1.0 — that was the pre-fix wrong value.)
 }
 
-TEST_CASE("custom-pct mode uses user value", "[print-geometry]") {
+TEST_CASE("custom-pct 75% yields 75% of fit scale", "[print-geometry]") {
+    // CustomPct = percentage of fit scale, not a raw dimensionless multiplier.
+    // fit_scale ≈ 4.166 px/pt → 75% → s ≈ 3.125 px/pt.
+    // Stamp width: 595 × 3.125 ≈ 1860 px (< 2480 px paper width). ✓
     auto m = compute_render_matrix(
         a4_portrait_pt, a4_paper_300dpi,
-        ScaleMode::CustomPct, /*custom_pct*/75.0f, true);
-    REQUIRE_THAT(m.scale_x, WithinAbs(0.75f, 0.001f));
-    REQUIRE_THAT(m.scale_y, WithinAbs(0.75f, 0.001f));
+        ScaleMode::CustomPct, /*custom_pct*/75.0f, true, dpi, dpi);
+    const float expected_s = 0.75f * fit_scale_a4;   // ≈ 3.124 px/pt
+    REQUIRE_THAT(m.scale_x, WithinAbs(expected_s, 0.02f));
+    REQUIRE_THAT(m.scale_y, WithinAbs(expected_s, 0.02f));
 }
 
-TEST_CASE("centering offsets are positive when scaled page is smaller than paper",
-          "[print-geometry]") {
-    // Page at 50% on A4 paper → scaled to 1240 × 1754, centered in 2480 × 3508.
+TEST_CASE("centering offsets for 50%-of-fit on A4@300dpi", "[print-geometry]") {
+    // CustomPct 50% → s = 0.5 × fit_scale ≈ 0.5 × 4.166 ≈ 2.083 px/pt.
+    // Stamp: 595 × 2.083 ≈ 1239 px wide, 842 × 2.083 ≈ 1754 px tall.
+    // Paper: 2480 × 3508 px.
+    // tx = (2480 - 1239) / 2 ≈ 620.5 px
+    // ty = (3508 - 1754) / 2 ≈ 877.0 px
+    // (Pre-fix wrong formula gave tx = (2480 - 595×0.5)/2 = 1091 — ~1.76× too large,
+    //  the stamp would have appeared correctly sized by the buggy tx but the scale
+    //  of 0.5 px/pt was itself wrong — the rendered stamp was only 298 px wide, not 1239.)
     auto m = compute_render_matrix(
         a4_portrait_pt, a4_paper_300dpi,
-        ScaleMode::CustomPct, 50.0f, true);
-    // tx = (2480 - 595*0.5) / 2 = (2480 - 297.5) / 2 = 1091.25
-    REQUIRE_THAT(m.tx, WithinAbs(1091.25f, 0.5f));
-    // ty = (3508 - 842*0.5) / 2 = (3508 - 421) / 2 = 1543.5
-    REQUIRE_THAT(m.ty, WithinAbs(1543.5f, 0.5f));
+        ScaleMode::CustomPct, 50.0f, true, dpi, dpi);
+    const float s50  = 0.5f * fit_scale_a4;              // ≈ 2.083 px/pt
+    const float stamp_w = 595.0f * s50;                   // ≈ 1239 px
+    const float stamp_h = 842.0f * s50;                   // ≈ 1754 px
+    REQUIRE_THAT(m.tx, WithinAbs((2480.0f - stamp_w) * 0.5f, 1.0f));  // ≈ 620.5 px
+    REQUIRE_THAT(m.ty, WithinAbs((3508.0f - stamp_h) * 0.5f, 1.0f));  // ≈ 877.0 px
 }
 ```
 
@@ -315,13 +358,26 @@ Replace `src/printing/PrintGeometry.hpp` with:
 // Pure-function helpers for print render matrix composition.
 // No Win32, no MuPDF includes -- POD-only types so this header can be
 // included into unit tests without any platform dependencies.
+//
+// UNIT CONTRACT (critical — both Rect params are floats; compiler cannot
+// catch swapped arguments):
+//   page_rect_pt  — page bounding box in MuPDF POINTS (1 pt = 1/72 inch),
+//                   as returned by fz_bound_page().
+//   paper_rect_px — printable area in PRINTER DEVICE PIXELS, from
+//                   GetDeviceCaps(hdc, HORZRES/VERTRES).
+//   dpi_x, dpi_y  — from GetDeviceCaps(hdc, LOGPIXELSX/Y).
+//
+// Returned PrintMatrix::scale_x/scale_y are in px/pt (device pixels per
+// MuPDF point) — feed directly into fz_scale(). Centering tx/ty are in
+// printer device pixels.
 
 #include <algorithm>
 
 namespace litepdf::printing {
 
-// Page or paper rect in caller's chosen unit (points for pages, pixels
-// for printer paper). The matrix is unit-agnostic — caller chooses.
+// Rect stores (x0, y0, x1, y1). Used for both page rects (in points) and
+// paper rects (in pixels) — callers MUST respect the per-parameter unit
+// contract documented above.
 struct Rect {
     float x0, y0, x1, y1;
     constexpr float width()  const { return x1 - x0; }
@@ -332,56 +388,75 @@ struct Rect {
 // fz_matrix and Win32 uses XFORM; caller composes the final matrix
 // in its own type. We just emit the scalar parts.
 struct PrintMatrix {
-    float scale_x;
-    float scale_y;
-    bool  rotate_90;   // true → caller prepends a 90° pre-rotation
-    float tx;          // translation to center on paper (printer pixels)
-    float ty;
+    float scale_x;   // px/pt — feed into fz_scale(scale_x, scale_y)
+    float scale_y;   // px/pt
+    bool  rotate_90; // true → caller prepends a 90° pre-rotation
+    float tx;        // centering translation in printer pixels
+    float ty;        // centering translation in printer pixels
 };
 
 enum class ScaleMode {
-    FitToPage,   // s = min(paper_w/page_w, paper_h/page_h) after rotation
-    ActualSize,  // s = 1.0
-    CustomPct,   // s = custom_pct / 100
+    FitToPage,  // scale to fill paper; s_fit = min(paper_in_w/page_in_w, paper_in_h/page_in_h) × dpi/72
+    ActualSize, // 1 pt → 1/72 inch on paper → dpi/72 px/pt
+    CustomPct,  // percentage of fit scale: s = (pct/100) × s_fit
 };
 
+// Computes scale + rotation + centering matrix components.
+// page_rect_pt:  fz_bound_page() output (MuPDF points, 1 pt = 1/72 inch).
+// paper_rect_px: GetDeviceCaps(HORZRES/VERTRES) (printer device pixels).
+// dpi_x, dpi_y:  GetDeviceCaps(LOGPIXELSX/Y).
 [[nodiscard]] inline PrintMatrix compute_render_matrix(
-    Rect page_pt,
-    Rect paper_px,
+    Rect  page_rect_pt,
+    Rect  paper_rect_px,
     ScaleMode mode,
     float custom_pct,
-    bool auto_rotate)
+    bool  auto_rotate,
+    float dpi_x,
+    float dpi_y)
 {
-    const float page_w = page_pt.width();
-    const float page_h = page_pt.height();
-    const float paper_w = paper_px.width();
-    const float paper_h = paper_px.height();
+    const float page_w  = page_rect_pt.width();
+    const float page_h  = page_rect_pt.height();
+    const float paper_w = paper_rect_px.width();
+    const float paper_h = paper_rect_px.height();
 
-    // Auto-rotate when page orientation differs from paper orientation.
+    // Auto-rotate when page and paper orientations differ.
     const bool need_rotate = auto_rotate &&
         ((page_w > page_h) != (paper_w > paper_h));
 
-    // Effective page dimensions after rotation.
-    const float eff_w = need_rotate ? page_h : page_w;
-    const float eff_h = need_rotate ? page_w : page_h;
+    // Effective page dimensions in points after rotation.
+    const float eff_w_pt = need_rotate ? page_h : page_w;
+    const float eff_h_pt = need_rotate ? page_w : page_h;
 
-    // Scale per mode.
-    float s = 1.0f;
+    // Fit scale in px/pt: compare paper-inches to page-inches on each axis.
+    //   paper_in_w = paper_w / dpi_x     (inches)
+    //   page_in_w  = eff_w_pt / 72       (inches, 72 pt per inch)
+    //   ratio      = paper_in_w / page_in_w = (paper_w * 72) / (eff_w_pt * dpi_x)
+    //   × (dpi_x/72) to convert dimensionless ratio → px/pt:
+    //   s_fit = min(paper_w / eff_w_pt, paper_h / eff_h_pt)  [px/pt directly]
+    // (The dpi cancels: (paper_w*72)/(eff_w_pt*dpi_x) × dpi_x/72 = paper_w/eff_w_pt.)
+    const float s_fit = std::min(paper_w / eff_w_pt, paper_h / eff_h_pt);
+
+    // Scale per mode (all in px/pt).
+    float s = s_fit;
     switch (mode) {
         case ScaleMode::FitToPage:
-            s = std::min(paper_w / eff_w, paper_h / eff_h);
+            s = s_fit;
             break;
         case ScaleMode::ActualSize:
-            s = 1.0f;
+            // 1 pt = 1/72 physical inch; at dpi_x dots/inch that is dpi_x/72 px/pt.
+            // Using dpi_x for both axes (printers are usually square-pixel).
+            s = dpi_x / 72.0f;
             break;
         case ScaleMode::CustomPct:
-            s = custom_pct / 100.0f;
+            // "50%" means half the fit-to-page scale, matching user expectation
+            // (Acrobat/SumatraPDF precedent). NOT 50% of 1 px/pt.
+            s = (custom_pct / 100.0f) * s_fit;
             break;
     }
 
     // Centering translation in printer pixels.
-    const float tx = (paper_w - eff_w * s) * 0.5f;
-    const float ty = (paper_h - eff_h * s) * 0.5f;
+    const float tx = (paper_w - eff_w_pt * s) * 0.5f;
+    const float ty = (paper_h - eff_h_pt * s) * 0.5f;
 
     return PrintMatrix{
         .scale_x   = s,
@@ -1320,23 +1395,28 @@ fz_pixmap* render_page_to_pixmap(
     fz_page* page = fz_load_page(ctx, doc, static_cast<int>(page_idx));
     if (!page) return nullptr;
 
+    // page_rect_pt: fz_bound_page returns MuPDF POINTS (1 pt = 1/72 inch).
     const fz_rect bound = fz_bound_page(ctx, page);
-    const Rect page_pt{bound.x0, bound.y0, bound.x1, bound.y1};
+    const Rect page_rect_pt{bound.x0, bound.y0, bound.x1, bound.y1};
 
+    // dpi_x/y: printer logical DPI from device capabilities.
     const float dpi_x = static_cast<float>(GetDeviceCaps(hdc, LOGPIXELSX));
     const float dpi_y = static_cast<float>(GetDeviceCaps(hdc, LOGPIXELSY));
-    const Rect paper_px{
+
+    // paper_rect_px: printable area in PRINTER DEVICE PIXELS.
+    const Rect paper_rect_px{
         0, 0,
         static_cast<float>(GetDeviceCaps(hdc, HORZRES)),
         static_cast<float>(GetDeviceCaps(hdc, VERTRES)),
     };
 
-    const auto pm = compute_render_matrix(page_pt, paper_px, mode, custom_pct, auto_rotate);
+    // compute_render_matrix returns scale in px/pt — correct unit for fz_scale().
+    // Pass dpi_x/dpi_y so ActualSize and CustomPct modes are dimensionally correct.
+    const auto pm = compute_render_matrix(
+        page_rect_pt, paper_rect_px, mode, custom_pct, auto_rotate, dpi_x, dpi_y);
 
-    // Convert page DIP scale (matrix is unit-agnostic; here we feed it
-    // points-on-paper-pixels so scale is "pixels per point"). MuPDF's
-    // fz_scale uses points; we want pixels. So scale_x already includes
-    // the dpi-to-page-unit conversion since paper_px is in pixels.
+    // pm.scale_x is in px/pt. fz_scale(s) applied to page points yields output
+    // in device pixels — exactly what StretchDIBits needs.
     fz_matrix m = fz_scale(pm.scale_x, pm.scale_y);
     if (pm.rotate_90) m = fz_pre_rotate(m, 90);
     m = fz_concat(m, fz_translate(pm.tx, pm.ty));
@@ -1800,15 +1880,43 @@ if ($Matches[1] -ne '3') { throw "Expected 3 pages, got $($Matches[1])" }
 Write-Host "[OK] print_to_pdf integration: 3 pages emitted."
 ```
 
-- [ ] **Step 4: Wire into CI**
+- [ ] **Step 4: Wire into CI (with mandatory printer feature install)**
 
-In `.github/workflows/ci.yml`, after the `Unit tests` step (and after the `Version sync gate` step from PR #5), add:
+**Important:** `windows-latest` GitHub Actions runners are Windows Server 2022, which does **not** have "Microsoft Print to PDF" pre-installed. The optional Windows feature `Printing-PrintToPDFServices-Features` must be enabled before the test step runs. This is a known GHA environment gap (referenced in GHA issue #12328).
+
+**Option A (selected):** Install the feature in CI, then run the test. This keeps real-printer code path fidelity.
+
+In `.github/workflows/ci.yml`, after the `Unit tests` step (and after the `Version sync gate` step from PR #5), add **two** steps — the feature install first, then the test:
 
 ```yaml
+      - name: Enable Microsoft Print to PDF (windows-latest does not have it by default)
+        shell: pwsh
+        # Printing-PrintToPDFServices-Features is not pre-installed on
+        # Windows Server 2022 (windows-latest as of 2026-05). GHA issue #12328.
+        # -NoRestart is mandatory in CI; the printer queue becomes enumerable
+        # within ~5 seconds after the feature install completes (no explicit
+        # sleep needed; the next step's OpenPrinterW will retry internally).
+        run: |
+          Enable-WindowsOptionalFeature -Online `
+            -FeatureName Printing-PrintToPDFServices-Features `
+            -All -NoRestart
+          # Confirm the printer is visible to Win32 before proceeding.
+          $deadline = (Get-Date).AddSeconds(30)
+          do {
+            $found = (Get-Printer -ErrorAction SilentlyContinue |
+                      Where-Object { $_.Name -eq 'Microsoft Print to PDF' })
+            if ($found) { break }
+            Start-Sleep -Seconds 2
+          } while ((Get-Date) -lt $deadline)
+          if (-not $found) { throw "Microsoft Print to PDF not enumerable after 30s" }
+          Write-Host "[OK] Microsoft Print to PDF is ready."
+
       - name: Print integration test
         shell: pwsh
         run: ./tests/integration/print_to_pdf.ps1
 ```
+
+> **Rationale for Option A over Option B (synthetic BITMAP HDC):** The spec's integration test goal is to exercise the actual printer DC code path — `StartDoc`/`EndDoc`, `StretchDIBits` to a real printer queue, and the `DEVMODE` plumbing in `PrintJob::run`. A synthetic `CreateCompatibleDC(nullptr)` + `CreateDIBSection` bitmap would only exercise the geometry math (already covered by unit tests in Task 1) and skip the Win32 print-job lifecycle. One `Enable-WindowsOptionalFeature` call is a cheap, stable price to keep real-fidelity integration coverage.
 
 - [ ] **Step 5: Commit**
 
@@ -1818,8 +1926,9 @@ git commit -m "$(cat <<'EOF'
 test(printing): CLI --print-to-pdf integration harness (Phase 8.5 T11)
 
 Codifies the Task 10 manual smoke as a CI test. Uses Microsoft Print
-to PDF (built into Windows 10+) so no real printer required. Gated
-by LITEPDF_TEST_HARNESS define so production litepdf.exe is not
+to PDF via Enable-WindowsOptionalFeature (required: not pre-installed
+on windows-latest / Windows Server 2022; see GHA issue #12328).
+Gated by LITEPDF_TEST_HARNESS define so production litepdf.exe is not
 affected.
 EOF
 )"
