@@ -95,17 +95,36 @@ PrintJob::run(hwnd, active_doc, active_page)
 
 ## 5. Scale & Rotation
 
+### Coordinate-space contract
+
+`PrintGeometry::compute_render_matrix` takes two rects with explicitly different units:
+
+- **`page_rect_pt`** — page bounding box in **MuPDF points** (1 pt = 1/72 inch), as returned by `fz_bound_page`. Origin is (0, 0); width and height are `w_pt` and `h_pt`.
+- **`paper_rect_px`** — printable area in **printer device pixels**, from `GetDeviceCaps(hdc, HORZRES/VERTRES)`. Origin is (0, 0).
+- **`dpi_x`, `dpi_y`** — printer logical DPI from `GetDeviceCaps(hdc, LOGPIXELSX/Y)`.
+
+The returned `PrintMatrix::scale_x` / `scale_y` is in units of **device pixels per point** and is fed directly into `fz_scale()` when building the MuPDF render matrix. Centering translations (`tx`, `ty`) are in **device pixels**.
+
+> **Why separate names matter:** `Rect` is used both for page space (points) and paper space (pixels) in the implementation. Passing them in the wrong order silently produces a scale in px/pt vs. a dimensionless ratio — both are floats and the compiler cannot catch the mistake. The parameter names and this section serve as the load-bearing documentation. Reviewers: verify that callers (only `render_page_to_pixmap` in `PrintJob.cpp`) pass `fz_bound_page(…)` output as the first argument and `GetDeviceCaps(…HORZRES/VERTRES)` as the second.
+
 For each page, before `StretchDIBits`:
 
-1. **Printable area**: `physical_w = GetDeviceCaps(hdc, HORZRES)`, same for `VERT`. (Excludes printer hardware margins automatically.)
-2. **Page DIP size**: `fz_bound_page(ctx, page) → fz_rect`. MuPDF returns sizes in points (1/72 inch).
-3. **Page size in printer pixels**: `page_w_px = page_w_pt * (LOGPIXELSX / 72.0)`.
-4. **Auto-rotate** (always on for T2; no user toggle): if page-orientation differs from paper-orientation (`(page_w > page_h) != (paper_w > paper_h)`), prepend `fz_pre_rotate(matrix, 90)`. Reduces clipping when printing landscape pages on portrait paper or vice versa.
-5. **Scale mode** (from pre-flight modal):
-   - **Fit to page** (default): `s = min(printable_w / page_w_px, printable_h / page_h_px)` after rotation
-   - **Actual size**: `s = 1.0`. Pages larger than the printable area are clipped; user is shown a one-time warning before printing if any page exceeds the paper size
-   - **Custom %**: `s = user_pct / 100`. Pre-flight modal validates 10 ≤ pct ≤ 400
-6. **Centering**: translate so the scaled page is centered within the printable area: `tx = (printable_w - page_w_px*s) / 2`, similar for `ty`.
+1. **Printable area**: `paper_w_px = GetDeviceCaps(hdc, HORZRES)`, same for `VERT`. (Excludes printer hardware margins automatically.)
+2. **Page size in points**: `fz_bound_page(ctx, page) → fz_rect`. MuPDF returns sizes in points (1/72 inch). These are `page_w_pt` and `page_h_pt`.
+3. **Printer DPI**: `dpi_x = GetDeviceCaps(hdc, LOGPIXELSX)`, `dpi_y = GetDeviceCaps(hdc, LOGPIXELSY)`.
+4. **Auto-rotate** (always on for T2; no user toggle): if page-orientation differs from paper-orientation (`(page_w_pt > page_h_pt) != (paper_w_px > paper_h_px)`), prepend `fz_pre_rotate(matrix, 90)`. After rotation, use effective dimensions `eff_w_pt` / `eff_h_pt` for scale computation.
+5. **Scale mode** (from pre-flight modal). All scale factors below are in **px/pt** for direct use with `fz_scale()`:
+   - **Fit to page** (default): compare paper-inches to page-inches across both axes and take the tighter bound:
+     `s_fit = min( (paper_w_px / dpi_x) / (eff_w_pt / 72),  (paper_h_px / dpi_y) / (eff_h_pt / 72) )`
+     which simplifies to `s_fit = min( paper_w_px * 72 / (eff_w_pt * dpi_x),  paper_h_px * 72 / (eff_h_pt * dpi_y) )`.
+     Result unit: px/pt. Applying `fz_scale(s_fit)` to an `eff_w_pt`-wide page produces `eff_w_pt × s_fit` output pixels, which ≤ `paper_w_px` by construction.
+   - **Actual size**: one point maps to one physical 1/72-inch on paper; at printer DPI that is `dpi_x / 72` pixels per point:
+     `s = dpi_x / 72.0`. Pages larger than the printable area are clipped; user is shown a one-time warning before printing if any page exceeds the paper size.
+   - **Custom %**: percentage relative to Fit scale so that "50%" means "half the fit-to-page size":
+     `s = (user_pct / 100.0) × s_fit`. Pre-flight modal validates 10 ≤ pct ≤ 400.
+     _Rationale for "% of fit" over "% of actual": users think of scale relative to the page fitting the sheet (Acrobat / SumatraPDF precedent). "50%" of actual at 300 DPI would produce a tiny stamp (dpi/72/2 ≈ 2.08 px/pt × 595 pt ≈ 1239 px) identical to 50%-of-fit for standard paper/page size combinations, but the two diverge for non-standard DPIs or exotic page sizes. Fit is the user-visible mental model._
+6. **Centering**: translate so the scaled page is centered within the printable area:
+   `tx = (paper_w_px - eff_w_pt × s) / 2.0`, similar for `ty`.
 7. **Final matrix**: `fz_translate(tx, ty) × fz_scale(s, s) × rotation × fz_translate(-page_origin)`. Order matters; verify in `PrintGeometry` unit tests.
 
 **Why a pre-flight modal instead of `PrintDlgEx` hook?** `PrintDlgEx` with a custom property sheet page is the "right" Windows pattern but historically has Per-Monitor-DPI bugs (controls don't scale correctly across monitor switches) and the property-sheet API surface is large. A separate pre-flight modal trades one extra click for ~150 LOC of dialog-template-hook code we'd never want to maintain. Concretely: pre-flight modal in `PrintProgressDlg` mode "config" reuses the same `DLGTEMPLATE` infrastructure as the progress mode, costing ~20 extra LOC vs ~200 for a property-sheet page.
@@ -139,7 +158,7 @@ Printing is a side-effect-heavy domain. Strategy:
 
 **Total: +13 tests** (11 unit, 2 integration). Brings cumulative count from 146 (post-Phase-8 with PR #5 merged) to **159**.
 
-CI integration test runs on Windows runners only — "Microsoft Print to PDF" is built into Windows 10+. Project is Windows-only anyway, so no matrix impact.
+CI integration test runs on Windows runners only. Project is Windows-only anyway, so no matrix impact. Note: "Microsoft Print to PDF" is **not** pre-installed on GitHub Actions `windows-latest` (Windows Server 2022) runners — the optional feature `Printing-PrintToPDFServices-Features` must be enabled explicitly in the CI workflow step before the test runs (see plan Task 11 for the required `Enable-WindowsOptionalFeature` step).
 
 ## 8. Phase Placement — Selected: Phase 8.5
 
