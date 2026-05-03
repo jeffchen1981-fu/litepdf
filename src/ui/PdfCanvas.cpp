@@ -543,6 +543,28 @@ void PdfCanvas::discard_render_target() {
 void PdfCanvas::resubmit_current_page() {
     if (!impl_->view) return;
     HWND target = hwnd_;
+    if (impl_->dual_page) {
+        // (Phase 8 D10) Spread mode: D2DERR_RECREATE_TARGET recovery
+        // also has to cover the right slot or the right page stays
+        // blank until the user pages forward. Same submission shape as
+        // on_key_down's dual branch.
+        const int cur   = impl_->view->current_page();
+        const int total = impl_->view->page_count();
+        const int left  = dual_page_compute_left(cur, total);
+        const int right = dual_page_compute_right(left, total);
+        impl_->view->cancel_stale_renders(0);
+        impl_->view->request_render(left,
+            [target](fz_pixmap* p, fz_context* worker_ctx) {
+                PdfCanvas::post_render_done(target, p, worker_ctx);
+            });
+        if (right >= 0) {
+            impl_->view->request_render(right,
+                [target](fz_pixmap* p, fz_context* worker_ctx) {
+                    PdfCanvas::post_render_done_right(target, p, worker_ctx);
+                });
+        }
+        return;
+    }
     impl_->view->request_render_with_prefetch(
         impl_->view->current_page(),
         [target](fz_pixmap* p, fz_context* worker_ctx) {

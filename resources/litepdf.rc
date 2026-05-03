@@ -2,8 +2,8 @@
 
 // Version info
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     0,0,6,0
-PRODUCTVERSION  0,0,6,0
+FILEVERSION     0,0,9,0
+PRODUCTVERSION  0,0,9,0
 FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
 FILEFLAGS       0
 FILEOS          VOS_NT_WINDOWS32
@@ -16,12 +16,12 @@ BEGIN
     BEGIN
       VALUE "CompanyName",      "LitePDF"
       VALUE "FileDescription",  "LitePDF - lightweight PDF reader"
-      VALUE "FileVersion",      "0.0.6.0"
+      VALUE "FileVersion",      "0.0.9.0"
       VALUE "InternalName",     "litepdf"
       VALUE "LegalCopyright",   "AGPL-3.0"
       VALUE "OriginalFilename", "litepdf.exe"
       VALUE "ProductName",      "LitePDF"
-      VALUE "ProductVersion",   "0.0.6.0"
+      VALUE "ProductVersion",   "0.0.9.0"
     END
   END
   BLOCK "VarFileInfo"

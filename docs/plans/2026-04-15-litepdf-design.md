@@ -68,10 +68,10 @@ MuPDF 1.24.11 lacks a CMakeLists.txt. Its Windows build is a VS solution at `thi
 - Thumbnail side panel (**hidden by default**, toggle with F4)
 - In-document search with highlighted hits
 - **Cross-tab search**: query all open documents, results in a dockable panel
-- Encrypted PDF: password prompt (max 3 attempts per session, password never persisted)
-- Additional formats: ePub, CBZ, XPS, FB2, SVG (via MuPDF)
-- Dark mode / invert colors
-- Two-page spread display
+- Encrypted PDF: password prompt (max 3 attempts per session, password never persisted) — *shipped Phase 8*
+- Additional formats: ePub, CBZ, XPS, FB2, SVG (via MuPDF) — *ePub + CBZ shipped Phase 8; XPS/FB2/SVG fixture coverage deferred to Phase 11*
+- Dark mode / invert colors — *shipped Phase 8 (channel invert via Ctrl+Shift+I; Foxit-style selective Night Mode is Phase 11 polish)*
+- Two-page spread display — *shipped Phase 8 (Ctrl+Shift+D; cover-page rule + odd-tail; thumb highlight tracks LEFT page)*
 - Recent files (MRU) stored in registry
 - Session restore after crash
 
