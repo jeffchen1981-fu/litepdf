@@ -583,14 +583,13 @@ LRESULT PdfCanvas::on_key_down(WPARAM key) {
         case VK_NEXT: {  // PgDn
             int next;
             if (impl_->dual_page) {
-                // (Phase 8 T4 / d2b583c bug-fix) Step from the current
-                // spread's LEFT page, not from cur raw. cur_left+2 is
-                // always already the left of the next pair (1→3, 3→5,
-                // …) or clamps to max_idx (which may be an odd-tail
-                // shown alone).
-                int cur_left = dual_page_compute_left(cur,
-                                                      impl_->view->page_count());
-                next = std::min(cur_left + 2, max_idx);
+                // (Phase 8 T4) Snap from the current spread's LEFT page,
+                // letting dual_page_step_next_left handle the cover→1
+                // bootstrap explicitly — a plain `cur_left + 2` stride
+                // overshoots from cover (0+2=2) and skips spread (1,2).
+                const int total    = impl_->view->page_count();
+                const int cur_left = dual_page_compute_left(cur, total);
+                next = dual_page_step_next_left(cur_left, total);
             } else {
                 next = std::min(cur + 1, max_idx);
             }
@@ -600,11 +599,12 @@ LRESULT PdfCanvas::on_key_down(WPARAM key) {
         case VK_PRIOR: {  // PgUp
             int prev;
             if (impl_->dual_page) {
-                // Symmetric step-back from cur_left to avoid snap-
-                // forward, clamped at 0 (cover-page renders alone).
-                int cur_left = dual_page_compute_left(cur,
-                                                      impl_->view->page_count());
-                prev = std::max(cur_left - 2, 0);
+                // Symmetric step-back via the helper. `cur_left == 1`
+                // (first spread) snaps to 0 (cover); `cur_left >= 3`
+                // walks back by 2.
+                const int total    = impl_->view->page_count();
+                const int cur_left = dual_page_compute_left(cur, total);
+                prev = dual_page_step_prev_left(cur_left, total);
             } else {
                 prev = std::max(cur - 1, 0);
             }
@@ -649,8 +649,17 @@ LRESULT PdfCanvas::on_key_down(WPARAM key) {
             impl_->current_bitmap.Reset();
             impl_->right_bitmap.Reset();
             impl_->view->cancel_stale_renders(0);
-            const int left  = impl_->view->current_page();
-            const int total = impl_->view->page_count();
+            // Defensive re-snap: D15 (programmatic page-jump) and any
+            // future entry point that leaves current_page on a non-LEFT-
+            // aligned page must not silently mis-pair the spread. Snap
+            // the LEFT here (and write it back so observers see the
+            // canonical state) instead of trusting current_page raw.
+            const int total    = impl_->view->page_count();
+            const int left     = dual_page_compute_left(
+                                     impl_->view->current_page(), total);
+            if (left != impl_->view->current_page()) {
+                impl_->view->set_current_page(left);
+            }
             const int right = dual_page_compute_right(left, total);
             impl_->view->request_render(left,
                 [target](fz_pixmap* p, fz_context* worker_ctx) {

@@ -30,4 +30,38 @@ inline int dual_page_compute_right(int left_page, int page_count) noexcept {
     return left_page + 1;
 }
 
+// Forward / backward navigation step in spread mode. Pure logic; both
+// PdfCanvas::on_key_down (PgUp/PgDn) and any future programmatic-jump
+// caller share the same snap rule via these helpers.
+//
+// The cover page (0) is its own 1-page "pair", while subsequent pages
+// form 2-page pairs (1,2)(3,4)…. A naive `cur_left + 2` stride works
+// inside the 2-page region but overshoots the (0→1) bootstrap — that
+// was the d2b583c-era bug surfaced by the T4 reviewer pass: cover→PgDn
+// would land on page 2, skipping spread (1,2). The helper below treats
+// the 0→1 step explicitly so callers don't have to know about the
+// asymmetry.
+//
+// Clamping rule (matches plan §"Step 4.8" smoke expectations): if the
+// next pair would start past the last page, clamp to the last LEFT-
+// aligned candidate. In a 3-page doc that's page 2 alone; in a 10-page
+// doc it's page 9 alone.
+inline int dual_page_step_next_left(int cur_left, int page_count) noexcept {
+    if (page_count <= 0) return 0;
+    const int last = page_count - 1;
+    int next_left;
+    if (cur_left <= 0) {
+        next_left = 1;            // cover → first spread (1,2)
+    } else {
+        next_left = cur_left + 2; // 1→3, 3→5, …
+    }
+    return next_left > last ? last : next_left;
+}
+
+inline int dual_page_step_prev_left(int cur_left, int /*page_count*/) noexcept {
+    if (cur_left <= 1) return 0;     // first spread or cover → cover
+    int prev = cur_left - 2;
+    return prev < 0 ? 0 : prev;
+}
+
 }  // namespace litepdf::ui
