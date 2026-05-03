@@ -114,10 +114,9 @@ For each page, before `StretchDIBits`:
 3. **Printer DPI**: `dpi_x = GetDeviceCaps(hdc, LOGPIXELSX)`, `dpi_y = GetDeviceCaps(hdc, LOGPIXELSY)`.
 4. **Auto-rotate** (always on for T2; no user toggle): if page-orientation differs from paper-orientation (`(page_w_pt > page_h_pt) != (paper_w_px > paper_h_px)`), prepend `fz_pre_rotate(matrix, 90)`. After rotation, use effective dimensions `eff_w_pt` / `eff_h_pt` for scale computation.
 5. **Scale mode** (from pre-flight modal). All scale factors below are in **px/pt** for direct use with `fz_scale()`:
-   - **Fit to page** (default): compare paper-inches to page-inches across both axes and take the tighter bound:
-     `s_fit = min( (paper_w_px / dpi_x) / (eff_w_pt / 72),  (paper_h_px / dpi_y) / (eff_h_pt / 72) )`
-     which simplifies to `s_fit = min( paper_w_px * 72 / (eff_w_pt * dpi_x),  paper_h_px * 72 / (eff_h_pt * dpi_y) )`.
-     Result unit: px/pt. Applying `fz_scale(s_fit)` to an `eff_w_pt`-wide page produces `eff_w_pt × s_fit` output pixels, which ≤ `paper_w_px` by construction.
+   - **Fit to page** (default): divide paper pixels by page points directly across both axes and take the tighter bound:
+     `s_fit = min( paper_w_px / eff_w_pt,  paper_h_px / eff_h_pt )`.
+     Result unit: **px/pt** by direct dimensional reasoning — pixels of paper divided by points of page. (The dpi/72 inch-conversion factors cancel: `(paper_px / dpi) / (page_pt / 72) = paper_px * 72 / (page_pt * dpi)`, but `paper_px = paper_in * dpi`, so `= paper_in * 72 / page_pt = paper_px / page_pt`. The simpler form is preferred.) Example: A4 @ 300 DPI: `min(2480/595, 3508/842) ≈ 4.166 px/pt`. Applying `fz_scale(s_fit)` to an `eff_w_pt`-wide page produces `eff_w_pt × s_fit` output pixels, which ≤ `paper_w_px` by construction.
    - **Actual size**: one point maps to one physical 1/72-inch on paper; at printer DPI that is `dpi_x / 72` pixels per point:
      `s = dpi_x / 72.0`. Pages larger than the printable area are clipped; user is shown a one-time warning before printing if any page exceeds the paper size.
    - **Custom %**: percentage relative to Fit scale so that "50%" means "half the fit-to-page size":
