@@ -27,6 +27,8 @@
 #include "printing/PrintRange.hpp"
 #include "core/Document.hpp"
 
+#include <mupdf/fitz.h>
+
 #include <algorithm>
 #include <cstdio>
 #include <vector>
@@ -52,6 +54,136 @@ void show_error(HWND parent, const wchar_t* msg) {
     MessageBoxW(parent, msg, L"Print", MB_OK | MB_ICONERROR);
 }
 
+// RAII wrapper: clones the Document's fz_context and re-opens the source
+// file on the clone. MuPDF forbids sharing fz_document across contexts
+// (RenderEngine pattern). Both context and document are dropped on scope
+// exit per the project's mupdf-refcount-conventions skill.
+struct PrintMupdfHandle {
+    fz_context*  ctx = nullptr;
+    fz_document* doc = nullptr;
+
+    explicit PrintMupdfHandle(litepdf::core::Document& d) {
+        ctx = d.clone_context();
+        if (!ctx) return;
+        const auto utf8 = d.source_path().u8string();
+        fz_try(ctx) {
+            doc = fz_open_document(
+                ctx, reinterpret_cast<const char*>(utf8.c_str()));
+        } fz_catch(ctx) {
+            doc = nullptr;
+        }
+    }
+    ~PrintMupdfHandle() {
+        if (doc) fz_drop_document(ctx, doc);
+        if (ctx) fz_drop_context(ctx);
+    }
+    PrintMupdfHandle(const PrintMupdfHandle&)            = delete;
+    PrintMupdfHandle& operator=(const PrintMupdfHandle&) = delete;
+    [[nodiscard]] bool valid() const { return ctx && doc; }
+};
+
+// Render one page to a BGRA pixmap at the printer's native DPI per the
+// supplied scale mode. Returns the pixmap and the px translation needed
+// to center it on paper. Caller owns the returned pixmap and MUST drop
+// it via fz_drop_pixmap once StretchDIBits has consumed it.
+struct RenderResult {
+    fz_pixmap* pix = nullptr;
+    int        dst_x = 0;
+    int        dst_y = 0;
+};
+
+RenderResult render_page_to_pixmap(
+    fz_context* ctx, fz_document* doc, std::size_t page_idx,
+    HDC hdc, ScaleMode mode, float custom_pct, bool auto_rotate)
+{
+    RenderResult result{};
+    fz_page* page = nullptr;
+    fz_try(ctx) {
+        page = fz_load_page(ctx, doc, static_cast<int>(page_idx));
+    } fz_catch(ctx) {
+        page = nullptr;
+    }
+    if (!page) return result;
+
+    // page_rect_pt: fz_bound_page returns MuPDF POINTS (1 pt = 1/72 inch).
+    fz_rect bound{};
+    fz_try(ctx) {
+        bound = fz_bound_page(ctx, page);
+    } fz_catch(ctx) {
+        fz_drop_page(ctx, page);
+        return result;
+    }
+    const Rect page_rect_pt{ bound.x0, bound.y0, bound.x1, bound.y1 };
+
+    const float dpi_x = static_cast<float>(GetDeviceCaps(hdc, LOGPIXELSX));
+    const float dpi_y = static_cast<float>(GetDeviceCaps(hdc, LOGPIXELSY));
+
+    // paper_rect_px: printable area in PRINTER DEVICE PIXELS.
+    const Rect paper_rect_px{
+        0.0f, 0.0f,
+        static_cast<float>(GetDeviceCaps(hdc, HORZRES)),
+        static_cast<float>(GetDeviceCaps(hdc, VERTRES)),
+    };
+
+    // compute_render_matrix returns scale in px/pt -- correct unit for fz_scale.
+    const auto pm = compute_render_matrix(
+        page_rect_pt, paper_rect_px, mode, custom_pct, auto_rotate, dpi_x, dpi_y);
+
+    // pm.scale_x is in px/pt. fz_scale(s) applied to page points yields
+    // device pixels -- exactly what StretchDIBits needs. Translation is
+    // applied in StretchDIBits dst rect, NOT in the MuPDF matrix; this
+    // keeps the rendered pixmap's bbox at origin (0,0,w,h) and avoids
+    // wasted pixels for the centering offset.
+    fz_matrix m = fz_scale(pm.scale_x, pm.scale_y);
+    if (pm.rotate_90) m = fz_pre_rotate(m, 90.0f);
+
+    fz_pixmap* pix = nullptr;
+    fz_try(ctx) {
+        pix = fz_new_pixmap_from_page(
+            ctx, page, m, fz_device_bgr(ctx), /*alpha*/1);
+    } fz_always(ctx) {
+        fz_drop_page(ctx, page);
+    } fz_catch(ctx) {
+        pix = nullptr;
+    }
+
+    result.pix = pix;
+    result.dst_x = static_cast<int>(pm.tx + 0.5f);
+    result.dst_y = static_cast<int>(pm.ty + 0.5f);
+    return result;
+}
+
+bool blit_pixmap_to_hdc(HDC hdc, fz_pixmap* pix, fz_context* ctx,
+                        int dst_x, int dst_y) {
+    if (!pix) return false;
+
+    int w = 0, h = 0;
+    const unsigned char* samples = nullptr;
+    fz_try(ctx) {
+        w       = fz_pixmap_width(ctx, pix);
+        h       = fz_pixmap_height(ctx, pix);
+        samples = fz_pixmap_samples(ctx, pix);
+    } fz_catch(ctx) {
+        return false;
+    }
+    if (!samples || w <= 0 || h <= 0) return false;
+
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize        = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth       = w;
+    bmi.bmiHeader.biHeight      = -h;          // top-down
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    const int rc = StretchDIBits(
+        hdc,
+        /*dst*/ dst_x, dst_y, w, h,
+        /*src*/ 0, 0, w, h,
+        samples, &bmi, DIB_RGB_COLORS, SRCCOPY);
+    return rc != GDI_ERROR && rc != 0;
+}
+
 } // anonymous namespace
 
 bool PrintJob::run(HWND parent,
@@ -66,7 +198,6 @@ bool PrintJob::run(HWND parent,
     // [1] Pre-flight scale picker.
     auto scale = PrintProgressDlg::show_config(parent);
     if (!scale) return false;
-    (void)scale;  // Task 7 wires this into the render call.
 
     // [2] OS PrintDlgEx (modern API; supports lpPageRanges).
     PRINTPAGERANGE ranges[10] = {};
@@ -139,7 +270,15 @@ bool PrintJob::run(HWND parent,
         return false;
     }
 
-    // [5] Skeleton page loop -- no rendering yet (Task 7 fills it in).
+    // [5] Open a per-job MuPDF context + document (Task 7).
+    PrintMupdfHandle mupdf(doc);
+    if (!mupdf.valid()) {
+        AbortDoc(pd.hDC);
+        show_error(parent, L"Failed to open document for printing.");
+        return false;
+    }
+
+    // [6] Page loop with MuPDF -> StretchDIBits.
     PrintAbortFlag abort_flag;
     PrintProgressDlg progress(parent, abort_flag, pages.size() * copies);
     std::size_t emitted = 0;
@@ -155,8 +294,28 @@ bool PrintJob::run(HWND parent,
                 error_aborted = true;
                 break;
             }
-            // Render goes here in Task 7.
-            (void)p;
+
+            auto rr = render_page_to_pixmap(
+                mupdf.ctx, mupdf.doc, p, pd.hDC,
+                scale->mode, scale->custom_pct, /*auto_rotate*/true);
+            if (!rr.pix) {
+                AbortDoc(pd.hDC);
+                wchar_t buf[96];
+                swprintf_s(buf, L"Failed to render page %zu.", p + 1);
+                show_error(parent, buf);
+                error_aborted = true;
+                break;
+            }
+            const bool ok = blit_pixmap_to_hdc(
+                pd.hDC, rr.pix, mupdf.ctx, rr.dst_x, rr.dst_y);
+            fz_drop_pixmap(mupdf.ctx, rr.pix);
+            if (!ok) {
+                AbortDoc(pd.hDC);
+                show_error(parent, L"StretchDIBits failed.");
+                error_aborted = true;
+                break;
+            }
+
             EndPage(pd.hDC);
         }
     }
