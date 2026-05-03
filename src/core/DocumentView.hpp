@@ -121,6 +121,17 @@ public:
     bool invert_colors() const noexcept;
     void set_invert_colors(bool on);
 
+    // ------------------------------------------------------------------
+    // (Phase 8 D10) Per-tab "Two-Page Spread" layout toggle.
+    //
+    // Layout-only: the engine still renders single pages. PdfCanvas
+    // submits two requests (left + right) when this flag is on and
+    // blits both side-by-side. Page navigation steps by 2; the
+    // cover-page rule (page 0 alone) is honored. Default off, per-tab,
+    // not persisted across restarts (D9 scope reuse).
+    bool dual_page() const noexcept;
+    void set_dual_page(bool on);
+
     // Bulk cancel on rapid nav (Phase 3 Task 11 wiring).
     void cancel_stale_renders(int keep_priority_threshold);
 

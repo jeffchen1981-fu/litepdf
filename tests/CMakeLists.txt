@@ -57,6 +57,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_password_dialog.cpp      # Phase 8 Task 1
     unit/test_password_retry.cpp       # Phase 8 Task 1
     unit/test_render_engine_invert.cpp # Phase 8 Task 3
+    unit/test_dual_page_layout.cpp     # Phase 8 Task 4
 )
 target_link_libraries(litepdf_unit_tests PRIVATE litepdf_core)
 

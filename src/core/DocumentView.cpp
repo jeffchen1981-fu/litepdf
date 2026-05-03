@@ -51,6 +51,7 @@ struct DocumentView::Impl {
     float                  vp_h         = 0.0f;
     float                  dpi          = 96.0f;
     bool                   invert_colors = false;  // Phase 8 D7/D9
+    bool                   dual_page     = false;  // Phase 8 D10
 
     // Preset custom zoom levels.
     static constexpr float kPresets[] = {
@@ -292,6 +293,19 @@ void DocumentView::set_invert_colors(bool on) {
     // requests, which the canvas treats as a no-paint event. The caller
     // (MainWindow toggle handler) is then responsible for kicking a
     // fresh render at the new polarity.
+    impl_->engine->cancel_all_below_priority(0);
+}
+
+bool DocumentView::dual_page() const noexcept {
+    return impl_->dual_page;
+}
+
+void DocumentView::set_dual_page(bool on) {
+    if (impl_->dual_page == on) return;
+    impl_->dual_page = on;
+    // (Phase 8 D9 addendum / D10) Drain in-flight single-page renders
+    // so their bitmaps don't land in the wrong slot of the new layout.
+    // Caller kicks a fresh dual-page render afterwards.
     impl_->engine->cancel_all_below_priority(0);
 }
 

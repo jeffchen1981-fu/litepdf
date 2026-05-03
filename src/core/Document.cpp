@@ -8,12 +8,16 @@
 #include <cassert>
 #include <cctype>
 #include <cstdio>
-#include <cstring>
 #include <fstream>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+
+// SecureZeroMemory is a volatile-write loop the optimizer cannot elide,
+// unlike std::memset which can be DCE'd when the buffer's lifetime ends
+// without an observable use. Required by Phase 8 D3 hygiene.
+#include <windows.h>
 
 namespace litepdf::core {
 
@@ -243,10 +247,10 @@ bool Document::authenticate(std::string_view password) {
         ok = fz_authenticate_password(impl_->ctx, impl_->doc, pw.c_str());
     }
     fz_catch(impl_->ctx) {
-        if (!pw.empty()) std::memset(pw.data(), 0, pw.size());
+        SecureZeroMemory(pw.data(), pw.size());
         return false;
     }
-    if (!pw.empty()) std::memset(pw.data(), 0, pw.size());
+    SecureZeroMemory(pw.data(), pw.size());
     if (ok != 0) {
         impl_->authenticated = true;
         return true;

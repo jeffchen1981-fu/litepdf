@@ -2,6 +2,8 @@
 #include "ui/MainWindow.hpp"
 #include "MainMenu.rc.h"
 
+#include "ui/PdfCanvasLayout.hpp"  // Phase 8 Task 4: dual-page snap helper
+
 #include "app/SearchDispatcher.hpp"
 #include "app/SingleInstance.hpp"
 #include "core/Document.hpp"
@@ -226,6 +228,29 @@ void MainWindow::kick_render(int page) {
         static_cast<float>(dpi));
 
     HWND target = canvas_->hwnd();
+    if (view->dual_page()) {
+        // (Phase 8 D10) Spread layout: snap to the LEFT page of the
+        // pair containing `page` (cover-rule + odd-tail handled by the
+        // helper) and submit two render requests.
+        const int left  = litepdf::ui::dual_page_compute_left(
+                              page, view->page_count());
+        const int right = litepdf::ui::dual_page_compute_right(
+                              left, view->page_count());
+        view->cancel_stale_renders(0);
+        view->set_current_page(left);
+        view->request_render(left,
+            [target](fz_pixmap* p, fz_context* worker_ctx) {
+                PdfCanvas::post_render_done(target, p, worker_ctx);
+            });
+        if (right >= 0) {
+            view->request_render(right,
+                [target](fz_pixmap* p, fz_context* worker_ctx) {
+                    PdfCanvas::post_render_done_right(target, p, worker_ctx);
+                });
+        }
+        InvalidateRect(canvas_->hwnd(), nullptr, FALSE);
+        return;
+    }
     view->request_render_with_prefetch(page,
         [target](fz_pixmap* p, fz_context* worker_ctx) {
             PdfCanvas::post_render_done(target, p, worker_ctx);
@@ -503,6 +528,10 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
         canvas_->set_invert_chrome(incoming && incoming->view
                                        ? incoming->view->invert_colors()
                                        : false);
+        // (Phase 8 D10) Same per-tab carry for two-page-spread layout.
+        canvas_->set_dual_page(incoming && incoming->view
+                                   ? incoming->view->dual_page()
+                                   : false);
     }
 
     if (outline_) {
@@ -866,9 +895,13 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             if (popup == GetSubMenu(main, 1)) {
                 auto* v = active_view();
                 const bool invert_on = v && v->invert_colors();
+                const bool dual_on   = v && v->dual_page();
                 CheckMenuItem(popup, IDM_VIEW_INVERT,
                               MF_BYCOMMAND
                               | (invert_on ? MF_CHECKED : MF_UNCHECKED));
+                CheckMenuItem(popup, IDM_VIEW_DUAL_PAGE,
+                              MF_BYCOMMAND
+                              | (dual_on ? MF_CHECKED : MF_UNCHECKED));
                 return 0;
             }
             // Only rebuild MRU when the File popup (index 0) is about to show.
@@ -955,6 +988,24 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     v->set_invert_colors(!v->invert_colors());
                     if (canvas_) canvas_->set_invert_chrome(v->invert_colors());
                     kick_render(v->current_page());
+                    return 0;
+                }
+                case IDM_VIEW_DUAL_PAGE: {
+                    // Phase 8 D10: per-tab Two-Page Spread toggle. Snap
+                    // current_page to the LEFT page of the pair on
+                    // toggle so the next paint lands cleanly. The
+                    // canvas drops both bitmaps in set_dual_page.
+                    auto* v = active_view();
+                    if (!v) return 0;
+                    v->set_dual_page(!v->dual_page());
+                    if (canvas_) canvas_->set_dual_page(v->dual_page());
+                    int p = v->current_page();
+                    if (v->dual_page()) {
+                        p = litepdf::ui::dual_page_compute_left(
+                                p, v->page_count());
+                        v->set_current_page(p);
+                    }
+                    kick_render(p);
                     return 0;
                 }
                 case IDM_TAB_CLOSE:
