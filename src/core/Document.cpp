@@ -235,6 +235,85 @@ const std::filesystem::path& Document::source_path() const noexcept {
     return impl_->path;
 }
 
+bool Document::with_rendered_page(
+    std::size_t page_idx,
+    float scale_x_px_per_pt,
+    float scale_y_px_per_pt,
+    bool  rotate_90,
+    const std::function<void(int width_px,
+                             int height_px,
+                             const std::uint8_t* bgra_top_down)>& callback) const
+{
+    if (!impl_->doc || !impl_->ctx) return false;
+
+    // Use this Document's own fz_context + fz_document so authentication
+    // (encrypted PDFs, Phase 8) and reflowable layout state (ePub, CBZ)
+    // are preserved. Cloning would lose both. doc_mutex serializes with
+    // search workers et al per the Impl comment.
+    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
+
+    fz_context*  ctx  = impl_->ctx;
+    fz_document* doc  = impl_->doc;
+    fz_page*     page = nullptr;
+    fz_pixmap*   pix  = nullptr;
+    bool         ok   = false;
+
+    fz_try(ctx) {
+        page = fz_load_page(ctx, doc, static_cast<int>(page_idx));
+        if (page) {
+            fz_matrix m = fz_scale(scale_x_px_per_pt, scale_y_px_per_pt);
+            if (rotate_90) m = fz_pre_rotate(m, 90.0f);
+            pix = fz_new_pixmap_from_page(
+                ctx, page, m, fz_device_bgr(ctx), /*alpha*/1);
+        }
+    } fz_catch(ctx) {
+        if (pix)  { fz_drop_pixmap(ctx, pix);   pix  = nullptr; }
+        if (page) { fz_drop_page(ctx, page);    page = nullptr; }
+        return false;
+    }
+
+    if (page) fz_drop_page(ctx, page);
+    if (!pix) return false;
+
+    int w = 0, h = 0;
+    const std::uint8_t* samples = nullptr;
+    fz_try(ctx) {
+        w       = fz_pixmap_width(ctx, pix);
+        h       = fz_pixmap_height(ctx, pix);
+        samples = fz_pixmap_samples(ctx, pix);
+    } fz_catch(ctx) {
+        fz_drop_pixmap(ctx, pix);
+        return false;
+    }
+
+    if (samples && w > 0 && h > 0) {
+        // MuPDF with alpha=1 initializes the pixmap to TRANSPARENT
+        // (0,0,0,0), not white. Pages with no explicit white-background
+        // drawing (ePub, some encrypted PDFs) leave the un-covered area
+        // transparent. StretchDIBits with BI_RGB ignores the alpha
+        // channel, so those pixels would be blitted as BGR=(0,0,0)
+        // -- solid black. Composite each pixel over white in-place so
+        // the resulting BGRA can be safely SRCCOPY'd.
+        std::uint8_t* mut = const_cast<std::uint8_t*>(samples);
+        const std::size_t n_pixels = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
+        for (std::size_t i = 0; i < n_pixels; ++i) {
+            std::uint8_t* p = mut + i * 4;  // BGRA layout
+            const int a = p[3];
+            if (a == 255) continue;  // fully opaque -- common case, no work
+            const int inv = 255 - a;
+            p[0] = static_cast<std::uint8_t>((p[0] * a + 255 * inv + 127) / 255);
+            p[1] = static_cast<std::uint8_t>((p[1] * a + 255 * inv + 127) / 255);
+            p[2] = static_cast<std::uint8_t>((p[2] * a + 255 * inv + 127) / 255);
+            p[3] = 255;
+        }
+        callback(w, h, samples);
+        ok = true;
+    }
+
+    fz_drop_pixmap(ctx, pix);
+    return ok;
+}
+
 bool Document::authenticate(std::string_view password) {
     if (!impl_->doc) return false;
     // fz_authenticate_password expects NUL-terminated; copy to std::string to
