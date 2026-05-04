@@ -27,9 +27,8 @@
 #include "printing/PrintRange.hpp"
 #include "core/Document.hpp"
 
-#include <mupdf/fitz.h>
-
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <vector>
 
@@ -73,119 +72,12 @@ BOOL CALLBACK abort_proc(HDC, int /*iError*/) {
            ? FALSE : TRUE;
 }
 
-// RAII wrapper: clones the Document's fz_context and re-opens the source
-// file on the clone. MuPDF forbids sharing fz_document across contexts
-// (RenderEngine pattern). Both context and document are dropped on scope
-// exit per the project's mupdf-refcount-conventions skill.
-struct PrintMupdfHandle {
-    fz_context*  ctx = nullptr;
-    fz_document* doc = nullptr;
-
-    explicit PrintMupdfHandle(const litepdf::core::Document& d) {
-        ctx = d.clone_context();
-        if (!ctx) return;
-        const auto utf8 = d.source_path().u8string();
-        fz_try(ctx) {
-            doc = fz_open_document(
-                ctx, reinterpret_cast<const char*>(utf8.c_str()));
-        } fz_catch(ctx) {
-            doc = nullptr;
-        }
-    }
-    ~PrintMupdfHandle() {
-        if (doc) fz_drop_document(ctx, doc);
-        if (ctx) fz_drop_context(ctx);
-    }
-    PrintMupdfHandle(const PrintMupdfHandle&)            = delete;
-    PrintMupdfHandle& operator=(const PrintMupdfHandle&) = delete;
-    [[nodiscard]] bool valid() const { return ctx && doc; }
-};
-
-// Render one page to a BGRA pixmap at the printer's native DPI per the
-// supplied scale mode. Returns the pixmap and the px translation needed
-// to center it on paper. Caller owns the returned pixmap and MUST drop
-// it via fz_drop_pixmap once StretchDIBits has consumed it.
-struct RenderResult {
-    fz_pixmap* pix = nullptr;
-    int        dst_x = 0;
-    int        dst_y = 0;
-};
-
-RenderResult render_page_to_pixmap(
-    fz_context* ctx, fz_document* doc, std::size_t page_idx,
-    HDC hdc, ScaleMode mode, float custom_pct, bool auto_rotate)
-{
-    RenderResult result{};
-    fz_page* page = nullptr;
-    fz_try(ctx) {
-        page = fz_load_page(ctx, doc, static_cast<int>(page_idx));
-    } fz_catch(ctx) {
-        page = nullptr;
-    }
-    if (!page) return result;
-
-    // page_rect_pt: fz_bound_page returns MuPDF POINTS (1 pt = 1/72 inch).
-    fz_rect bound{};
-    fz_try(ctx) {
-        bound = fz_bound_page(ctx, page);
-    } fz_catch(ctx) {
-        fz_drop_page(ctx, page);
-        return result;
-    }
-    const Rect page_rect_pt{ bound.x0, bound.y0, bound.x1, bound.y1 };
-
-    const float dpi_x = static_cast<float>(GetDeviceCaps(hdc, LOGPIXELSX));
-    const float dpi_y = static_cast<float>(GetDeviceCaps(hdc, LOGPIXELSY));
-
-    // paper_rect_px: printable area in PRINTER DEVICE PIXELS.
-    const Rect paper_rect_px{
-        0.0f, 0.0f,
-        static_cast<float>(GetDeviceCaps(hdc, HORZRES)),
-        static_cast<float>(GetDeviceCaps(hdc, VERTRES)),
-    };
-
-    // compute_render_matrix returns scale in px/pt -- correct unit for fz_scale.
-    const auto pm = compute_render_matrix(
-        page_rect_pt, paper_rect_px, mode, custom_pct, auto_rotate, dpi_x, dpi_y);
-
-    // pm.scale_x is in px/pt. fz_scale(s) applied to page points yields
-    // device pixels -- exactly what StretchDIBits needs. Translation is
-    // applied in StretchDIBits dst rect, NOT in the MuPDF matrix; this
-    // keeps the rendered pixmap's bbox at origin (0,0,w,h) and avoids
-    // wasted pixels for the centering offset.
-    fz_matrix m = fz_scale(pm.scale_x, pm.scale_y);
-    if (pm.rotate_90) m = fz_pre_rotate(m, 90.0f);
-
-    fz_pixmap* pix = nullptr;
-    fz_try(ctx) {
-        pix = fz_new_pixmap_from_page(
-            ctx, page, m, fz_device_bgr(ctx), /*alpha*/1);
-    } fz_always(ctx) {
-        fz_drop_page(ctx, page);
-    } fz_catch(ctx) {
-        pix = nullptr;
-    }
-
-    result.pix = pix;
-    result.dst_x = static_cast<int>(pm.tx + 0.5f);
-    result.dst_y = static_cast<int>(pm.ty + 0.5f);
-    return result;
-}
-
-bool blit_pixmap_to_hdc(HDC hdc, fz_pixmap* pix, fz_context* ctx,
-                        int dst_x, int dst_y) {
-    if (!pix) return false;
-
-    int w = 0, h = 0;
-    const unsigned char* samples = nullptr;
-    fz_try(ctx) {
-        w       = fz_pixmap_width(ctx, pix);
-        h       = fz_pixmap_height(ctx, pix);
-        samples = fz_pixmap_samples(ctx, pix);
-    } fz_catch(ctx) {
-        return false;
-    }
-    if (!samples || w <= 0 || h <= 0) return false;
+// Blit a top-down BGRA bitmap (from Document::with_rendered_page) to the
+// printer DC at (dst_x, dst_y). No fz_* calls -- buffer is already pure
+// pixel data owned by the caller.
+bool blit_bgra_to_hdc(HDC hdc, int w, int h, const std::uint8_t* bgra,
+                      int dst_x, int dst_y) {
+    if (!bgra || w <= 0 || h <= 0) return false;
 
     BITMAPINFO bmi = {};
     bmi.bmiHeader.biSize        = sizeof(bmi.bmiHeader);
@@ -199,7 +91,7 @@ bool blit_pixmap_to_hdc(HDC hdc, fz_pixmap* pix, fz_context* ctx,
         hdc,
         /*dst*/ dst_x, dst_y, w, h,
         /*src*/ 0, 0, w, h,
-        samples, &bmi, DIB_RGB_COLORS, SRCCOPY);
+        bgra, &bmi, DIB_RGB_COLORS, SRCCOPY);
     return rc != GDI_ERROR && rc != 0;
 }
 
@@ -219,10 +111,35 @@ bool PrintJob::run(HWND parent,
     if (!scale) return false;
 
     // [2] OS PrintDlgEx (modern API; supports lpPageRanges).
+    // PrintDlgEx internally uses COM property sheets and per MSDN remarks
+    // requires the calling thread to have called CoInitializeEx with
+    // COINIT_APARTMENTTHREADED. Without it the dialog silently fails
+    // (returns S_OK + PD_RESULT_CANCEL on some Windows versions, which
+    // looks like "no dialog appears" to the user). The legacy PrintDlg
+    // does NOT need COM; we hit this when switching to PrintDlgEx.
+    struct ComScope {
+        HRESULT init_hr;
+        ComScope() {
+            init_hr = CoInitializeEx(
+                nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        }
+        ~ComScope() {
+            // Don't uninitialize if we hit RPC_E_CHANGED_MODE -- some other
+            // thread/library set the apartment first; not ours to tear down.
+            if (init_hr == S_OK || init_hr == S_FALSE) CoUninitialize();
+        }
+    } com_scope;
+
     PRINTPAGERANGE ranges[10] = {};
     PRINTDLGEXW pd = {};
     pd.lStructSize    = sizeof(pd);
     pd.hwndOwner      = parent;
+    // PD_USEDEVMODECOPIESANDCOLLATE delegates copy multiplication and
+    // collation order to the printer driver -- it sets DEVMODE.dmCopies
+    // and dmCollate from the dialog, and we send the page sequence once.
+    // PD_COLLATE pre-selects the Collate checkbox so the dialog UI
+    // defaults to "Collate ON" matching the natural user expectation
+    // (1,2,3,1,2,3 order). User can untick to get uncollated output.
     pd.Flags          = PD_RETURNDC | PD_NOSELECTION
                       | PD_NOCURRENTPAGE
                       | PD_USEDEVMODECOPIESANDCOLLATE
@@ -276,9 +193,32 @@ bool PrintJob::run(HWND parent,
         return false;
     }
 
-    // Copies: PrintDlgEx returns the resolved nCopies on the struct itself
-    // when PD_USEDEVMODECOPIESANDCOLLATE is set.
-    DWORD copies = std::max<DWORD>(1, pd.nCopies);
+    // Copies: without PD_USEDEVMODECOPIESANDCOLLATE pd.nCopies holds the
+    // user's choice. BUT some drivers (notably Microsoft Print to PDF)
+    // ALSO populate DEVMODE.dmCopies regardless of the flag, and the
+    // driver multiplies by dmCopies internally during printing -- if we
+    // also loop nCopies times we get nCopies * dmCopies pages (4x for 2
+    // copies). Force dmCopies=1 in DEVMODE and apply ResetDC so the HDC
+    // honors it; we are the sole multiplier via our outer copies loop.
+    // With PD_USEDEVMODECOPIESANDCOLLATE: pd.nCopies is always 1, and
+    // copy count + collation order live in DEVMODE (dm->dmCopies,
+    // dm->dmCollate). The driver applies both during print -- we send
+    // the page sequence ONCE.
+    //
+    // PD_COLLATE pre-selects Collate ON in the dialog, but the Win11
+    // modern Print dialog HIDES the Collate option entirely on many
+    // drivers (Brother DCP-L2540DW, etc.) so the flag's pre-selection
+    // is silently overridden by the driver's own default (FALSE -- gives
+    // 1,1,2,2,3,3). Force dmCollate=TRUE post-dialog so the driver
+    // emits collated output regardless of what the dialog returned.
+    if (pd.hDevMode) {
+        auto* dm = static_cast<DEVMODEW*>(GlobalLock(pd.hDevMode));
+        if (dm) {
+            dm->dmCollate = DMCOLLATE_TRUE;
+            ResetDCW(pd.hDC, dm);
+            GlobalUnlock(pd.hDevMode);
+        }
+    }
 
     // [4] StartDoc + abort callback registration (Task 8).
     PrintAbortFlag abort_flag;
@@ -295,16 +235,10 @@ bool PrintJob::run(HWND parent,
         ~AbortFlagGuard() { g_active_abort_flag = nullptr; }
     } abort_guard;
 
-    // [5] Open a per-job MuPDF context + document (Task 7).
-    PrintMupdfHandle mupdf(doc);
-    if (!mupdf.valid()) {
-        AbortDoc(pd.hDC);
-        show_error(parent, L"Failed to open document for printing.");
-        return false;
-    }
-
-    // [6] Page loop with MuPDF -> StretchDIBits.
-    PrintProgressDlg progress(parent, abort_flag, pages.size() * copies);
+    // [5] Page loop. PD_USEDEVMODECOPIESANDCOLLATE means the driver
+    // multiplies by dm->dmCopies and re-orders per dm->dmCollate; we
+    // send the page sequence ONCE.
+    PrintProgressDlg progress(parent, abort_flag, pages.size());
     if (!progress.is_valid()) {
         AbortDoc(pd.hDC);
         show_error(parent, L"Failed to create print progress dialog.");
@@ -312,47 +246,68 @@ bool PrintJob::run(HWND parent,
     }
     std::size_t emitted = 0;
     bool error_aborted = false;
-    for (DWORD c = 0; c < copies && !abort_flag.is_aborted() && !error_aborted; ++c) {
-        for (std::size_t p : pages) {
-            if (abort_flag.is_aborted()) break;
-            ++emitted;
-            progress.set_progress(emitted);
-            if (StartPage(pd.hDC) <= 0) {
-                AbortDoc(pd.hDC);
-                show_error(parent, L"Printer reported an error mid-job.");
-                error_aborted = true;
-                break;
-            }
+    for (std::size_t p : pages) {
+        if (abort_flag.is_aborted()) break;
+        ++emitted;
+        progress.set_progress(emitted);
+        if (StartPage(pd.hDC) <= 0) {
+            AbortDoc(pd.hDC);
+            show_error(parent, L"Printer reported an error mid-job.");
+            error_aborted = true;
+            break;
+        }
 
-            auto rr = render_page_to_pixmap(
-                mupdf.ctx, mupdf.doc, p, pd.hDC,
-                scale->mode, scale->custom_pct, /*auto_rotate*/true);
-            if (!rr.pix) {
-                AbortDoc(pd.hDC);
-                wchar_t buf[96];
-                swprintf_s(buf, L"Failed to render page %zu.", p + 1);
-                show_error(parent, buf);
-                error_aborted = true;
-                break;
-            }
-            const bool ok = blit_pixmap_to_hdc(
-                pd.hDC, rr.pix, mupdf.ctx, rr.dst_x, rr.dst_y);
-            fz_drop_pixmap(mupdf.ctx, rr.pix);
-            if (!ok) {
-                AbortDoc(pd.hDC);
-                show_error(parent, L"StretchDIBits failed.");
-                error_aborted = true;
-                break;
-            }
+        // FillRect white: see commit history -- "Microsoft Print to
+        // PDF" leaves untouched DC areas BLACK; StretchDIBits only
+        // paints the page-content rect.
+        const int paper_w_px = GetDeviceCaps(pd.hDC, HORZRES);
+        const int paper_h_px = GetDeviceCaps(pd.hDC, VERTRES);
+        {
+            RECT paper_rect{ 0, 0, paper_w_px, paper_h_px };
+            FillRect(pd.hDC, &paper_rect,
+                     reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+        }
 
-            if (EndPage(pd.hDC) <= 0) {
-                AbortDoc(pd.hDC);
-                wchar_t buf[96];
-                swprintf_s(buf, L"Printer reported error after page %zu.", p + 1);
-                show_error(parent, buf);
-                error_aborted = true;
-                break;
-            }
+        // Compute matrix from page size + paper geometry.
+        const auto ps = doc.page_size(p);
+        const Rect page_rect_pt{ 0.0f, 0.0f, ps.width_pt, ps.height_pt };
+        const Rect paper_rect_px{ 0.0f, 0.0f,
+                                  static_cast<float>(paper_w_px),
+                                  static_cast<float>(paper_h_px) };
+        const float dpi_x = static_cast<float>(GetDeviceCaps(pd.hDC, LOGPIXELSX));
+        const float dpi_y = static_cast<float>(GetDeviceCaps(pd.hDC, LOGPIXELSY));
+        const auto pm = compute_render_matrix(
+            page_rect_pt, paper_rect_px,
+            scale->mode, scale->custom_pct,
+            /*auto_rotate*/true, dpi_x, dpi_y);
+        const int dst_x = static_cast<int>(pm.tx + 0.5f);
+        const int dst_y = static_cast<int>(pm.ty + 0.5f);
+
+        // Render + blit via Document escape hatch (uses Document's
+        // own ctx + doc -- preserves auth + layout state).
+        bool render_ok = false;
+        const bool got_pix = doc.with_rendered_page(
+            p, pm.scale_x, pm.scale_y, pm.rotate_90,
+            [&](int w, int h, const std::uint8_t* bgra) {
+                render_ok = blit_bgra_to_hdc(
+                    pd.hDC, w, h, bgra, dst_x, dst_y);
+            });
+        if (!got_pix || !render_ok) {
+            AbortDoc(pd.hDC);
+            wchar_t buf[96];
+            swprintf_s(buf, L"Failed to render page %zu.", p + 1);
+            show_error(parent, buf);
+            error_aborted = true;
+            break;
+        }
+
+        if (EndPage(pd.hDC) <= 0) {
+            AbortDoc(pd.hDC);
+            wchar_t buf[96];
+            swprintf_s(buf, L"Printer reported error after page %zu.", p + 1);
+            show_error(parent, buf);
+            error_aborted = true;
+            break;
         }
     }
 
