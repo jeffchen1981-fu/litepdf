@@ -62,9 +62,16 @@ static PrintAbortFlag* g_active_abort_flag = nullptr;
 BOOL CALLBACK abort_proc(HDC, int /*iError*/) {
     // Pump messages so PrintProgressDlg's Cancel button can be observed
     // even while a single StretchDIBits is mid-execution (printer drivers
-    // call back into us during long blits).
+    // call back into us during long blits). Re-post WM_QUIT so the host
+    // message loop in MainWindow::run still sees app-shutdown requests
+    // (taskbar X / Alt-F4 / system shutdown) that arrive mid-print.
     MSG msg;
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        if (msg.message == WM_QUIT) {
+            PostQuitMessage(static_cast<int>(msg.wParam));
+            if (g_active_abort_flag) g_active_abort_flag->request_abort();
+            break;
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
@@ -189,6 +196,9 @@ bool PrintJob::run(HWND parent,
         for (std::size_t i = 0; i < doc.page_count(); ++i) pages.push_back(i);
     }
     if (pages.empty()) {
+        // RAII guards above (hdc_owner / devmode_owner / devnames_owner)
+        // cover this early return. If a future refactor moves them, also
+        // free pd.hDC + pd.hDevMode + pd.hDevNames before returning.
         show_error(parent, L"No pages selected.");
         return false;
     }

@@ -294,6 +294,18 @@ bool Document::with_rendered_page(
         // channel, so those pixels would be blitted as BGR=(0,0,0)
         // -- solid black. Composite each pixel over white in-place so
         // the resulting BGRA can be safely SRCCOPY'd.
+        //
+        // MuPDF pixmaps use PREMULTIPLIED alpha during rendering
+        // (mupdf/fitz/pixmap.h:37). For premultiplied source over a
+        // solid white background:
+        //   out_color = src_color + (255 - alpha)  (clamped)
+        // -- because src_color already encodes color * alpha. Using the
+        // straight-alpha formula (src_color * alpha + 255 * inv) on a
+        // premultiplied buffer produces fringe-darkening on partial-alpha
+        // edges (anti-aliased glyph borders show ~25% too dark for
+        // saturated colors).
+        // The const_cast is safe: this Document owns the pixmap (about to
+        // drop it after the callback) and doc_mutex serializes all access.
         std::uint8_t* mut = const_cast<std::uint8_t*>(samples);
         const std::size_t n_pixels = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
         for (std::size_t i = 0; i < n_pixels; ++i) {
@@ -301,9 +313,9 @@ bool Document::with_rendered_page(
             const int a = p[3];
             if (a == 255) continue;  // fully opaque -- common case, no work
             const int inv = 255 - a;
-            p[0] = static_cast<std::uint8_t>((p[0] * a + 255 * inv + 127) / 255);
-            p[1] = static_cast<std::uint8_t>((p[1] * a + 255 * inv + 127) / 255);
-            p[2] = static_cast<std::uint8_t>((p[2] * a + 255 * inv + 127) / 255);
+            p[0] = static_cast<std::uint8_t>(std::min(255, p[0] + inv));
+            p[1] = static_cast<std::uint8_t>(std::min(255, p[1] + inv));
+            p[2] = static_cast<std::uint8_t>(std::min(255, p[2] + inv));
             p[3] = 255;
         }
         callback(w, h, samples);

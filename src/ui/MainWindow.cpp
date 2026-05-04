@@ -907,6 +907,15 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             }
             // Only rebuild MRU when the File popup (index 0) is about to show.
             if (popup != GetSubMenu(main, 0)) return 0;
+            // Phase 8.5: gray Print menu when no document is open.
+            // Spec §1 Non-goals: "Print menu disabled until Document is_ready()".
+            {
+                auto* v = active_view();
+                const bool has_doc = v && v->document().is_open();
+                EnableMenuItem(popup, IDM_FILE_PRINT,
+                               MF_BYCOMMAND
+                               | (has_doc ? MF_ENABLED : MF_GRAYED));
+            }
             // Remove any existing MRU items + the dynamic SEP (safe when absent).
             DeleteMenu(popup, IDM_MRU_SEPARATOR, MF_BYCOMMAND);
             for (int id = IDM_MRU_1; id <= IDM_MRU_10; ++id) {

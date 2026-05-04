@@ -318,8 +318,16 @@ void PrintProgressDlg::set_progress(std::size_t current_1based) {
     SetDlgItemTextW(hwnd_, IDC_LABEL_STATUS, buf);
     // Pump pending messages so the Cancel click is observed before the
     // next page render starts. IsDialogMessage handles tab/enter routing.
+    // Re-post WM_QUIT so the host message loop in MainWindow::run still
+    // sees app-shutdown requests that arrive mid-print -- otherwise
+    // PeekMessage removes WM_QUIT and DispatchMessage drops it.
     MSG msg;
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        if (msg.message == WM_QUIT) {
+            PostQuitMessage(static_cast<int>(msg.wParam));
+            abort_flag_.request_abort();
+            break;
+        }
         if (!IsDialogMessageW(hwnd_, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
