@@ -13,6 +13,7 @@
 #include "ui/ColdStartTimer.hpp"
 #include "ui/PasswordDialog.hpp"  // Phase 8 Task 1
 #include "ui/password_retry.hpp"  // Phase 8 Task 1
+#include "printing/PrintJob.hpp"  // Phase 8.5 Task 10
 #include "ui/ThumbnailPane.hpp"  // Phase 7 Task 8: F4 toggle uses ThumbnailPane methods.
 
 #include <commctrl.h>
@@ -906,6 +907,15 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             }
             // Only rebuild MRU when the File popup (index 0) is about to show.
             if (popup != GetSubMenu(main, 0)) return 0;
+            // Phase 8.5: gray Print menu when no document is open.
+            // Spec §1 Non-goals: "Print menu disabled until Document is_ready()".
+            {
+                auto* v = active_view();
+                const bool has_doc = v && v->document().is_open();
+                EnableMenuItem(popup, IDM_FILE_PRINT,
+                               MF_BYCOMMAND
+                               | (has_doc ? MF_ENABLED : MF_GRAYED));
+            }
             // Remove any existing MRU items + the dynamic SEP (safe when absent).
             DeleteMenu(popup, IDM_MRU_SEPARATOR, MF_BYCOMMAND);
             for (int id = IDM_MRU_1; id <= IDM_MRU_10; ++id) {
@@ -1027,6 +1037,15 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                         if (n >= 0) tabs_->set_active(n);
                     }
                     return 0;
+                case IDM_FILE_PRINT: {
+                    auto* view = active_view();
+                    if (view && view->document().is_open()) {
+                        litepdf::printing::PrintJob::run(
+                            hwnd, view->document(),
+                            static_cast<std::size_t>(view->current_page()));
+                    }
+                    return 0;
+                }
                 case IDM_FILE_OPEN: {
                     wchar_t buf[MAX_PATH] = {0};
                     OPENFILENAMEW ofn = {0};
@@ -1055,7 +1074,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     return 0;
                 case IDM_HELP_ABOUT:
                     MessageBoxW(hwnd,
-                        L"LitePDF v0.0.9\n\n"
+                        L"LitePDF v0.0.11\n\n"
                         L"A lightweight PDF / ePub / CBZ / XPS viewer for Windows.\n\n"
                         L"License: AGPL-3.0\n"
                         L"Engine: MuPDF 1.24.11\n"
@@ -1576,6 +1595,7 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
     // Ctrl+1..9 jumps to tab N.
     ACCEL accels[] = {
         { FCONTROL | FVIRTKEY, 'O',          IDM_FILE_OPEN     },
+        { FCONTROL | FVIRTKEY, 'P',          IDM_FILE_PRINT    },  // Phase 8.5
         { FCONTROL | FVIRTKEY, VK_OEM_PLUS,  IDM_ZOOM_IN       },  // Ctrl+=
         { FCONTROL | FVIRTKEY, VK_OEM_MINUS, IDM_ZOOM_OUT      },  // Ctrl+-
         { FCONTROL | FVIRTKEY, '0',          IDM_ZOOM_RESET    },

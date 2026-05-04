@@ -47,6 +47,12 @@ add_library(litepdf_core STATIC
     # same rationale as ThumbnailPane.cpp above.
     src/ui/PasswordDialog.cpp
     src/ui/password_retry.cpp
+    # Phase 8.5: Print support (T2). Header-only files
+    # (PrintGeometry.hpp, PrintAbortFlag.hpp) are #included directly
+    # by consumers and not listed here.
+    src/printing/PrintRange.cpp
+    src/printing/PrintProgressDlg.cpp
+    src/printing/PrintJob.cpp
 )
 
 litepdf_apply_flags(litepdf_core)

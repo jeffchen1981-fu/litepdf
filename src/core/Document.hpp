@@ -6,7 +6,9 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -162,6 +164,41 @@ public:
     // empty path. RenderEngine workers use this to re-open the file on their
     // own fz_context (MuPDF forbids sharing fz_document across contexts).
     [[nodiscard]] const std::filesystem::path& source_path() const noexcept;
+
+    // ------------------------------------------------------------------
+    // Synchronous render escape hatch (Phase 8.5)
+    // ------------------------------------------------------------------
+    // Renders a page to a BGRA pixmap on this Document's internal
+    // fz_context, invokes the callback with the pixel data, then drops
+    // the pixmap. Used by PrintJob (UI-thread, synchronous, modal) so
+    // that authentication state on encrypted PDFs and layout state on
+    // reflowable formats (ePub, CBZ) are preserved -- a cloned context
+    // would lose both.
+    //
+    // Caller MUST consume `bgra` only inside the callback; the pointer
+    // is invalidated when the callback returns. Pixel order is BGRA
+    // (4 bytes per pixel) top-down (row 0 = top of page).
+    //
+    // scale_x_px_per_pt, scale_y_px_per_pt: feed directly into fz_scale().
+    // rotate_90: if true, the matrix prepends a 90 degree pre-rotation
+    // (auto-rotate logic, computed by the caller).
+    //
+    // Returns false if page_idx is out of range, document is not open,
+    // or rendering fails. On false, callback is not invoked.
+    //
+    // Thread-safety: SAFE concurrently with other Document methods on
+    // the same instance -- internal doc_mutex serializes all callers.
+    // Holds the mutex for the entire render duration (~50-300ms at
+    // print DPI). RenderEngine worker threads hitting this Document
+    // will block; acceptable because print is a rare modal operation.
+    [[nodiscard]] bool with_rendered_page(
+        std::size_t page_idx,
+        float scale_x_px_per_pt,
+        float scale_y_px_per_pt,
+        bool  rotate_90,
+        const std::function<void(int width_px,
+                                 int height_px,
+                                 const std::uint8_t* bgra_top_down)>& callback) const;
 
 private:
     struct Impl;

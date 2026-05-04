@@ -2,8 +2,8 @@
 
 // Version info
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     0,0,9,0
-PRODUCTVERSION  0,0,9,0
+FILEVERSION     0,0,10,0
+PRODUCTVERSION  0,0,10,0
 FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
 FILEFLAGS       0
 FILEOS          VOS_NT_WINDOWS32
@@ -16,12 +16,12 @@ BEGIN
     BEGIN
       VALUE "CompanyName",      "LitePDF"
       VALUE "FileDescription",  "LitePDF - lightweight PDF reader"
-      VALUE "FileVersion",      "0.0.9.0"
+      VALUE "FileVersion",      "0.0.10.0"
       VALUE "InternalName",     "litepdf"
       VALUE "LegalCopyright",   "AGPL-3.0"
       VALUE "OriginalFilename", "litepdf.exe"
       VALUE "ProductName",      "LitePDF"
-      VALUE "ProductVersion",   "0.0.9.0"
+      VALUE "ProductVersion",   "0.0.10.0"
     END
   END
   BLOCK "VarFileInfo"
@@ -48,11 +48,12 @@ IDM_MAIN_MENU MENU
     POPUP "&File"
     {
         MENUITEM "&Open...\tCtrl+O", IDM_FILE_OPEN
+        MENUITEM "&Print...\tCtrl+P", IDM_FILE_PRINT
         MENUITEM SEPARATOR
         // MRU entries + their trailing separator (IDM_MRU_SEPARATOR) are
         // inserted dynamically at WM_INITMENUPOPUP between this static
         // separator and Exit, but ONLY when the MRU has at least one
-        // entry — keeps the empty-MRU layout as Open / SEP / Exit.
+        // entry — keeps the empty-MRU layout as Open / Print / SEP / Exit.
         MENUITEM "E&xit",            IDM_FILE_EXIT
     }
     POPUP "&View"
