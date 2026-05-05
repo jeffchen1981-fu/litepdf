@@ -6,7 +6,7 @@
 
 **Phase placement:** Phase 9 of the v1.0 roadmap. Prerequisite: Phase 8.5 (Print support) merged. Successor: Phase 10 (Installer) — which consumes `IDI_PDFDOC` via the `DefaultIcon` registry key for `.pdf` association.
 
-**LOC budget:** ~65 (resource embedding + regen script + README; SVG/PNG/ICO are binary assets, not code). Leaves ~35 LOC headroom under the roadmap's 100-LOC budget for incidental wiring (e.g. `WM_SETICON`, tab-strip integration).
+**LOC budget:** ~85 (resource embedding + regen .ps1 + regen .py helper + requirements.txt + README; SVG/PNG/ICO are binary assets, not code). Leaves ~15 LOC headroom under the roadmap's 100-LOC budget. Breakdown: `litepdf.rc` +2, `MainMenu.rc.h` +5, `MainWindow.cpp` +2, `CMakeLists.txt` +1, `regenerate.ps1` ~15, `regenerate.py` ~30, `requirements.txt` 2, `README.md` ~30.
 
 ---
 
@@ -68,7 +68,7 @@ If auto-downscale fails this criterion, the implementer authors a separate `lite
 Icons change rarely (target: 0–1 times per year). Coupling icon regeneration to every CMake build forces every contributor and CI runner to install rasterization tools. **This spec commits the final `.ico` binaries to the repository and treats regeneration as an explicit out-of-band step.**
 
 Consequences:
-- CMake has no rasterization dependency. The build does `IDI_APPICON ICON "../assets/icon/litepdf-app.ico"` (relative to `resources/litepdf.rc`) and is done.
+- CMake has no rasterization dependency. The build does `IDI_APPICON ICON "assets/icon/litepdf-app.ico"` (resolved against the source-root resource-compiler include path; see §3.1) and is done.
 - CI runners need no extra packages.
 - A contributor updating the visual design runs one PowerShell script locally; the resulting `.ico` files land in the same commit as the `.svg` source change.
 
@@ -149,21 +149,32 @@ PNG intermediates are committed (not just the ICO) so visual diffs in PRs are tr
 
 ### 3.1 Resource declarations
 
-`resources/litepdf.rc` (existing file) gains two ICON entries:
+`resources/litepdf.rc` (existing file) already reserves placeholder slots for these icons (commented out, pre-reserved at IDs 101/102 since Phase 0 bootstrap). Phase 9 uncomments them and corrects the path:
 
 ```rc
-IDI_APPICON ICON "../assets/icon/litepdf-app.ico"
-IDI_PDFDOC  ICON "../assets/icon/litepdf-doc.ico"
+IDI_APPICON ICON "assets/icon/litepdf-app.ico"
+IDI_PDFDOC  ICON "assets/icon/litepdf-doc.ico"
 ```
 
-Resource IDs declared in `resources/IconIds.h` (new file) or appended to existing `resources/MainMenu.rc.h`:
+The path `assets/icon/...` resolves relative to the project source root, which requires adding the source root to the resource-compiler include directories in `CMakeLists.txt`:
+
+```cmake
+target_include_directories(litepdf PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/resources"
+    "${CMAKE_CURRENT_SOURCE_DIR}"        # for .rc paths like "assets/icon/..."
+)
+```
+
+Resource IDs declared in `resources/MainMenu.rc.h` (existing file) — appended in a new section. Honors the pre-reservation in litepdf.rc to avoid renumbering risk:
 
 ```c
-#define IDI_APPICON 200
-#define IDI_PDFDOC  201
+// Phase 9: app and document icon resource IDs.
+// Numeric IDs match the reservation in litepdf.rc (since Phase 0 bootstrap).
+#define IDI_APPICON 101
+#define IDI_PDFDOC  102
 ```
 
-Numeric IDs in the 200 range (well clear of menu/dialog IDs already in MainMenu.rc.h).
+Numeric IDs are in the 100 range (icon resources). The IDM_ menu-command IDs in the same header live in the 40000+ range, so the two namespaces do not collide.
 
 ### 3.2 Window class registration
 
@@ -184,20 +195,18 @@ In Phase 9: declared and embedded only — not loaded by any runtime code. Phase
 
 ```reg
 HKEY_CLASSES_ROOT\.pdf\OpenWithProgids\LitePDF.Document = ""
-HKEY_CLASSES_ROOT\LitePDF.Document\DefaultIcon = "<install-dir>\litepdf.exe,-201"
+HKEY_CLASSES_ROOT\LitePDF.Document\DefaultIcon = "<install-dir>\litepdf.exe,-102"
 ```
 
-(The `-201` references resource ID `IDI_PDFDOC = 201`.) Phase 10 owns that wiring; Phase 9 only ensures the resource is present.
+(The `-102` references resource ID `IDI_PDFDOC = 102`.) Phase 10 owns that wiring; Phase 9 only ensures the resource is present.
 
 ---
 
 ## 4. Build & Verification
 
-### 4.1 Build flow (no changes from baseline)
+### 4.1 Build flow (one CMake change)
 
-CMake's existing `add_executable(litepdf WIN32 … resources/litepdf.rc)` already routes the `.rc` through `rc.exe`. Adding two `ICON` entries requires no CMake change.
-
-The `.ico` files must be readable from the `.rc`'s relative path. The `..\assets\icon\` prefix in the `.rc` resolves correctly because `litepdf.rc` lives in `resources/` and asset files live in `assets/icon/`.
+CMake's existing `add_executable(litepdf WIN32 … resources/litepdf.rc)` already routes the `.rc` through `rc.exe`. Adding two `ICON` entries requires one CMake change: extending the resource-compiler include path so the `.rc` can reference assets via `"assets/icon/<file>.ico"`. See §3.1 for the `target_include_directories` snippet.
 
 ### 4.2 Verification (added to manual smoke checklist)
 
@@ -257,7 +266,6 @@ Deferred deliberately:
 
 None at spec time. Implementation plan will resolve:
 - Exact PowerShell heredoc strategy in `regenerate.ps1` (inline `python -c` vs. helper `.py` file)
-- Whether `MainMenu.rc.h` gains the icon IDs or `IconIds.h` is created (either works; convenience call at implementation)
 
 ---
 
