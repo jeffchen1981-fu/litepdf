@@ -2,12 +2,13 @@
 
 A lightweight PDF / ePub / CBZ / XPS reader for Windows 11, optimized for mechanical hard drives. Single self-contained executable, no runtime dependencies.
 
-- **Status:** under development (Phase 8 shipped — Tier 3 feature-complete; tag `v0.0.9-phase8`)
+- **Status:** under development (Phase 8.5 shipped — Tier 3 feature-complete + print support; tag `v0.0.10-phase8.5`)
 - **License:** [AGPL-3.0](LICENSE)
 - **Design:** [`docs/plans/2026-04-15-litepdf-design.md`](docs/plans/2026-04-15-litepdf-design.md)
 - **Roadmap:** [`docs/plans/2026-04-15-litepdf-roadmap.md`](docs/plans/2026-04-15-litepdf-roadmap.md)
+- **Changelog:** [`CHANGELOG.md`](CHANGELOG.md)
 
-## Features (v0.0.9)
+## Features (v0.0.10)
 
 Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab independent state. Cold-start budget under 1 s on SSD; tuned for HDD-friendly I/O patterns.
 
@@ -17,6 +18,7 @@ Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab i
 - **Thumbnails** — lazy-rendered side pane (F4)
 - **Invert colors** — per-tab dark-mode toggle (Ctrl+Shift+I, Phase 8)
 - **Two-page spread** — book-style side-by-side layout with cover-page rule (Ctrl+Shift+D, Phase 8)
+- **Print** — standard `PrintDlgEx` with page range, copies, scale modes (fit / actual / custom %), auto-rotate, and mid-job cancel (Ctrl+P, Phase 8.5)
 - **MRU** — recent files in File menu, persisted across runs
 
 ## Keyboard shortcuts
@@ -24,6 +26,7 @@ Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab i
 | Key                | Action                              |
 |--------------------|-------------------------------------|
 | Ctrl+O             | Open file                           |
+| Ctrl+P             | Print active document               |
 | Ctrl+W             | Close active tab                    |
 | Ctrl+Tab / Ctrl+Shift+Tab | Cycle tabs                   |
 | Ctrl+1..9          | Jump to tab N                       |
@@ -64,7 +67,7 @@ The produced `build/Release/litepdf.exe` is a single self-contained binary.
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-149 unit tests at `v0.0.9-phase8`. The CI workflow (`.github/workflows/ci.yml`) runs configure + build + version-sync gate + ctest on `windows-latest` for every push and pull request.
+163 unit tests at `v0.0.10-phase8.5` (Phase 8.5 added the `src/printing/` suite covering geometry, range parser, and abort flag). The CI workflow (`.github/workflows/ci.yml`) runs configure + build + version-sync gate + ctest on `windows-latest` for every push and pull request.
 
 The PowerShell smoke harness exercises the full app via launch-and-poll:
 
