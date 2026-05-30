@@ -23,7 +23,8 @@ Design source of truth:
 
 Pre-requisites: Python 3.10+ and `pip` on PATH. From the project root:
 
-    pwsh assets/icon/regenerate.ps1
+    powershell -File assets/icon/regenerate.ps1   # Windows PowerShell 5.1+
+    pwsh assets/icon/regenerate.ps1               # PowerShell 7+
 
 The script installs `resvg-py` and `Pillow` into the active Python environment
 (use a venv if you prefer), rasterizes both SVGs at all seven sizes, and
