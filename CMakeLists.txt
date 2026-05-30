@@ -90,9 +90,11 @@ set_target_properties(litepdf PROPERTIES
     OUTPUT_NAME           "litepdf"
 )
 
-# Resource compiler: ensure it can find manifest.xml relative to the .rc file
+# Resource compiler: ensure it can find manifest.xml relative to the .rc file,
+# and assets/icon/*.ico via source-root paths (Phase 9).
 target_include_directories(litepdf PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/resources"
+    "${CMAKE_CURRENT_SOURCE_DIR}"
 )
 
 # Tell the MSVC linker NOT to auto-generate/embed a manifest — resources/litepdf.rc
