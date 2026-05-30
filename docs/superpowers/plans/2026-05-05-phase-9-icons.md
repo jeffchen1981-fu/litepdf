@@ -59,7 +59,7 @@
 - [ ] Task 1: Author `litepdf-app.svg` (Lightning Document, 256×256)
 - [ ] Task 2: Author `litepdf-doc.svg` (PDF wordmark variant, 256×256)
 - [ ] Task 3: Implement `regenerate.py` (SVG → 7×PNG → multi-res ICO; with `--verify` smoke mode)
-- [ ] Task 4: Implement `regenerate.ps1` wrapper (deps install + invoke `regenerate.py`)
+- [x] Task 4: Implement `regenerate.ps1` wrapper (deps install + invoke `regenerate.py`)
 - [ ] Task 5: Run regen, eyeball 16-px legibility, commit produced PNG/ICO assets
 - [ ] Task 5b (conditional): Author small-master `litepdf-app-16.svg` if 16-px auto-downscale fails legibility
 - [ ] Task 6: Add resource IDs to `MainMenu.rc.h`
@@ -477,14 +477,22 @@ set. Stays out of CMake; runs out-of-band on SVG edits per spec §2.1."
 
 **Why:** Thin driver — checks Python is on PATH, ensures deps are installed, then invokes the Python script. PowerShell rather than batch because PowerShell 7+ runs cross-platform and the project already uses pwsh in CI.
 
-- [ ] **Step 1: Replace the stub with the wrapper**
+- [x] **Step 1: Replace the stub with the wrapper**
 
 Path: `assets/icon/regenerate.ps1`
 
+> **Deviation from this block (T4 implementation, commit `0fae77c`):** the
+> original draft below used the null-conditional operator `?.`, which is a
+> PowerShell 7+ feature and a *parse-time* error under Windows PowerShell 5.1.
+> The dev box has only 5.1 (no `pwsh`), so the script must parse there. The
+> shipped version below uses plain `Get-Command` + `if`. Invoke on 5.1 with
+> `powershell -File assets/icon/regenerate.ps1`; `pwsh` still works on 7+.
+
 ```powershell
 # Phase 9 icon regeneration driver.
-# Run from any directory:
-#     pwsh assets/icon/regenerate.ps1
+# Run from any directory with Windows PowerShell 5.1+ or PowerShell 7+:
+#     powershell -File assets/icon/regenerate.ps1   # Windows PowerShell 5.1
+#     pwsh assets/icon/regenerate.ps1               # PowerShell 7+
 # See README.md for prerequisites.
 $ErrorActionPreference = 'Stop'
 
@@ -492,9 +500,16 @@ $scriptDir = Split-Path -Parent $PSCommandPath
 $pyScript  = Join-Path $scriptDir 'regenerate.py'
 $reqFile   = Join-Path $scriptDir 'requirements.txt'
 
-# Locate Python. Prefer `python` on PATH; fall back to `py` launcher on Windows.
-$python = (Get-Command python -ErrorAction SilentlyContinue)?.Source
-if (-not $python) { $python = (Get-Command py -ErrorAction SilentlyContinue)?.Source }
+# Locate Python. Prefer `python` on PATH; fall back to the `py` launcher on
+# Windows. Written with plain Get-Command + if (not the null-conditional `?.`)
+# so the script parses under Windows PowerShell 5.1, not only PowerShell 7+.
+$python = $null
+$pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+if ($pythonCmd) { $python = $pythonCmd.Source }
+if (-not $python) {
+    $pyCmd = Get-Command py -ErrorAction SilentlyContinue
+    if ($pyCmd) { $python = $pyCmd.Source }
+}
 if (-not $python) { throw "Python 3.10+ required (not on PATH). Install python.org or 'winget install Python.Python.3'." }
 
 Write-Host "[regenerate.ps1] Using Python: $python"
@@ -507,7 +522,7 @@ if ($LASTEXITCODE -ne 0) { throw "regenerate.py failed (exit $LASTEXITCODE)" }
 Write-Host "[regenerate.ps1] Done. Inspect assets/icon/*.png and assets/icon/*.ico."
 ```
 
-- [ ] **Step 2: Run the driver**
+- [x] **Step 2: Run the driver**
 
 ```bash
 pwsh assets/icon/regenerate.ps1
@@ -515,7 +530,7 @@ pwsh assets/icon/regenerate.ps1
 
 Expected: deps install (silent), regen runs, "Done." line printed.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add assets/icon/regenerate.ps1
