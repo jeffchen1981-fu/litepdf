@@ -17,7 +17,7 @@ Design source of truth:
 | `litepdf-app.ico`, `litepdf-doc.ico` | Multi-resolution bundles consumed by `resources/litepdf.rc` |
 | `regenerate.ps1` | Top-level driver — call this after editing an SVG |
 | `regenerate.py` | Python helper invoked by the driver; pure logic |
-| `requirements.txt` | `cairosvg` and `Pillow` version pins |
+| `requirements.txt` | `resvg-py` and `Pillow` version pins |
 
 ## Regenerating after an SVG edit
 
@@ -25,10 +25,18 @@ Pre-requisites: Python 3.10+ and `pip` on PATH. From the project root:
 
     pwsh assets/icon/regenerate.ps1
 
-The script installs `cairosvg` and `Pillow` into the active Python environment
+The script installs `resvg-py` and `Pillow` into the active Python environment
 (use a venv if you prefer), rasterizes both SVGs at all seven sizes, and
 bundles the per-variant `.ico` files. The PNG intermediates are also written
 so PR reviewers can scan visual diffs on GitHub.
+
+**Why `resvg-py` and not `cairosvg`?** `resvg` is a Rust SVG renderer shipped as
+a statically linked wheel — no native libraries to install. `cairosvg` (and the
+`svglib` + `reportlab` fallback, which uses the `rlPyCairo` backend) need a
+system `libcairo` DLL that a stock Windows machine does not have, so they install
+fine but crash at import time. `resvg-py` renders each size natively, so the
+bundled 256-px ICO frame is pixel-identical to the standalone 256-px PNG with no
+upscaling blur.
 
 After regeneration, commit every changed `.png` and `.ico` together with the
 `.svg` source change so reviewers see the visual delta in one commit.

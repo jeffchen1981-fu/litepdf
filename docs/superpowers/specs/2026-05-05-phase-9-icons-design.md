@@ -81,20 +81,30 @@ Tool dependencies (only required for regeneration, never for normal build):
 | Tool | Source | Why |
 |---|---|---|
 | Python 3.10+ | already installed | Script orchestration |
-| `cairosvg` | `pip install cairosvg` | SVG → PNG rasterization (LGPL, pure-Python wrapper around Cairo) |
+| `resvg-py` | `pip install resvg-py` | SVG → PNG rasterization (Rust `resvg`, statically linked wheel, no native deps) |
 | `Pillow` | `pip install Pillow` | PNG → multi-resolution `.ico` packing |
 
 Rationale for Python over the original `rsvg-convert + ImageMagick` choice:
 - Python 3.14 already on the dev machine; `rsvg-convert` and `magick` are not.
-- `cairosvg` + `Pillow` install via single `pip install` line (`requirements.txt` in `assets/icon/`).
-- Cross-platform without GTK runtime headaches that bedevil librsvg on Windows.
+- `resvg-py` + `Pillow` install via a single `pip install` line (`requirements.txt` in `assets/icon/`).
+- Cross-platform with **no native-library dependency**.
+
+> **Rasterizer choice (revised in T3).** The original plan specified `cairosvg`.
+> On a stock Windows + Python 3.14 box it import-crashes: `cairocffi` cannot
+> `dlopen` `libcairo-2.dll` (no system Cairo). The obvious fallback,
+> `svglib` + `reportlab`, fails identically — reportlab 4.x removed its libart
+> `_renderPM` C backend and hard-locks the `rlPyCairo` backend, which also needs
+> `libcairo`. `resvg` (Rust, statically linked) has none of this: the `resvg-py`
+> wheel just works on Windows/macOS/Linux. "Pure-Python package" is not the same
+> as "no native deps" — `cairocffi`/`rlPyCairo` `dlopen` at runtime, so they
+> install cleanly and only fail on use.
 
 ### 2.3 Regeneration flow
 
 ```
 assets/icon/litepdf-app.svg   (256-px master, hand-authored)
      │
-     ├──cairosvg──▶ app-16.png, app-20.png, app-24.png, app-32.png,
+     ├──resvg────▶ app-16.png, app-20.png, app-24.png, app-32.png,
      │             app-48.png, app-64.png, app-256.png
      │
      └──Pillow.save(format='ICO')──▶ litepdf-app.ico  (multi-resolution)
@@ -110,14 +120,23 @@ foreach ($variant in 'app','doc') {
     $svg = "assets/icon/litepdf-$variant.svg"
     $pngs = $sizes | ForEach-Object {
         $out = "assets/icon/$variant-$_.png"
-        python -c "import cairosvg; cairosvg.svg2png(url='$svg', output_width=$_, output_height=$_, write_to='$out')"
+        python -c "import resvg_py; open('$out','wb').write(bytes(resvg_py.svg_to_bytes(svg_path='$svg', width=$_, height=$_)))"
         $out
     }
     python -c "from PIL import Image; ims=[Image.open(p) for p in @($($pngs -join ','))]; ims[0].save('assets/icon/litepdf-$variant.ico', sizes=[(s,s) for s in @($($sizes -join ','))])"
 }
 ```
 
-(The actual script will use a Python helper file rather than inline `-c` heredocs to keep escaping sane; the pseudocode above shows the dataflow.)
+(The actual script uses a Python helper file rather than inline `-c` heredocs to keep escaping sane; the pseudocode above shows the dataflow.)
+
+> **Implementation note (T3).** Two details the pseudocode glosses over, both
+> verified during implementation: (1) rasterizer is `resvg-py`, not `cairosvg`
+> (see "Rasterizer choice" above); (2) the ICO base image passed to
+> `Image.save(format='ICO', sizes=..., append_images=...)` **must be the largest
+> (256) frame** — Pillow silently drops any `sizes` entry larger than the base
+> image's own dimensions, so a 16-px base yields a single-frame ICO. With native
+> per-size renders appended, every frame is an exact-size match (no resize); the
+> 256 ICO frame is pixel-identical to the standalone 256 PNG.
 
 ### 2.4 File layout
 
@@ -137,7 +156,7 @@ assets/icon/
 ├─ litepdf-doc.ico         # bundled ICO (consumed by .rc + Phase 10 installer)
 ├─ regenerate.ps1          # PowerShell driver
 ├─ regenerate.py           # Python helper invoked by .ps1
-├─ requirements.txt        # cairosvg + Pillow pins
+├─ requirements.txt        # resvg-py + Pillow pins
 └─ README.md               # regen instructions + design rationale pointers
 ```
 
@@ -231,7 +250,7 @@ No automated tests for icons — pixel comparisons across DPIs are flaky and not
 | `LoadIconW` returns NULL at runtime | Wrong resource ID, rc compilation skipped icon, or `.ico` file missing at build | Validate `MAKEINTRESOURCE` ID matches `IconIds.h`; check `.rc` compiled without warnings; verify `.ico` exists at the path in `.rc`. |
 | Win11 dark taskbar icon looks washed out | `#0B5ED7` luminance still leaves contrast ~3.0 on dark bg (passes large-icon AAA but not text) | Acceptable for v1; if reported, evaluate dual-tone (light/dark variant) for v1.1. |
 | Contributor edits SVG but forgets to regenerate `.ico` | Manual step is easy to miss | `regenerate.ps1` is run as a CI lint check (Phase 12 hardening adds it); for now, PR reviewer enforces. |
-| `cairosvg` install fails on Windows | Missing Cairo DLLs | `requirements.txt` pins `cairosvg>=2.7` which bundles `cairocffi` with Windows wheels; fallback documented in `README.md` is `pip install pyinkscape` or manual Inkscape CLI. |
+| SVG rasterizer fails on Windows | `cairosvg` / `rlPyCairo` need a system `libcairo` DLL absent on stock Windows (import-crash) | **Resolved in T3:** switched to `resvg-py` (Rust, statically linked, no native deps). `requirements.txt` pins `resvg-py>=0.3.0`. |
 
 ---
 

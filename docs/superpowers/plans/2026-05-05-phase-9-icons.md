@@ -6,7 +6,7 @@
 
 **Architecture:** New `assets/icon/` directory holds two hand-authored SVG masters, their PNG rasterizations (intermediates), the bundled `.ico` files, and a Python regen script. CMake's resource compiler picks up the `.ico` files via the `.rc`. Runtime `LoadIconW` in `MainWindow.cpp` wires `IDI_APPICON` into the window class. `IDI_PDFDOC` is embedded but not loaded at runtime (Phase 10 installer consumes it via `DefaultIcon` registry).
 
-**Tech Stack:** C++17 + Win32 (`commctrl.h`, `winres.h`, `WNDCLASSEXW`, `LoadIconW`); Python 3.10+ + `cairosvg` + `Pillow` for the regen pipeline; PowerShell wrapper.
+**Tech Stack:** C++17 + Win32 (`commctrl.h`, `winres.h`, `WNDCLASSEXW`, `LoadIconW`); Python 3.10+ + `resvg-py` + `Pillow` for the regen pipeline; PowerShell wrapper. (T3 switched the rasterizer from `cairosvg` to `resvg-py` — libcairo is absent on stock Windows; see T3 note.)
 
 **Source spec:** [`docs/superpowers/specs/2026-05-05-phase-9-icons-design.md`](../specs/2026-05-05-phase-9-icons-design.md). LOC budget ~85.
 
@@ -35,7 +35,7 @@
 | `assets/icon/doc-{16,20,24,32,48,64,256}.png` | Same | ~5 KB total |
 | `assets/icon/litepdf-app.ico` | Bundled multi-resolution ICO | ~12 KB |
 | `assets/icon/litepdf-doc.ico` | Same | ~10 KB |
-| `assets/icon/regenerate.py` | Python regen logic (cairosvg + Pillow) | ~30 |
+| `assets/icon/regenerate.py` | Python regen logic (resvg-py + Pillow) | ~30 |
 | `assets/icon/regenerate.ps1` | PowerShell wrapper (deps install + invoke .py) | ~15 |
 | `assets/icon/requirements.txt` | Pip pins | 2 |
 | `assets/icon/README.md` | Regen instructions + design pointer | ~30 |
@@ -84,7 +84,7 @@
 - [ ] **Step 1: Create the directory and write `requirements.txt`**
 
 ```
-cairosvg>=2.7.0
+resvg-py>=0.3.0
 Pillow>=10.0.0
 ```
 
@@ -114,7 +114,7 @@ Design source of truth:
 | `litepdf-app.ico`, `litepdf-doc.ico` | Multi-resolution bundles consumed by `resources/litepdf.rc` |
 | `regenerate.ps1` | Top-level driver — call this after editing an SVG |
 | `regenerate.py` | Python helper invoked by the driver; pure logic |
-| `requirements.txt` | `cairosvg` and `Pillow` version pins |
+| `requirements.txt` | `resvg-py` and `Pillow` version pins |
 
 ## Regenerating after an SVG edit
 
@@ -122,7 +122,7 @@ Pre-requisites: Python 3.10+ and `pip` on PATH. From the project root:
 
     pwsh assets/icon/regenerate.ps1
 
-The script installs `cairosvg` and `Pillow` into the active Python environment
+The script installs `resvg-py` and `Pillow` into the active Python environment
 (use a venv if you prefer), rasterizes both SVGs at all seven sizes, and
 bundles the per-variant `.ico` files. The PNG intermediates are also written
 so PR reviewers can scan visual diffs on GitHub.
@@ -223,7 +223,7 @@ The lightning-bolt path is a closed polygon: starts top-center, zigzags down-lef
 
 Run (any of):
 - Open `assets/icon/litepdf-app.svg` in a web browser — should show paper + blue lightning
-- `python -c "import cairosvg; cairosvg.svg2png(url='assets/icon/litepdf-app.svg', output_width=256, write_to='/tmp/check-app.png')"` then open `/tmp/check-app.png`
+- `python -c "import resvg_py; open('/tmp/check-app.png','wb').write(bytes(resvg_py.svg_to_bytes(svg_path='assets/icon/litepdf-app.svg', width=256, height=256)))"` then open `/tmp/check-app.png`
 
 Expected: white paper rectangle with a small darker triangle in top-right (folded corner), and a blue zigzag lightning bolt running diagonally across.
 
@@ -295,6 +295,20 @@ spec §1.2. Paper #F8F9FA, fold #DEE2E6, PDF text #D32F2F."
 - Modify: `assets/icon/regenerate.py` (replace the T0 stub)
 
 **Why:** This is the workhorse. SVG → seven PNGs → multi-resolution ICO, for both variants. Pure Python (no Win32, no shell escaping) because PowerShell heredoc quoting was the original concern that motivated splitting `.ps1` from `.py` (see spec §8 open item, now closed).
+
+> **Implementation note (deviated from this plan during T3).** The code block
+> below specifies `cairosvg`, but it import-crashes on this machine (Windows +
+> Python 3.14): `cairocffi` cannot `dlopen` `libcairo-2.dll`. The `svglib` +
+> `reportlab` fallback fails identically (reportlab 4.x → `rlPyCairo` → libcairo).
+> **Shipped implementation uses `resvg-py`** (Rust, statically linked, zero native
+> deps) — see `assets/icon/regenerate.py` for the actual code, and the spec
+> "Rasterizer choice" addendum for the full rationale. Two further fixes the
+> original code block got wrong: (1) the ICO base image must be the **largest**
+> (256) frame, since Pillow drops any `sizes` entry larger than the base image —
+> a 16-px base yields a single-frame ICO; (2) `IcoImageFile` has no
+> `n_frames`/`seek` interface, so `--verify` reads frame sizes via
+> `ico.ico.sizes()`, not `ImageSequence`. Both were caught by `--verify` +
+> a pixel-identity audit of the 256 frame.
 
 - [ ] **Step 1: Replace the stub with the implementation**
 
@@ -428,7 +442,10 @@ Expected output (something like):
   bundled litepdf-doc.ico (7 frames)
 ```
 
-If `pip install cairosvg` fails on Windows because of missing Cairo native binaries, see `README.md` fallback notes — typical fix is `pip install --upgrade cairocffi cairosvg` to pull pre-built wheels.
+The pipeline uses `resvg-py` (Rust, statically linked) precisely to avoid the
+libcairo native-binary problem that breaks `cairosvg` (and the `svglib`+`reportlab`
+fallback) on Windows. `pip install -r assets/icon/requirements.txt` pulls a
+prebuilt wheel with no system dependencies — no GTK/Cairo install needed.
 
 - [ ] **Step 3: Run --verify mode**
 
@@ -446,7 +463,7 @@ Expected:
 git add assets/icon/regenerate.py
 git commit -m "feat(icons): regenerate.py — SVG to multi-res ICO (Phase 9 T3)
 
-Pure Python pipeline using cairosvg + Pillow. Supports --verify mode
+Pure Python pipeline using resvg-py + Pillow. Supports --verify mode
 that asserts committed .ico files match the expected 7-frame size
 set. Stays out of CMake; runs out-of-band on SVG edits per spec §2.1."
 ```
@@ -1040,7 +1057,7 @@ Tag: `v0.0.11-phase9`.
 - Seven sizes per variant (16/20/24/32/48/64/256), bundled into multi-res `.ico`
 - New `assets/icon/` directory: SVG masters, PNG intermediates, `.ico` bundles
 - Regenerate-on-demand pipeline: `assets/icon/regenerate.ps1` (PowerShell driver
-  that installs `cairosvg` + `Pillow`, then invokes `regenerate.py`); not part
+  that installs `resvg-py` + `Pillow`, then invokes `regenerate.py`); not part
   of the CMake build, runs out-of-band on SVG edits
 - One CMake change: source-root added to the resource-compiler include
   directories so `.rc` paths can reference `assets/icon/...`
@@ -1082,7 +1099,7 @@ After writing this plan, I checked it against the spec section-by-section. Notes
 - **Spec §1.3 sizes:** SIZES tuple in `regenerate.py` is `(16, 20, 24, 32, 48, 64, 256)`. ✓
 - **Spec §1.4 acceptance:** T5 step 2 implements the acceptance check; T5b is the documented fallback. ✓
 - **Spec §2.1 regen-on-demand:** Pipeline is out-of-band; no CMake target. ✓
-- **Spec §2.2 tooling:** Python + cairosvg + Pillow per `requirements.txt`. ✓
+- **Spec §2.2 tooling:** Python + resvg-py + Pillow per `requirements.txt`. ✓
 - **Spec §2.4 file layout:** Plan creates everything except `regenerate.py` as a Python *helper* — the spec mentioned this as an open item (§8); the plan resolves it as "yes, separate `.py`, drives it from `.ps1`." ✓
 - **Spec §3.1 IDs:** 101/102 (matches pre-reservation in `litepdf.rc`). ✓
 - **Spec §3.1 path:** `assets/icon/...` with source-root added to RC include dir in T8. ✓

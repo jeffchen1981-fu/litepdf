@@ -405,7 +405,7 @@ This table is the single source of truth. `installer/LICENSE-DISPLAY.rtf` and Ru
 
 ## 9. Application Icon
 
-> **Implementation spec:** [`docs/superpowers/specs/2026-05-05-phase-9-icons-design.md`](../superpowers/specs/2026-05-05-phase-9-icons-design.md) supersedes this section. Differences: lightning color `#0D6EFD` → `#0B5ED7` (light-taskbar contrast); pipeline `rsvg-convert + ImageMagick` → Python `cairosvg + Pillow`, regenerate-on-demand rather than build-time; small-size pixel-art promise replaced with auto-downscale + recognizability acceptance criterion.
+> **Implementation spec:** [`docs/superpowers/specs/2026-05-05-phase-9-icons-design.md`](../superpowers/specs/2026-05-05-phase-9-icons-design.md) supersedes this section. Differences: lightning color `#0D6EFD` → `#0B5ED7` (light-taskbar contrast); pipeline `rsvg-convert + ImageMagick` → Python `resvg-py + Pillow`, regenerate-on-demand rather than build-time; small-size pixel-art promise replaced with auto-downscale + recognizability acceptance criterion.
 
 ### 9.1 Primary Icon — "Lightning Document"
 

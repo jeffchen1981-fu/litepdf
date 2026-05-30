@@ -1,2 +1,2 @@
-cairosvg>=2.7.0
+resvg-py>=0.3.0
 Pillow>=10.0.0
