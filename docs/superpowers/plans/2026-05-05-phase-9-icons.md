@@ -62,10 +62,10 @@
 - [x] Task 4: Implement `regenerate.ps1` wrapper (deps install + invoke `regenerate.py`)
 - [x] Task 5: Run regen, eyeball 16-px legibility, commit produced PNG/ICO assets
 - [x] Task 5b (conditional): SKIPPED — T5 16-px legibility passed, small-master unnecessary
-- [ ] Task 6: Add resource IDs to `MainMenu.rc.h`
-- [ ] Task 7: Update `litepdf.rc` (uncomment + correct path)
-- [ ] Task 8: Update `CMakeLists.txt` (add source-root to RC include dirs)
-- [ ] Task 9: Wire `WNDCLASSEXW` in `MainWindow.cpp` (set `hIcon`, `hIconSm`)
+- [x] Task 6: Add resource IDs to `MainMenu.rc.h`
+- [x] Task 7: Update `litepdf.rc` (uncomment + correct path)
+- [x] Task 8: Update `CMakeLists.txt` (add source-root to RC include dirs)
+- [x] Task 9: Wire `WNDCLASSEXW` in `MainWindow.cpp` (set `hIcon`, `hIconSm`) — RC path verified via standalone rc.exe (RC_EXIT=0, .res embeds both ICOs); full C++ link + visual smoke deferred to T10
 - [ ] Task 10: Build + manual smoke checklist (6 items per spec §4.2)
 - [ ] Task 11: Mark roadmap shipped + version finalize + tag + PR
 
