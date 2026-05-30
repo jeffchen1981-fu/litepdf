@@ -1569,6 +1569,8 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInstance;
     wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hIcon         = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APPICON));
+    wc.hIconSm       = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APPICON));
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     wc.lpszClassName = kWindowClassName;
     wc.lpszMenuName  = nullptr;  // attach per-instance via CreateWindowEx
