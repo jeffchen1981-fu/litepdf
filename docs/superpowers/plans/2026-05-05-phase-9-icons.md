@@ -55,13 +55,13 @@
 
 ## Task List
 
-- [ ] Task 0: Bootstrap `assets/icon/` scaffolding (directory, `requirements.txt`, `README.md` skeleton, empty `regenerate.py` + `regenerate.ps1` stubs)
-- [ ] Task 1: Author `litepdf-app.svg` (Lightning Document, 256×256)
-- [ ] Task 2: Author `litepdf-doc.svg` (PDF wordmark variant, 256×256)
-- [ ] Task 3: Implement `regenerate.py` (SVG → 7×PNG → multi-res ICO; with `--verify` smoke mode)
+- [x] Task 0: Bootstrap `assets/icon/` scaffolding (directory, `requirements.txt`, `README.md` skeleton, empty `regenerate.py` + `regenerate.ps1` stubs)
+- [x] Task 1: Author `litepdf-app.svg` (Lightning Document, 256×256)
+- [x] Task 2: Author `litepdf-doc.svg` (PDF wordmark variant, 256×256)
+- [x] Task 3: Implement `regenerate.py` (SVG → 7×PNG → multi-res ICO; with `--verify` smoke mode)
 - [x] Task 4: Implement `regenerate.ps1` wrapper (deps install + invoke `regenerate.py`)
-- [ ] Task 5: Run regen, eyeball 16-px legibility, commit produced PNG/ICO assets
-- [ ] Task 5b (conditional): Author small-master `litepdf-app-16.svg` if 16-px auto-downscale fails legibility
+- [x] Task 5: Run regen, eyeball 16-px legibility, commit produced PNG/ICO assets
+- [x] Task 5b (conditional): SKIPPED — T5 16-px legibility passed, small-master unnecessary
 - [ ] Task 6: Add resource IDs to `MainMenu.rc.h`
 - [ ] Task 7: Update `litepdf.rc` (uncomment + correct path)
 - [ ] Task 8: Update `CMakeLists.txt` (add source-root to RC include dirs)
@@ -553,7 +553,7 @@ CMake target, no CI step (Phase 12 will add the lint check)."
 
 **Why:** Generate the actual binary assets and run the small-size legibility check from spec §1.4 before committing.
 
-- [ ] **Step 1: Run the driver (produces all PNG + ICO files)**
+- [x] **Step 1: Run the driver (produces all PNG + ICO files)**
 
 ```bash
 pwsh assets/icon/regenerate.ps1
@@ -561,7 +561,7 @@ pwsh assets/icon/regenerate.ps1
 
 This was already run in T4 step 2 to verify the wrapper, but run it again now since this is the canonical "produce committable assets" step. Expected: 14 PNGs + 2 ICOs in `assets/icon/`.
 
-- [ ] **Step 2: Eyeball the 16-px rasterizations**
+- [x] **Step 2: Eyeball the 16-px rasterizations**
 
 Open `assets/icon/app-16.png` and `assets/icon/doc-16.png` at 100% in any image viewer.
 
@@ -573,7 +573,7 @@ If both pass: skip Task 5b and proceed to step 3.
 
 If either fails: STOP and execute Task 5b (small-master fallback) before continuing.
 
-- [ ] **Step 3: Run --verify smoke**
+- [x] **Step 3: Run --verify smoke**
 
 ```bash
 python assets/icon/regenerate.py --verify
@@ -581,7 +581,7 @@ python assets/icon/regenerate.py --verify
 
 Expected: both ICOs report "OK (7 frames at expected sizes)".
 
-- [ ] **Step 4: Commit all binary assets**
+- [x] **Step 4: Commit all binary assets**
 
 ```bash
 git add assets/icon/*.png assets/icon/*.ico
@@ -596,7 +596,14 @@ consumed by resources/litepdf.rc in T7."
 
 ### Task 5b (conditional): small-master fallback
 
-**Skip this task if T5 step 2 acceptance passed.**
+**Skip this task if T5 step 2 acceptance passed.** (Skipped in this run — the
+16-px rasterizations were legible; see T5 step 2.)
+
+> ⚠️ **Stale code below:** the `regenerate.py` snippet in Step 3 still imports
+> and calls `cairosvg`, which T3 replaced with `resvg-py` (cairosvg
+> import-crashes on stock Windows). If T5b is ever un-skipped, port the
+> small-master size routing onto the existing `_rasterize()` resvg helper
+> instead of copying this block verbatim.
 
 **Files:**
 - Create: `assets/icon/litepdf-app-16.svg`
