@@ -1011,7 +1011,9 @@ Move to Task 11.
 
 **Why:** Record-keeping and release artifacts.
 
-- [ ] **Step 1: Mark roadmap shipped**
+> **DONE (2026-05-31).** Roadmap row marked SHIPPED; VERSION 0.0.11 → tag `v0.0.11-phase9` (commit `9a0ebc8`) → VERSION 0.0.12-dev (commit `e073638`). Final gate: incremental Release build exit 0, ctest 162/162. Pushed to `feat/phase-9-icons`; PR #12 retitled "Phase 9: Icons" and marked ready for review.
+
+- [x] **Step 1: Mark roadmap shipped**
 
 In `docs/plans/2026-04-15-litepdf-roadmap.md`, find the Phase 9 row:
 
@@ -1027,7 +1029,7 @@ Replace the right-hand cell with:
 
 (Replace `XX` with the actual ship date.)
 
-- [ ] **Step 2: Bump VERSION to release tag**
+- [x] **Step 2: Bump VERSION to release tag**
 
 Edit `VERSION`:
 
@@ -1037,7 +1039,7 @@ Edit `VERSION`:
 
 (was `0.0.11-dev`)
 
-- [ ] **Step 3: Final test run**
+- [x] **Step 3: Final test run**
 
 ```bash
 cmake --build build --config Release
@@ -1046,7 +1048,7 @@ ctest --test-dir build -C Release
 
 Expected: all tests pass (162/162 from the Phase 8.5 baseline). Phase 9 adds no unit tests.
 
-- [ ] **Step 4: Commit + tag**
+- [x] **Step 4: Commit + tag**
 
 ```bash
 git add docs/plans/2026-04-15-litepdf-roadmap.md VERSION
@@ -1054,7 +1056,7 @@ git commit -m "release: v0.0.11 — Phase 9 (Icons) shipped"
 git tag v0.0.11-phase9
 ```
 
-- [ ] **Step 5: Bump VERSION back to dev**
+- [x] **Step 5: Bump VERSION back to dev**
 
 Edit `VERSION`:
 
@@ -1067,7 +1069,7 @@ git add VERSION
 git commit -m "chore: bump VERSION to 0.0.12-dev (post-Phase-9 tag)"
 ```
 
-- [ ] **Step 6: Push and open PR**
+- [x] **Step 6: Push and open PR**
 
 ```bash
 git push -u origin HEAD
