@@ -70,7 +70,7 @@
 
 // Phase 9: app and document icon resource IDs.
 // IDM_* (menu commands) live in 40000+; IDI_* (icons) live in 100+.
-// Numeric IDs match the reservation in litepdf.rc since Phase 0 bootstrap;
+// Numeric IDs match the reservation in litepdf.rc.in since Phase 0 bootstrap;
 // do NOT renumber — Phase 10 installer references IDI_PDFDOC by numeric
 // value (-102) in the DefaultIcon registry key.
 #define IDI_APPICON 101
