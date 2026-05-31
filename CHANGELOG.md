@@ -22,6 +22,21 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
   fails loudly in CI when the generated resource is missing, and returns a
   deterministic exit code. Stays Windows PowerShell 5.1 compatible.
 
+## [0.0.11-phase9] — 2026-05-31 — Icons
+
+### Added
+- **Application icon** (`IDI_APPICON`): a lightning-document mark wired to the
+  main window class so `litepdf.exe` and its taskbar / title-bar entries show a
+  branded icon instead of the Win32 default.
+- **PDF-document icon** (`IDI_PDFDOC`): a red document variant embedded for the
+  Phase 10 installer's file-type association.
+- Seven sizes per variant (16 / 20 / 24 / 32 / 48 / 64 / 256 px) bundled into
+  multi-resolution `.ico` files under `assets/icon/`, with a regenerate-on-demand
+  pipeline (`regenerate.ps1` + `regenerate.py`, `resvg-py` + Pillow) driven from
+  the SVG sources.
+
+[Compare 0.0.10-phase8.5…0.0.11-phase9](https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.10-phase8.5...v0.0.11-phase9)
+
 ## [0.0.10-phase8.5] — 2026-05-05 — Print support
 
 ### Added

@@ -2,13 +2,13 @@
 
 A lightweight PDF / ePub / CBZ / XPS reader for Windows 11, optimized for mechanical hard drives. Single self-contained executable, no runtime dependencies.
 
-- **Status:** under development (Phase 8.5 shipped — Tier 3 feature-complete + print support; tag `v0.0.10-phase8.5`)
+- **Status:** under development (Phase 9 shipped — Tier 3 feature-complete + print support + app/document icons; tag `v0.0.11-phase9`)
 - **License:** [AGPL-3.0](LICENSE)
 - **Design:** [`docs/plans/2026-04-15-litepdf-design.md`](docs/plans/2026-04-15-litepdf-design.md)
 - **Roadmap:** [`docs/plans/2026-04-15-litepdf-roadmap.md`](docs/plans/2026-04-15-litepdf-roadmap.md)
 - **Changelog:** [`CHANGELOG.md`](CHANGELOG.md)
 
-## Features (v0.0.10)
+## Features (v0.0.11)
 
 Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab independent state. Cold-start budget under 1 s on SSD; tuned for HDD-friendly I/O patterns.
 
@@ -67,7 +67,7 @@ The produced `build/Release/litepdf.exe` is a single self-contained binary.
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-163 unit tests at `v0.0.10-phase8.5` (Phase 8.5 added the `src/printing/` suite covering geometry, range parser, and abort flag). The CI workflow (`.github/workflows/ci.yml`) runs configure + build + version-sync gate + ctest on `windows-latest` for every push and pull request.
+162 unit tests at `v0.0.11-phase9` (the `src/printing/` suite added in Phase 8.5 covers geometry, range parser, and abort flag; Phase 9 added icons only, no new unit tests). The CI workflow (`.github/workflows/ci.yml`) runs configure + build + version-sync gate + ctest on `windows-latest` for every push and pull request.
 
 The PowerShell smoke harness exercises the full app via launch-and-poll:
 
