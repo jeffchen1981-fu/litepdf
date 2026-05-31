@@ -1,10 +1,17 @@
 #include <winres.h>
 #include "MainMenu.rc.h"
 
-// Version info
+// Version info.
+//
+// GENERATED FILE SOURCE: the version fields below are filled by CMake's
+// configure_file() from the canonical VERSION file at build time
+// (@LITEPDF_VERSION_COMMA@ / @LITEPDF_VERSION_DOTTED@). Do NOT hardcode a
+// numeric version here — that reintroduces the drift this template exists
+// to prevent. scripts/check-version-sync.ps1 enforces that these stay
+// parametric. Edit VERSION, not this file, to change the version.
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     0,0,11,0
-PRODUCTVERSION  0,0,11,0
+FILEVERSION     @LITEPDF_VERSION_COMMA@
+PRODUCTVERSION  @LITEPDF_VERSION_COMMA@
 FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
 FILEFLAGS       0
 FILEOS          VOS_NT_WINDOWS32
@@ -17,12 +24,12 @@ BEGIN
     BEGIN
       VALUE "CompanyName",      "LitePDF"
       VALUE "FileDescription",  "LitePDF - lightweight PDF reader"
-      VALUE "FileVersion",      "0.0.11.0"
+      VALUE "FileVersion",      "@LITEPDF_VERSION_DOTTED@"
       VALUE "InternalName",     "litepdf"
       VALUE "LegalCopyright",   "AGPL-3.0"
       VALUE "OriginalFilename", "litepdf.exe"
       VALUE "ProductName",      "LitePDF"
-      VALUE "ProductVersion",   "0.0.11.0"
+      VALUE "ProductVersion",   "@LITEPDF_VERSION_DOTTED@"
     END
   END
   BLOCK "VarFileInfo"

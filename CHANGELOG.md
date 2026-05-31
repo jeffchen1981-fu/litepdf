@@ -8,7 +8,19 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 
 ## [Unreleased]
 
-_No unreleased changes yet. Phase 9 (icons) is the next milestone._
+### Changed
+- **Embedded Win32 version resource now derives from `VERSION` at build time.**
+  `resources/litepdf.rc` became a `configure_file` template (`litepdf.rc.in`);
+  CMake fills `FILEVERSION` / `PRODUCTVERSION` / `FileVersion` / `ProductVersion`
+  from `PROJECT_VERSION`, so `litepdf.exe`'s embedded version can no longer drift
+  from the canonical `VERSION` file (the class of manual fix that PR #13 required).
+  Added `CMAKE_CONFIGURE_DEPENDS` on `VERSION` so a bare `cmake --build`
+  regenerates the resource instead of shipping a stale one.
+- `scripts/check-version-sync.ps1` now also gates the version resource: it
+  asserts the template stays parametric (no hardcoded numbers), verifies the
+  generated `build/litepdf.rc` matches `VERSION` across all four version fields,
+  fails loudly in CI when the generated resource is missing, and returns a
+  deterministic exit code. Stays Windows PowerShell 5.1 compatible.
 
 ## [0.0.10-phase8.5] — 2026-05-05 — Print support
 

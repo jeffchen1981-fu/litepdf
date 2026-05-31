@@ -3,6 +3,11 @@ cmake_minimum_required(VERSION 3.25)
 # Read version from VERSION file (single source of truth).
 # Strip any pre-release suffix (e.g. "-dev", "-rc1") because CMake's
 # project(VERSION ...) only accepts numeric major.minor.patch[.tweak].
+# Re-run CMake configure whenever VERSION changes, so the generated
+# litepdf.rc (below) and project version never go stale on an incremental
+# local build — a bare `cmake --build` would otherwise skip reconfigure.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" LITEPDF_VERSION_RAW)
 string(STRIP "${LITEPDF_VERSION_RAW}" LITEPDF_VERSION_RAW)
 string(REGEX REPLACE "-.*$" "" LITEPDF_VERSION "${LITEPDF_VERSION_RAW}")
@@ -11,6 +16,21 @@ project(litepdf
     VERSION     ${LITEPDF_VERSION}
     LANGUAGES   CXX
     DESCRIPTION "Lightweight PDF reader for Windows")
+
+# --- Embedded Win32 version resource (VERSIONINFO) ------------------------
+# Derive the .rc version fields from PROJECT_VERSION (itself read from the
+# canonical VERSION file above) so litepdf.exe's embedded FILEVERSION /
+# ProductVersion can never drift from VERSION. The template lives at
+# resources/litepdf.rc.in; the configured copy is generated into the build
+# tree and consumed by the litepdf target below. scripts/check-version-sync.ps1
+# verifies both that the template stays parametric and that the generated
+# output matches VERSION.
+set(LITEPDF_VERSION_COMMA  "${PROJECT_VERSION_MAJOR},${PROJECT_VERSION_MINOR},${PROJECT_VERSION_PATCH},0")
+set(LITEPDF_VERSION_DOTTED "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${PROJECT_VERSION_PATCH}.0")
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/resources/litepdf.rc.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/litepdf.rc"
+    @ONLY)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerFlags)
@@ -76,7 +96,9 @@ add_executable(litepdf WIN32
     src/ui/Splitter.cpp          # Phase 6 Task 12
     src/ui/TabManager.cpp
     src/ui/VerticalSplitter.cpp  # Phase 7 Task 4b
-    resources/litepdf.rc
+    # Version resource generated from resources/litepdf.rc.in by the
+    # configure_file() call above (version derived from VERSION at build time).
+    "${CMAKE_CURRENT_BINARY_DIR}/litepdf.rc"
 )
 
 litepdf_apply_flags(litepdf)
@@ -90,16 +112,19 @@ set_target_properties(litepdf PROPERTIES
     OUTPUT_NAME           "litepdf"
 )
 
-# Resource compiler: ensure it can find manifest.xml relative to the .rc file,
-# and assets/icon/*.ico via source-root paths (Phase 9).
+# Resource compiler include paths. The generated litepdf.rc lives in the build
+# tree (configure_file above), so EVERY file it references resolves through
+# these dirs, not "next to the .rc": MainMenu.rc.h + manifest.xml via the
+# resources/ dir, and assets/icon/*.ico via the source root (Phase 9).
 target_include_directories(litepdf PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/resources"
     "${CMAKE_CURRENT_SOURCE_DIR}"
 )
 
-# Tell the MSVC linker NOT to auto-generate/embed a manifest — resources/litepdf.rc
-# already supplies it via CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST. Having both
-# produces CVT1100 "duplicate resource" at link time.
+# Tell the MSVC linker NOT to auto-generate/embed a manifest — the generated
+# litepdf.rc (from resources/litepdf.rc.in) already supplies it via
+# CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST. Having both produces CVT1100
+# "duplicate resource" at link time.
 if(MSVC)
     target_link_options(litepdf PRIVATE "/MANIFEST:NO")
 endif()
