@@ -66,7 +66,7 @@
 - [x] Task 7: Update `litepdf.rc` (uncomment + correct path)
 - [x] Task 8: Update `CMakeLists.txt` (add source-root to RC include dirs)
 - [x] Task 9: Wire `WNDCLASSEXW` in `MainWindow.cpp` (set `hIcon`, `hIconSm`) — RC path verified via standalone rc.exe (RC_EXIT=0, .res embeds both ICOs); full C++ link + visual smoke deferred to T10
-- [ ] Task 10: Build + manual smoke checklist (6 items per spec §4.2)
+- [x] Task 10: Build + manual smoke checklist (6 items per spec §4.2) — full from-scratch build exit 0 (MuPDF from source + litepdf + cli + tests), ctest 162/162 pass, zero litepdf warnings; 6/6 smoke items pass (1/3/6 automated, 2/4/5 confirmed via screenshots 2026-05-31)
 - [ ] Task 11: Mark roadmap shipped + version finalize + tag + PR
 
 ---
@@ -972,22 +972,32 @@ unused at runtime — Phase 10 installer reads it via DefaultIcon."
 
 **Why:** Spec §4.2 enumerates six manual smoke items. None of them are automatable in CI without unreasonable harness work, so this task is a discrete walk-through with the implementer's eyes on the screen.
 
-- [ ] **Step 1: Run the smoke checklist**
+- [x] **Step 1: Run the smoke checklist** — all 6 items PASS (2026-05-31)
 
-For each item, perform the action and note pass/fail. If any item fails, escalate as a bug report (do not silently re-iterate the plan).
+Build first: full from-scratch Release build in the worktree (MuPDF compiled from
+source via the ExternalProject path + litepdf_core + litepdf.exe + litepdf-cli +
+unit tests), `BUILD_EXIT=0`, zero litepdf warnings (only upstream MuPDF thirdparty
+warnings), `litepdf.exe` 39.6 MB static /MT, no LNK errors. `ctest -C Release`:
+162/162 tests pass in 8.59s.
 
-1. Built `litepdf.exe` (Release config) shows the lightning icon in **Alt+Tab** (32×32 area).
-2. `litepdf.exe` in **File Explorer details view** at default DPI is recognizable as paper + lightning.
-3. `litepdf.exe` in **Explorer's "Extra large icons" view** (256×256) shows full detail with no obvious aliasing.
-4. **Pinning to taskbar** (right-click taskbar → Pin) shows the icon at the user's DPI scaling.
-5. **Open the running app's main window**: title bar (top-left, 16×16) shows the icon.
-6. From a clean check-out (`git stash` any local changes), run `pwsh assets/icon/regenerate.ps1` and confirm the produced `.ico` files byte-match the committed ones (use `Get-FileHash assets/icon/*.ico`). Acceptable difference: only `.ico` mtime metadata (Pillow embeds timestamps); the binary content should match.
+1. PASS — Alt+Tab (32×32): icon extracted from the built `litepdf.exe` via
+   `Icon.ExtractAssociatedIcon` renders the blue lightning on a document (automated).
+2. PASS — File Explorer details view: `litepdf.exe` shows the lightning (user screenshot).
+3. PASS — Explorer "Extra large icons" (256×256): source 256 frame full detail, no
+   aliasing; embedded via the multi-frame `.ico` (automated + visual).
+4. PASS — Taskbar: running `litepdf.exe` shows the blue lightning at the user's DPI
+   (user screenshot).
+5. PASS — Title bar (top-left, 16×16): open window shows the lightning (user screenshot).
+6. PASS — `regenerate.py` re-run produced **byte-identical** `litepdf-app.ico`
+   (SHA256 569F8F…A2F5, 5797 B) and `litepdf-doc.ico` (SHA256 F0B80D…D80A, 5273 B);
+   even the intermediate PNGs byte-matched, working tree stayed clean. Note: the
+   plan's anticipated "`.ico` mtime metadata" difference did NOT occur — the ICO
+   container carries no timestamp field, so the match is exact, not just content-equal.
 
-- [ ] **Step 2: Note any deviations**
+- [x] **Step 2: Note any deviations** — none. Item 6 byte-match was exact, so no
+  "Plan deviations" table is needed in the PR body.
 
-If item 6 produces non-trivial binary diff, capture the diff in the PR body under a "Plan deviations" table (same pattern as Phase 8.5 PR #10) and explain why. Most likely cause: Pillow version difference between regen runs.
-
-- [ ] **Step 3: No commit needed (this is a verification step)**
+- [x] **Step 3: No commit needed (this is a verification step)**
 
 Move to Task 11.
 
