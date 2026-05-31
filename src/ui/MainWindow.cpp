@@ -1074,7 +1074,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     return 0;
                 case IDM_HELP_ABOUT:
                     MessageBoxW(hwnd,
-                        L"LitePDF v0.0.11\n\n"
+                        L"LitePDF v0.0.12\n\n"
                         L"A lightweight PDF / ePub / CBZ / XPS viewer for Windows.\n\n"
                         L"License: AGPL-3.0\n"
                         L"Engine: MuPDF 1.24.11\n"
@@ -1569,6 +1569,8 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInstance;
     wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hIcon         = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APPICON));
+    wc.hIconSm       = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APPICON));
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     wc.lpszClassName = kWindowClassName;
     wc.lpszMenuName  = nullptr;  // attach per-instance via CreateWindowEx

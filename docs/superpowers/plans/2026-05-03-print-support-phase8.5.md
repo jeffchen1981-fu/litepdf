@@ -1,5 +1,7 @@
 # Print Support (Phase 8.5) Implementation Plan
 
+> **STATUS — SHIPPED 2026-05-04** ([PR #10](https://github.com/anthropics/litepdf/pull/10), tag `v0.0.10-phase8.5`). Tasks 0–10 and 12 completed; Task 11 (CLI integration test) deferred per plan-authorized scope reduction. See PR body for plan deviations and `src/printing/PrintJob.cpp` header for inline notes.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add Tier-2 Windows print support to LitePDF — standard `PrintDlg` (page range + copies) plus a pre-flight scale modal (Fit / Actual / Custom %) plus auto-rotate, with `MuPDF pixmap → StretchDIBits` to printer DC at native printer DPI. Cancel mid-job via `SetAbortProc`. Format-agnostic (works for PDF / ePub / CBZ / XPS).
@@ -61,19 +63,19 @@
 
 ## Task List
 
-- [ ] Task 0: Bootstrap (CMake + scaffolds + version)
-- [ ] Task 1: `PrintGeometry::compute_render_matrix` (TDD, pure function)
-- [ ] Task 2: `parse_page_ranges` (TDD, pure function)
-- [ ] Task 3: `PrintAbortFlag` (TDD, pure type)
-- [ ] Task 4: `PrintProgressDlg` config mode (in-memory DLGTEMPLATE)
-- [ ] Task 5: `PrintProgressDlg` progress mode + Cancel wiring
-- [ ] Task 6: `PrintJob::run` skeleton (PrintDlg + StartDoc + EndDoc, no render)
-- [ ] Task 7: `PrintJob` render loop (MuPDF → StretchDIBits)
-- [ ] Task 8: `SetAbortProc` mid-job cancel
-- [ ] Task 9: Error handling (per spec §6 table)
-- [ ] Task 10: MainWindow wiring (menu + Ctrl+P + dispatch)
-- [ ] Task 11: Integration test (CLI `--print-to-pdf` flag)
-- [ ] Task 12: Manual smoke + version finalize + tag
+- [x] Task 0: Bootstrap (CMake + scaffolds + version)
+- [x] Task 1: `PrintGeometry::compute_render_matrix` (TDD, pure function)
+- [x] Task 2: `parse_page_ranges` (TDD, pure function)
+- [x] Task 3: `PrintAbortFlag` (TDD, pure type)
+- [x] Task 4: `PrintProgressDlg` config mode (in-memory DLGTEMPLATE)
+- [x] Task 5: `PrintProgressDlg` progress mode + Cancel wiring
+- [x] Task 6: `PrintJob::run` skeleton (PrintDlg + StartDoc + EndDoc, no render)
+- [x] Task 7: `PrintJob` render loop (MuPDF → StretchDIBits)
+- [x] Task 8: `SetAbortProc` mid-job cancel
+- [x] Task 9: Error handling (per spec §6 table)
+- [x] Task 10: MainWindow wiring (menu + Ctrl+P + dispatch)
+- [ ] Task 11: Integration test (CLI `--print-to-pdf` flag) — **DEFERRED** (see PR #10 body; manual smoke covers same code path; tracked for future plan)
+- [x] Task 12: Manual smoke + version finalize + tag
 
 ---
 
@@ -95,7 +97,7 @@
 - Create: `tests/unit/test_print_abort_flag.cpp` (empty stub)
 - Modify: `VERSION`
 
-- [ ] **Step 1: Verify Phase 8 has shipped**
+- [x] **Step 1: Verify Phase 8 has shipped**
 
 ```bash
 git log --oneline main | grep -E 'phase-8|v0\.0\.9' | head -5
@@ -103,13 +105,13 @@ git log --oneline main | grep -E 'phase-8|v0\.0\.9' | head -5
 
 Expected: at least one commit with "phase-8" and a tag `v0.0.9-phase8`. If absent, STOP — Phase 8.5 cannot start before Phase 8 ships.
 
-- [ ] **Step 2: Create the worktree branch**
+- [x] **Step 2: Create the worktree branch**
 
 ```bash
 git checkout -b phase-8.5-print main
 ```
 
-- [ ] **Step 3: Bump VERSION**
+- [x] **Step 3: Bump VERSION**
 
 Read current `VERSION`. After Phase 8 ships it should be `0.0.10-dev`. If it is something else, note in commit message and adjust.
 
@@ -120,7 +122,7 @@ Replace contents with:
 
 (We work on `-dev` throughout. The pre-tag commit in Task 12 will flip to `0.0.10`, then immediately to `0.0.11-dev` after the tag.)
 
-- [ ] **Step 4: Create empty source-file stubs**
+- [x] **Step 4: Create empty source-file stubs**
 
 For each new `src/printing/*.{hpp,cpp}` file listed above, create with this skeleton (substitute file name appropriately):
 
@@ -143,7 +145,7 @@ namespace litepdf::printing {
 }
 ```
 
-- [ ] **Step 5: Wire into top-level CMakeLists.txt**
+- [x] **Step 5: Wire into top-level CMakeLists.txt**
 
 In the `add_library(litepdf_core STATIC ...)` call (around line 22), append after the existing Phase 7 entries:
 
@@ -156,7 +158,7 @@ In the `add_library(litepdf_core STATIC ...)` call (around line 22), append afte
 
 (Header-only files — `PrintGeometry.hpp`, `PrintAbortFlag.hpp` — do not need to be listed; consumers `#include` them directly.)
 
-- [ ] **Step 6: Wire test stubs into tests/CMakeLists.txt**
+- [x] **Step 6: Wire test stubs into tests/CMakeLists.txt**
 
 In `target_sources(litepdf_unit_tests PRIVATE ...)`, append:
 
@@ -177,7 +179,7 @@ TEST_CASE("placeholder for print geometry tests", "[print-geometry]") {
 }
 ```
 
-- [ ] **Step 7: Build to verify scaffolding compiles**
+- [x] **Step 7: Build to verify scaffolding compiles**
 
 ```bash
 cmake --build build --config Debug --target litepdf_unit_tests
@@ -185,7 +187,7 @@ cmake --build build --config Debug --target litepdf_unit_tests
 
 Expected: clean build, no warnings (litepdf_apply_flags treats warnings as errors).
 
-- [ ] **Step 8: Run tests to confirm baseline + 3 new placeholder cases**
+- [x] **Step 8: Run tests to confirm baseline + 3 new placeholder cases**
 
 ```bash
 ctest --test-dir build -C Debug --output-on-failure | tail -5
@@ -193,7 +195,7 @@ ctest --test-dir build -C Debug --output-on-failure | tail -5
 
 Expected: 149/149 (146 from Phase 8 + 3 new placeholders). If Phase 8 baseline differs, adjust expected number; the +3 delta from the placeholders is what we verify.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add CMakeLists.txt tests/CMakeLists.txt src/printing/ tests/unit/test_print_*.cpp VERSION
@@ -217,7 +219,7 @@ EOF
 
 **Why:** The matrix that maps a MuPDF page's natural points (`fz_bound_page` returns `{0, 0, w_pt, h_pt}`) onto the printer's device pixels. Composes scale (from user mode), optional 90° rotation (auto when paper/page orientation differ), and centering translation. Pure function so it's TDD-friendly. Used by `PrintJob` (Task 7) inside the page render loop.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Replace `tests/unit/test_print_geometry.cpp` with:
 
@@ -340,7 +342,7 @@ TEST_CASE("centering offsets for 50%-of-fit on A4@300dpi", "[print-geometry]") {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 ```bash
 cmake --build build --config Debug --target litepdf_unit_tests 2>&1 | tail -20
@@ -348,7 +350,7 @@ cmake --build build --config Debug --target litepdf_unit_tests 2>&1 | tail -20
 
 Expected: compile errors — `compute_render_matrix`, `ScaleMode`, `Rect` undefined.
 
-- [ ] **Step 3: Implement `PrintGeometry.hpp`**
+- [x] **Step 3: Implement `PrintGeometry.hpp`**
 
 Replace `src/printing/PrintGeometry.hpp` with:
 
@@ -470,7 +472,7 @@ enum class ScaleMode {
 } // namespace litepdf::printing
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 ```bash
 cmake --build build --config Debug --target litepdf_unit_tests 2>&1 | tail -3
@@ -479,7 +481,7 @@ ctest --test-dir build -C Debug -R "print-geometry" --output-on-failure
 
 Expected: 6 cases, all PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/printing/PrintGeometry.hpp tests/unit/test_print_geometry.cpp
@@ -505,7 +507,7 @@ EOF
 
 **Why:** Win32 `PRINTDLG` returns user-selected page ranges as a `PRINTPAGERANGE[]` array of `{nFromPage, nToPage}` pairs (1-based, inclusive). The print loop needs a flat 0-based index list. Pure function.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Replace `tests/unit/test_print_range_parser.cpp` with:
 
@@ -557,7 +559,7 @@ TEST_CASE("inverted range (from > to) is dropped silently", "[print-range]") {
 
 (5 cases — exceeds the spec §7 "~3" estimate; the 2 extra (clamp + inverted) are guard-rail tests for malformed input that costs nothing to verify.)
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 ```bash
 cmake --build build --config Debug --target litepdf_unit_tests 2>&1 | tail -10
@@ -565,7 +567,7 @@ cmake --build build --config Debug --target litepdf_unit_tests 2>&1 | tail -10
 
 Expected: compile errors — `PageRange`, `parse_page_ranges` undefined.
 
-- [ ] **Step 3: Implement `PrintRange.hpp`**
+- [x] **Step 3: Implement `PrintRange.hpp`**
 
 Replace `src/printing/PrintRange.hpp`:
 
@@ -598,7 +600,7 @@ struct PageRange {
 } // namespace litepdf::printing
 ```
 
-- [ ] **Step 4: Implement `PrintRange.cpp`**
+- [x] **Step 4: Implement `PrintRange.cpp`**
 
 Replace `src/printing/PrintRange.cpp`:
 
@@ -635,7 +637,7 @@ std::vector<std::size_t> parse_page_ranges(
 } // namespace litepdf::printing
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 ```bash
 cmake --build build --config Debug --target litepdf_unit_tests 2>&1 | tail -3
@@ -644,7 +646,7 @@ ctest --test-dir build -C Debug -R "print-range" --output-on-failure
 
 Expected: 5 cases, all PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/printing/PrintRange.hpp src/printing/PrintRange.cpp tests/unit/test_print_range_parser.cpp
@@ -661,7 +663,7 @@ git commit -m "feat(printing): parse_page_ranges Win32 → 0-based index list (P
 
 **Why:** `SetAbortProc` callback runs synchronously on the print thread (which is the UI thread in our design) between pages; `PrintProgressDlg`'s Cancel button runs in the same thread but inside the dialog's message-pump callback. The atomic `bool` is overkill for single-threaded use, but cheap insurance and makes the type future-proof for an eventual background-printing variant.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Replace `tests/unit/test_print_abort_flag.cpp`:
 
@@ -687,7 +689,7 @@ TEST_CASE("set/read across threads is observable", "[print-abort]") {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 ```bash
 cmake --build build --config Debug --target litepdf_unit_tests 2>&1 | tail -10
@@ -695,7 +697,7 @@ cmake --build build --config Debug --target litepdf_unit_tests 2>&1 | tail -10
 
 Expected: compile errors — `PrintAbortFlag` undefined.
 
-- [ ] **Step 3: Implement `PrintAbortFlag.hpp`**
+- [x] **Step 3: Implement `PrintAbortFlag.hpp`**
 
 Replace `src/printing/PrintAbortFlag.hpp`:
 
@@ -726,7 +728,7 @@ private:
 } // namespace litepdf::printing
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 ```bash
 cmake --build build --config Debug --target litepdf_unit_tests 2>&1 | tail -3
@@ -735,7 +737,7 @@ ctest --test-dir build -C Debug -R "print-abort" --output-on-failure
 
 Expected: 2 cases, all PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/printing/PrintAbortFlag.hpp tests/unit/test_print_abort_flag.cpp
@@ -754,7 +756,7 @@ git commit -m "feat(printing): PrintAbortFlag atomic shared cancel signal (Phase
 
 **Reference:** `src/ui/PasswordDialog.cpp` (Phase 8 ship). Look at `make_dialog_template()`, `dialog_proc()`, `DialogBoxIndirectParamW` invocation. Mimic the structure; do NOT extract a shared helper in this task (kept-it-simple discipline; if both modules grow a third consumer, refactor then).
 
-- [ ] **Step 1: Write the implementation directly (no unit tests for DLGTEMPLATE bytes)**
+- [x] **Step 1: Write the implementation directly (no unit tests for DLGTEMPLATE bytes)**
 
 Rationale: dialog template byte layouts are exercised by the Win32 dialog manager itself; the only useful test is "does it open and respond to clicks", which is a smoke test (Task 12), not a unit test. Skipping the TDD cycle here is intentional.
 
@@ -813,7 +815,7 @@ private:
 } // namespace litepdf::printing
 ```
 
-- [ ] **Step 2: Implement `PrintProgressDlg.cpp` (config mode only this task)**
+- [x] **Step 2: Implement `PrintProgressDlg.cpp` (config mode only this task)**
 
 Replace `src/printing/PrintProgressDlg.cpp` with:
 
@@ -957,7 +959,7 @@ std::optional<ScaleChoice> PrintProgressDlg::show_config(HWND parent) {
 } // namespace litepdf::printing
 ```
 
-- [ ] **Step 3: Build to verify compilation (no behavior test in this task)**
+- [x] **Step 3: Build to verify compilation (no behavior test in this task)**
 
 ```bash
 cmake --build build --config Debug --target litepdf_core 2>&1 | tail -10
@@ -967,7 +969,7 @@ Expected: compile clean. The progress-mode methods will produce undefined-symbol
 
 If `PrintProgressDlg::PrintProgressDlg(...)` etc are called by any other compilation unit at this point, add temporary `// = delete;` placeholders in the header, OR (cleaner) leave the class methods unimplemented in the .cpp and add a comment noting Task 5 will fill them. The litepdf_core static lib won't error on missing definitions until something links them.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/printing/PrintProgressDlg.hpp src/printing/PrintProgressDlg.cpp
@@ -992,7 +994,7 @@ EOF
 
 **Why:** Modeless progress dialog so the print loop in `PrintJob::run` can call `set_progress(N)` between pages while the dialog stays interactive. The Cancel button sets the shared `PrintAbortFlag`; `set_progress` pumps the message queue so the click is observed promptly.
 
-- [ ] **Step 1: Append progress-mode template builder**
+- [x] **Step 1: Append progress-mode template builder**
 
 In the anonymous namespace of `src/printing/PrintProgressDlg.cpp`, add another control-ID block and a second template builder:
 
@@ -1041,7 +1043,7 @@ INT_PTR CALLBACK progress_dialog_proc(HWND hDlg, UINT msg, WPARAM wp, LPARAM lp)
 }
 ```
 
-- [ ] **Step 2: Add `abort_flag_for_dialog()` accessor to `PrintProgressDlg.hpp`**
+- [x] **Step 2: Add `abort_flag_for_dialog()` accessor to `PrintProgressDlg.hpp`**
 
 In the public section of class `PrintProgressDlg`, add:
 
@@ -1050,7 +1052,7 @@ In the public section of class `PrintProgressDlg`, add:
 PrintAbortFlag& abort_flag_for_dialog() noexcept { return abort_flag_; }
 ```
 
-- [ ] **Step 3: Implement constructor / destructor / set_progress / close**
+- [x] **Step 3: Implement constructor / destructor / set_progress / close**
 
 Append to `src/printing/PrintProgressDlg.cpp` (outside the anonymous namespace):
 
@@ -1103,7 +1105,7 @@ void PrintProgressDlg::close() {
 }
 ```
 
-- [ ] **Step 4: Build to verify**
+- [x] **Step 4: Build to verify**
 
 ```bash
 cmake --build build --config Debug --target litepdf_core 2>&1 | tail -10
@@ -1111,7 +1113,7 @@ cmake --build build --config Debug --target litepdf_core 2>&1 | tail -10
 
 Expected: clean compile.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/printing/PrintProgressDlg.hpp src/printing/PrintProgressDlg.cpp
@@ -1137,7 +1139,7 @@ EOF
 
 **Why:** Get the dialog flow + Win32 print job lifecycle correct before adding the render loop. After this task, Ctrl+P (Task 10) opens the pre-flight, then PrintDlg, then sends a blank job to the printer. End-to-end smoke is "the print queue gets one empty job".
 
-- [ ] **Step 1: Implement `PrintJob.hpp`**
+- [x] **Step 1: Implement `PrintJob.hpp`**
 
 Replace `src/printing/PrintJob.hpp`:
 
@@ -1165,7 +1167,7 @@ struct PrintJob {
 
 (Add `#include <windows.h>` at top if `HWND` is needed; or forward-declare `struct HWND__; using HWND = HWND__*;`.)
 
-- [ ] **Step 2: Implement `PrintJob.cpp` skeleton**
+- [x] **Step 2: Implement `PrintJob.cpp` skeleton**
 
 Replace `src/printing/PrintJob.cpp`:
 
@@ -1317,7 +1319,7 @@ bool PrintJob::run(HWND parent, litepdf::core::Document& doc, std::size_t /*acti
 } // namespace litepdf::printing
 ```
 
-- [ ] **Step 3: Build**
+- [x] **Step 3: Build**
 
 ```bash
 cmake --build build --config Debug --target litepdf 2>&1 | tail -10
@@ -1325,7 +1327,7 @@ cmake --build build --config Debug --target litepdf 2>&1 | tail -10
 
 Expected: clean. Linker may complain `PRINTDLG` symbols missing — add `comdlg32` to `target_link_libraries(litepdf PRIVATE ...)` in top CMakeLists.txt if not already present (it likely is from File→Open). Verify with `grep comdlg32 CMakeLists.txt`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/printing/PrintJob.hpp src/printing/PrintJob.cpp CMakeLists.txt
@@ -1349,7 +1351,7 @@ EOF
 
 **Why:** Replace the no-op page body with the actual render: clone the document's `fz_context`, re-open the source file on the clone (RenderEngine pattern), build the per-page matrix from `PrintGeometry::compute_render_matrix`, render to a BGRA pixmap, blit via `StretchDIBits`, drop the pixmap. Verify per `mupdf-refcount-conventions` skill.
 
-- [ ] **Step 1: Add MuPDF includes + helper**
+- [x] **Step 1: Add MuPDF includes + helper**
 
 At the top of `src/printing/PrintJob.cpp` (after existing includes):
 
@@ -1458,7 +1460,7 @@ bool blit_pixmap_to_hdc(HDC hdc, fz_pixmap* pix, fz_context* ctx) {
 }
 ```
 
-- [ ] **Step 2: Wire the helper into the page loop**
+- [x] **Step 2: Wire the helper into the page loop**
 
 Replace the `// Render goes here in Task 7.` block in `PrintJob::run` with:
 
@@ -1494,7 +1496,7 @@ Just before the `for (DWORD c = 0; c < copies ...)` line, add the MuPDF handle:
     }
 ```
 
-- [ ] **Step 3: Build**
+- [x] **Step 3: Build**
 
 ```bash
 cmake --build build --config Debug --target litepdf 2>&1 | tail -10
@@ -1502,7 +1504,7 @@ cmake --build build --config Debug --target litepdf 2>&1 | tail -10
 
 Expected: clean. If `fz_*` symbols are unresolved, the link line for `litepdf` already pulls `litepdf::mupdf` (verify with the existing CMakeLists).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/printing/PrintJob.cpp
@@ -1528,7 +1530,7 @@ EOF
 
 **Why:** Without `SetAbortProc`, the printer driver may buffer many pages before our between-pages `is_aborted()` check has a chance to fire. `SetAbortProc` lets the GDI spooler poll us during long blits and during driver-internal waits, giving cancel responsiveness to milliseconds.
 
-- [ ] **Step 1: Add the abort callback**
+- [x] **Step 1: Add the abort callback**
 
 In the anonymous namespace of `PrintJob.cpp`, add:
 
@@ -1552,7 +1554,7 @@ BOOL CALLBACK abort_proc(HDC, int /*iError*/) {
 }
 ```
 
-- [ ] **Step 2: Register/unregister the callback in `PrintJob::run`**
+- [x] **Step 2: Register/unregister the callback in `PrintJob::run`**
 
 Immediately after the `StartDocW(...)` success branch (before the page loop), add:
 
@@ -1577,7 +1579,7 @@ Immediately after `EndDoc(pd.hDC);` and after `AbortDoc(pd.hDC); return false;` 
 
 (Note: `abort_flag` (the `PrintAbortFlag` instance) is declared earlier in the function. Move the `PrintAbortFlag abort_flag;` declaration UP to before `StartDocW` so the guard can register the pointer right after `StartDoc`.)
 
-- [ ] **Step 3: Build**
+- [x] **Step 3: Build**
 
 ```bash
 cmake --build build --config Debug --target litepdf 2>&1 | tail -10
@@ -1585,7 +1587,7 @@ cmake --build build --config Debug --target litepdf 2>&1 | tail -10
 
 Expected: clean.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/printing/PrintJob.cpp
@@ -1610,7 +1612,7 @@ EOF
 
 **Why:** Audit the spec §6 error table; ensure each row has a matching code path. Most are already in place from Task 6/7; this task is the cross-check pass plus filling the few that aren't.
 
-- [ ] **Step 1: Walk the error table from spec §6**
+- [x] **Step 1: Walk the error table from spec §6**
 
 Open `docs/superpowers/specs/2026-05-03-print-support-design.md` §6. For each row, locate the corresponding code path in `PrintJob.cpp` (use `grep -n` on the trigger condition). Confirm:
 
@@ -1625,7 +1627,7 @@ Open `docs/superpowers/specs/2026-05-03-print-support-design.md` §6. For each r
 | Printer offline mid-job | `if (StartPage(...) <= 0)` branch (Task 6) ✓ — but also check `EndPage` return per spec |
 | OOM in dialog creation | `if (!hwnd_) return;` in PrintProgressDlg ctor; PrintJob caller treats it as silent skip — spec wants a MessageBox |
 
-- [ ] **Step 2: Add the missing rows**
+- [x] **Step 2: Add the missing rows**
 
 Wrap the `EndPage(pd.hDC)` call in Task 6's loop:
 
@@ -1655,7 +1657,7 @@ And in `PrintProgressDlg.hpp`, add:
 [[nodiscard]] bool is_valid() const noexcept { return hwnd_ != nullptr; }
 ```
 
-- [ ] **Step 3: Build**
+- [x] **Step 3: Build**
 
 ```bash
 cmake --build build --config Debug --target litepdf 2>&1 | tail -10
@@ -1663,7 +1665,7 @@ cmake --build build --config Debug --target litepdf 2>&1 | tail -10
 
 Expected: clean.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/printing/PrintJob.cpp src/printing/PrintProgressDlg.hpp
@@ -1680,7 +1682,7 @@ git commit -m "fix(printing): cover EndPage failure + dialog OOM in error matrix
 
 **Why:** Expose the new functionality. Menu item + Ctrl+P accelerator + WM_COMMAND dispatch.
 
-- [ ] **Step 1: Add the resource ID**
+- [x] **Step 1: Add the resource ID**
 
 Find the file containing `IDM_FILE_OPEN` definitions:
 
@@ -1696,7 +1698,7 @@ Expected: a header like `src/ui/Resources.h` or inline in `MainWindow.cpp`. Add 
 
 (Run `grep -E 'IDM_[A-Z_]+ +[0-9]+' src/ui/ -r | sort -k3n | tail -5` to find the highest current ID; pick the next free integer.)
 
-- [ ] **Step 2: Insert into the File menu and accelerator table**
+- [x] **Step 2: Insert into the File menu and accelerator table**
 
 Locate `IDM_FILE_OPEN` in `src/ui/MainWindow.cpp` (around line 889). Find where the File menu is built (search for `AppendMenuW.*IDM_FILE_OPEN` or the menu construction site). Add immediately after the Open entry:
 
@@ -1718,7 +1720,7 @@ In that block, after the `Ctrl+O` entry, add:
         { FCONTROL | FVIRTKEY, 'P',          IDM_FILE_PRINT    },
 ```
 
-- [ ] **Step 3: Add the dispatch case**
+- [x] **Step 3: Add the dispatch case**
 
 In `MainWindow.cpp`'s `WM_COMMAND` handler (search for `case IDM_FILE_OPEN:`), add a new case **before** the `IDM_FILE_OPEN` block:
 
@@ -1741,7 +1743,7 @@ At the top of `MainWindow.cpp`, add:
 #include "printing/PrintJob.hpp"
 ```
 
-- [ ] **Step 4: Build + manual smoke**
+- [x] **Step 4: Build + manual smoke**
 
 ```bash
 cmake --build build --config Release
@@ -1757,7 +1759,7 @@ In the running app:
 
 If any step fails, fix and re-run.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/ui/Resources.h src/ui/MainWindow.cpp
@@ -1773,7 +1775,9 @@ EOF
 
 ---
 
-### Task 11: Integration test (CLI `--print-to-pdf`)
+### Task 11: Integration test (CLI `--print-to-pdf`) — DEFERRED
+
+> **Status:** Deferred per plan-authorized scope reduction (see line 1843 fallback). Manual smoke from Task 10 step 4 covers the same code path. Tracked for future follow-up plan; not required for v0.0.10-phase8.5 ship.
 
 **Files:**
 - Modify: `src/cli/main.cpp`
@@ -1942,7 +1946,7 @@ EOF
 - Modify: `VERSION`
 - Modify: `docs/plans/2026-04-15-litepdf-roadmap.md` (mark Phase 8.5 as ✓ shipped)
 
-- [ ] **Step 1: Manual smoke checklist**
+- [x] **Step 1: Manual smoke checklist**
 
 On a Release build, verify each:
 
@@ -1966,13 +1970,13 @@ Then:
 
 Document anything that fails as a follow-up issue (don't block the ship on cosmetic issues; do block on data corruption or crashes).
 
-- [ ] **Step 2: Bump VERSION to release tag**
+- [x] **Step 2: Bump VERSION to release tag**
 
 ```bash
 echo '0.0.10' > VERSION
 ```
 
-- [ ] **Step 3: Update About dialog literal**
+- [x] **Step 3: Update About dialog literal**
 
 ```bash
 grep -n 'v0\.0\.' src/ui/MainWindow.cpp | head -5
@@ -1986,11 +1990,11 @@ pwsh ./scripts/check-version-sync.ps1
 
 Expected: `[OK] version sync: VERSION=0.0.10 -> About dialog v0.0.10`.
 
-- [ ] **Step 4: Mark roadmap shipped**
+- [x] **Step 4: Mark roadmap shipped**
 
 In `docs/plans/2026-04-15-litepdf-roadmap.md`, change the Phase 8.5 row's exit criteria column to begin with `**SHIPPED 2026-MM-DD** —` (current date).
 
-- [ ] **Step 5: Final test run**
+- [x] **Step 5: Final test run**
 
 ```bash
 ctest --test-dir build -C Release --output-on-failure
@@ -1998,7 +2002,7 @@ ctest --test-dir build -C Release --output-on-failure
 
 Expected: 159/159 PASS (146 + 11 new unit + 2 placeholder = wait, count is 11 unit + 2 integration; integration runs separately). Adjust count to whatever ctest actually reports — the absolute number is informational; the delta from Phase 8 ship (+11 unit cases) is what matters.
 
-- [ ] **Step 6: Commit + tag**
+- [x] **Step 6: Commit + tag**
 
 ```bash
 git add VERSION src/ui/MainWindow.cpp docs/plans/2026-04-15-litepdf-roadmap.md
@@ -2020,7 +2024,7 @@ git push origin phase-8.5-print
 git push origin v0.0.10-phase8.5
 ```
 
-- [ ] **Step 7: Bump VERSION back to dev**
+- [x] **Step 7: Bump VERSION back to dev**
 
 ```bash
 echo '0.0.11-dev' > VERSION
@@ -2029,7 +2033,7 @@ git commit -m "chore: bump VERSION to 0.0.11-dev (post-Phase-8.5)"
 git push origin phase-8.5-print
 ```
 
-- [ ] **Step 8: Open PR**
+- [x] **Step 8: Open PR**
 
 ```bash
 gh pr create --title "Phase 8.5: Print support (T2)" --body "$(cat <<'EOF'

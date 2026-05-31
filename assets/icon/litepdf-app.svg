@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- LitePDF app icon: white sheet of paper with folded top-right corner,
+     blue lightning bolt overlaid. See spec §1.1 for color rationale. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Paper body (with folded corner cut out of top-right) -->
+  <path d="M 36 24 L 188 24 L 220 56 L 220 232 L 36 232 Z"
+        fill="#F8F9FA" stroke="#ADB5BD" stroke-width="2"/>
+  <!-- Folded corner shadow triangle -->
+  <path d="M 188 24 L 188 56 L 220 56 Z"
+        fill="#DEE2E6" stroke="#ADB5BD" stroke-width="2" stroke-linejoin="round"/>
+  <!-- Lightning bolt (Bootstrap btn-primary:hover #0B5ED7) -->
+  <path d="M 144 56 L 88 144 L 124 144 L 100 208 L 176 112 L 132 112 Z"
+        fill="#0B5ED7"/>
+</svg>

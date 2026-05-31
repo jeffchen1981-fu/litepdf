@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- LitePDF PDF document icon: same paper silhouette as litepdf-app.svg,
+     with bold red "PDF" wordmark in place of the lightning bolt.
+     See spec §1.2. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Paper body (identical to litepdf-app.svg) -->
+  <path d="M 36 24 L 188 24 L 220 56 L 220 232 L 36 232 Z"
+        fill="#F8F9FA" stroke="#ADB5BD" stroke-width="2"/>
+  <!-- Folded corner shadow triangle -->
+  <path d="M 188 24 L 188 56 L 220 56 Z"
+        fill="#DEE2E6" stroke="#ADB5BD" stroke-width="2" stroke-linejoin="round"/>
+  <!-- "PDF" wordmark, centered -->
+  <text x="128" y="160"
+        font-family="Arial, sans-serif" font-weight="900" font-size="64"
+        text-anchor="middle" fill="#D32F2F">PDF</text>
+</svg>

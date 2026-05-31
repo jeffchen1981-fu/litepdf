@@ -1,4 +1,5 @@
 #include <winres.h>
+#include "MainMenu.rc.h"
 
 // Version info
 VS_VERSION_INFO VERSIONINFO
@@ -33,15 +34,12 @@ END
 // Manifest (side-by-side assembly)
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "manifest.xml"
 
-// Icon slots: real icon assets land in Phase 9. See design §9 for the "Lightning
-// Document" app icon and the red-PDF document variant. Resource IDs are reserved
-// here so existing consumers (WNDCLASSEX.hIcon, DefaultIcon registry keys) don't
-// change when we uncomment these.
-// TODO(phase-9): ship assets/icon/litepdf-app.ico and litepdf-doc.ico
-// IDI_APPICON    101 ICON "icon/litepdf-app.ico"
-// IDI_PDFDOC     102 ICON "icon/litepdf-doc.ico"
-
-#include "MainMenu.rc.h"
+// App + PDF document icons (Phase 9, shipped). Symbolic IDs come from
+// MainMenu.rc.h (included at the top of this file). The path
+// "assets/icon/..." resolves via the source-root include directory
+// added in CMakeLists.txt.
+IDI_APPICON ICON "assets/icon/litepdf-app.ico"
+IDI_PDFDOC  ICON "assets/icon/litepdf-doc.ico"
 
 IDM_MAIN_MENU MENU
 {

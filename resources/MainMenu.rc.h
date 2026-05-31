@@ -67,3 +67,11 @@
 #define IDM_FILE_PRINT       40063   // Ctrl+P
 
 // Next free ID: 40064. Reserve 40064-40070 for future Phase 8.x cleanups.
+
+// Phase 9: app and document icon resource IDs.
+// IDM_* (menu commands) live in 40000+; IDI_* (icons) live in 100+.
+// Numeric IDs match the reservation in litepdf.rc since Phase 0 bootstrap;
+// do NOT renumber — Phase 10 installer references IDI_PDFDOC by numeric
+// value (-102) in the DefaultIcon registry key.
+#define IDI_APPICON 101
+#define IDI_PDFDOC  102

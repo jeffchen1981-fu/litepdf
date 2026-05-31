@@ -405,12 +405,14 @@ This table is the single source of truth. `installer/LICENSE-DISPLAY.rtf` and Ru
 
 ## 9. Application Icon
 
+> **Implementation spec:** [`docs/superpowers/specs/2026-05-05-phase-9-icons-design.md`](../superpowers/specs/2026-05-05-phase-9-icons-design.md) supersedes this section. Differences: lightning color `#0D6EFD` → `#0B5ED7` (light-taskbar contrast); pipeline `rsvg-convert + ImageMagick` → Python `resvg-py + Pillow`, regenerate-on-demand rather than build-time; small-size pixel-art promise replaced with auto-downscale + recognizability acceptance criterion.
+
 ### 9.1 Primary Icon — "Lightning Document"
 
 A white sheet of paper with a folded top-right corner; a blue lightning bolt overlaid across the sheet.
 
 - Paper: `#F8F9FA`; fold shadow: `#DEE2E6`
-- Lightning: `#0D6EFD` (high contrast on both light and dark taskbars)
+- Lightning: `#0B5ED7` (Bootstrap `btn-primary:hover`; updated 2026-05-05 from `#0D6EFD` for AA contrast on Win11 light taskbars — see implementation spec §6)
 - Background: transparent
 - Meaning: lightning = fast/lightweight; paper = document
 
