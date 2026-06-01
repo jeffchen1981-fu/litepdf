@@ -60,7 +60,10 @@ def rtf_escape(s):
         elif o < 128:
             out.append(ch)
         else:
-            out.append('\\u%d?' % o)
+            # RTF \uN takes a SIGNED 16-bit value; codepoints > 0x7FFF must be
+            # written as their negative equivalent (o - 65536) to be spec-valid.
+            signed = o if o < 32768 else o - 65536
+            out.append('\\u%d?' % signed)
     return ''.join(out)
 
 HEADER = (r'{\rtf1\ansi\ansicpg950\deff0'
