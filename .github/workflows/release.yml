@@ -83,8 +83,21 @@ jobs:
           "version=$v" | Add-Content -Path $env:GITHUB_OUTPUT -Encoding utf8
           Write-Host "Release version: $v"
 
-      - name: Install Inno Setup (pinned)
-        run: choco install innosetup --version=6.3.3 -y --no-progress
+      - name: Ensure Inno Setup 6 is available
+        shell: pwsh
+        run: |
+          # windows-latest now pre-ships Inno Setup 6.x; `choco install
+          # --version=6.3.3` fails refusing to downgrade over it. Use the
+          # pre-installed compiler when present; otherwise install a pinned 6.x.
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (Test-Path $iscc) {
+            Write-Host "Using pre-installed Inno Setup at $iscc"
+          } else {
+            choco install innosetup --version=6.3.3 -y --no-progress
+            if ($LASTEXITCODE -ne 0) { Write-Error "choco install innosetup failed"; exit 1 }
+          }
+          if (-not (Test-Path $iscc)) { Write-Error "ISCC.exe not found at $iscc"; exit 1 }
+          Write-Host "[OK] Inno Setup 6 present."
 
       - name: Compile installer
         shell: pwsh
