@@ -1,4 +1,4 @@
-; LitePDF installer — Phase 10. Per-user default, opt-in per-machine.
+﻿; LitePDF installer — Phase 10. Per-user default, opt-in per-machine.
 ; Build:  ISCC.exe /DMyAppVersion=0.0.12 installer\litepdf.iss
 ; Output: installer\Output\litepdf-setup-0.0.12.exe
 
