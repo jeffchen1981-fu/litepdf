@@ -321,6 +321,18 @@ begin
 end;
 ```
 
+- [ ] **Step 1a: Save the `.iss` with a UTF-8 BOM** — CRITICAL. ISCC reads a
+  `.iss` as the system ANSI code page UNLESS it begins with a UTF-8 BOM; without
+  it, the literal Traditional Chinese in `[Tasks]`/`[Run]`/`[Code]` is mojibake
+  on an en-US build runner. Most editors/`Write` tools omit the BOM, so prepend
+  it at byte level (`bash`):
+```bash
+head -c3 installer/litepdf.iss | grep -q $'\xEF\xBB\xBF' || { printf '\xEF\xBB\xBF' | cat - installer/litepdf.iss > installer/litepdf.iss.tmp && mv installer/litepdf.iss.tmp installer/litepdf.iss; }
+```
+  Verify: `xxd installer/litepdf.iss | head -1` shows `efbb bf...`. (Do NOT
+  round-trip through PowerShell 5.1 `Get-Content` — it reads a BOM-less UTF-8
+  file as ANSI and corrupts the Chinese.)
+
 - [ ] **Step 2: Compile locally if Inno Setup is installed (otherwise defer to CI)**
 
 **Prerequisite:** `build\Release\litepdf.exe` must exist (the `[Files]` step
