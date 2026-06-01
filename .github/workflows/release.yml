@@ -1,0 +1,151 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Configure
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Assert static CRT (portable zip must be self-contained)
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          # -products "*" so Build-Tools-only hosts also match (mirrors cmake/ImportMuPDF.cmake).
+          $msvc = & $vswhere -latest -products "*" -find "VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          if (-not $msvc -or -not (Test-Path $msvc)) { Write-Error "dumpbin not found via vswhere"; exit 1 }
+          $imports = & $msvc /imports build\Release\litepdf.exe
+          if ($imports -match 'VCRUNTIME\d+\.dll' -or $imports -match 'MSVCP\d+\.dll') {
+            Write-Error "litepdf.exe imports the dynamic VC++ runtime (/MD) - portable zip would not be self-contained. Expected /MT."
+            exit 1
+          }
+          Write-Host "[OK] no dynamic VC++ runtime imports (static CRT confirmed)."
+
+      - name: Version sync gate
+        shell: pwsh
+        run: ./scripts/check-version-sync.ps1
+
+      - name: Unit tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Smoke test
+        shell: pwsh
+        run: ./scripts/smoke-test.ps1
+
+      - name: Derive + verify version
+        id: ver
+        shell: pwsh
+        run: |
+          $raw = (Get-Content VERSION -Raw).Trim()
+          if ($raw -match '-') {
+            Write-Error "VERSION still carries a pre-release suffix ($raw). Tag the release commit where VERSION has no -dev (Task 7), not the dev tree."
+            exit 1
+          }
+          $v = $raw -replace '-.*$',''
+          $tagver = ("${{ github.ref_name }}" -replace '^v','') -replace '-.*$',''
+          if ($v -ne $tagver) {
+            Write-Error "VERSION ($v) does not match tag numeric ($tagver)."
+            exit 1
+          }
+          "version=$v" | Add-Content -Path $env:GITHUB_OUTPUT -Encoding utf8
+          Write-Host "Release version: $v"
+
+      - name: Install Inno Setup (pinned)
+        run: choco install innosetup --version=6.3.3 -y --no-progress
+
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ steps.ver.outputs.version }} installer\litepdf.iss
+          if (-not (Test-Path "installer\Output\litepdf-setup-${{ steps.ver.outputs.version }}.exe")) {
+            Write-Error "Installer not produced."; exit 1
+          }
+
+      - name: Build portable zip
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          New-Item -ItemType Directory -Force portable | Out-Null
+          Copy-Item build\Release\litepdf.exe portable\
+          Copy-Item LICENSE portable\
+          Copy-Item README.md portable\
+          Compress-Archive -Path portable\* -DestinationPath "litepdf-portable-$v.zip" -Force
+
+      - name: Build source tarball (incl. submodules)
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install git-archive-all
+          # git-archive-all installs as a console script; ensure its dir is on PATH.
+          $scripts = & python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+          $env:PATH = "$scripts;$env:PATH"
+          $v = "${{ steps.ver.outputs.version }}"
+          git-archive-all --prefix "litepdf-$v/" "litepdf-$v-source.tar.gz"
+          if (-not (Test-Path "litepdf-$v-source.tar.gz")) { Write-Error "tarball not produced"; exit 1 }
+
+      - name: Source tarball build-back gate (AGPL corresponding-source proof)
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          New-Item -ItemType Directory -Force _backcheck | Out-Null
+          tar -xzf "litepdf-$v-source.tar.gz" -C _backcheck
+          $src = "_backcheck\litepdf-$v"
+          if (-not (Test-Path "$src\third_party\mupdf\platform\win32\mupdf.sln")) {
+            Write-Error "Tarball missing MuPDF submodule content - not complete corresponding source."; exit 1
+          }
+          cmake -S $src -B "$src\build" -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$src\build" --config Release --parallel
+          if (-not (Test-Path "$src\build\Release\litepdf.exe")) {
+            Write-Error "Tarball did not build to litepdf.exe."; exit 1
+          }
+          Write-Host "[OK] source tarball is buildable corresponding source."
+
+      - name: Extract changelog section for release notes
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $cl = Get-Content CHANGELOG.md -Raw
+          # Grab the block from "## [<v>-..." up to the next "## [" heading (or EOF).
+          $m = [regex]::Match($cl, "(?ms)^## \[$([regex]::Escape($v))-.*?(?=^## \[|\z)")
+          if ($m.Success) { $m.Value.Trim() | Out-File -Encoding utf8 notes.md }
+          else { "LitePDF $v" | Out-File -Encoding utf8 notes.md }
+
+      - name: Create draft prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          gh release create "${{ github.ref_name }}" `
+            --draft --prerelease `
+            --title "LitePDF ${{ github.ref_name }}" `
+            --notes-file notes.md `
+            "installer/Output/litepdf-setup-$v.exe" `
+            "litepdf-portable-$v.zip" `
+            "litepdf-$v-source.tar.gz"
+
+      - name: Publish (un-draft) only after all assets uploaded
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${{ github.ref_name }}" --draft=false
