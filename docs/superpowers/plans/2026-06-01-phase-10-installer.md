@@ -80,21 +80,25 @@ should be ~20022 (not the LF-shrunk ~19639).
 
 ## Task 2: Author the license-disclosure RTF
 
-The informational page content. RTF cannot be reliably hand-typed with `\u`
-escapes, so **author it in WordPad** and save as RTF. This is user-facing
-installer UI copy (Traditional Chinese is the intended locale).
+The informational page content (user-facing installer UI copy; Traditional
+Chinese is the intended locale). RTF cannot hold raw UTF-8 CJK reliably and
+headless agents can't drive WordPad, so the RTF is **generated** by
+`installer/make-license-rtf.py`, which embeds the canonical text and emits
+`\uNNNN?` escapes at runtime (no hand-typed codepoints → no mojibake). The
+output is pure ASCII.
 
 **Files:**
-- Create: `installer/LICENSE-DISPLAY.rtf`
+- Create: `installer/make-license-rtf.py` (generator), `installer/LICENSE-DISPLAY.rtf` (output)
 
-- [ ] **Step 1: Author the RTF in WordPad with this exact content**
+- [ ] **Step 1: Write the generator `installer/make-license-rtf.py`**
 
-Open WordPad, set the font to **Microsoft JhengHei, 10pt**, type the content
-below verbatim (the three `─────` section headers in **bold**), then
-**Save As → Rich Text Format (RTF)** to `installer\LICENSE-DISPLAY.rtf`. The
-zh-TW wording is from design §8.5.2; the 9-component inventory and the two
-English credit lines are mandatory (FTL §2 and the IJG license require them
-verbatim for binary distribution).
+The script embeds the content below verbatim (zh-TW wording from design §8.5.2;
+the 9-component inventory and the two English credit lines are mandatory — FTL §2
+and the IJG license require them verbatim for binary distribution) and converts
+each char: ASCII passes through, `\\`/`{`/`}` are escaped, newline → `\par`,
+non-ASCII → `\uNNNN?`. RTF header:
+`{\rtf1\ansi\ansicpg950\deff0{\fonttbl{\f0\fnil\fcharset136 Microsoft JhengHei;}}` +
+`\viewkind4\uc1\f0\fs20`. Canonical content:
 
 ```text
 ─────────────────────────────────────────────
@@ -137,25 +141,29 @@ This software is based in part on the work of the Independent JPEG Group.
 作者與貢獻者對任何使用後果不負責任。
 ```
 
-- [ ] **Step 2: Verify the RTF renders and carries the mandatory credit lines**
+- [ ] **Step 2: Run the generator** (`pwsh`): `python installer\make-license-rtf.py`
+  (fallback `py installer\make-license-rtf.py`). Expected: `wrote ...LICENSE-DISPLAY.rtf <N> bytes`.
+
+- [ ] **Step 3: Verify the RTF is valid pure-ASCII with escaped CJK + required strings**
 
 Run (`pwsh`):
 ```pwsh
 $raw = Get-Content installer\LICENSE-DISPLAY.rtf -Raw
-if (-not ($raw -match '^\{\\rtf')) { Write-Error "Not RTF (missing {\rtf header) - re-save from WordPad as 'Rich Text Format'."; exit 1 }
-@('Independent JPEG Group','The FreeType Project','MuPDF 1.24.11','zlib') | ForEach-Object {
+if (-not ($raw -match '^\{\\rtf')) { Write-Error "Not RTF (missing {\rtf header)"; exit 1 }
+@('Independent JPEG Group','The FreeType Project','MuPDF 1.24.11','zlib','OpenJPEG','jbig2dec') | ForEach-Object {
   if ($raw -notmatch [regex]::Escape($_)) { Write-Error "RTF missing: $_"; exit 1 }
 }
-"OK: valid RTF, all required strings present"
+$bytes = [System.IO.File]::ReadAllBytes("installer\LICENSE-DISPLAY.rtf")
+if ($bytes | Where-Object { $_ -gt 127 }) { Write-Error "RTF has non-ASCII bytes (escaping failed)"; exit 1 }
+if ($raw -notmatch '\\u25480\?') { Write-Error "expected 授 (╈0?) escape not found"; exit 1 }
+"OK: valid pure-ASCII RTF with escaped CJK and all required strings"
 ```
-Expected: `OK: all required strings present`. Open it in WordPad and confirm the
-Traditional Chinese renders correctly (not mojibake).
 
-- [ ] **Step 3: Commit** (`bash`)
+- [ ] **Step 4: Commit** (`bash`)
 
 ```bash
-git add installer/LICENSE-DISPLAY.rtf
-git commit -m "docs: add installer license + third-party notices page (zh-TW)"
+git add installer/make-license-rtf.py installer/LICENSE-DISPLAY.rtf
+git commit -m "docs: add installer license + third-party notices page (zh-TW, generated)"
 ```
 
 ---
