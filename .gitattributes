@@ -16,6 +16,10 @@
 *.psm1    text eol=lf
 *.psd1    text eol=lf
 
+# Vendored Inno Setup language files: keep byte-exact (UTF-8 BOM + CRLF as
+# shipped upstream). Never normalize line endings or treat as diffable text.
+*.isl     binary
+
 # Binary (never normalize, never diff as text)
 *.png     binary
 *.jpg     binary
