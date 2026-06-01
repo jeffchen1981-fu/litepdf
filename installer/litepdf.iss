@@ -20,7 +20,10 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}/issues
 AppUpdatesURL={#MyAppURL}/releases
-DefaultDirName={localappdata}\Programs\LitePDF
+; {autopf} is install-mode-aware: per-user -> %LOCALAPPDATA%\Programs, per-machine
+; -> Program Files. A fixed {localappdata} path would mis-place a per-machine
+; install (HKLM registry pointing at one user's profile; unusable by others).
+DefaultDirName={autopf}\LitePDF
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 ; Per-user by default (no UAC); allow opt-in elevation to per-machine.
@@ -101,9 +104,13 @@ Root: HKA; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueNa
 ; (uninsdeletekeyifempty would no-op here: LIFO uninstall evaluates the parent
 ;  before its Capabilities child is removed, so it's never empty at that point.)
 Root: HKA; Subkey: "Software\LitePDF"; Flags: uninsdeletekey
-; --- Context menu "Open with LitePDF" on the PDF ProgID ---
-Root: HKA; Subkey: "Software\Classes\LitePDF.pdf\shell\openWithLitePDF"; ValueType: string; ValueName: ""; ValueData: "以 LitePDF 開啟"; Flags: uninsdeletekey; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\LitePDF.pdf\shell\openWithLitePDF\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
+; --- Context menu "Open with LitePDF" for .pdf via SystemFileAssociations ---
+; Registered under SystemFileAssociations\.pdf (not the private LitePDF.pdf
+; ProgID), so the verb shows for every .pdf regardless of the current default
+; app, works without the assocpdf task, and is self-contained: uninstall removes
+; only this key (no orphaned LitePDF.pdf ProgID left behind).
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.pdf\shell\openWithLitePDF"; ValueType: string; ValueName: ""; ValueData: "以 LitePDF 開啟"; Flags: uninsdeletekey; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.pdf\shell\openWithLitePDF\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
