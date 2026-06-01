@@ -8,11 +8,13 @@
 
 **Tech Stack:** Inno Setup 6 (Pascal Script `[Code]`), GitHub Actions (`windows-latest`), Chocolatey, `git-archive-all` (pip), PowerShell 5.1-floor scripts, CMake + VS2022, MuPDF static-linked.
 
-**Spec:** [`docs/superpowers/specs/2026-06-01-phase-10-installer-design.md`](../specs/2026-06-01-phase-10-installer-design.md) (v2).
+**Spec:** [`docs/superpowers/specs/2026-06-01-phase-10-installer-design.md`](../specs/2026-06-01-phase-10-installer-design.md) (v2). The zh-TW license wording originates in [`docs/plans/2026-04-15-litepdf-design.md`](../../plans/2026-04-15-litepdf-design.md) §8.5.2.
 
 **⚠️ This is a packaging / CI / docs phase, not a Catch2-testable code phase.** There is no `src/` logic to drive with unit tests. "Tests" here are: `ISCC.exe` compiles the script (exit 0), the release workflow's gates pass (static-CRT assert, version-sync, ctest, smoke, source build-back), and a **manual fresh-VM smoke checklist**. Each task states its concrete verification. Commit after every task.
 
 **Branch:** `phase-10-installer` (already created; spec committed at `67a34f5`).
+
+**Shell convention:** code blocks labelled `pwsh` run in PowerShell; blocks labelled `bash` run in Git Bash. Do not mix.
 
 ---
 
@@ -20,13 +22,13 @@
 
 | File | Responsibility |
 |---|---|
-| `installer/litepdf.iss` | Inno Setup script: install scope, wizard, file-association registry, uninstall, `[Code]` shell-refresh. |
+| `installer/litepdf.iss` | Inno Setup script: install scope, wizard, file-association registry, uninstall (incl. keep-config prompt), `[Code]` shell-refresh. |
 | `installer/LICENSE-DISPLAY.rtf` | Informational license + third-party notices page (zh-TW), shown via `InfoBeforeFile`. |
 | `installer/lang/ChineseTraditional.isl` | Inno Setup Traditional Chinese UI strings (unofficial translation, vendored). |
 | `.github/workflows/release.yml` | Tag-triggered release job: build → installer → zip → tarball → build-back → publish prerelease. |
 | `VERSION` | `0.0.12-dev → 0.0.12` (release commit), then `→ 0.0.13-dev`. |
 | `README.md` | Download / install section, system requirements, SmartScreen note, status-line bump. |
-| `CHANGELOG.md` | `[0.0.12-phase10]` section (folds in the pending `[Unreleased]` items), compare link, footer ref. |
+| `CHANGELOG.md` | `[0.0.12-phase10]` section (folds in the pending `[Unreleased]` items), compare link, footer refs. |
 | `docs/plans/2026-04-15-litepdf-design.md` | §8.5.6 inventory — already expanded in this PR (`67a34f5`); no further edit. |
 
 ---
@@ -40,9 +42,7 @@ is self-contained (CI's `choco install innosetup` won't fetch unofficial langs).
 **Files:**
 - Create: `installer/lang/ChineseTraditional.isl`
 
-- [ ] **Step 1: Download the pinned translation**
-
-Run (from repo root):
+- [ ] **Step 1: Download the pinned translation** (`pwsh`, from repo root)
 
 ```pwsh
 New-Item -ItemType Directory -Force installer\lang | Out-Null
@@ -50,12 +50,12 @@ $url = "https://raw.githubusercontent.com/jrsoftware/issrc/is-6_3_3/Files/Langua
 Invoke-WebRequest -Uri $url -OutFile installer\lang\ChineseTraditional.isl
 ```
 
-- [ ] **Step 2: Verify it parsed as an .isl (has a LangOptions block)**
+- [ ] **Step 2: Verify it parsed as an .isl (has a LanguageName line)**
 
 Run: `Select-String -Path installer\lang\ChineseTraditional.isl -Pattern 'LanguageName' | Select-Object -First 1`
-Expected: a line like `LanguageName=...` (non-empty). The file is UTF-8/UTF-16 with BOM — leave its encoding untouched.
+Expected: a line like `LanguageName=...` (non-empty). The file is UTF-16 with BOM — leave its encoding untouched.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Commit** (`bash`)
 
 ```bash
 git add installer/lang/ChineseTraditional.isl
@@ -66,72 +66,77 @@ git commit -m "build: vendor Inno Setup Traditional Chinese language file (pinne
 
 ## Task 2: Author the license-disclosure RTF
 
-The informational page content. Mirrors design §8.5.2 wording + the expanded
-§8.5.6 inventory + the mandatory FreeType (FTL) and libjpeg (IJG) credit lines.
+The informational page content. RTF cannot be reliably hand-typed with `\u`
+escapes, so **author it in WordPad** and save as RTF. This is user-facing
+installer UI copy (Traditional Chinese is the intended locale).
 
 **Files:**
 - Create: `installer/LICENSE-DISPLAY.rtf`
 
-- [ ] **Step 1: Write the RTF**
+- [ ] **Step 1: Author the RTF in WordPad with this exact content**
 
-Create `installer/LICENSE-DISPLAY.rtf` with exactly this content (it is a valid
-minimal RTF; `\b`/`\b0` bold section headers, `\par` line breaks, `\u####?`
-escapes for CJK so the file stays ASCII-safe and survives any editor):
+Open WordPad, set the font to **Microsoft JhengHei, 10pt**, type the content
+below verbatim (the three `─────` section headers in **bold**), then
+**Save As → Rich Text Format (RTF)** to `installer\LICENSE-DISPLAY.rtf`. The
+zh-TW wording is from design §8.5.2; the 9-component inventory and the two
+English credit lines are mandatory (FTL §2 and the IJG license require them
+verbatim for binary distribution).
 
-```rtf
-{\rtf1\ansi\deff0{\fonttbl{\f0\fnil\fcharset136 Microsoft JhengHei;}{\f1\fnil\fcharset0 Segoe UI;}}
-\viewkind4\uc1\f0\fs20
-\b LitePDF ╈0?❀2?♸1?❅4?\b0\par
-\par
-LitePDF ‸1? GNU Affero General Public License v3.0 (AGPL-3.0) 〳2? 6?。\par
-♁2?♸1?❅4?⁄5?㡕6?⑴4?’7?下?❀2?℃3?:\par
-•  ⅈ7?㌥8?　1?‵1?⦙2?♁2?ㄤ3?␳5? (⁉1?―4?┑0?Ↄ0?⦙2?〴2?ⅈ7?)\par
-•  ⅈ7?ⅆ2?⑇1?⍃6?▗2?⅀7?⊘7?ゐ8?: https://github.com/jeffchen1981-fu/litepdf\par
-•  ⅈ7?⁆2?░3? 6?₇7?▕5? 6?, 4?㡥6?➃9?⦙2?ぅ6?⅑6?╈0?❀2?\par
-\par
-㍐9?⑴4?⍕9?♁2?ㄤ3?␳5?㚇9?㚔2?㈗8?㘳5?╕2?‷9?☸1?℠9?,AGPL 㔠1?❱4?⑴4?₄4?㠨3?ぅ6?␡2?⅀7?⊘7?ゐ8? (AGPL §13)。\par
-⍃6?▗2?㍒1?▙1?♸1?❅4?: https://www.gnu.org/licenses/agpl-3.0.html\par
-\par
-\b ♁2?ㄤ3?␳5?℥3?⅔7? 3?ㅓ2?三?☄1?₀3?‡4?\b0\par
-\par
-• MuPDF 1.24.11 — © Artifex Software, Inc. — AGPL-3.0\par
-• FreeType 2.13.0 — The FreeType Project — FTL\par
-• libjpeg 9e — Independent JPEG Group — IJG License\par
-• OpenJPEG — UCLouvain / OpenJPEG contributors — BSD-2-Clause\par
-• Little CMS (lcms2) — © Marti Maria — MIT\par
-• MuJS — © Artifex Software, Inc. — ISC\par
-• jbig2dec — © Artifex Software, Inc. — AGPL-3.0\par
-• Gumbo (gumbo-parser) — © Google, Inc. — Apache-2.0\par
-• zlib 1.2.13 — © Jean-loup Gailly & Mark Adler — zlib License\par
-\par
-Portions of this software are copyright © 2006-2024 The FreeType Project (www.freetype.org). All rights reserved.\par
-This software is based in part on the work of the Independent JPEG Group.\par
-\par
-\b ₁3?㘁2?㊆2?☒6?\b0\par
-\par
-♁2?ㄤ3?␳5?┵3?「?⅀7?✗1?」?╕2?‷9?,不?⅔7?‡9?‰9?☒6?㄃4?┑0?䁦4?㄃4?⁄5?㕥7?。\par
-‱6?㉷3?㌨7?㘁1?獻?㉷3?⍖5?‡9?‰9?‵1?⦙2?⑆0?♒4?不?㘀0?㘁2?‡9?。\par
-}
+```text
+─────────────────────────────────────────────
+LitePDF 授權條款
+─────────────────────────────────────────────
+
+LitePDF 依 GNU Affero General Public License v3.0 (AGPL-3.0) 發佈。
+本條款保障您以下權利:
+  • 可自由使用本程式 (個人或商業用途均可)
+  • 可取得完整原始碼: https://github.com/jeffchen1981-fu/litepdf
+  • 可修改並再散佈本程式,但需沿用相同授權
+
+若您將本程式或其衍生作品透過網路提供服務,
+AGPL 要求您同樣需將您的原始碼公開 (AGPL §13)。
+
+完整英文條款: https://www.gnu.org/licenses/agpl-3.0.html
+
+─────────────────────────────────────────────
+本程式包含之第三方元件
+─────────────────────────────────────────────
+
+• MuPDF 1.24.11 — © Artifex Software, Inc. — AGPL-3.0
+• FreeType 2.13.0 — The FreeType Project — FTL
+• libjpeg 9e — Independent JPEG Group — IJG License
+• OpenJPEG — UCLouvain / OpenJPEG contributors — BSD-2-Clause
+• Little CMS (lcms2) — © Marti Maria — MIT
+• MuJS — © Artifex Software, Inc. — ISC
+• jbig2dec — © Artifex Software, Inc. — AGPL-3.0
+• Gumbo (gumbo-parser) — © Google, Inc. — Apache-2.0
+• zlib 1.2.13 — © Jean-loup Gailly & Mark Adler — zlib License
+
+Portions of this software are copyright © 2006-2024 The FreeType Project (www.freetype.org). All rights reserved.
+This software is based in part on the work of the Independent JPEG Group.
+
+─────────────────────────────────────────────
+免責聲明
+─────────────────────────────────────────────
+
+本程式按「原樣」提供,不含任何明示或默示保證。
+作者與貢獻者對任何使用後果不負責任。
 ```
 
-> **Authoring note:** the `\u####?` sequences are decimal Unicode code points
-> (the trailing `?` is the mandatory RTF fallback char). If you prefer, author
-> the visible text in a real RTF editor (WordPad) using the **plain-text content
-> shown in spec §8.5.2 plus the 9-line inventory above and the two English
-> credit lines**, save as RTF — the rendered result must contain all 9
-> components and both verbatim FreeType/libjpeg credit lines. The two English
-> lines must appear verbatim (FTL §2 and IJG legal requirement).
+- [ ] **Step 2: Verify the RTF renders and carries the mandatory credit lines**
 
-- [ ] **Step 2: Verify the RTF opens and carries the mandatory credit lines**
-
-Run:
+Run (`pwsh`):
 ```pwsh
-(Get-Content installer\LICENSE-DISPLAY.rtf -Raw) -match 'Independent JPEG Group'
-(Get-Content installer\LICENSE-DISPLAY.rtf -Raw) -match 'The FreeType Project'
+$raw = Get-Content installer\LICENSE-DISPLAY.rtf -Raw
+@('Independent JPEG Group','The FreeType Project','MuPDF 1.24.11','zlib') | ForEach-Object {
+  if ($raw -notmatch [regex]::Escape($_)) { Write-Error "RTF missing: $_"; exit 1 }
+}
+"OK: all required strings present"
 ```
-Expected: both `True`. Open it in WordPad to eyeball the CJK renders correctly.
+Expected: `OK: all required strings present`. Open it in WordPad and confirm the
+Traditional Chinese renders correctly (not mojibake).
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Commit** (`bash`)
 
 ```bash
 git add installer/LICENSE-DISPLAY.rtf
@@ -247,13 +252,17 @@ Root: HKA; Subkey: "Software\LitePDF\Capabilities\FileAssociations"; ValueType: 
 Root: HKA; Subkey: "Software\LitePDF\Capabilities\FileAssociations"; ValueType: string; ValueName: ".cbz"; ValueData: "LitePDF.cbz"; Tasks: assocothers
 Root: HKA; Subkey: "Software\LitePDF\Capabilities\FileAssociations"; ValueType: string; ValueName: ".xps"; ValueData: "LitePDF.xps"; Tasks: assocothers
 Root: HKA; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "LitePDF"; ValueData: "Software\LitePDF\Capabilities"; Flags: uninsdeletevalue
+; Clean up the parent key so no empty Software\LitePDF shell is left after uninstall.
+Root: HKA; Subkey: "Software\LitePDF"; Flags: uninsdeletekeyifempty dontcreatekey
 ; --- Context menu "Open with LitePDF" on the PDF ProgID ---
 Root: HKA; Subkey: "Software\Classes\LitePDF.pdf\shell\openWithLitePDF"; ValueType: string; ValueName: ""; ValueData: "以 LitePDF 開啟"; Flags: uninsdeletekey; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\LitePDF.pdf\shell\openWithLitePDF\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
-Filename: "ms-settings:defaultapps"; Description: "在 Windows 設定中將 LitePDF 設為預設"; Flags: shellexec postinstall skipifsilent; Tasks: assocpdf
+; runasoriginaluser: in a per-machine (elevated) install, open Settings in the
+; invoking user's session, not the admin context. Best-effort deep-link to LitePDF.
+Filename: "ms-settings:defaultapps?registeredAppUser=LitePDF"; Description: "在 Windows 設定中將 LitePDF 設為預設"; Flags: shellexec runasoriginaluser postinstall skipifsilent; Tasks: assocpdf
 
 [Code]
 procedure SHChangeNotify(wEventId: Integer; uFlags: Cardinal; dwItem1, dwItem2: Cardinal);
@@ -268,24 +277,47 @@ begin
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ConfigDir: String;
 begin
   if CurUninstallStep = usPostUninstall then
+  begin
+    // Prompt whether to keep user config. Default = No (keep): MB_DEFBUTTON2.
+    ConfigDir := ExpandConstant('{localappdata}\LitePDF');
+    if DirExists(ConfigDir) then
+    begin
+      if MsgBox('要一併刪除 LitePDF 的設定資料嗎?' + #13#10 + ConfigDir + #13#10#13#10 +
+                '選「否」會保留您的設定 (預設)。', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+        DelTree(ConfigDir, True, True, True);
+    end;
+    // Refresh the shell after removing associations.
     SHChangeNotify($08000000, $0000, 0, 0);
+  end;
 end;
 ```
 
 - [ ] **Step 2: Compile locally if Inno Setup is installed (otherwise defer to CI)**
 
-If `ISCC.exe` is available locally:
+**Prerequisite:** `build\Release\litepdf.exe` must exist (the `[Files]` step
+copies it). If it does not, build it first (`pwsh`):
+```pwsh
+cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --parallel
+```
+Then, if `ISCC.exe` is available locally (`pwsh`):
 ```pwsh
 & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=0.0.12 installer\litepdf.iss
 ```
-Expected: `Successful compile` and `installer\Output\litepdf-setup-0.0.12.exe` exists. (Requires `build\Release\litepdf.exe` to exist — run a Release build first.) If Inno Setup is not installed locally, skip; the `release.yml` job (Task 5) compiles it in CI. Do **not** commit the `installer\Output\` artifact — add it to `.gitignore` in Step 3.
+Expected: `Successful compile` and `installer\Output\litepdf-setup-0.0.12.exe`
+exists. If Inno Setup is not installed locally, skip — the `release.yml` job
+(Task 4) compiles it in CI. Do **not** commit `installer\Output\`.
 
-- [ ] **Step 3: Ignore the build output and commit**
+- [ ] **Step 3: Ignore the build output and commit** (`pwsh` then `bash`)
 
+```pwsh
+Add-Content -Path .gitignore -Value "`n# Inno Setup build output`ninstaller/Output/"
+```
 ```bash
-printf '\n# Inno Setup build output\ninstaller/Output/\n' >> .gitignore
 git add installer/litepdf.iss .gitignore
 git commit -m "build: add Inno Setup installer script (per-user default, file assoc)"
 ```
@@ -316,6 +348,7 @@ concurrency:
 jobs:
   release:
     runs-on: windows-latest
+    timeout-minutes: 120
     steps:
       - name: Checkout with submodules
         uses: actions/checkout@v5
@@ -332,9 +365,10 @@ jobs:
       - name: Assert static CRT (portable zip must be self-contained)
         shell: pwsh
         run: |
-          $dumpbin = (Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio\2022\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-          if (-not $dumpbin) { Write-Host "dumpbin not found; skipping CRT assertion"; exit 0 }
-          $imports = & $dumpbin /imports build\Release\litepdf.exe
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $msvc = & $vswhere -latest -find "VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          if (-not $msvc -or -not (Test-Path $msvc)) { Write-Error "dumpbin not found via vswhere"; exit 1 }
+          $imports = & $msvc /imports build\Release\litepdf.exe
           if ($imports -match 'VCRUNTIME\d+\.dll' -or $imports -match 'MSVCP\d+\.dll') {
             Write-Error "litepdf.exe imports the dynamic VC++ runtime (/MD) — portable zip would not be self-contained. Expected /MT."
             exit 1
@@ -356,13 +390,18 @@ jobs:
         id: ver
         shell: pwsh
         run: |
-          $v = ((Get-Content VERSION -Raw).Trim()) -replace '-.*$',''
-          $tagver = ("${{ github.ref_name }}" -replace '^v','') -replace '-.*$',''
-          if ($v -ne $tagver) {
-            Write-Error "VERSION ($v) does not match tag numeric ($tagver). Tag the 0.0.12 release commit, not the -dev follow-up."
+          $raw = (Get-Content VERSION -Raw).Trim()
+          if ($raw -match '-') {
+            Write-Error "VERSION still carries a pre-release suffix ($raw). Tag the release commit where VERSION has no -dev (Task 7), not the dev tree."
             exit 1
           }
-          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $v = $raw -replace '-.*$',''
+          $tagver = ("${{ github.ref_name }}" -replace '^v','') -replace '-.*$',''
+          if ($v -ne $tagver) {
+            Write-Error "VERSION ($v) does not match tag numeric ($tagver)."
+            exit 1
+          }
+          "version=$v" | Add-Content -Path $env:GITHUB_OUTPUT -Encoding utf8
           Write-Host "Release version: $v"
 
       - name: Install Inno Setup (pinned)
@@ -389,9 +428,14 @@ jobs:
       - name: Build source tarball (incl. submodules)
         shell: pwsh
         run: |
-          pip install git-archive-all
+          python -m pip install --upgrade pip
+          python -m pip install git-archive-all
+          # git-archive-all installs as a console script; ensure its dir is on PATH.
+          $scripts = & python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+          $env:PATH = "$scripts;$env:PATH"
           $v = "${{ steps.ver.outputs.version }}"
           git-archive-all --prefix "litepdf-$v/" "litepdf-$v-source.tar.gz"
+          if (-not (Test-Path "litepdf-$v-source.tar.gz")) { Write-Error "tarball not produced"; exit 1 }
 
       - name: Source tarball build-back gate (AGPL corresponding-source proof)
         shell: pwsh
@@ -443,10 +487,10 @@ jobs:
 - [ ] **Step 2: Lint the YAML**
 
 Run (if `actionlint` available): `actionlint .github/workflows/release.yml`
-Otherwise validate it parses: `pwsh -c "Get-Content .github/workflows/release.yml -Raw | Out-Null; 'syntax read ok'"` and eyeball indentation.
-Expected: no errors. The workflow cannot be executed until a tag is pushed (Task 8).
+Otherwise validate it parses (`pwsh`): `Get-Content .github/workflows/release.yml -Raw | Out-Null; 'syntax read ok'` and eyeball indentation.
+Expected: no errors. The workflow cannot execute until a tag is pushed (Task 8).
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Commit** (`bash`)
 
 ```bash
 git add .github/workflows/release.yml
@@ -458,7 +502,7 @@ git commit -m "ci: add tag-triggered release workflow (installer + zip + source 
 ## Task 5: Update README (download / install / requirements / SmartScreen)
 
 **Files:**
-- Modify: `README.md` (status line ~5; add an "Install" section after the intro; update prerequisites min-OS)
+- Modify: `README.md` (status line ~5; add an "Install" section before `## Features`; update prerequisites min-OS)
 
 - [ ] **Step 1: Bump the status line**
 
@@ -503,7 +547,7 @@ In `### Prerequisites`, change `- Windows 11` to:
 - Windows 10 version 1903+ or Windows 11 (64-bit)
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Commit** (`bash`)
 
 ```bash
 git add README.md
@@ -573,21 +617,19 @@ Replace the current `## [Unreleased]` section (lines 9–23) with an empty
 
 - [ ] **Step 2: Update the footer link references**
 
-At the bottom of the file, change the `[Unreleased]` compare link and add the
-new release tag link. Replace:
+At the bottom of the file, replace:
 ```markdown
 [Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.10-phase8.5...HEAD
 ```
-with:
+with (this also corrects the stale `[Unreleased]` base and adds the missing
+`[0.0.11-phase9]` footer reference, which the current file lacks):
 ```markdown
 [Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.12-phase10...HEAD
 [0.0.12-phase10]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.12-phase10
+[0.0.11-phase9]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.11-phase9
 ```
 
-> Note: the existing `[Unreleased]` compare base was stale at `v0.0.10-phase8.5`
-> (never advanced after 0.0.11). Correcting it to `v0.0.12-phase10` is intended.
-
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Commit** (`bash`)
 
 ```bash
 git add CHANGELOG.md
@@ -601,7 +643,7 @@ git commit -m "docs: add CHANGELOG 0.0.12-phase10 section (installer)"
 **Files:**
 - Modify: `VERSION` (`0.0.12-dev` → `0.0.12`)
 
-- [ ] **Step 1: Write the release version**
+- [ ] **Step 1: Write the release version** (`pwsh`)
 
 ```pwsh
 "0.0.12" | Out-File -FilePath VERSION -Encoding ascii -NoNewline
@@ -609,16 +651,18 @@ git commit -m "docs: add CHANGELOG 0.0.12-phase10 section (installer)"
 (The About-dialog literal in `src/ui/MainWindow.cpp:1077` already reads
 `LitePDF v0.0.12`, so no source change is needed — the gate normalizes `-dev`.)
 
-- [ ] **Step 2: Regenerate the resource and run the version-sync gate**
+- [ ] **Step 2: Regenerate the resource and run the version-sync gate** (`pwsh`)
 
 ```pwsh
 cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
 ./scripts/check-version-sync.ps1
 ```
-Expected: `[OK] version sync: VERSION=0.0.12` with About `v0.0.12` and
-`VERSIONINFO ... 0,0,12,0`. Exit 0.
+This only re-runs cmake **configure** to regenerate `build/litepdf.rc` from the
+updated VERSION; a full `cmake --build` is not required here.
+Expected: `[OK] version sync: VERSION=0.0.12`, About `v0.0.12`, VERSIONINFO
+`0,0,12,0`. Exit 0.
 
-- [ ] **Step 3: Commit (this is the release commit the tag will point at)**
+- [ ] **Step 3: Commit (this is the release commit the tag will point at)** (`bash`)
 
 ```bash
 git add VERSION
@@ -632,7 +676,7 @@ git commit -m "release: LitePDF 0.0.12 (Phase 10 installer)"
 This is the release-cutting step. The tag MUST point at the `0.0.12` release
 commit (Task 7), before the `-dev` follow-up (Task 9) exists.
 
-- [ ] **Step 1: Open the PR and land it on `main`**
+- [ ] **Step 1: Open the PR and land it on `main`** (`bash`)
 
 ```bash
 git push -u origin phase-10-installer
@@ -645,9 +689,10 @@ Wait for CI (`ci.yml`) to pass, then squash-merge:
 gh pr merge --squash --delete-branch
 ```
 
-- [ ] **Step 2: Tag the merge commit on `main` and push the tag**
+- [ ] **Step 2: Tag the merge commit on `main` and push the tag** (`bash`)
 
 ```bash
+git fetch origin
 git checkout main && git pull --ff-only
 # Confirm VERSION reads 0.0.12 at HEAD before tagging:
 git show HEAD:VERSION   # expect: 0.0.12
@@ -655,7 +700,7 @@ git tag v0.0.12-phase10
 git push origin v0.0.12-phase10
 ```
 
-- [ ] **Step 3: Watch the release workflow and verify the published prerelease**
+- [ ] **Step 3: Watch the release workflow and verify the published prerelease** (`bash`)
 
 ```bash
 gh run watch
@@ -664,16 +709,24 @@ gh release view v0.0.12-phase10
 Expected: the run succeeds; the release is marked **Pre-release** and lists all
 three assets (`litepdf-setup-0.0.12.exe`, `litepdf-portable-0.0.12.zip`,
 `litepdf-0.0.12-source.tar.gz`). If the run fails, fix the cause on `main`, then
-delete and re-push the tag: `git push --delete origin v0.0.12-phase10 && git tag -d v0.0.12-phase10 && git tag v0.0.12-phase10 <fixed-commit> && git push origin v0.0.12-phase10` (the `concurrency` guard + `--draft`-first publish make a re-run safe; delete any leftover draft release first with `gh release delete v0.0.12-phase10 --yes` if it exists).
+delete any leftover draft and re-tag:
+```bash
+gh release delete v0.0.12-phase10 --yes   # remove the leftover draft, if any
+git push --delete origin v0.0.12-phase10
+git tag -d v0.0.12-phase10
+git tag v0.0.12-phase10 <fixed-commit>
+git push origin v0.0.12-phase10
+```
+(The `concurrency` guard + `--draft`-first publish make a re-run safe.)
 
 ---
 
 ## Task 9: Bump VERSION back to dev
 
 **Files:**
-- Modify: `VERSION` (`0.0.12` → `0.0.13-dev`)
+- Modify: `VERSION` (`0.0.12` → `0.0.13-dev`), `src/ui/MainWindow.cpp:1077`
 
-- [ ] **Step 1: Write the dev version on a fresh branch**
+- [ ] **Step 1: Write the dev version on a fresh branch** (`bash` then `pwsh`)
 
 ```bash
 git checkout -b chore-bump-0.0.13-dev main
@@ -691,7 +744,7 @@ git checkout -b chore-bump-0.0.13-dev main
                         L"LitePDF v0.0.13\n\n"
 ```
 
-- [ ] **Step 3: Regenerate + verify the gate, then commit and PR**
+- [ ] **Step 3: Regenerate + verify the gate, then commit and PR** (`pwsh` then `bash`)
 
 ```pwsh
 cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
@@ -703,6 +756,9 @@ git add VERSION src/ui/MainWindow.cpp
 git commit -m "chore: resume development at 0.0.13-dev"
 git push -u origin chore-bump-0.0.13-dev
 gh pr create --title "chore: bump VERSION to 0.0.13-dev" --body "Post-release dev bump after v0.0.12-phase10." --base main
+```
+Wait for CI to pass, then:
+```bash
 gh pr merge --squash --delete-branch
 ```
 
@@ -720,36 +776,48 @@ on a clean Windows 10/11 x64 VM using the published `litepdf-setup-0.0.12.exe`.
       `.pdf` file shows the red icon **without a logoff** (proves `SHChangeNotify`).
 - [ ] LitePDF appears in the `.pdf` "Open with" list.
 - [ ] Uninstall removes files + all association/ProgID/OpenWithProgids/context
-      keys (LitePDF no longer in "Open with") and prompts to keep config
+      keys (LitePDF no longer in "Open with"), and **prompts** to keep config
       (default keep); declining removes `%LOCALAPPDATA%\LitePDF\`.
 - [ ] Re-install over an existing install upgrades in place (single "Add or
       Remove Programs" entry) — test in **both** per-user and per-machine scope.
 - [ ] Per-machine install path triggers UAC and lands in real `Program Files`.
 
 Record results (and any fixes) in the PR or a follow-up note. If a fix is
-needed, it lands as a normal commit on `main` and a re-tagged patch release
-(e.g. `v0.0.12.1` or a fresh `-phase10` re-tag per Task 8 Step 3).
+needed, it lands as a normal commit on `main` and a re-tagged release
+(per Task 8 Step 3).
 
 ---
 
-## Self-Review (completed by plan author)
+## Self-Review (completed by plan author; updated after Round-1 agent review)
 
 **Spec coverage:** D1 unsigned + SignTool hook → Task 3 `[Setup]`. D2 tag
-trigger → Task 4. D3 associations + ms-settings → Task 3 `[Registry]`/`[Run]`.
-D4 real prerelease + VERSION flow → Tasks 7–9. Artifacts ×3 → Task 4. InfoBeforeFile
-license page → Tasks 2–3. AppId/AppMutex/Architectures/SHChangeNotify/DefaultIcon
--102/uninstall flags → Task 3. permissions/concurrency/static-CRT/build-back/
-prerelease/draft/notes-file/choco-pin → Task 4. §6 source tarball → Task 4.
-Expanded inventory → already in `67a34f5` + surfaced in RTF (Task 2) and CHANGELOG
-(Task 6). README + system requirements → Task 5. Smoke checklist → Task 10. All
-spec §10 acceptance criteria map to a task.
+trigger → Task 4. D3 associations + ms-settings deep-link → Task 3
+`[Registry]`/`[Run]`. D4 real prerelease + VERSION flow → Tasks 7–9. Artifacts
+×3 → Task 4. InfoBeforeFile license page → Tasks 2–3. AppId / AppMutex /
+Architectures / SHChangeNotify / DefaultIcon -102 / uninstall flags /
+keep-config prompt → Task 3. permissions / concurrency / static-CRT / build-back
+/ prerelease / draft / notes-file / choco-pin / git-archive-all PATH →
+Task 4. §6 source tarball → Task 4. Expanded inventory → already in `67a34f5`,
+surfaced in RTF (Task 2) and CHANGELOG (Task 6). README + system requirements →
+Task 5. Smoke checklist → Task 10. All spec §10 acceptance criteria map to a task.
 
-**Placeholders:** none — `.iss`, `release.yml`, RTF, CHANGELOG, and README blocks
-are given in full. The one fetched file (ChineseTraditional.isl, Task 1) is a real
-pinned download, not a placeholder.
+**Round-1 fixes applied:** RTF authored as readable zh-TW (no mojibake) via
+WordPad with §8.5.2 citation; uninstaller keep-config prompt added to `[Code]`;
+`git-archive-all` PATH hardened (`python -m pip` + Scripts dir on PATH);
+CHANGELOG adds the missing `[0.0.11-phase9]` footer ref; Task 3 Step 2 states
+the Release-build prerequisite; ms-settings gains `runasoriginaluser` +
+`?registeredAppUser`; `Software\LitePDF` parent-key cleanup row; `.gitignore`
+via PowerShell `Add-Content`; `GITHUB_OUTPUT` via `Add-Content -Encoding utf8`;
+`timeout-minutes: 120`; raw-VERSION no-suffix assertion; `dumpbin` located via
+`vswhere` (hard fail if absent); Task 8 `git fetch` before checkout; Task 9
+waits for CI before merge.
+
+**Placeholders:** none — `.iss`, `release.yml`, RTF content, CHANGELOG, and
+README blocks are given in full. The one fetched file (ChineseTraditional.isl,
+Task 1) is a real pinned download.
 
 **Consistency:** AppId `{62012304-133C-41C1-98E8-CCA248396FFF}`, mutex
 `Local\LitePDF_SingleInstance_v1`, ProgIDs `LitePDF.<ext>`, icon ids `-102`
-(PDF) / `-101` (app), version string `0.0.12`, tag `v0.0.12-phase10`, and the
-`installer\Output\litepdf-setup-0.0.12.exe` path are used identically across the
+(PDF) / `-101` (app/others), version string `0.0.12`, tag `v0.0.12-phase10`, and
+`installer\Output\litepdf-setup-0.0.12.exe` are used identically across the
 `.iss`, the workflow, and the release step.
