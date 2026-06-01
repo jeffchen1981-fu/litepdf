@@ -28,7 +28,7 @@ Download the latest release from
 > The binary is the one built by the [release workflow](.github/workflows/release.yml)
 > from the tagged source.
 
-## Features (v0.0.11)
+## Features (v0.0.12)
 
 Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab independent state. Cold-start budget under 1 s on SSD; tuned for HDD-friendly I/O patterns.
 
