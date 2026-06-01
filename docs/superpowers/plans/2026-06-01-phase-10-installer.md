@@ -53,14 +53,28 @@ Invoke-WebRequest -Uri $url -OutFile installer\lang\ChineseTraditional.isl
 - [ ] **Step 2: Verify it parsed as an .isl (has a LanguageName line)**
 
 Run: `Select-String -Path installer\lang\ChineseTraditional.isl -Pattern 'LanguageName' | Select-Object -First 1`
-Expected: a line like `LanguageName=...` (non-empty). The file is UTF-16 with BOM — leave its encoding untouched.
+Expected: `LanguageName=繁體中文` (non-empty). The file is **UTF-8 with BOM and
+CRLF line endings** (~20 KB) as shipped upstream — DO NOT re-encode or reformat.
 
-- [ ] **Step 3: Commit** (`bash`)
+- [ ] **Step 3: Keep it byte-exact in git** (the repo's `.gitattributes` has
+  `* text=auto eol=lf`, which would strip the CRLFs from this vendored file).
+  Mark `*.isl` binary so git stores the upstream bytes verbatim:
+
+Append to `.gitattributes` (under the binary section):
+```gitattributes
+# Vendored Inno Setup language files: keep byte-exact (UTF-8 BOM + CRLF).
+*.isl     binary
+```
+
+- [ ] **Step 4: Commit** (`bash`)
 
 ```bash
-git add installer/lang/ChineseTraditional.isl
+git add .gitattributes
+git add --renormalize installer/lang/ChineseTraditional.isl
 git commit -m "build: vendor Inno Setup Traditional Chinese language file (pinned 6.3.3)"
 ```
+Verify the stored blob is byte-exact: `git cat-file -s :installer/lang/ChineseTraditional.isl`
+should be ~20022 (not the LF-shrunk ~19639).
 
 ---
 
