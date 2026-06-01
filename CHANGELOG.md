@@ -8,19 +8,47 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 
 ## [Unreleased]
 
+## [0.0.12-phase10] — 2026-06-01 — Installer
+
+### Added
+- **Inno Setup installer** (`litepdf-setup-<version>.exe`): per-user by default
+  (no UAC), opt-in per-machine. Optional file associations for `.pdf` (red
+  document icon) / `.epub` / `.cbz` / `.xps`, an "Open with LitePDF" context
+  menu entry, and Default-Programs capability registration. License page is an
+  informational AGPL + third-party disclosure (no agree/disagree gate).
+- **Portable zip** (`litepdf-portable-<version>.zip`): the self-contained
+  `litepdf.exe` plus `LICENSE` and `README.md`.
+- **Source tarball** (`litepdf-<version>-source.tar.gz`): complete AGPL
+  corresponding source including the MuPDF submodule.
+- **Tag-triggered release workflow** (`.github/workflows/release.yml`): builds
+  Release, asserts static CRT, runs the version-sync gate + unit tests + smoke
+  test, compiles the installer, archives source, verifies the tarball is
+  buildable, and publishes a GitHub prerelease with all three assets.
+- Expanded the §8.5.6 third-party license inventory to all nine bundled
+  libraries (MuPDF + eight static deps: FreeType, libjpeg, OpenJPEG, lcms2,
+  MuJS, jbig2dec, Gumbo, zlib) with the mandatory FreeType (FTL) and libjpeg
+  (IJG) attribution lines.
+
 ### Changed
 - **Embedded Win32 version resource now derives from `VERSION` at build time.**
   `resources/litepdf.rc` became a `configure_file` template (`litepdf.rc.in`);
   CMake fills `FILEVERSION` / `PRODUCTVERSION` / `FileVersion` / `ProductVersion`
   from `PROJECT_VERSION`, so `litepdf.exe`'s embedded version can no longer drift
-  from the canonical `VERSION` file (the class of manual fix that PR #13 required).
-  Added `CMAKE_CONFIGURE_DEPENDS` on `VERSION` so a bare `cmake --build`
-  regenerates the resource instead of shipping a stale one.
+  from the canonical `VERSION` file. Added `CMAKE_CONFIGURE_DEPENDS` on `VERSION`
+  so a bare `cmake --build` regenerates the resource instead of shipping a stale
+  one.
 - `scripts/check-version-sync.ps1` now also gates the version resource: it
-  asserts the template stays parametric (no hardcoded numbers), verifies the
-  generated `build/litepdf.rc` matches `VERSION` across all four version fields,
-  fails loudly in CI when the generated resource is missing, and returns a
-  deterministic exit code. Stays Windows PowerShell 5.1 compatible.
+  asserts the template stays parametric, verifies the generated `build/litepdf.rc`
+  matches `VERSION` across all four version fields, fails loudly in CI when the
+  generated resource is missing, and returns a deterministic exit code. Stays
+  Windows PowerShell 5.1 compatible.
+
+### Notes
+- Spec: [docs/superpowers/specs/2026-06-01-phase-10-installer-design.md](docs/superpowers/specs/2026-06-01-phase-10-installer-design.md)
+- Plan: [docs/superpowers/plans/2026-06-01-phase-10-installer.md](docs/superpowers/plans/2026-06-01-phase-10-installer.md)
+- First public, downloadable release (pre-1.0; marked prerelease on GitHub).
+
+[Compare 0.0.11-phase9…0.0.12-phase10](https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.11-phase9...v0.0.12-phase10)
 
 ## [0.0.11-phase9] — 2026-05-31 — Icons
 
@@ -247,7 +275,9 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 
 [Compare initial commit…0.0.1-phase0](https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.1-phase0)
 
-[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.10-phase8.5...HEAD
+[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.12-phase10...HEAD
+[0.0.12-phase10]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.12-phase10
+[0.0.11-phase9]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.11-phase9
 [0.0.10-phase8.5]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.10-phase8.5
 [0.0.9-phase8]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.9-phase8
 [0.0.8-phase7]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.8-phase7

@@ -32,3 +32,6 @@ Makefile
 # Misc
 Thumbs.db
 .DS_Store
+
+# Inno Setup build output
+installer/Output/

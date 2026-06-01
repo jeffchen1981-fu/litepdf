@@ -397,11 +397,46 @@ These rules are binding on every PR that changes the set of components shipped i
 
 #### 8.5.6 Current Components Inventory
 
+`litepdf.exe` statically links MuPDF, which in turn compiles the third-party
+libraries below directly into the binary (verified against
+`third_party/mupdf/platform/win32/libthirdparty.vcxproj` ClCompile entries and
+the link line in `cmake/ImportMuPDF.cmake`, which links `libmupdf.lib` +
+`libthirdparty.lib` + `libresources.lib`). All of these are *distributed* with
+the product and therefore must be disclosed per Rule 4.
+
 | Name | Version | License | Copyright | URL |
 |---|---|---|---|---|
-| MuPDF | 1.24.x (pinned per release) | AGPL-3.0 | Artifex Software, Inc. | https://mupdf.com |
+| MuPDF | 1.24.11 (pinned per release) | AGPL-3.0 | Artifex Software, Inc. | https://mupdf.com |
+| FreeType | 2.13.0 | FTL (FreeType License) | The FreeType Project | https://freetype.org |
+| libjpeg | 9e | IJG License | Independent JPEG Group (Thomas G. Lane et al.) | https://ijg.org |
+| OpenJPEG | 2.x | BSD-2-Clause | UCLouvain / OpenJPEG contributors | https://www.openjpeg.org |
+| Little CMS (lcms2) | 2.x | MIT | Marti Maria Saguer | https://littlecms.com |
+| MuJS | (Artifex, pinned with MuPDF) | ISC | Artifex Software, Inc. | https://mujs.com |
+| jbig2dec | (Artifex, pinned with MuPDF) | AGPL-3.0 | Artifex Software, Inc. | https://github.com/ArtifexSoftware/jbig2dec |
+| Gumbo (gumbo-parser) | (pinned with MuPDF) | Apache-2.0 | Google, Inc. | https://github.com/google/gumbo-parser |
+| zlib | 1.2.13 | zlib License | Jean-loup Gailly & Mark Adler | https://zlib.net |
 
-This table is the single source of truth. `installer/LICENSE-DISPLAY.rtf` and Rule 5 PR checklists must be kept consistent with it.
+**Mandatory attribution lines** (independent of AGPL; required by the
+components' own licenses, must appear verbatim in `LICENSE-DISPLAY.rtf`):
+
+- **FreeType (FTL §2):** *"Portions of this software are copyright © 2006-2024
+  The FreeType Project (www.freetype.org). All rights reserved."* plus a
+  statement that the software is based in part on the work of the FreeType Team.
+- **libjpeg (IJG):** *"This software is based in part on the work of the
+  Independent JPEG Group."*
+
+**Components present in the MuPDF submodule tree but NOT linked into
+`litepdf.exe`** (feature-gated off / `libharfbuzz.lib` et al. absent from the
+`cmake/ImportMuPDF.cmake` link line — verified the exe links cleanly without
+them, i.e. no unresolved symbols): HarfBuzz, libarchive, Tesseract, Leptonica,
+curl, OpenSSL, FreeGLUT, extract. These are **not distributed** and are exempt
+under Rule 2. Before authoring or updating `LICENSE-DISPLAY.rtf`, re-verify the
+linked set against the binary (e.g. inspect `cmake/ImportMuPDF.cmake` and/or
+`dumpbin /symbols`) so a future build-config change that links one of these is
+caught and disclosed.
+
+This table is the single source of truth. `installer/LICENSE-DISPLAY.rtf` and
+Rule 5 PR checklists must be kept consistent with it.
 
 ## 9. Application Icon
 
