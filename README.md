@@ -2,11 +2,31 @@
 
 A lightweight PDF / ePub / CBZ / XPS reader for Windows 11, optimized for mechanical hard drives. Single self-contained executable, no runtime dependencies.
 
-- **Status:** under development (Phase 9 shipped — Tier 3 feature-complete + print support + app/document icons; tag `v0.0.11-phase9`)
+- **Status:** under development (Phase 10 — installer + first public release `v0.0.12-phase10`)
 - **License:** [AGPL-3.0](LICENSE)
 - **Design:** [`docs/plans/2026-04-15-litepdf-design.md`](docs/plans/2026-04-15-litepdf-design.md)
 - **Roadmap:** [`docs/plans/2026-04-15-litepdf-roadmap.md`](docs/plans/2026-04-15-litepdf-roadmap.md)
 - **Changelog:** [`CHANGELOG.md`](CHANGELOG.md)
+
+## Install
+
+Download the latest release from
+[GitHub Releases](https://github.com/jeffchen1981-fu/litepdf/releases):
+
+- **`litepdf-setup-<version>.exe`** — installer (per-user by default, no admin
+  needed; advanced users can opt into a per-machine install). Optional file
+  associations for `.pdf` / `.epub` / `.cbz` / `.xps`.
+- **`litepdf-portable-<version>.zip`** — just `litepdf.exe`, no install. Unzip
+  and run.
+- **`litepdf-<version>-source.tar.gz`** — complete corresponding source
+  (AGPL-3.0), MuPDF submodule included.
+
+**System requirements:** Windows 10 version 1903 or later, 64-bit.
+
+> **SmartScreen note:** LitePDF is not code-signed, so Windows SmartScreen may
+> show "Windows protected your PC". Click **More info → Run anyway** to proceed.
+> The binary is the one built by the [release workflow](.github/workflows/release.yml)
+> from the tagged source.
 
 ## Features (v0.0.11)
 
@@ -46,7 +66,7 @@ Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab i
 
 ### Prerequisites
 
-- Windows 11
+- Windows 10 version 1903+ or Windows 11 (64-bit)
 - Visual Studio 2022 Build Tools with the **Desktop development with C++** workload (includes MSVC v143, Windows 11 SDK, and CMake ≥ 3.25).
 - Git 2.30+ (for submodule support).
 
