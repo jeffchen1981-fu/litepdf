@@ -128,10 +128,11 @@ This software is based in part on the work of the Independent JPEG Group.
 Run (`pwsh`):
 ```pwsh
 $raw = Get-Content installer\LICENSE-DISPLAY.rtf -Raw
+if (-not ($raw -match '^\{\\rtf')) { Write-Error "Not RTF (missing {\rtf header) - re-save from WordPad as 'Rich Text Format'."; exit 1 }
 @('Independent JPEG Group','The FreeType Project','MuPDF 1.24.11','zlib') | ForEach-Object {
   if ($raw -notmatch [regex]::Escape($_)) { Write-Error "RTF missing: $_"; exit 1 }
 }
-"OK: all required strings present"
+"OK: valid RTF, all required strings present"
 ```
 Expected: `OK: all required strings present`. Open it in WordPad and confirm the
 Traditional Chinese renders correctly (not mojibake).
@@ -252,8 +253,10 @@ Root: HKA; Subkey: "Software\LitePDF\Capabilities\FileAssociations"; ValueType: 
 Root: HKA; Subkey: "Software\LitePDF\Capabilities\FileAssociations"; ValueType: string; ValueName: ".cbz"; ValueData: "LitePDF.cbz"; Tasks: assocothers
 Root: HKA; Subkey: "Software\LitePDF\Capabilities\FileAssociations"; ValueType: string; ValueName: ".xps"; ValueData: "LitePDF.xps"; Tasks: assocothers
 Root: HKA; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "LitePDF"; ValueData: "Software\LitePDF\Capabilities"; Flags: uninsdeletevalue
-; Clean up the parent key so no empty Software\LitePDF shell is left after uninstall.
-Root: HKA; Subkey: "Software\LitePDF"; Flags: uninsdeletekeyifempty dontcreatekey
+; Own the whole Software\LitePDF subtree; remove it wholesale on uninstall.
+; (uninsdeletekeyifempty would no-op here: LIFO uninstall evaluates the parent
+;  before its Capabilities child is removed, so it's never empty at that point.)
+Root: HKA; Subkey: "Software\LitePDF"; Flags: uninsdeletekey
 ; --- Context menu "Open with LitePDF" on the PDF ProgID ---
 Root: HKA; Subkey: "Software\Classes\LitePDF.pdf\shell\openWithLitePDF"; ValueType: string; ValueName: ""; ValueData: "以 LitePDF 開啟"; Flags: uninsdeletekey; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\LitePDF.pdf\shell\openWithLitePDF\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
@@ -366,7 +369,8 @@ jobs:
         shell: pwsh
         run: |
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $msvc = & $vswhere -latest -find "VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          # -products "*" so Build-Tools-only hosts also match (mirrors cmake/ImportMuPDF.cmake).
+          $msvc = & $vswhere -latest -products "*" -find "VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
           if (-not $msvc -or -not (Test-Path $msvc)) { Write-Error "dumpbin not found via vswhere"; exit 1 }
           $imports = & $msvc /imports build\Release\litepdf.exe
           if ($imports -match 'VCRUNTIME\d+\.dll' -or $imports -match 'MSVCP\d+\.dll') {
@@ -460,7 +464,7 @@ jobs:
           $v = "${{ steps.ver.outputs.version }}"
           $cl = Get-Content CHANGELOG.md -Raw
           # Grab the block from "## [<v>-..." up to the next "## [" heading.
-          $m = [regex]::Match($cl, "(?ms)^## \[$([regex]::Escape($v))-.*?(?=^## \[)")
+          $m = [regex]::Match($cl, "(?ms)^## \[$([regex]::Escape($v))-.*?(?=^## \[|\z)")
           if ($m.Success) { $m.Value.Trim() | Out-File -Encoding utf8 notes.md }
           else { "LitePDF $v" | Out-File -Encoding utf8 notes.md }
 
@@ -568,7 +572,8 @@ along with the new installer work, and reset `[Unreleased]`.
 - [ ] **Step 1: Replace the `## [Unreleased]` block and insert the new release section**
 
 Replace the current `## [Unreleased]` section (lines 9–23) with an empty
-`[Unreleased]` followed by the new release section:
+`[Unreleased]` followed by the new release section. **Leave the existing
+`## [0.0.11-phase9]` section and everything below it unchanged:**
 
 ```markdown
 ## [Unreleased]
@@ -589,9 +594,10 @@ Replace the current `## [Unreleased]` section (lines 9–23) with an empty
   Release, asserts static CRT, runs the version-sync gate + unit tests + smoke
   test, compiles the installer, archives source, verifies the tarball is
   buildable, and publishes a GitHub prerelease with all three assets.
-- Expanded the §8.5.6 third-party license inventory to all eight statically
-  linked libraries (FreeType, libjpeg, OpenJPEG, lcms2, MuJS, jbig2dec, Gumbo,
-  zlib) with the mandatory FreeType (FTL) and libjpeg (IJG) attribution lines.
+- Expanded the §8.5.6 third-party license inventory to all nine bundled
+  libraries (MuPDF + eight static deps: FreeType, libjpeg, OpenJPEG, lcms2,
+  MuJS, jbig2dec, Gumbo, zlib) with the mandatory FreeType (FTL) and libjpeg
+  (IJG) attribution lines.
 
 ### Changed
 - **Embedded Win32 version resource now derives from `VERSION` at build time.**
@@ -617,7 +623,9 @@ Replace the current `## [Unreleased]` section (lines 9–23) with an empty
 
 - [ ] **Step 2: Update the footer link references**
 
-At the bottom of the file, replace:
+At the bottom of the file, replace **only the first footer reference line** (the
+`[Unreleased]:` line). Leave every other `[x.y.z-...]:` tag-reference line below
+it untouched. Replace:
 ```markdown
 [Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.10-phase8.5...HEAD
 ```
