@@ -817,6 +817,12 @@ on a clean Windows 10/11 x64 VM using the published `litepdf-setup-0.0.12.exe`.
 - [ ] Opening a `.pdf` works; after choosing LitePDF as default in Settings, the
       `.pdf` file shows the red icon **without a logoff** (proves `SHChangeNotify`).
 - [ ] LitePDF appears in the `.pdf` "Open with" list.
+- [ ] **Context menu without the `assocpdf` task:** install with **only** the
+      `contextmenu` task ticked (`assocpdf` left unchecked) → right-clicking any
+      `.pdf` in Explorer shows the "以 LitePDF 開啟" verb (registered under
+      `SystemFileAssociations\.pdf`, so it no longer requires LitePDF to be the
+      default `.pdf` app). After uninstall, no orphaned
+      `HKCU\Software\Classes\LitePDF.pdf` ProgID key remains.
 - [ ] Uninstall removes files + all association/ProgID/OpenWithProgids/context
       keys (LitePDF no longer in "Open with"), and **prompts** to keep config
       (default keep); declining removes `%LOCALAPPDATA%\LitePDF\`.
