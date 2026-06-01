@@ -198,7 +198,10 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}/issues
 AppUpdatesURL={#MyAppURL}/releases
-DefaultDirName={localappdata}\Programs\LitePDF
+; {autopf} is install-mode-aware: per-user -> %LOCALAPPDATA%\Programs, per-machine
+; -> Program Files. A fixed {localappdata} path would mis-place a per-machine
+; install (HKLM registry pointing at one user's profile; unusable by others).
+DefaultDirName={autopf}\LitePDF
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 ; Per-user by default (no UAC); allow opt-in elevation to per-machine.
@@ -279,9 +282,13 @@ Root: HKA; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueNa
 ; (uninsdeletekeyifempty would no-op here: LIFO uninstall evaluates the parent
 ;  before its Capabilities child is removed, so it's never empty at that point.)
 Root: HKA; Subkey: "Software\LitePDF"; Flags: uninsdeletekey
-; --- Context menu "Open with LitePDF" on the PDF ProgID ---
-Root: HKA; Subkey: "Software\Classes\LitePDF.pdf\shell\openWithLitePDF"; ValueType: string; ValueName: ""; ValueData: "以 LitePDF 開啟"; Flags: uninsdeletekey; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\LitePDF.pdf\shell\openWithLitePDF\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
+; --- Context menu "Open with LitePDF" for .pdf via SystemFileAssociations ---
+; Registered under SystemFileAssociations\.pdf (not the private LitePDF.pdf
+; ProgID), so the verb shows for every .pdf regardless of the current default
+; app, works without the assocpdf task, and is self-contained: uninstall removes
+; only this key (no orphaned LitePDF.pdf ProgID left behind).
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.pdf\shell\openWithLitePDF"; ValueType: string; ValueName: ""; ValueData: "以 LitePDF 開啟"; Flags: uninsdeletekey; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.pdf\shell\openWithLitePDF\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Tasks: contextmenu
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
@@ -811,24 +818,37 @@ gh pr merge --squash --delete-branch
 The installer cannot be Catch2-tested; this is the roadmap exit criterion. Run
 on a clean Windows 10/11 x64 VM using the published `litepdf-setup-0.0.12.exe`.
 
-- [ ] Per-user install completes with **no UAC prompt**.
-- [ ] App launches from the Start-menu and Desktop shortcuts.
-- [ ] License page shows Back/Next only — **no** agree/disagree radios.
-- [ ] Opening a `.pdf` works; after choosing LitePDF as default in Settings, the
+- [x] Per-user install completes with **no UAC prompt**.
+- [x] App launches from the Start-menu and Desktop shortcuts.
+- [x] License page shows Back/Next only — **no** agree/disagree radios.
+- [x] Opening a `.pdf` works; after choosing LitePDF as default in Settings, the
       `.pdf` file shows the red icon **without a logoff** (proves `SHChangeNotify`).
-- [ ] LitePDF appears in the `.pdf` "Open with" list.
-- [ ] **Context menu without the `assocpdf` task:** install with **only** the
+- [x] LitePDF appears in the `.pdf` "Open with" list.
+- [x] **Context menu without the `assocpdf` task:** install with **only** the
       `contextmenu` task ticked (`assocpdf` left unchecked) → right-clicking any
       `.pdf` in Explorer shows the "以 LitePDF 開啟" verb (registered under
       `SystemFileAssociations\.pdf`, so it no longer requires LitePDF to be the
       default `.pdf` app). After uninstall, no orphaned
       `HKCU\Software\Classes\LitePDF.pdf` ProgID key remains.
-- [ ] Uninstall removes files + all association/ProgID/OpenWithProgids/context
+- [x] Uninstall removes files + all association/ProgID/OpenWithProgids/context
       keys (LitePDF no longer in "Open with"), and **prompts** to keep config
       (default keep); declining removes `%LOCALAPPDATA%\LitePDF\`.
-- [ ] Re-install over an existing install upgrades in place (single "Add or
+- [x] Re-install over an existing install upgrades in place (single "Add or
       Remove Programs" entry) — test in **both** per-user and per-machine scope.
-- [ ] Per-machine install path triggers UAC and lands in real `Program Files`.
+- [x] Per-machine install path triggers UAC and lands in real `Program Files`.
+
+**Smoke result (2026-06-02, dev machine — not a pristine VM):** all 9 items
+observed passing. The two PR #16 review fixes are now runtime-validated, not
+just compile-validated: **H1 `{autopf}`** confirmed via the per-machine item
+(UAC + lands in `C:\Program Files`), and **M1 `SystemFileAssociations`**
+confirmed via the context-menu item (verb appears under Win11 "Show more
+options" for any `.pdf` even when Adobe Acrobat is the default; no orphaned
+`HKCU\Software\Classes\LitePDF.pdf` ProgID after uninstall — verified by a
+read-only registry scan). One caveat: whether uninstall removes the app's
+runtime `HKCU\Software\LitePDF\MRU` could not be cleanly verified on this
+dev machine because dev builds repeatedly recreate that key (its entries point
+at `.claude/worktrees/...` paths). Settle on a clean env (e.g. Windows Sandbox)
+if 100% rigor is wanted; it does not affect the release-correctness conclusion.
 
 Record results (and any fixes) in the PR or a follow-up note. If a fix is
 needed, it lands as a normal commit on `main` and a re-tagged release
