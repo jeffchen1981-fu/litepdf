@@ -22,6 +22,18 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: License RTF sync gate (generated file must match its source)
+        shell: pwsh
+        run: |
+          python installer\make-license-rtf.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "make-license-rtf.py failed to run."; exit 1 }
+          git diff --exit-code -- installer/LICENSE-DISPLAY.rtf
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "installer/LICENSE-DISPLAY.rtf is out of sync with installer/make-license-rtf.py. Re-run the generator and commit the result."
+            exit 1
+          }
+          Write-Host "[OK] LICENSE-DISPLAY.rtf is in sync with its generator."
+
       - name: Configure
         run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
 
