@@ -104,6 +104,17 @@ Root: HKA; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueNa
 ; (uninsdeletekeyifempty would no-op here: LIFO uninstall evaluates the parent
 ;  before its Capabilities child is removed, so it's never empty at that point.)
 Root: HKA; Subkey: "Software\LitePDF"; Flags: uninsdeletekey
+; Per-machine cleanup gap: HKA above resolves to HKLM for an all-users install,
+; but the app's runtime MRU (core::MruList) is ALWAYS written under HKCU. So an
+; all-users uninstall removes HKLM\Software\LitePDF yet leaves the user's
+; HKCU\Software\LitePDF\MRU orphaned (reproduced in Windows Sandbox 2026-06-03).
+; This explicit HKCU entry deletes that subtree on uninstall. dontcreatekey: do
+; NOT plant an empty key at install time (the app creates it at runtime); only
+; remove it on uninstall if present. Known limitation: a per-machine install
+; whose uninstall runs under a DIFFERENT user than the one who populated the MRU
+; cannot be cleaned from here -- a machine-wide uninstall has no handle on another
+; profile's HKCU.
+Root: HKCU; Subkey: "Software\LitePDF"; Flags: uninsdeletekey dontcreatekey
 ; --- Context menu "Open with LitePDF" for .pdf via SystemFileAssociations ---
 ; Registered under SystemFileAssociations\.pdf (not the private LitePDF.pdf
 ; ProgID), so the verb shows for every .pdf regardless of the current default
