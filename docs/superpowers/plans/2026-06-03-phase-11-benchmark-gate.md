@@ -314,16 +314,23 @@ bool run_one_iteration(const char* path, BenchIteration& it) {
     }
     it.open_ms = to_ms(t1 - t0);
 
-    auto t2 = clock::now();
-    litepdf::core::RenderEngine engine(doc, 1, nullptr);
-    auto t3 = clock::now();
-    it.engine_init_ms = to_ms(t3 - t2);
-
+    // Declare the sync primitives BEFORE `engine` so they outlive it. Locals
+    // destroy in reverse declaration order, so `engine` (last) is destroyed
+    // first: ~RenderEngine() joins/drains any in-flight job — which may fire
+    // the callback below on a worker thread — while m/cv/render_end are still
+    // alive. Reversing this order would let the timeout path (returns false
+    // with a job still queued) lock a destroyed mutex / write a destroyed
+    // time_point in the drained callback = UB.
     std::mutex m;
     std::condition_variable cv;
     bool done = false;
     bool ok = false;
     clock::time_point render_end;
+
+    auto t2 = clock::now();
+    litepdf::core::RenderEngine engine(doc, 1, nullptr);
+    auto t3 = clock::now();
+    it.engine_init_ms = to_ms(t3 - t2);
 
     auto render_start = clock::now();
     engine.submit({
@@ -386,10 +393,10 @@ double vstddev(const std::vector<double>& v) {  // sample stddev (N-1)
 // 1 if any iteration fails to open/render.
 int run_benchmark(const char* path, int iterations, bool json) {
     std::vector<double> open_s, init_s, render_s, total_s;
-    open_s.reserve(iterations);
-    init_s.reserve(iterations);
-    render_s.reserve(iterations);
-    total_s.reserve(iterations);
+    open_s.reserve(static_cast<std::size_t>(iterations));
+    init_s.reserve(static_cast<std::size_t>(iterations));
+    render_s.reserve(static_cast<std::size_t>(iterations));
+    total_s.reserve(static_cast<std::size_t>(iterations));
 
     for (int i = 0; i < iterations; ++i) {
         BenchIteration it;
