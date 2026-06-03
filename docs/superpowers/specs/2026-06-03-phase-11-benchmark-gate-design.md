@@ -1,11 +1,13 @@
 # Phase 11 — Benchmark Regression Gate (Design Spec)
 
-> **Status:** Approved via brainstorming 2026-06-03; **hardened to v2 after a
-> three-lens agent review (Opus + Sonnet + Codex) on 2026-06-03** that found the
-> v1 methodology sound but flagged two blockers (a non-existent `large.pdf`
-> fixture and a non-existent Pester test convention), a bootstrap chicken-and-egg,
-> and several CI-mechanics gaps. v2 resolves all of them (see §10 Review Changelog).
-> Implementation plan to follow via `superpowers:writing-plans`.
+> **Status:** Approved via brainstorming 2026-06-03; **hardened to v3 over two
+> three-lens agent review rounds (Opus + Sonnet + Codex) on 2026-06-03.** Round 1
+> found the methodology sound but flagged two blockers (non-existent `large.pdf`
+> fixture, non-existent Pester convention), a bootstrap chicken-and-egg, and
+> CI-mechanics gaps (→ v2). Round 2 confirmed all round-1 fixes against the real
+> code (Opus: GO) but Codex surfaced a real timing-span blocker plus CI-scoping
+> and fixture-signal majors (→ v3). See §10 Review Changelog. Implementation plan
+> to follow via `superpowers:writing-plans`.
 >
 > **Parent design:** This spec is the implementation-level authority for
 > Phase 11. It inherits and refines
@@ -74,22 +76,30 @@ both). `--iterations` (default 5) and `--json` are only meaningful with
 `--benchmark`. The positional `<fixture>` stays argv[1] as today.
 
 **Per-iteration measurement** (mirrors the existing `--render` await/drop pattern
-in `main.cpp`, which is the only correct way to drive `RenderEngine`):
+in `main.cpp`, which is the only correct way to drive `RenderEngine`). Three
+sub-spans are recorded, but **the gated metric is the boundary-agnostic total**
+so it does not matter which internal stage a regression lands in:
 
-- Construct a **fresh** `core::Document`; time `open()` → `open_ms`.
-- Construct a **fresh** `core::RenderEngine(doc, /*workers=*/1, /*cache=*/nullptr)`.
-  One worker for determinism; **no `PageCache`** so the metric reflects real
-  rasterization, not an L1/L2 cache hit (a reused engine would let iterations
-  2..N collapse `min` onto cache-lookup latency and hide render regressions).
-- Time **from immediately before `submit({page:0, rot:0, scale:1.0f, cb})` to
-  inside the `on_complete` callback** → `render_ms`. `submit()` returns
-  immediately and the callback fires on the worker thread; block on the same
-  `condition_variable` + `wait_for(10s)` timeout the `--render` path uses, and
-  `fz_drop_pixmap` in the callback exactly as `--render` does. `scale=1.0f`
-  (72 dpi). `render_ms` includes whatever the worker does to produce the first
-  pixmap (incl. any per-worker `fz_open_document`); that is fine because it is
-  measured identically on base and PR.
-- `open_render_ms = open_ms + render_ms`.
+- `open_ms` — construct a **fresh** `core::Document`; time `open()`.
+- `engine_init_ms` — construct a **fresh**
+  `core::RenderEngine(doc, /*workers=*/1, /*cache=*/nullptr)`; time the
+  constructor. This span is **not** zero: per-worker documents are opened in the
+  `RenderEngine` constructor (`RenderEngine.cpp` ~L251/L293), *before* any
+  `submit()` — so a regression in the worker-side document open shows up here,
+  not in `render_ms`. (Round-2 review caught the v2 spec mis-attributing this to
+  `render_ms`.) One worker for determinism; **no `PageCache`** so the metric
+  reflects real rasterization, not an L1/L2 cache hit (a reused engine would let
+  iterations 2..N collapse `min` onto cache-lookup latency and hide regressions).
+- `render_ms` — time **from immediately before
+  `submit({page:0, priority:0, scale:1.0f, cb})` to inside the `on_complete`
+  callback**. `submit()` returns immediately and the callback fires on the worker
+  thread; block on the same `condition_variable` + `wait_for(10s)` timeout the
+  `--render` path uses, and `fz_drop_pixmap` in the callback exactly as
+  `--render` does. `scale=1.0f` (72 dpi). (`RenderRequest` field 2 is `priority`,
+  not rotation — there is no rotation field.)
+- **`open_render_ms = open_ms + engine_init_ms + render_ms`** — the gated total.
+  Because it sums all three CPU spans, the exact boundary between them is
+  irrelevant to the gate; every per-iteration CPU cost is captured exactly once.
 
 Runs `N` iterations, reports the **minimum** (best-of-N) of each metric. Min is
 chosen because cold-start noise is right-skewed (occasional slowdowns); the
@@ -128,17 +138,21 @@ or wrong-artifact mistakes):
   "git_sha": "3576426...",
   "config": "Release",
   "runner_os": "windows-2022",
+  "cli_exe_path": "build/Release/litepdf-cli.exe",
   "gui_exe_path": "build/Release/litepdf.exe",
   "exe_bytes": 40894464,
   "fixtures": {
-    "large.pdf":  {"open_ms": <n>, "render_ms": <n>, "open_render_ms": <n>, "samples": [..]},
-    "simple.pdf": {"open_ms": <n>, "render_ms": <n>, "open_render_ms": <n>, "samples": [..]}
+    "large.pdf":  {"open_ms": <n>, "engine_init_ms": <n>, "render_ms": <n>, "open_render_ms": <n>, "samples": [..], "median_ms": <n>, "stddev_ms": <n>},
+    "simple.pdf": {"open_ms": <n>, "engine_init_ms": <n>, "render_ms": <n>, "open_render_ms": <n>, "samples": [..], "median_ms": <n>, "stddev_ms": <n>}
   }
 }
 ```
 
-`samples` is the raw per-iteration `open_render_ms` array, for variance
-diagnostics. PowerShell 5.1-parse-safe (no `?.`/`??`/ternary — project memory
+`samples` is the raw per-iteration `open_render_ms` array; `median_ms` /
+`stddev_ms` summarize it so the PR1 measure-only run can decide which metrics
+clear the noise floor (§3.3). `cli_exe_path` records which binary produced the
+timings (provenance symmetry with `gui_exe_path`). PowerShell 5.1-parse-safe
+(no `?.`/`??`/ternary — project memory
 `reference_litepdf_powershell_51_only`); paths resolved via `$PSScriptRoot` /
 `Join-Path`, matching `smoke-test.ps1` / `check-version-sync.ps1`.
 
@@ -153,21 +167,29 @@ gated metric exceeds its threshold.
 
 `benchmarks/thresholds.json`:
 ```json
-{"time_regression_pct": 10, "size_regression_bytes": 262144}
+{"time_regression_pct": 10, "time_min_delta_ms": 5, "size_regression_bytes": 262144}
 ```
 
-The 256 KB size tolerance absorbs linker/compiler-version jitter; the gate is
-anti-bloat regression protection, **not** a path to the design's aspirational
-8 MB target (deferred to 11.5 pruning).
+A timing metric fails **only if both** `delta% > time_regression_pct` **and**
+`delta_abs > time_min_delta_ms`. The absolute floor stops a sub-millisecond
+number from flapping the gate at 10 % (a real concern Codex raised: a small
+metric's 10 % can be noise). The 256 KB size tolerance absorbs
+linker/compiler-version jitter; the size gate is anti-bloat regression
+protection, **not** a path to the design's aspirational 8 MB target (deferred to
+11.5 pruning).
 
-**Gated metrics** (the JSON path the compare script reads is explicit):
-- `fixtures["large.pdf"]["open_render_ms"]` — primary cold-start CPU representative.
-- `fixtures["large.pdf"]["open_ms"]` — guards the xref/parse path (500 pages
-  amplify open cost).
-- top-level `exe_bytes` — binary size.
-
-`simple.pdf` metrics are **informational** (printed, never gated) — too small to
-gate without timer-granularity flapping.
+**Gated metrics (data-driven — finalized by PR1's measure-only data, not assumed
+now):** the candidate gated timing metric is
+`fixtures["large.pdf"]["open_render_ms"]` (the boundary-agnostic total). A timing
+metric is promoted to **gated** only if PR1's baseline shows its `median_ms`
+comfortably clears the noise floor (rule of thumb: `median_ms` ≥ ~10× `stddev_ms`
+and ≥ a few × `time_min_delta_ms`); otherwise it stays **informational**.
+`exe_bytes` is always gated (deterministic, no noise). `fixtures["large.pdf"]
+["open_ms"]` is a *candidate* second gate (xref/parse path) but MuPDF opens
+lazily, so it is gated **only if** PR1 shows it has real signal — else
+informational. `simple.pdf` metrics are always informational (too small to gate).
+PR1's job output records the observed floors so the promotion decision is visible
+in the PR that enables enforcement (PR2).
 
 **Numeric validation (fail-closed):** before computing any delta, every gated
 field in **both** files must be present, numeric, finite, and `> 0`; otherwise
@@ -179,37 +201,68 @@ informational and do **not** fail the gate. Malformed JSON → error exit.
 
 - `tests/fixtures/simple.pdf` — exists; stays informational.
 - `tests/fixtures/large.pdf` — **created this phase** by
-  `scripts/generate-large-fixture.py` (reportlab; deterministic — pin the PDF
-  producer/creation-date so regeneration is byte-stable; white-filled pages per
-  `generate-search-fixture.py`'s dark-surface rationale; English filler text).
-  Target ~500 pages, a few hundred KB. Committed to the repo so PR and base
-  builds read identical bytes. A docstring records the page count and that it is
-  load-bearing for the gate.
+  `scripts/generate-large-fixture.py` (reportlab; white-filled pages per
+  `generate-search-fixture.py`'s dark-surface rationale; English text).
+  - **Render-heavy page 0** so `render_ms` has signal: the benchmark renders
+    page 0 only, and a sparse text page rasterizes in near-zero time. Page 0 is
+    deliberately dense — many text runs and/or vector content — so first-page
+    rasterization is measurable above the timer floor. (Codex round-2: page
+    count alone stresses `open_ms`, not `render_ms`.)
+  - **~500 pages** so `open_ms` has a chance of signal — but because MuPDF opens
+    lazily, whether `open_ms` actually clears the noise floor is decided
+    empirically by PR1 (§3.3), not assumed here.
+  - **Deterministic + verified:** generate with reportlab in invariant mode
+    (`rl_config`/`invariant=1`) and explicitly pinned producer + creation/mod
+    dates, so regeneration is byte-stable (the existing fixture generators do
+    *not* pin dates — this generator must). A `--check` mode regenerates to a
+    temp path and asserts a byte-identical match against the committed fixture;
+    wired into the §6 self-test so drift fails CI.
+  - Committed to the repo so PR and base builds read identical bytes. Docstring
+    records page count, page-0 density rationale, and that it is gate-load-bearing.
 
-## 4. CI Integration — `.github/workflows/ci.yml`
+## 4. CI Integration — a new `.github/workflows/benchmark.yml`
 
-A new `benchmark` job, running in parallel with `build-windows` (does not block or
-modify it). **Triggers only on `pull_request`, and skips when the PR touches only
-docs** (`paths-ignore: ['**/*.md', 'docs/**']`) — so the double MuPDF build is not
-paid for documentation PRs (including this spec PR). On `push` to `main` there is
-no base to compare, so the job does not run there.
+The benchmark gate lives in its **own workflow file**, not as a job added to
+`ci.yml`. Reason (Codex round-2): `paths-ignore` is workflow-trigger level, not
+job level — adding it to `ci.yml`'s `pull_request` trigger would skip *all* PR CI
+(build + tests) on docs-only PRs, not just the expensive benchmark. A separate
+workflow scopes the skip correctly and keeps `ci.yml` untouched.
 
-Checkout requirements: `actions/checkout@v5` with `fetch-depth: 0` and
-`submodules: recursive` (the default shallow clone would not contain the base
-commit; a worktree does not auto-populate submodules).
+```yaml
+name: Benchmark
+on:
+  pull_request:
+    paths-ignore: ['**/*.md', 'docs/**']   # skip the double build for docs-only PRs
+jobs:
+  benchmark:
+    runs-on: windows-latest                # MSVC + pwsh + windows binary layout
+    steps:
+      - uses: actions/checkout@v5
+        with: { fetch-depth: 0, submodules: recursive }   # base SHA must be fetchable; worktree needs submodules
+      ...
+```
 
-**Step sequence (`shell: pwsh` for the `.ps1` steps):**
+There is no `push: main` trigger — on `main` there is no base to compare against.
 
-1. Build PR head: `cmake -B build ...` → `cmake --build build --config Release`.
+**Step sequence (`shell: pwsh`; same cmake generator/arch as `ci.yml`'s
+`build-windows`):**
+
+1. Build PR head:
+   `cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release`
+   then `cmake --build build --config Release --parallel`.
 2. `benchmark.ps1 -CliExe build/Release/litepdf-cli.exe -GuiExe build/Release/litepdf.exe -Out pr.json`.
-3. Resolve the immutable base: `BASE=${{ github.event.pull_request.base.sha }}`.
-   `git worktree add ../base "$BASE"`, then in the worktree
-   `git submodule update --init --recursive`.
-4. Build base in a **separate binary dir**: `cmake -S ../base -B build-base ...`
-   → `cmake --build build-base --config Release`. (The worktree has its own
-   submodule working tree, so its MuPDF `.sln` outputs land under
-   `../base/third_party/mupdf/...`, isolated from the PR's `build/` — this is
-   the load-bearing detail that makes D4's calibration and the size delta honest.)
+3. Resolve the immutable base and add a worktree (PowerShell syntax):
+   `$base = "${{ github.event.pull_request.base.sha }}"`;
+   `git worktree add ../base $base`; then in the worktree
+   `git -C ../base submodule update --init --recursive`.
+4. Build base in a **separate binary dir**:
+   `cmake -S ../base -B build-base -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release`
+   then `cmake --build build-base --config Release --parallel`. MuPDF is wired via
+   `ExternalProject_Add` on `mupdf.sln` with `BUILD_IN_SOURCE` outputs under
+   `<root>/third_party/mupdf/platform/win32/x64/Release` (see `cmake/ImportMuPDF.cmake`).
+   Because the base worktree has its **own** submodule working tree, those outputs
+   land under `../base/third_party/mupdf/...`, isolated from the PR's `build/` —
+   the load-bearing detail that makes D4's calibration and the size delta honest.
 5. `benchmark.ps1 -CliExe build-base/Release/litepdf-cli.exe -GuiExe build-base/Release/litepdf.exe -Out base.json`.
 6. `check-benchmark-regression.ps1 -Base base.json -Pr pr.json` → pass/fail.
 
@@ -217,12 +270,13 @@ Both builds happen on the same runner in the same job (D4). The binary-size delt
 falls out of building both exes.
 
 **Two-step rollout (D7):** in **PR1** (this gate's introduction) steps 3–6 are
-omitted; the job runs measure-only (steps 1–2) plus the §6 self-test and harness
-smoke. **PR2** adds steps 3–6 to enable enforcement. Encode PR1 vs PR2 as the last
-two items of §9 rather than a runtime branch, so the CI YAML never has to detect
-"does the base have the script."
+omitted; the workflow runs measure-only (steps 1–2) plus the §6 self-test, the
+harness smoke, and emits the observed noise floors (§3.3). **PR2** adds steps 3–6
+to enable enforcement and pins which timing metrics are gated based on PR1's data.
+Encode PR1 vs PR2 as the last two items of §9 rather than a runtime branch, so the
+workflow YAML never has to detect "does the base have the script."
 
-**PowerShell 5.1 guard:** add a cheap CI step that force-parses each new `.ps1`
+**PowerShell 5.1 guard:** add a cheap step that force-parses each new `.ps1`
 under Windows PowerShell 5.1 (`powershell.exe -NoProfile -Command
 "[ScriptBlock]::Create((Get-Content -Raw <script>)) > $null"`), so a `?.`/`??`/
 ternary slip fails CI even though the run steps use `pwsh` 7 (project memory
@@ -257,21 +311,37 @@ The roadmap exit criterion ("a regression is correctly blocked") is made
 timing jitter. **No Pester** (the repo has no Pester convention; `windows-latest`
 ships only the legacy 3.x module). Instead, `check-benchmark-regression.ps1`
 gains a `-SelfTest` switch that runs synthetic-JSON assertions in-process and
-exits non-zero on any failure; CI invokes it as a step, and it is also wired as a
-CTest `add_test` so `ctest` runs it locally. The five assertions:
+exits non-zero on any failure. It is wired as a CTest test inside the existing
+root `CMakeLists.txt` `if(BUILD_TESTING)` block (next to `add_subdirectory(tests)`),
+so `ctest` runs it locally; the new `benchmark.yml` workflow also invokes it
+directly:
 
-1. a +15 % delta on a gated timing metric → non-zero exit (blocked);
-2. a +5 % delta → zero exit (allowed);
-3. `exe_bytes` growth beyond the 256 KB tolerance → blocked;
-4. `exe_bytes` growth within tolerance → allowed;
-5. a missing/zero/malformed gated field → error exit.
+```cmake
+add_test(NAME benchmark_selftest
+         COMMAND pwsh -NoProfile -File ${CMAKE_SOURCE_DIR}/scripts/check-benchmark-regression.ps1 -SelfTest)
+set_tests_properties(benchmark_selftest PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+```
+
+(`WORKING_DIRECTORY` + `$PSScriptRoot`-relative threshold resolution per §3.3 keep
+the test location-independent.) The six assertions:
+
+1. a +15 % delta **above** `time_min_delta_ms` on a gated timing metric → blocked;
+2. a +5 % delta → allowed;
+3. a +50 % delta that is **below** `time_min_delta_ms` (tiny absolute) → allowed
+   (the absolute-floor guard);
+4. `exe_bytes` growth beyond the 256 KB tolerance → blocked;
+5. `exe_bytes` growth within tolerance → allowed;
+6. a missing/zero/malformed gated field → error exit.
 
 This *is* the "regression correctly blocked" evidence — reproducible without
 runner timing.
 
 Also:
-- **Harness smoke**: CI runs `litepdf-cli large.pdf --benchmark --json` once and
-  asserts the output parses as JSON with all expected fields present.
+- **Fixture determinism check**: `generate-large-fixture.py --check` regenerates
+  to a temp path and asserts byte-identity with the committed `large.pdf`; run in
+  the benchmark workflow so fixture drift fails CI (§3.4).
+- **Harness smoke**: the workflow runs `litepdf-cli large.pdf --benchmark --json`
+  once and asserts the output parses as JSON with all expected fields present.
 - **GUI absolute ceiling unchanged**: `scripts/smoke-test.ps1`'s
   `T0->T4 ≤ 1500 ms` check stays as-is (liveness + ceiling); only its comment is
   clarified to note it is the absolute ceiling, not the regression gate.
@@ -292,35 +362,74 @@ Also:
 ## 8. Estimated Size
 
 ~250 LOC + one committed fixture: harness timing extension in `src/cli/main.cpp`;
-`scripts/generate-large-fixture.py`; `scripts/benchmark.ps1`;
+`scripts/generate-large-fixture.py` (incl. `--check`); `scripts/benchmark.ps1`;
 `scripts/check-benchmark-regression.ps1` (incl. `-SelfTest`); a new `benchmarks/`
-dir with `thresholds.json`; the `benchmark` CI job; the PS-5.1 parse guard step.
-Slightly above the roadmap's ~200 LOC estimate because of the fixture generator
-and the self-test, both surfaced by the review.
+dir with `thresholds.json`; the new `.github/workflows/benchmark.yml`; the CTest
+`add_test` wiring; the PS-5.1 parse guard step. Slightly above the roadmap's
+~200 LOC estimate because of the fixture generator and the self-test, both
+surfaced by review.
 
 ## 9. Build Sequence (for the implementation plan)
 
-1. `scripts/generate-large-fixture.py`; generate + commit `tests/fixtures/large.pdf`;
-   record page count in its docstring.
+1. `scripts/generate-large-fixture.py` (invariant/pinned-metadata, render-heavy
+   page 0, `--check` byte-diff mode); generate + commit `tests/fixtures/large.pdf`;
+   record page count + density rationale in its docstring.
 2. Harness: add `--benchmark` / `--iterations` / `--json` to `src/cli/main.cpp`
-   (timing spans per §3.1); verify JSON locally on `simple.pdf` and `large.pdf`.
-3. `scripts/benchmark.ps1` (`-CliExe`/`-GuiExe`/`-Out`/`-Iterations`); confirm the
-   combined `result.json` shape.
-4. `benchmarks/thresholds.json` + `scripts/check-benchmark-regression.ps1`
-   (compare + numeric validation).
-5. `-SelfTest` switch + CTest `add_test`; prove all five §6 assertions.
+   (three sub-spans + gated total per §3.1); verify JSON locally on `simple.pdf`
+   and `large.pdf`.
+3. `scripts/benchmark.ps1` (`-CliExe`/`-GuiExe`/`-Out`/`-Iterations`; emits
+   median/stddev); confirm the combined `result.json` shape.
+4. `benchmarks/thresholds.json` (pct + `time_min_delta_ms` + size) +
+   `scripts/check-benchmark-regression.ps1` (compare + dual pct/abs threshold +
+   numeric validation).
+5. `-SelfTest` switch + CTest `add_test` in root `CMakeLists.txt`; prove all six
+   §6 assertions. Wire `generate-large-fixture.py --check`.
 6. Clarify the `smoke-test.ps1` ceiling comment.
-7. **PR1**: `benchmark` CI job in **measure-only** mode (build PR, `pr.json`,
-   harness smoke, self-test, PS-5.1 guard; no base comparison). Land to `main`.
-8. **PR2**: extend the job with the rebuild-base steps (`fetch-depth: 0`, base
-   SHA worktree, submodule init, `build-base`, compare) to enable enforcement.
-   Validate end-to-end by including a deliberate slowdown on a throwaway branch
-   and confirming the gate blocks it (exit-criterion evidence).
+7. **PR1**: new `.github/workflows/benchmark.yml` in **measure-only** mode (build
+   PR, `pr.json`, harness smoke, self-test, fixture `--check`, PS-5.1 guard; no
+   base comparison). Its output **reports the observed noise floors** (median /
+   stddev) so the gated-metric promotion decision (§3.3) is data-driven. Land to
+   `main`.
+8. **PR2**: extend the workflow with the rebuild-base steps (`fetch-depth: 0`,
+   base SHA worktree, submodule init, `build-base`, compare) and **pin which
+   timing metrics are gated** per PR1's floors. Validate end-to-end by including a
+   deliberate slowdown on a throwaway branch and confirming the gate blocks it
+   (exit-criterion evidence).
 
-## 10. Review Changelog (v1 → v2)
+## 10. Review Changelog
 
-Three-lens review (Opus + Sonnet + Codex), 2026-06-03. Cross-model agreement in
-brackets.
+### v2 → v3 (round-2 three-lens, 2026-06-03)
+
+Opus returned GO (all round-1 fixes verified against real code: the
+`RenderEngine(doc,1,nullptr)` ctor exists; worktree MuPDF output isolation is
+correct for this repo's `BUILD_IN_SOURCE`). Sonnet + Codex returned NO-GO on
+fixable items; v3 applies them.
+
+- **[Codex] Blocker §3.1** — `render_ms` (submit→callback) does **not** include
+  the per-worker `fz_open_document`; that happens in the `RenderEngine`
+  constructor. → split out `engine_init_ms` and **gate the total
+  `open_render_ms = open_ms + engine_init_ms + render_ms`** (boundary-agnostic).
+- **[Codex] Major §4** — `paths-ignore` is workflow-level, not job-level → move
+  the gate to its own `.github/workflows/benchmark.yml`.
+- **[Codex] Major §3.3/§3.4** — `large.pdf open_ms` / `render_ms` may lack signal
+  → render-heavy page 0; **data-driven gating** (PR1 measures median/stddev, a
+  metric is gated only if it clears the noise floor); `time_min_delta_ms`
+  absolute-floor guard added to `thresholds.json`.
+- **[Sonnet] Major §4** — cmake configure flags shown as `...`, and no `runs-on:`
+  → spelled out (`-G "Visual Studio 17 2022" -A x64 ...`, `runs-on: windows-latest`).
+- **[Sonnet] Minor §4** — base-SHA step used bash assignment under `shell: pwsh`
+  → rewritten in PowerShell (`$base = "..."`).
+- **[Opus+Sonnet] Minor/nit §3.1** — `rot:0` → `priority:0` (no rotation field).
+- **[Opus+Codex] Minor §3.4** — "mirror generate-search-fixture.py" was
+  self-contradictory (that script doesn't pin dates) → require invariant mode +
+  pinned metadata + a `--check` byte-diff verification.
+- **[Opus+Sonnet] Minor §6** — CTest interpreter/working-dir/file placement now
+  explicit (`pwsh -NoProfile -File ... -SelfTest`, root `CMakeLists.txt`).
+- **[Sonnet] Minor §3.2** — added `cli_exe_path` provenance.
+
+### v1 → v2 (round-1 three-lens, 2026-06-03)
+
+Three-lens review (Opus + Sonnet + Codex). Cross-model agreement in brackets.
 
 - **[3/3] Blocker** `large.pdf` didn't exist → D6: generate it; it becomes the
   primary gated fixture (also fixes the `simple.pdf`-too-small flakiness major).
