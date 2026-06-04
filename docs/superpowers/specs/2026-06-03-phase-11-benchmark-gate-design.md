@@ -211,12 +211,23 @@ informational and do **not** fail the gate. Malformed JSON → error exit.
   - **~500 pages** so `open_ms` has a chance of signal — but because MuPDF opens
     lazily, whether `open_ms` actually clears the noise floor is decided
     empirically by PR1 (§3.3), not assumed here.
-  - **Deterministic + verified:** generate with reportlab in invariant mode
-    (`rl_config`/`invariant=1`) and explicitly pinned producer + creation/mod
-    dates, so regeneration is byte-stable (the existing fixture generators do
-    *not* pin dates — this generator must). A `--check` mode regenerates to a
-    temp path and asserts a byte-identical match against the committed fixture;
-    wired into the §6 self-test so drift fails CI.
+  - **Deterministic + verified (environment-independent):** generate with
+    reportlab in invariant mode (`rl_config`/`invariant=1`) and explicitly pinned
+    producer + creation/mod dates (the existing fixture generators do *not* pin
+    dates — this generator must), **and build the canvas with `pageCompression=0`
+    so the PDF contains zero `/FlateDecode` streams.** The compression point is
+    load-bearing: PDF stream compression runs through the interpreter's zlib, and
+    CPython 3.14+ on Windows bundles zlib-ng while ≤3.13 bundles stock zlib — the
+    two emit different deflate bytes, so a *compressed* fixture is only
+    byte-reproducible on the same zlib build and drifts between, e.g., a 3.14 dev
+    box and a 3.12 CI runner (observed on PR1: committed 251659 B vs CI-regenerated
+    252303 B). With no compressed streams the bytes depend solely on reportlab's
+    pure-Python output, so any machine with the pinned reportlab regenerates the
+    identical file. A `--check` mode regenerates to a temp path and asserts both a
+    byte-identical match against the committed fixture **and** zero `/FlateDecode`
+    streams (the latter catches a compression re-enable on the dev's own machine,
+    before it breaks a different-zlib CI); wired into the §6 self-test so drift
+    fails CI.
   - Committed to the repo so PR and base builds read identical bytes. Docstring
     records page count, page-0 density rationale, and that it is gate-load-bearing.
 
@@ -338,8 +349,9 @@ runner timing.
 
 Also:
 - **Fixture determinism check**: `generate-large-fixture.py --check` regenerates
-  to a temp path and asserts byte-identity with the committed `large.pdf`; run in
-  the benchmark workflow so fixture drift fails CI (§3.4).
+  to a temp path and asserts byte-identity with the committed `large.pdf` plus zero
+  `/FlateDecode` streams (so the bytes stay zlib-independent across the dev box and
+  CI); run in the benchmark workflow so fixture drift fails CI (§3.4).
 - **Harness smoke**: the workflow runs `litepdf-cli large.pdf --benchmark --json`
   once and asserts the output parses as JSON with all expected fields present.
 - **GUI absolute ceiling unchanged**: `scripts/smoke-test.ps1`'s

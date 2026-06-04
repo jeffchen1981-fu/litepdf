@@ -29,12 +29,13 @@
 
 ## Refinements beyond the spec (for the plan-gate 3-lens reviewer)
 
-These four diverge from a literal reading of the spec. Each is justified; flagged here so the review is delta-scoped and can accept/reject them explicitly.
+These diverge from a literal reading of the spec. Each is justified; flagged here so the review is delta-scoped and can accept/reject them explicitly. (R-A..R-D were plan-gate reviewed; R-E was discovered on PR1's first CI run and fixed before merge.)
 
 - **R-A (harness computes median/stddev):** spec §3.2 lists `median_ms`/`stddev_ms` in the combined file but does not say who computes them. This plan computes all timing stats in C++ (Task 2) and has `benchmark.ps1` merely nest the harness JSON. Rationale: PowerShell 5.1 numeric/stats work is error-prone; one place for the math.
 - **R-B (`benchmark.ps1 -GitSha` optional param):** spec §3.2's param list is `-CliExe/-GuiExe/-Out/-Iterations`. But `git_sha` provenance for `base.json` is wrong if derived from the PR checkout (the script's cwd) — the base source lives in the `../base` worktree. This plan adds an optional `-GitSha` (defaults to `git rev-parse HEAD`); CI passes `$base` explicitly for `base.json`. Honors the spec's stated purpose for the field ("provenance so a bad comparison can't hide … wrong-artifact mistakes").
 - **R-C (CTest interpreter via `find_program`):** spec §6 hardcodes `COMMAND pwsh`. Project memory `reference_litepdf_powershell_51_only` + rationale log (2026-05-31) record that the dev box has **only** Windows PowerShell 5.1, no `pwsh` — so a hardcoded `pwsh` breaks local `ctest`. This plan uses `find_program(LITEPDF_PWSH NAMES pwsh powershell)` so the test runs on the 5.1-only dev box and on CI (which has both). The scripts are authored 5.1-safe, so either interpreter is correct.
-- **R-D (pinned reportlab):** spec §3.4 mandates byte-identical regeneration but `--check` is only meaningful if CI's reportlab matches the version that generated the committed fixture. This plan pins `reportlab==4.4.10` (the version verified installed on the build machine, Python 3.14.3) in Task 1's generation **and** in the workflow's install step. (If a future build machine has a different reportlab, regenerate the fixture with it and bump the pin in the docstring + `benchmark.yml` to match — a one-line change in two files.)
+- **R-D (pinned reportlab):** spec §3.4 mandates byte-identical regeneration but `--check` is only meaningful if CI's reportlab matches the version that generated the committed fixture. This plan pins `reportlab==4.4.10` (the version verified installed on the build machine, Python 3.14.3) in Task 1's generation **and** in the workflow's install step. (If a future build machine has a different reportlab, regenerate the fixture with it and bump the pin in the docstring + `benchmark.yml` to match — a one-line change in two files.) **Necessary but not sufficient on its own — see R-E.**
+- **R-E (uncompressed fixture for cross-zlib byte-identity — discovered on PR1's first CI run):** R-D's reportlab pin matches the *content generator* but not the *compression library*. PR1's first CI run failed `--check`: `committed=251659 B vs regenerated=252303 B`. reportlab compresses PDF content streams through the interpreter's zlib, and the dev box (CPython 3.14.3, **zlib-ng** 1.3.1) and the `windows-latest` runner (CPython **3.12**, stock zlib) emit different deflate bytes for identical input — `invariant=1` cannot control that. Fix: build the canvas with `pageCompression=0` so the fixture carries **zero `/FlateDecode` streams** and its bytes depend solely on reportlab's pure-Python output, byte-identical on any machine with the pinned reportlab. The committed fixture was regenerated (251659 → **254818 B**, +1.3%, zero `/FlateDecode`); render signal is unchanged (compression only affects on-disk bytes, not page 0's display list). `--check` now also asserts zero `/FlateDecode`, so a future compression re-enable fails on the dev's own machine before it can break a different-zlib CI. Spec §3.4 updated to match.
 
 ## Decisions carried from the spec (do not re-litigate)
 
@@ -59,11 +60,17 @@ No `VERSION` bump and no tag. These are infra PRs, not a user-facing release; th
 - [ ] **Step 1: Pin reportlab**
 
 Run: `pip install "reportlab==4.4.10"`
-Expected: `Requirement already satisfied` (this is the version verified installed on the build machine). If a different reportlab is installed, use that exact version here, in the script docstring (Step 2), and in `benchmark.yml` (Task 7 Step 4) — all three must match so `--check` byte-identity holds between the committed fixture and CI. Do NOT downgrade reportlab on this machine (Phase 9 T3 recorded that older reportlab loses the `_renderPM` backend here).
+Expected: `Requirement already satisfied` (this is the version verified installed on the build machine). If a different reportlab is installed, use that exact version here, in the script docstring (Step 2), and in `benchmark.yml` (Task 7 Step 4) — all three must match so the fixture *content* is reproducible. (Cross-environment byte-identity itself comes from `pageCompression=0` / zero `/FlateDecode` streams, not the version pin — see R-E; the pin keeps the content stable, the uncompressed output keeps the bytes zlib-independent.) Do NOT downgrade reportlab on this machine (Phase 9 T3 recorded that older reportlab loses the `_renderPM` backend here).
 
 - [ ] **Step 2: Create the generator**
 
 Create `scripts/generate-large-fixture.py`:
+
+> **Post-CI update (R-E):** the snapshot below is the plan-time version. The shipped
+> generator additionally builds the canvas with `pageCompression=0` and makes `--check`
+> assert zero `/FlateDecode` streams (cross-zlib byte-identity). The live file
+> `scripts/generate-large-fixture.py` is the source of truth; the determinism comments
+> in this snapshot are superseded by R-E.
 
 ```python
 #!/usr/bin/env python3
