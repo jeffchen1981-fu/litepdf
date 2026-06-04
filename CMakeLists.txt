@@ -141,4 +141,21 @@ target_link_libraries(litepdf-cli PRIVATE litepdf_core litepdf::mupdf)
 include(CTest)
 if(BUILD_TESTING)
     add_subdirectory(tests)
+
+    # Phase 11: deterministic compare-logic self-test. Use whichever PowerShell
+    # is present — pwsh on CI, Windows PowerShell 5.1 on the dev box (which has
+    # no pwsh; see reference_litepdf_powershell_51_only). The script is authored
+    # 5.1-safe, so either interpreter is correct. $PSScriptRoot-relative
+    # threshold resolution + WORKING_DIRECTORY keep the test location-independent.
+    find_program(LITEPDF_PWSH NAMES pwsh powershell.exe powershell
+                 DOC "PowerShell interpreter for the benchmark self-test")
+    if(LITEPDF_PWSH)
+        add_test(NAME benchmark_selftest
+                 COMMAND "${LITEPDF_PWSH}" -NoProfile -File
+                         "${CMAKE_SOURCE_DIR}/scripts/check-benchmark-regression.ps1" -SelfTest)
+        set_tests_properties(benchmark_selftest PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    else()
+        message(WARNING "No PowerShell interpreter found; benchmark_selftest not registered.")
+    endif()
 endif()

@@ -1,0 +1,78 @@
+name: Benchmark
+
+on:
+  pull_request:
+    paths-ignore: ['**/*.md', 'docs/**']   # skip the build for docs-only PRs
+
+jobs:
+  benchmark:
+    runs-on: windows-latest                 # MSVC v143 + pwsh + windows binary layout
+
+    steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: PS 5.1 parse guard
+        shell: pwsh
+        run: |
+          $scripts = @(
+            'scripts/benchmark.ps1',
+            'scripts/check-benchmark-regression.ps1'
+          )
+          foreach ($s in $scripts) {
+            powershell.exe -NoProfile -Command "[ScriptBlock]::Create((Get-Content -Raw '$s')) | Out-Null"
+            if ($LASTEXITCODE -ne 0) { throw "PS 5.1 parse failed for $s" }
+          }
+          Write-Host "[OK] PS 5.1 parse guard passed"
+
+      - name: Install reportlab (pinned)
+        run: pip install "reportlab==4.4.10"
+
+      - name: Fixture determinism check
+        run: python scripts/generate-large-fixture.py --check
+
+      - name: Configure
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build PR head
+        run: cmake --build build --config Release --parallel
+
+      - name: Benchmark self-test (compare logic)
+        shell: pwsh
+        run: ./scripts/check-benchmark-regression.ps1 -SelfTest
+
+      - name: Harness smoke (JSON well-formed)
+        shell: pwsh
+        run: |
+          $out = & build/Release/litepdf-cli.exe tests/fixtures/large.pdf --benchmark --json
+          if ($LASTEXITCODE -ne 0) { throw "harness exited $LASTEXITCODE" }
+          $j = ($out | Out-String).Trim() | ConvertFrom-Json
+          foreach ($f in @('open_ms','engine_init_ms','render_ms','open_render_ms','samples','median_ms','stddev_ms')) {
+            if ($null -eq $j.$f) { throw "harness JSON missing field: $f" }
+          }
+          Write-Host "[OK] harness JSON has all fields (open_render_ms=$($j.open_render_ms))"
+
+      - name: Measure PR
+        shell: pwsh
+        run: ./scripts/benchmark.ps1 -CliExe build/Release/litepdf-cli.exe -GuiExe build/Release/litepdf.exe -Out pr.json
+
+      - name: Report observed noise floors
+        shell: pwsh
+        run: |
+          $r = Get-Content pr.json -Raw | ConvertFrom-Json
+          foreach ($name in @('large.pdf','simple.pdf')) {
+            $fx = $r.fixtures.$name
+            Write-Host ("{0,-12} open_render_ms min={1,8:N3} median={2,8:N3} stddev={3,7:N3} open_ms_min={4,8:N3} render_ms_min={5,8:N3}" -f `
+              $name, $fx.open_render_ms, $fx.median_ms, $fx.stddev_ms, $fx.open_ms, $fx.render_ms)
+          }
+          Write-Host "exe_bytes=$($r.exe_bytes)"
+          Write-Host "PR2 promotion rule: gate a timing metric only if median >= ~10x stddev and >= a few x time_min_delta_ms (5 ms)."
+
+      - name: Upload pr.json
+        uses: actions/upload-artifact@v5
+        with:
+          name: benchmark-pr-json
+          path: pr.json
+          if-no-files-found: error

@@ -85,7 +85,12 @@ Write-Host "[OK] timing line: $timingLine"
 
 if ($timingLine -match "T0->T4=(\d+)\s*ms") {
     $t4 = [int]$Matches[1]
-    # Loose CI budget. Dev measured ~233 ms; CI runners are typically 3-5x slower.
+    # ABSOLUTE CEILING, not the regression gate. This is the GUI T0->T4 line
+    # (WARP-inclusive: D2D factory + blit run under software rendering in CI),
+    # which is too GPU-noisy to gate at +/-10%. The Phase 11 benchmark gate
+    # (.github/workflows/benchmark.yml) protects the CPU path via the headless
+    # litepdf-cli harness; this check only catches a gross liveness/ceiling
+    # blowout. Dev measured ~233 ms; CI runners are typically 3-5x slower.
     $budget = 1500
     if ($t4 -gt $budget) {
         throw "cold-start T0->T4 = $t4 ms exceeds budget $budget ms"

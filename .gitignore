@@ -35,3 +35,11 @@ Thumbs.db
 
 # Inno Setup build output
 installer/Output/
+
+# Benchmark gate scratch (Phase 11): result JSON written by scripts/benchmark.ps1
+# at the repo root (locally and in CI); never committed.
+/pr.json
+/base.json
+
+# Python bytecode cache (fixture generators under scripts/)
+__pycache__/
