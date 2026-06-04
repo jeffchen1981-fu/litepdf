@@ -2,7 +2,7 @@
 #Requires -Version 5.1
 # Compares a PR benchmark result against its base (Phase 11 spec §3.3) and
 # exits non-zero if any gated metric regresses beyond threshold. Also offers
-# -SelfTest: six synthetic-JSON assertions proving the gate logic with no real
+# -SelfTest: seven synthetic-JSON assertions proving the gate logic with no real
 # timing (the roadmap "regression correctly blocked" evidence, run as a CTest
 # test). 5.1-safe syntax throughout — no ?./??/ternary, no [double]::IsFinite
 # (absent on .NET Framework 4.x that backs PS 5.1).
@@ -24,7 +24,7 @@ $GatedTimingMetrics = @("open_render_ms")
 
 function Get-Thresholds {
     $path = Join-Path (Split-Path -Parent $PSScriptRoot) "benchmarks/thresholds.json"
-    if (-not (Test-Path $path)) { throw "thresholds.json not found at $path" }
+    if (-not (Test-Path $path)) { Write-Host "[ERROR] thresholds.json not found at $path"; exit 2 }
     $t = (Get-Content $path -Raw) | ConvertFrom-Json
     # Fail-closed: a corrupt thresholds.json must error, not silently gate on a
     # missing/zero/non-finite bound. (Assert-PositiveFinite is defined below; it
@@ -51,7 +51,7 @@ function Assert-PositiveFinite {
 
 # Core comparison. Returns [pscustomobject]@{ Failed; Rows }. Does NOT call
 # exit, so -SelfTest can assert on the result. Throws "BENCH_VALIDATION:" on a
-# bad gated field (assertion 6).
+# bad gated field (assertion 6) or a missing/invalid exe_bytes (assertion 7).
 function Invoke-BenchmarkCompare {
     param($BaseObj, $PrObj, $Thresholds)
 
@@ -143,8 +143,22 @@ function Invoke-SelfTest {
     }
     Check $threw "6: zero gated field errors"
 
+    # 7: missing base exe_bytes -> error (throws BENCH_VALIDATION). Guards the
+    # exe_bytes validation path (Invoke-BenchmarkCompare's first check), which
+    # assertion 6 (a zero timing field) never reaches.
+    $threw = $false
+    try {
+        $noBytes = [pscustomobject]@{
+            fixtures = [pscustomobject]@{ "large.pdf" = [pscustomobject]@{ open_render_ms = 100 } }
+        }
+        Invoke-BenchmarkCompare $noBytes (New-SyntheticResult 100 40000000) $thr | Out-Null
+    } catch {
+        if ($_.Exception.Message -like "BENCH_VALIDATION*") { $threw = $true }
+    }
+    Check $threw "7: missing exe_bytes errors"
+
     if ($script:selfTestOk) {
-        Write-Host "[OK] benchmark self-test: 6/6 passed"
+        Write-Host "[OK] benchmark self-test: 7/7 passed"
         exit 0
     }
     Write-Host "[FAIL] benchmark self-test had failures"
@@ -156,8 +170,8 @@ if ($SelfTest) {
     Invoke-SelfTest   # exits
 }
 
-if (-not (Test-Path $Base)) { throw "Base result not found: $Base" }
-if (-not (Test-Path $Pr))   { throw "PR result not found: $Pr" }
+if (-not (Test-Path $Base)) { Write-Host "[ERROR] Base result not found: $Base"; exit 2 }
+if (-not (Test-Path $Pr))   { Write-Host "[ERROR] PR result not found: $Pr"; exit 2 }
 $thr = Get-Thresholds
 
 try {
