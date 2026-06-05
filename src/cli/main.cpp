@@ -21,6 +21,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
@@ -76,6 +77,7 @@ bool run_one_iteration(const char* path, BenchIteration& it) {
     clock::time_point render_end;
 
     auto t2 = clock::now();
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));  // DELIBERATE regression: gate-block proof (DO NOT MERGE)
     litepdf::core::RenderEngine engine(doc, 1, nullptr);
     auto t3 = clock::now();
     it.engine_init_ms = to_ms(t3 - t2);
