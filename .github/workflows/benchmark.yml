@@ -12,6 +12,7 @@ jobs:
       - name: Checkout with submodules
         uses: actions/checkout@v5
         with:
+          fetch-depth: 0          # base SHA must be reachable for the worktree
           submodules: recursive
 
       - name: PS 5.1 parse guard
@@ -70,9 +71,42 @@ jobs:
           Write-Host "exe_bytes=$($r.exe_bytes)"
           Write-Host "PR2 promotion rule: gate a timing metric only if median >= ~10x stddev and >= a few x time_min_delta_ms (5 ms)."
 
-      - name: Upload pr.json
+      - name: Add base worktree at the PR's base SHA
+        shell: pwsh
+        run: |
+          $base = "${{ github.event.pull_request.base.sha }}"
+          Write-Host "Base SHA: $base"
+          git worktree add ../base $base
+          if ($LASTEXITCODE -ne 0) { throw "git worktree add failed (exit $LASTEXITCODE)" }
+          git -C ../base submodule update --init --recursive
+          if ($LASTEXITCODE -ne 0) { throw "base submodule update failed (exit $LASTEXITCODE)" }
+
+      - name: Build base in a separate binary dir
+        run: |
+          cmake -S ../base -B build-base -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-base --config Release --parallel
+
+      - name: Measure base
+        shell: pwsh
+        run: |
+          $base = "${{ github.event.pull_request.base.sha }}"
+          ./scripts/benchmark.ps1 -CliExe build-base/Release/litepdf-cli.exe -GuiExe build-base/Release/litepdf.exe -Out base.json -GitSha $base
+
+      - name: Regression gate
+        shell: pwsh
+        run: ./scripts/check-benchmark-regression.ps1 -Base base.json -Pr pr.json
+
+      # if: always() so a real regression (gate exits non-zero) still uploads the
+      # measurement data needed to diagnose it; both pr.json and base.json so the
+      # full comparison is recoverable. warn (not error) so an early-stage failure
+      # that leaves the files absent doesn't stack a confusing upload error on top
+      # of the real failure; the gate's own Test-Path checks guard the happy path.
+      - name: Upload benchmark JSON
+        if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: benchmark-pr-json
-          path: pr.json
-          if-no-files-found: error
+          name: benchmark-json
+          path: |
+            pr.json
+            base.json
+          if-no-files-found: warn
