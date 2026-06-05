@@ -3,7 +3,9 @@ name: CI
 on:
   push:
     branches: [ main ]
+    paths-ignore: ['**/*.md', 'docs/**']   # docs-only changes don't affect the build
   pull_request:
+    paths-ignore: ['**/*.md', 'docs/**']   # skip the full Windows build for docs-only PRs
 
 jobs:
   build-windows:
