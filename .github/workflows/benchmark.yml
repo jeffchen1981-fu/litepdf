@@ -77,7 +77,9 @@ jobs:
           $base = "${{ github.event.pull_request.base.sha }}"
           Write-Host "Base SHA: $base"
           git worktree add ../base $base
+          if ($LASTEXITCODE -ne 0) { throw "git worktree add failed (exit $LASTEXITCODE)" }
           git -C ../base submodule update --init --recursive
+          if ($LASTEXITCODE -ne 0) { throw "base submodule update failed (exit $LASTEXITCODE)" }
 
       - name: Build base in a separate binary dir
         run: |
@@ -94,9 +96,17 @@ jobs:
         shell: pwsh
         run: ./scripts/check-benchmark-regression.ps1 -Base base.json -Pr pr.json
 
-      - name: Upload pr.json
+      # if: always() so a real regression (gate exits non-zero) still uploads the
+      # measurement data needed to diagnose it; both pr.json and base.json so the
+      # full comparison is recoverable. warn (not error) so an early-stage failure
+      # that leaves the files absent doesn't stack a confusing upload error on top
+      # of the real failure; the gate's own Test-Path checks guard the happy path.
+      - name: Upload benchmark JSON
+        if: always()
         uses: actions/upload-artifact@v5
         with:
-          name: benchmark-pr-json
-          path: pr.json
-          if-no-files-found: error
+          name: benchmark-json
+          path: |
+            pr.json
+            base.json
+          if-no-files-found: warn
