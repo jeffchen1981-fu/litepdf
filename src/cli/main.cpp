@@ -7,6 +7,7 @@
 // a binary PPM (P6) image to stdout. Used for manual smoke-checking the
 // render path during Phase 2+ development.
 
+#include "cli/render_to_ppm.hpp"
 #include "core/Document.hpp"
 #include "core/RenderEngine.hpp"
 
@@ -249,68 +250,21 @@ int main(int argc, char* argv[]) {
         std::fflush(stdout);
         _setmode(_fileno(stdout), _O_BINARY);
 #endif
-        litepdf::core::RenderEngine engine(doc, 1);
-
-        std::mutex m;
-        std::condition_variable cv;
-        bool done = false;
-        int exit_code = 0;
-
-        engine.submit({
-            render_page,
-            0,
-            1.0f,
-            [&](fz_pixmap* pix, fz_context* ctx) {
-                if (!pix) {
-                    std::lock_guard<std::mutex> g(m);
-                    exit_code = 2;
-                    done = true;
-                    cv.notify_all();
-                    return;
-                }
-                int w = fz_pixmap_width(ctx, pix);
-                int h = fz_pixmap_height(ctx, pix);
-                int stride = fz_pixmap_stride(ctx, pix);
-                unsigned char* samples = fz_pixmap_samples(ctx, pix);
-
-                // Task 0.3 (Phase 3): RenderEngine now produces BGRA
-                // (fz_device_bgr + alpha=1) so Direct2D can upload the
-                // buffer without a per-pixel channel swap. PPM's P6 format
-                // is RGB with no alpha, so we swap BGRA → RGB at write time.
-                // BGRA memory layout: byte[0]=B, byte[1]=G, byte[2]=R, byte[3]=A.
-                std::fprintf(stdout, "P6\n%d %d\n255\n", w, h);
-                for (int y = 0; y < h; ++y) {
-                    const unsigned char* row =
-                        samples + static_cast<std::size_t>(y) * stride;
-                    for (int x = 0; x < w; ++x) {
-                        const unsigned char* px = row + static_cast<std::size_t>(x) * 4;
-                        const unsigned char rgb[3] = {
-                            px[2],  // R
-                            px[1],  // G
-                            px[0],  // B
-                        };
-                        std::fwrite(rgb, 1, 3, stdout);
-                    }
-                }
-                std::fflush(stdout);
-                fz_drop_pixmap(ctx, pix);
-
-                std::lock_guard<std::mutex> g(m);
-                done = true;
-                cv.notify_all();
-            }
-        });
-
-        {
-            std::unique_lock<std::mutex> lk(m);
-            cv.wait_for(lk, std::chrono::seconds(10), [&] { return done; });
-            if (!done) {
-                std::fprintf(stderr, "Render timed out\n");
-                exit_code = 3;
-            }
-        }
-        // engine destructor joins workers.
-        return exit_code;
+        // The render + bounded-wait + teardown sequence lives in
+        // render_page_to_ppm so it is unit-testable and teardown-safe by
+        // construction (see render_to_ppm.{hpp,cpp} and
+        // test_cli_render_teardown.cpp). Exit codes: 0 ok, 2 no pixmap,
+        // 3 timeout — preserved from the original inline implementation.
+        //
+        // Note on rc == 3: a slow render that only finishes while
+        // ~RenderEngine() drains it (inside the helper) still emits its
+        // complete PPM to stdout during teardown — same as the original
+        // inline path. The exit code, not the presence of stdout bytes, is
+        // the authoritative success signal for this dev/smoke CLI.
+        const int rc = litepdf::cli::render_page_to_ppm(
+            doc, render_page, stdout, std::chrono::seconds(10));
+        if (rc == 3) std::fprintf(stderr, "Render timed out\n");
+        return rc;
     }
 
     const std::size_t n = doc.page_count();

@@ -133,7 +133,9 @@ endif()
 # here to keep Phase 0 build time small and isolate bootstrap failures.
 
 # --- litepdf-cli (console demo / benchmark harness) -----------------------
-add_executable(litepdf-cli src/cli/main.cpp)
+add_executable(litepdf-cli
+    src/cli/main.cpp
+    src/cli/render_to_ppm.cpp)
 litepdf_apply_flags(litepdf-cli)
 target_link_libraries(litepdf-cli PRIVATE litepdf_core litepdf::mupdf)
 
