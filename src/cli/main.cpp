@@ -263,7 +263,11 @@ int main(int argc, char* argv[]) {
         // the authoritative success signal for this dev/smoke CLI.
         const int rc = litepdf::cli::render_page_to_ppm(
             doc, render_page, stdout, std::chrono::seconds(10));
-        if (rc == 3) std::fprintf(stderr, "Render timed out\n");
+        // Surface the failure codes on stderr. rc == 2 was historically silent
+        // on this path; emitting it here matches the benchmark helper's
+        // diagnostics and makes an out-of-range page visible.
+        if (rc == 2) std::fprintf(stderr, "Render produced no pixmap (page %d)\n", render_page);
+        else if (rc == 3) std::fprintf(stderr, "Render timed out\n");
         return rc;
     }
 

@@ -62,3 +62,59 @@ TEST_CASE("render_page_to_ppm: 0 ms wait hits the timeout-teardown path safely",
     REQUIRE(h > 0);
     REQUIRE(maxval == 255);
 }
+
+// Locks the rc == 2 (no-pixmap) contract at the function level. The engine
+// delivers a null pixmap for an out-of-range page (fz_load_page throws,
+// fz_catch nulls it); render_page_to_ppm must report 2 and write nothing.
+// Guards against got_pixmap ever being miscomputed into a false success (rc 0).
+TEST_CASE("render_page_to_ppm: out-of-range page returns 2 and writes no PPM",
+          "[cli][render][no-pixmap]") {
+    litepdf::core::Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/simple.pdf").has_value());
+
+    std::FILE* sink = std::tmpfile();
+    REQUIRE(sink != nullptr);
+
+    const int bad_page = static_cast<int>(doc.page_count()) + 100;
+    const int rc = litepdf::cli::render_page_to_ppm(
+        doc, bad_page, sink, std::chrono::seconds(10));
+
+    REQUIRE(rc == 2);
+
+    // Nothing is written on the no-pixmap path.
+    std::fseek(sink, 0, SEEK_END);
+    REQUIRE(std::ftell(sink) == 0);
+    std::fclose(sink);
+}
+
+// Locks the rc == 0 success contract deterministically. The teardown test
+// above only reaches rc == 0 incidentally (on a lost 0 ms race); a generous
+// timeout makes the render complete before the wait, so the success path and
+// the BGRA->RGB PPM serialization are always exercised here.
+TEST_CASE("render_page_to_ppm: success path returns 0 with a well-formed PPM",
+          "[cli][render][success]") {
+    litepdf::core::Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/simple.pdf").has_value());
+
+    std::FILE* sink = std::tmpfile();
+    REQUIRE(sink != nullptr);
+
+    const int rc = litepdf::cli::render_page_to_ppm(
+        doc, 0, sink, std::chrono::seconds(10));
+
+    REQUIRE(rc == 0);
+
+    std::rewind(sink);
+    char magic[3] = {0, 0, 0};
+    int w = 0, h = 0, maxval = 0;
+    const int matched =
+        std::fscanf(sink, "%2s %d %d %d", magic, &w, &h, &maxval);
+    std::fclose(sink);
+
+    REQUIRE(matched == 4);
+    REQUIRE(magic[0] == 'P');
+    REQUIRE(magic[1] == '6');
+    REQUIRE(w > 0);
+    REQUIRE(h > 0);
+    REQUIRE(maxval == 255);
+}

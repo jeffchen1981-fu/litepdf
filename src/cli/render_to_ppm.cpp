@@ -11,8 +11,10 @@
 // Keep this TU MuPDF-header-free, matching the PIMPL discipline of core's
 // public headers and the render unit tests: forward-declare the handful of
 // fz_* C-ABI entry points the PPM writer needs. They resolve at link time
-// through the litepdf::mupdf dependency that litepdf_core propagates to every
-// consumer (the litepdf-cli executable and the unit-test binary).
+// against libmupdf.lib: litepdf_core links litepdf::mupdf PRIVATE, and CMake
+// propagates a static library's PRIVATE link dependencies to each consumer's
+// final link, so both the litepdf-cli executable and the unit-test binary pull
+// in libmupdf.lib without naming it directly.
 extern "C" {
     struct fz_pixmap;
     struct fz_context;
@@ -47,6 +49,11 @@ int render_page_to_ppm(litepdf::core::Document& doc, int page, std::FILE* out,
                        std::chrono::milliseconds timeout) {
     auto state = std::make_shared<WaitState>();
 
+    // `engine` is declared after `state`, so on return it is destroyed first:
+    // ~RenderEngine() joins the worker and drains any still-in-flight render,
+    // firing the callback below. The callback's by-value shared_ptr copy keeps
+    // WaitState alive through that join regardless of stack order, so this
+    // ordering is belt-and-suspenders, not load-bearing.
     litepdf::core::RenderEngine engine(doc, 1);
     engine.submit({
         page,
@@ -97,10 +104,6 @@ int render_page_to_ppm(litepdf::core::Document& doc, int page, std::FILE* out,
         // result is unambiguously synchronized with the callback's write.
         return state->got_pixmap ? 0 : 2;
     }
-    // `engine` is destroyed when this function returns. ~RenderEngine() joins
-    // the worker; if the render was still in flight (the timeout path returned
-    // above), the callback fires during that join into the still-alive shared
-    // WaitState — safe, no matter the stack-destruction order.
 }
 
 } // namespace litepdf::cli
