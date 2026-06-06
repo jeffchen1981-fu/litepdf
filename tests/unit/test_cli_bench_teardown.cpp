@@ -24,6 +24,14 @@
 // dangerous drain path runs without crashing or hanging, and that the helper
 // still works afterward. The real positive coverage is the success-path case,
 // which is the first unit test of the benchmark iteration logic at all.
+//
+// One branch the sibling test locks is intentionally absent here: the no-pixmap
+// (got_pixmap == false) path. run_one_iteration always renders page 0, so there
+// is no out-of-range page to force a null pixmap — render_page_to_ppm takes a
+// page parameter and tests rc == 2, this helper does not. That branch is
+// structurally identical to the tested render_to_ppm path, so it is covered by
+// inspection rather than a dedicated case (adding a page parameter purely for
+// testability would be scope creep the benchmark never uses).
 
 namespace {
 constexpr const char* kFixture = "tests/fixtures/simple.pdf";

@@ -101,16 +101,16 @@ bool run_one_iteration(const char* path, BenchIteration& out,
             std::fprintf(stderr, "Render timed out\n");
             return false;
         }
+        // Read got_pixmap and render_end under the SAME lock that observed
+        // `done`, so both are unambiguously synchronized with the callback's
+        // writes (matches render_to_ppm.cpp's convention). render_start is a
+        // calling-thread stack local, read only here on the success path.
+        if (!state->got_pixmap) {
+            std::fprintf(stderr, "Render produced no pixmap\n");
+            return false;
+        }
+        out.render_ms = to_ms(state->render_end - render_start);
     }
-    if (!state->got_pixmap) {
-        std::fprintf(stderr, "Render produced no pixmap\n");
-        return false;
-    }
-    // render_start is a stack local read only here, on the calling thread, and
-    // only on the success path. state->render_end was written by the callback
-    // under state->m; we observed `done` under the same lock, so that write
-    // happens-before this read.
-    out.render_ms = to_ms(state->render_end - render_start);
     out.open_render_ms = out.open_ms + out.engine_init_ms + out.render_ms;
     return true;
 }
