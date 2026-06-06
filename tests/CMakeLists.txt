@@ -61,6 +61,12 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_print_geometry.cpp       # Phase 8.5 Task 1
     unit/test_print_range_parser.cpp   # Phase 8.5 Task 2
     unit/test_print_abort_flag.cpp     # Phase 8.5 Task 3
+    unit/test_cli_render_teardown.cpp  # CLI --render teardown UAF regression
+    # The CLI render helper under test is compiled straight into the test
+    # binary (it is not part of litepdf_core). It is MuPDF-header-free and
+    # resolves its fz_* calls through the litepdf::mupdf dependency that
+    # litepdf_core propagates to consumers.
+    "${CMAKE_SOURCE_DIR}/src/cli/render_to_ppm.cpp"
 )
 target_link_libraries(litepdf_unit_tests PRIVATE litepdf_core)
 
