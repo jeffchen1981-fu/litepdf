@@ -7,8 +7,8 @@
 //   - page 4 : no "Lorem"
 //
 // MuPDF 1.24.11 ships only fz_search_page (case-insensitive). The case-
-// sensitive test is marked [!mayfail] so it does not fail the suite: it
-// is expected to fail until we upgrade MuPDF (Phase 11) or swap to
+// sensitive test is marked [!shouldfail] so it does not fail the suite: it
+// is expected to fail until the post-v1.0 MuPDF 1.27+ upgrade or a swap to
 // stext+custom matcher.
 #include "core/Document.hpp"
 

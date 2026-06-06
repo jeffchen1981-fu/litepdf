@@ -41,7 +41,7 @@ These diverge from a literal reading of the spec. Each is justified; flagged her
 
 D1 no MuPDF upgrade (gate against 1.24.11). D2 gate cold-start CPU path + binary size only. D3 measure headless, GUI `T0->T4` stays an absolute ceiling. D4 self-calibrate by rebuilding the base on the same runner. D5 gate only, no tuning. D6 generate `large.pdf`. D7 two-step rollout (PR1 measure-only → PR2 enforce). D8 pin `github.event.pull_request.base.sha`. **Gate the boundary-agnostic total `open_render_ms`.** Data-driven gating: a timing metric is promoted to gated only if PR1's floor clears the noise (`thresholds.json` carries an absolute `time_min_delta_ms` floor alongside the pct).
 
-## Out of scope (deferred to Phase 11.5+, per spec §7)
+## Out of scope (deferred to Phase 11.5+, per spec §7 — except the MuPDF search upgrade, now post-v1.0; see spec §7 reconciliation note)
 
 MuPDF upgrade and the search features gated on it; MuPDF feature-flag pruning / 8 MB target; idle-RAM gating; active cold-start optimization; disk-IO (cold-cache) regression detection; CMake/MuPDF build caching.
 

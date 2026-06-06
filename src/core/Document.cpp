@@ -492,7 +492,9 @@ std::vector<Document::PageHit> Document::page_hits(
         // TODO(post-v1.0): MuPDF 1.27+ adds fz_match_stext_page + an
         // fz_search_options enum (FZ_SEARCH_EXACT / FZ_SEARCH_IGNORE_CASE /
         // FZ_SEARCH_REGEXP). Upgrading means extracting an fz_stext_page first
-        // and switching the matcher on flags.match_case here.
+        // and switching the matcher on flags.match_case here. The same upgrade
+        // should honor abort_flag via fz_match_stext_page_cb (callback-return-1)
+        // — see the @param abort_flag note in the header.
         n = fz_search_page(ctx, pg, needle.c_str(), marks, quads, kMaxQuads);
     }
     fz_always(ctx) {
