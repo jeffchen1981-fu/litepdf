@@ -51,7 +51,7 @@ initial design pass; D6–D8 added after the three-lens review.
 
 | # | Decision | Choice | Rationale |
 |---|----------|--------|-----------|
-| D1 | MuPDF submodule upgrade in scope? | **No — gate built against MuPDF 1.24.11** | Upgrading the engine while establishing a perf baseline makes the baseline a moving target. The upgrade (case-sensitive search via `fz_search_page2`, mid-page `fz_cookie` abort, adaptive `SearchDispatcher`) is deferred to **Phase 11.5**, which the gate built here will then validate. The `TODO(phase-11)` markers in `src/core/Document.hpp/.cpp` and `src/core/SearchSession.cpp` belong to 11.5. |
+| D1 | MuPDF submodule upgrade in scope? | **No — gate built against MuPDF 1.24.11** | Upgrading the engine while establishing a perf baseline makes the baseline a moving target. The upgrade (case-sensitive search via `fz_search_page2`, mid-page `fz_cookie` abort, adaptive `SearchDispatcher`) is deferred to **Phase 11.5**, which the gate built here will then validate. The `TODO(phase-11)` markers in `src/core/Document.hpp/.cpp` and `src/core/SearchSession.cpp` belong to 11.5. *(Superseded — see the §7 reconciliation note: timing is now post-v1.0, the markers are retagged `TODO(post-v1.0)`, and the real API is `fz_match_stext_page` + `fz_search_options`, not `fz_search_page2`/`fz_cookie`.)* |
 | D2 | Which dimensions does the gate cover? | **Cold-start (CPU path) + binary size** | §7 names cold-start; §3 ties a binary-size regression gate to Phase 11. Idle-RAM gating is **deferred** (noisiest CI signal; per-tab memory already guarded by the Phase 2 1000-render stress test). MuPDF feature-flag pruning (~2 MB mujs/gumbo/tesseract) is **deferred to 11.5** (requires rebuilding MuPDF, which pairs with the upgrade). |
 | D3 | Where is the regression number measured? | **Headless `litepdf-cli` harness (best-of-5 min), gating open+render; GUI `T0->T4` stays an absolute ceiling** | `T0->T4` mixes CPU stages (MuPDF open `T1->T2`, rasterize `T2->T3`) with GPU stages (D2D factory `T0->T1`, blit `T3->T4`). CI has no GPU → Direct2D runs under WARP → the GPU stages are slow and high-variance. Everyday changes regress the CPU stages, which the harness measures cleanly and GPU-independently. The WARP stages rarely regress and can't be measured stably, so they stay out of the ±10% gate and under the existing loose absolute ceiling. |
 | D4 | Where does the baseline come from? | **Rebuild the PR's base commit in the same CI job and compare on the same runner (self-calibrating)** | Dominant noise source is GitHub runner heterogeneity (different CPU per run shifts a pure-CPU number 10–20%). Measuring base and PR on the *same* runner in the *same* job cancels it, so ±10% is meaningful. Cost: the benchmark job builds MuPDF twice. Accepted — a false-failing gate gets ignored. |
@@ -364,6 +364,18 @@ Also:
   search (`fz_search_page2` + `FZ_SEARCH_EXACT`), honoring `fz_cookie.abort` for
   mid-page search cancellation, and **DPI-/CPU-count-adaptive `SearchDispatcher`
   sizing**. The `TODO(phase-11)` code comments refer to this 11.5 work.
+
+> **Reconciliation note (2026-06-06):** The MuPDF-upgrade timing above has been
+> superseded. Phase 11 shipped as the benchmark gate only; the upgrade is now
+> deferred to **post-v1.0 (v1.1 candidate)**, not "Phase 11.5" — see the roadmap
+> "Out of Scope (post-v1.0)" section. The assumed API names here are also wrong:
+> the real upgrade path is MuPDF 1.27+'s experimental `fz_match_stext_page` /
+> `fz_match_stext_page_cb` + the `fz_search_options` enum (`FZ_SEARCH_EXACT` /
+> `FZ_SEARCH_IGNORE_CASE` / `FZ_SEARCH_REGEXP`); mid-page cancellation is
+> callback-return-1, not `fz_cookie.abort`. The `TODO(phase-11)` code markers
+> have been retagged `TODO(post-v1.0)`. Original text left intact as a
+> point-in-time record.
+
 - MuPDF feature-flag pruning (mujs / gumbo / tesseract / leptonica) and any move
   toward the 8 MB exe target. Only anti-regression size protection lands here.
 - Idle-RAM regression gating.

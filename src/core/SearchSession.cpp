@@ -29,11 +29,11 @@ struct SearchSession::Impl {
         // Atomic so the task lambda can check/reject stale runs without
         // taking the mutex in the fast path.
         std::atomic<std::uint64_t> epoch{0};
-        // Reserved for a future cookie-based MuPDF search cancel path
+        // Reserved for a future callback-based MuPDF search cancel path
         // (see Document::page_hits header). Ignored by MuPDF 1.24.11 but
-        // kept wired up so that day one after the Phase 11 upgrade we
-        // can flip the abort flag during set_query() to cut running
-        // page scans short.
+        // kept wired up so that day one after the post-v1.0 MuPDF 1.27+
+        // upgrade we can flip the abort flag during set_query() and have
+        // the stext match callback observe it to cut running page scans short.
         std::atomic<int>         abort_flag{0};
         // Live counter of task lambdas that have been submitted but whose
         // run() body has not yet returned. Incremented at submit time in
@@ -97,9 +97,9 @@ SearchSession::~SearchSession() {
     // the drain loop below terminate.
     auto& st = *impl_->state;
     st.epoch.fetch_add(1, std::memory_order_acq_rel);
-    // Also set the MuPDF cookie abort flag for any tasks already inside
-    // page_hits(). MuPDF 1.24.11 ignores it, but Phase 11's upgrade will
-    // honor it and cut in-progress scans short.
+    // Also set the abort flag for any tasks already inside page_hits().
+    // MuPDF 1.24.11 ignores it, but the post-v1.0 MuPDF 1.27+ upgrade will
+    // honor it (via the stext match callback) and cut in-progress scans short.
     st.abort_flag.store(1, std::memory_order_relaxed);
 
     // Step 2: spin-wait until every submitted task has executed its

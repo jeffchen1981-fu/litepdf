@@ -104,15 +104,27 @@ Before starting any phase after Phase 0:
 
 Captured at `v0.0.7-phase6` tag. See `docs/plans/2026-04-24-phase-6-search-design.md` §9 for full context.
 
-- **Whole-word and regex search are not supported.** MuPDF 1.24.11 provides no primitive for either and neither is in Phase 6 scope. Revisit if user demand surfaces.
-- **Case-sensitive search is a no-op in v1.** MuPDF 1.24.11's `fz_search_page` is unconditionally case-insensitive (internal `canon()` upper-cases before matching). The `SearchFlags::match_case` flag is accepted but ignored. Phase 11 MuPDF upgrade will expose `fz_search_page2` + `FZ_SEARCH_EXACT`; see `TODO(phase-11)` markers in `src/core/Document.cpp`.
+- **Whole-word and regex search are not supported.** MuPDF 1.24.11 provides no primitive for either and neither is in Phase 6 scope. The post-v1.0 MuPDF 1.27+ upgrade adds `FZ_SEARCH_REGEXP` (regex; whole-word via `\bword\b`); revisit then, or sooner if user demand surfaces.
+- **Case-sensitive search is a no-op in v1.** MuPDF 1.24.11's `fz_search_page` is unconditionally case-insensitive (internal `canon()` upper-cases before matching). The `SearchFlags::match_case` flag is accepted but ignored. The post-v1.0 MuPDF 1.27+ upgrade exposes `fz_match_stext_page` + an `fz_search_options` enum (`FZ_SEARCH_EXACT` / `FZ_SEARCH_IGNORE_CASE`); see `TODO(post-v1.0)` markers in `src/core/Document.cpp`. (NB: the earlier `fz_search_page2` name referred to MuPDF's C++ vector-returning binding wrapper, not the flags-based C search API assumed here — the real path operates on an extracted `fz_stext_page`.)
 - **ResultsPanel is not a true dockable panel.** It is a bottom-docked resizable pane only. A full docking framework (undock-to-float, left/right dock) is out of scope for v1 and would require ~1500 additional LOC.
 - **L2 display list cache is not warmed by search.** Pages searched once but never viewed stay cold for subsequent renders. Intentional per design §D16 (search must not pollute render's hot cache).
-- **`fz_cookie::abort` is not honored by MuPDF 1.24.11's search path.** In-progress per-page searches run to completion; cross-page cancellation is handled by `SearchSession` epoch bump. Phase 11 MuPDF upgrade will enable true mid-page abort.
-- **SearchDispatcher is 2-worker fixed.** Adequate per design §5.4 "tabs run in parallel", but Phase 11 benchmark data may motivate DPI-/CPU-count-adaptive sizing.
+- **Mid-page search cancellation is not honored by MuPDF 1.24.11's search path.** In-progress per-page searches run to completion; cross-page cancellation is handled by `SearchSession` epoch bump. The post-v1.0 MuPDF 1.27+ upgrade enables true mid-page abort via the `fz_match_stext_page_cb` callback (return 1 to stop) — note this is callback-return-to-abort, not an `fz_cookie::abort` field as originally assumed.
+- **SearchDispatcher is 2-worker fixed.** Adequate per design §5.4 "tabs run in parallel", but the Phase 11 benchmark harness may surface data motivating DPI-/CPU-count-adaptive sizing post-v1.0.
 - **Cross-tab results `N hits` counter is total-only.** Plan's ideal format is "m / n" (current / total) but `SearchSession` doesn't expose cursor index; a Phase 6.x follow-up adds `cursor_index()` and flips the counter format.
 - **FindBar counter refreshes during cross-tab scan: resolved.** `CrossTabSearch::clear()` restores each tab's previous on_update observer, so the per-tab find-bar counter resumes updating the moment the results panel is dismissed. `dispatch()` also calls `clear()` first so repeated Ctrl+Shift+F invocations don't stack chained lambdas.
 
 ## Out of Scope (post-v1.0)
 
 See §10 of the design doc. Post-v1.0 roadmap is not planned here.
+
+**Deferred to post-v1.0 (v1.1 candidate): MuPDF 1.27+ upgrade.** Phase 11 was
+re-scoped to the benchmark regression gate only; its original "MuPDF upgrade"
+sub-goal was dropped and is NOT part of v1.0. Upgrading from the pinned 1.24.11
+to MuPDF 1.27+ (experimental stext matcher: `fz_match_stext_page` /
+`fz_match_stext_page_cb` + the `fz_search_options` enum) clears the search
+known-limitations above in one move: case-sensitive (`FZ_SEARCH_EXACT`), regex
+(`FZ_SEARCH_REGEXP`), whole-word (regex `\bword\b`), and true mid-page
+cancellation (callback returns 1). Held back because it is a 3-minor dependency
+jump onto an API still flagged experimental as of 1.27.0 (2025-12) — best done
+after v1.0 ships rather than during Phase 12 release hardening. Latest upstream
+at time of writing: 1.27.2 (2026-02).
