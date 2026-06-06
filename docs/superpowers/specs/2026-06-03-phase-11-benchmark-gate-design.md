@@ -364,6 +364,18 @@ Also:
   search (`fz_search_page2` + `FZ_SEARCH_EXACT`), honoring `fz_cookie.abort` for
   mid-page search cancellation, and **DPI-/CPU-count-adaptive `SearchDispatcher`
   sizing**. The `TODO(phase-11)` code comments refer to this 11.5 work.
+
+> **Reconciliation note (2026-06-06):** The MuPDF-upgrade timing above has been
+> superseded. Phase 11 shipped as the benchmark gate only; the upgrade is now
+> deferred to **post-v1.0 (v1.1 candidate)**, not "Phase 11.5" — see the roadmap
+> "Out of Scope (post-v1.0)" section. The assumed API names here are also wrong:
+> the real upgrade path is MuPDF 1.27+'s experimental `fz_match_stext_page` /
+> `fz_match_stext_page_cb` + the `fz_search_options` enum (`FZ_SEARCH_EXACT` /
+> `FZ_SEARCH_IGNORE_CASE` / `FZ_SEARCH_REGEXP`); mid-page cancellation is
+> callback-return-1, not `fz_cookie.abort`. The `TODO(phase-11)` code markers
+> have been retagged `TODO(post-v1.0)`. Original text left intact as a
+> point-in-time record.
+
 - MuPDF feature-flag pruning (mujs / gumbo / tesseract / leptonica) and any move
   toward the 8 MB exe target. Only anti-regression size protection lands here.
 - Idle-RAM regression gating.

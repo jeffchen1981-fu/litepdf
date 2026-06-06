@@ -49,8 +49,8 @@ TEST_CASE("page_hits: case-insensitive matches lowercase needle", "[document][se
     REQUIRE(hits.size() == 12);
 }
 
-// Revisit trigger: the Phase 11 MuPDF upgrade (FZ_SEARCH_EXACT /
-// fz_search_page2) is expected to make this test pass. When that happens,
+// Revisit trigger: the post-v1.0 MuPDF 1.27+ upgrade (fz_match_stext_page +
+// FZ_SEARCH_EXACT) is expected to make this test pass. When that happens,
 // Catch2's [!shouldfail] will flip the test RED to force a manual re-audit:
 // remove the tag, adjust the case-sensitivity code path in Document.cpp, and
 // confirm the semantics still match what callers expect.

@@ -90,7 +90,8 @@ public:
     // case-insensitive (it uppercases each codepoint via fz_toupper before
     // matching). SearchFlags::match_case is therefore a no-op on this MuPDF
     // release — we keep the field so the API shape is stable across the
-    // Phase 11 MuPDF upgrade and the eventual custom-matcher fallback.
+    // post-v1.0 MuPDF upgrade (1.27+; see page_hits) and the eventual
+    // custom-matcher fallback.
     struct SearchFlags {
         bool match_case = false;
     };
@@ -120,9 +121,12 @@ public:
     //                    not accept a cookie. A per-page search runs to
     //                    completion once started. Cross-page cancellation
     //                    is SearchSession's responsibility (epoch bump).
-    //                    TODO(phase-11): when MuPDF exposes fz_search_page2
-    //                    or an equivalent cookie-accepting variant, honor
-    //                    abort_flag by feeding it through fz_cookie.abort.
+    //                    TODO(post-v1.0): MuPDF 1.27+ ships an experimental
+    //                    stext matcher (fz_match_stext_page_cb) whose
+    //                    callback can return 1 to abort mid-page. When we
+    //                    take that upgrade, honor abort_flag by checking it
+    //                    inside the match callback (note: callback-return-
+    //                    to-abort, NOT an fz_cookie.abort field).
     //
     // Thread-safety: SAFE to call concurrently from multiple threads on
     // the same Document instance. An internal std::mutex serializes every

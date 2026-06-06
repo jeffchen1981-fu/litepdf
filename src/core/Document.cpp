@@ -476,7 +476,7 @@ std::vector<Document::PageHit> Document::page_hits(
 
     // abort_flag is accepted for API forward-compatibility but not honored
     // by MuPDF 1.24.11 — fz_search_page takes no fz_cookie. See the header
-    // comment on page_hits for the phase-11 upgrade path.
+    // comment on page_hits for the post-v1.0 upgrade path.
     (void)abort_flag;
 
     // Cap per-page hits. Larger than typical query hit counts; if a page
@@ -489,8 +489,10 @@ std::vector<Document::PageHit> Document::page_hits(
     fz_try(ctx) {
         pg = fz_load_page(ctx, impl_->doc, static_cast<int>(page));
         // MuPDF 1.24.11 only exposes fz_search_page (always case-insensitive).
-        // When we upgrade to a MuPDF with fz_search_page2 + FZ_SEARCH_EXACT,
-        // switch on flags.match_case here.
+        // TODO(post-v1.0): MuPDF 1.27+ adds fz_match_stext_page + an
+        // fz_search_options enum (FZ_SEARCH_EXACT / FZ_SEARCH_IGNORE_CASE /
+        // FZ_SEARCH_REGEXP). Upgrading means extracting an fz_stext_page first
+        // and switching the matcher on flags.match_case here.
         n = fz_search_page(ctx, pg, needle.c_str(), marks, quads, kMaxQuads);
     }
     fz_always(ctx) {
