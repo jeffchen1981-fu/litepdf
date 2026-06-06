@@ -7,20 +7,16 @@
 // a binary PPM (P6) image to stdout. Used for manual smoke-checking the
 // render path during Phase 2+ development.
 
+#include "cli/bench_iteration.hpp"
 #include "cli/render_to_ppm.hpp"
 #include "core/Document.hpp"
-#include "core/RenderEngine.hpp"
-
-#include <mupdf/fitz.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -30,88 +26,6 @@
 #endif
 
 namespace {
-
-struct BenchIteration {
-    double open_ms = 0.0;
-    double engine_init_ms = 0.0;
-    double render_ms = 0.0;
-    double open_render_ms = 0.0;
-};
-
-// Render page 0 once on a FRESH Document + RenderEngine (no PageCache, one
-// worker) and fill `it`. Mirrors the --render await/drop pattern below: the
-// callback fires on the worker thread; we block on a condition_variable with a
-// 10 s timeout and fz_drop_pixmap inside the callback. Returns false (and
-// prints to stderr) if open or render fails — no silent zero metric.
-//
-// engine_init_ms is NOT zero: the RenderEngine constructor opens the
-// per-worker fz_document, so a regression in worker-side open lands here, not
-// in render_ms. Gating the total open_render_ms makes the boundary irrelevant.
-bool run_one_iteration(const char* path, BenchIteration& it) {
-    using clock = std::chrono::steady_clock;
-    auto to_ms = [](clock::duration d) {
-        return std::chrono::duration<double, std::milli>(d).count();
-    };
-
-    auto t0 = clock::now();
-    litepdf::core::Document doc;
-    auto err = doc.open(path);
-    auto t1 = clock::now();
-    if (err) {
-        std::fprintf(stderr, "Open error: %d\n", static_cast<int>(*err));
-        return false;
-    }
-    it.open_ms = to_ms(t1 - t0);
-
-    // Declare the sync primitives BEFORE `engine` so they outlive it. Locals
-    // destroy in reverse declaration order, so `engine` (last) is destroyed
-    // first: ~RenderEngine() joins/drains any in-flight job — which may fire
-    // the callback below on a worker thread — while m/cv/render_end are still
-    // alive. Reversing this order would let the timeout path (returns false
-    // with a job still queued) lock a destroyed mutex / write a destroyed
-    // time_point in the drained callback = UB.
-    std::mutex m;
-    std::condition_variable cv;
-    bool done = false;
-    bool ok = false;
-    clock::time_point render_end;
-
-    auto t2 = clock::now();
-    litepdf::core::RenderEngine engine(doc, 1, nullptr);
-    auto t3 = clock::now();
-    it.engine_init_ms = to_ms(t3 - t2);
-
-    auto render_start = clock::now();
-    engine.submit({
-        0,        // page_num
-        0,        // priority (0 = highest)
-        1.0f,     // scale (1.0 = 72 dpi)
-        [&](fz_pixmap* pix, fz_context* ctx) {
-            auto end = clock::now();
-            std::lock_guard<std::mutex> g(m);
-            render_end = end;
-            ok = (pix != nullptr);
-            if (pix) fz_drop_pixmap(ctx, pix);
-            done = true;
-            cv.notify_all();
-        }
-    });
-
-    {
-        std::unique_lock<std::mutex> lk(m);
-        if (!cv.wait_for(lk, std::chrono::seconds(10), [&] { return done; })) {
-            std::fprintf(stderr, "Render timed out\n");
-            return false;
-        }
-    }
-    if (!ok) {
-        std::fprintf(stderr, "Render produced no pixmap\n");
-        return false;
-    }
-    it.render_ms = to_ms(render_end - render_start);
-    it.open_render_ms = it.open_ms + it.engine_init_ms + it.render_ms;
-    return true;
-}
 
 double vmin(const std::vector<double>& v) {
     double best = v.front();
@@ -148,8 +62,8 @@ int run_benchmark(const char* path, int iterations, bool json) {
     total_s.reserve(static_cast<std::size_t>(iterations));
 
     for (int i = 0; i < iterations; ++i) {
-        BenchIteration it;
-        if (!run_one_iteration(path, it)) {
+        litepdf::cli::BenchIteration it;
+        if (!litepdf::cli::run_one_iteration(path, it, std::chrono::seconds(10))) {
             std::fprintf(stderr, "Benchmark failed on iteration %d for %s\n", i, path);
             return 1;
         }
