@@ -76,6 +76,46 @@ foreach(_vcx ${_MUPDF_VCXPROJS})
     file(WRITE "${_vcx}" "${_vcx_content}")
 endforeach()
 
+# --- Phase 11.5: prune unused MuPDF features + fonts to shrink the exe ----
+# Prepend pruning #defines above config.h's `#ifndef FZ_CONFIG_H` include guard.
+# FZ_ENABLE_* are #ifndef-guarded (config.h:162-208) so an injected 0 wins; the
+# TOFU_* macros have no guard but are tested with bare #ifndef in font-table.h
+# (compiled via noto.c), so an injected #define equally takes effect.
+#
+# Idempotent AND re-appliable: the _PRUNE_VER marker version-stamps the injected
+# set. If config.h lacks the CURRENT marker (fresh checkout, OR the define set
+# changed — e.g. Task 6 adds TOFU_CJK_LANG and bumps the version), restore the
+# tracked submodule file to pristine (dropping any older prepend so we never
+# stack two), re-prepend the current set, and delete the stamp so it rebuilds.
+set(_MUPDF_CONFIG_H "${_MUPDF_ROOT}/include/mupdf/fitz/config.h")
+set(_PRUNE_VER "LITEPDF_PRUNE_V1")   # bump when the injected define set changes
+set(_prune
+    "/* ${_PRUNE_VER} — injected by ImportMuPDF.cmake (do not edit) */\n"
+    "#define FZ_ENABLE_JS 0\n"
+    "#define FZ_ENABLE_OCR_OUTPUT 0\n"
+    "#define FZ_ENABLE_DOCX_OUTPUT 0\n"
+    "#define TOFU_SYMBOL\n")
+string(JOIN "" _prune_str ${_prune})
+file(READ "${_MUPDF_CONFIG_H}" _cfg)
+if(NOT _cfg MATCHES "${_PRUNE_VER}")
+    execute_process(
+        COMMAND git -C "${_MUPDF_ROOT}" checkout -- include/mupdf/fitz/config.h
+        RESULT_VARIABLE _gitrc)
+    if(NOT _gitrc EQUAL 0)
+        message(FATAL_ERROR
+            "Phase 11.5: failed to restore MuPDF config.h to pristine (git rc=${_gitrc}). "
+            "A silent restore failure would stack two prune layers and break the "
+            "single-clean-layer / exactly-one-rebuild guarantee. Aborting.")
+    endif()
+    file(READ "${_MUPDF_CONFIG_H}" _cfg_pristine)
+    file(WRITE "${_MUPDF_CONFIG_H}" "${_prune_str}${_cfg_pristine}")
+    message(STATUS "MuPDF config.h pruned (${_PRUNE_VER}).")
+    # ExternalProject BUILD_ALWAYS OFF re-runs MSBuild only when its stamp is
+    # absent — not when config.h changes. Delete the stamp so the prune rebuilds.
+    file(REMOVE
+        "${CMAKE_BINARY_DIR}/mupdf_ext-prefix/src/mupdf_ext-stamp/Release/mupdf_ext-build")
+endif()
+
 # ExternalProject builds MuPDF's sln. We target libmupdf; MSBuild
 # automatically chases its ProjectReferences (libthirdparty, libresources,
 # libmuthreads) and the sln-level config maps bin2coff → Release|Win32.
