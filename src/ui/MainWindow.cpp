@@ -149,8 +149,12 @@ void MainWindow::open_tab_async(std::filesystem::path path) {
     // else touches the dispatcher.
     auto& dispatcher = *search_dispatcher_;
     std::thread([hwnd, &dispatcher, path = std::move(path)]() {
+        litepdf::ui::ColdStartTimer::mark_sub(
+            litepdf::ui::ColdStartTimer::Sub::OpenStart);
         litepdf::core::Document doc;
         auto err = doc.open(path);
+        litepdf::ui::ColdStartTimer::mark_sub(
+            litepdf::ui::ColdStartTimer::Sub::OpenDone);
         if (err.has_value()) {
             // Phase 8 Task 1: NeedsPassword is now a non-fatal handshake.
             // Hand the still-alive Document + path to the UI thread; it
@@ -193,6 +197,8 @@ void MainWindow::open_tab_async(std::filesystem::path path) {
             tab->label = path.filename().wstring();
             tab->view  = std::make_unique<litepdf::core::DocumentView>(
                 std::move(doc), dispatcher);
+            litepdf::ui::ColdStartTimer::mark_sub(
+                litepdf::ui::ColdStartTimer::Sub::ViewBuilt);
             // Transfer ownership across thread boundary via raw ptr.
             auto* raw = tab.release();
             // Ownership has crossed the thread boundary. If PostMessageW

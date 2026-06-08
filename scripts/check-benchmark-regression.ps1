@@ -2,7 +2,7 @@
 #Requires -Version 5.1
 # Compares a PR benchmark result against its base (Phase 11 spec §3.3) and
 # exits non-zero if any gated metric regresses beyond threshold. Also offers
-# -SelfTest: seven synthetic-JSON assertions proving the gate logic with no real
+# -SelfTest: eight synthetic-JSON assertions proving the gate logic with no real
 # timing (the roadmap "regression correctly blocked" evidence, run as a CTest
 # test). 5.1-safe syntax throughout — no ?./??/ternary, no [double]::IsFinite
 # (absent on .NET Framework 4.x that backs PS 5.1).
@@ -32,6 +32,7 @@ function Get-Thresholds {
     [void](Assert-PositiveFinite $t.time_regression_pct   "thresholds.time_regression_pct")
     [void](Assert-PositiveFinite $t.time_min_delta_ms     "thresholds.time_min_delta_ms")
     [void](Assert-PositiveFinite $t.size_regression_bytes "thresholds.size_regression_bytes")
+    [void](Assert-PositiveFinite $t.size_ceiling_bytes    "thresholds.size_ceiling_bytes")
     return $t
 }
 
@@ -67,6 +68,15 @@ function Invoke-BenchmarkCompare {
     $rows += [pscustomobject]@{
         Metric = "exe_bytes"; Base = $baseBytes; Pr = $prBytes
         Delta = $byteDelta; Pct = ""; Fail = $sizeFail
+    }
+
+    # Absolute ceiling (Phase 11.5): independent of the base, catches re-bloat
+    # that slips under the per-PR relative delta.
+    $ceilFail = ($prBytes -gt $Thresholds.size_ceiling_bytes)
+    if ($ceilFail) { $failed = $true }
+    $rows += [pscustomobject]@{
+        Metric = "exe_bytes_ceiling"; Base = $Thresholds.size_ceiling_bytes; Pr = $prBytes
+        Delta = ($prBytes - $Thresholds.size_ceiling_bytes); Pct = ""; Fail = $ceilFail
     }
 
     # Gated timing metrics on the gated fixture.
@@ -111,33 +121,33 @@ function Invoke-SelfTest {
     }
 
     # 1: +15% delta, above the absolute min-delta -> blocked.
-    $r = Invoke-BenchmarkCompare (New-SyntheticResult 100 40000000) (New-SyntheticResult 115 40000000) $thr
+    $r = Invoke-BenchmarkCompare (New-SyntheticResult 100 18000000) (New-SyntheticResult 115 18000000) $thr
     Check ($r.Failed -eq $true) "1: +15% (> min-delta) blocks"
 
     # 2: +5% delta -> allowed (under the pct threshold).
-    $r = Invoke-BenchmarkCompare (New-SyntheticResult 100 40000000) (New-SyntheticResult 105 40000000) $thr
+    $r = Invoke-BenchmarkCompare (New-SyntheticResult 100 18000000) (New-SyntheticResult 105 18000000) $thr
     Check ($r.Failed -eq $false) "2: +5% allowed"
 
     # 3: +50% but tiny absolute (4 ms < 5 ms floor) -> allowed.
-    $r = Invoke-BenchmarkCompare (New-SyntheticResult 8 40000000) (New-SyntheticResult 12 40000000) $thr
+    $r = Invoke-BenchmarkCompare (New-SyntheticResult 8 18000000) (New-SyntheticResult 12 18000000) $thr
     Check ($r.Failed -eq $false) "3: +50% but < min-delta allowed"
 
     # 4: exe growth beyond the 256 KB tolerance -> blocked.
-    $r = Invoke-BenchmarkCompare (New-SyntheticResult 100 40000000) (New-SyntheticResult 100 40300000) $thr
+    $r = Invoke-BenchmarkCompare (New-SyntheticResult 100 18000000) (New-SyntheticResult 100 18300000) $thr
     Check ($r.Failed -eq $true) "4: exe +300000 B blocks"
 
     # 5: exe growth within tolerance -> allowed.
-    $r = Invoke-BenchmarkCompare (New-SyntheticResult 100 40000000) (New-SyntheticResult 100 40100000) $thr
+    $r = Invoke-BenchmarkCompare (New-SyntheticResult 100 18000000) (New-SyntheticResult 100 18100000) $thr
     Check ($r.Failed -eq $false) "5: exe +100000 B allowed"
 
     # 6: a zero gated field -> error (throws BENCH_VALIDATION).
     $threw = $false
     try {
         $bad = [pscustomobject]@{
-            exe_bytes = 40000000
+            exe_bytes = 18000000
             fixtures  = [pscustomobject]@{ "large.pdf" = [pscustomobject]@{ open_render_ms = 0 } }
         }
-        Invoke-BenchmarkCompare (New-SyntheticResult 100 40000000) $bad $thr | Out-Null
+        Invoke-BenchmarkCompare (New-SyntheticResult 100 18000000) $bad $thr | Out-Null
     } catch {
         if ($_.Exception.Message -like "BENCH_VALIDATION*") { $threw = $true }
     }
@@ -151,14 +161,18 @@ function Invoke-SelfTest {
         $noBytes = [pscustomobject]@{
             fixtures = [pscustomobject]@{ "large.pdf" = [pscustomobject]@{ open_render_ms = 100 } }
         }
-        Invoke-BenchmarkCompare $noBytes (New-SyntheticResult 100 40000000) $thr | Out-Null
+        Invoke-BenchmarkCompare $noBytes (New-SyntheticResult 100 18000000) $thr | Out-Null
     } catch {
         if ($_.Exception.Message -like "BENCH_VALIDATION*") { $threw = $true }
     }
     Check $threw "7: missing exe_bytes errors"
 
+    # 8: PR within the per-PR delta but ABOVE the absolute ceiling -> blocked.
+    $r = Invoke-BenchmarkCompare (New-SyntheticResult 100 18900000) (New-SyntheticResult 100 19050000) $thr
+    Check ($r.Failed -eq $true) "8: exe above size_ceiling_bytes blocks"
+
     if ($script:selfTestOk) {
-        Write-Host "[OK] benchmark self-test: 7/7 passed"
+        Write-Host "[OK] benchmark self-test: 8/8 passed"
         exit 0
     }
     Write-Host "[FAIL] benchmark self-test had failures"

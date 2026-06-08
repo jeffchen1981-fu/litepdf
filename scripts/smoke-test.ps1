@@ -16,9 +16,9 @@ if (-not (Test-Path $fixture)) {
     throw "fixture not found at $fixture"
 }
 
-# Size budget. MuPDF is linked in full; feature-pruning deferred to Phase 11.
-# Current Release build ~39 MB; 50 MB leaves headroom for Phase 3 additions.
-$maxBytes = 50MB
+# Size budget. Phase 11.5 pruned MuPDF (JS/OCR/DOCX off, CJK -> Droid Sans
+# Fallback Full); Release build ~18-20 MB. 25 MB leaves headroom.
+$maxBytes = 25MB
 $size = (Get-Item $exe).Length
 if ($size -gt $maxBytes) {
     throw "litepdf.exe is $size bytes, exceeds budget of $maxBytes bytes"

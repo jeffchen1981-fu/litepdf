@@ -378,6 +378,14 @@ Also:
 
 - MuPDF feature-flag pruning (mujs / gumbo / tesseract / leptonica) and any move
   toward the 8 MB exe target. Only anti-regression size protection lands here.
+
+> **Reconciliation note (2026-06-08):** The feature-flag pruning above shipped in
+> **Phase 11.5** (branch `phase-11.5`): `FZ_ENABLE_JS/OCR_OUTPUT/DOCX_OUTPUT 0` +
+> symbol fonts off + CJK downgraded to Droid Sans Fallback Full took `litepdf.exe`
+> from 39.6 MB to 18.25 MB. The benchmark gate also gained an absolute
+> `size_ceiling_bytes` field on top of the per-PR `size_regression_bytes` delta
+> (the §6 `thresholds.json` now carries both). The 8 MB exe target stays deferred
+> to post-v1.0. See `docs/superpowers/plans/2026-06-07-phase-11.5-size-prune-coldstart.md`.
 - Idle-RAM regression gating.
 - Active cold-start optimization.
 - Disk-IO (cold-cache) regression detection — the warm-cache metric (§3.1) does

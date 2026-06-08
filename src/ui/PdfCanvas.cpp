@@ -315,6 +315,9 @@ PdfCanvas::PdfCanvas(HINSTANCE hInstance, HWND parent)
                                    reinterpret_cast<void**>(impl_->factory.GetAddressOf()));
     if (FAILED(hr))
         throw std::runtime_error("D2D1CreateFactory failed");
+
+    litepdf::ui::ColdStartTimer::mark_sub(
+        litepdf::ui::ColdStartTimer::Sub::D2DFactory);
 }
 
 PdfCanvas::~PdfCanvas() = default;
