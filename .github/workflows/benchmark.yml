@@ -32,7 +32,17 @@ jobs:
         run: pip install "reportlab==4.4.10"
 
       - name: Fixture determinism check
-        run: python scripts/generate-large-fixture.py --check
+        shell: pwsh
+        run: |
+          # Both checks gate independently. Under the Windows runner's default
+          # pwsh shell a bare multi-line block only surfaces the LAST command's
+          # exit code, so an explicit $LASTEXITCODE throw per check keeps a
+          # large-fixture failure from being masked by a passing cjk check
+          # (matches this file's other pwsh steps).
+          python scripts/generate-large-fixture.py --check
+          if ($LASTEXITCODE -ne 0) { throw "large-fixture determinism check failed (exit $LASTEXITCODE)" }
+          python scripts/generate-cjk-fixture.py --check
+          if ($LASTEXITCODE -ne 0) { throw "cjk-fixture determinism check failed (exit $LASTEXITCODE)" }
 
       - name: Configure
         run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
