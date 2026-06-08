@@ -88,13 +88,14 @@ endforeach()
 # tracked submodule file to pristine (dropping any older prepend so we never
 # stack two), re-prepend the current set, and delete the stamp so it rebuilds.
 set(_MUPDF_CONFIG_H "${_MUPDF_ROOT}/include/mupdf/fitz/config.h")
-set(_PRUNE_VER "LITEPDF_PRUNE_V1")   # bump when the injected define set changes
+set(_PRUNE_VER "LITEPDF_PRUNE_V2")   # bump when the injected define set changes
 set(_prune
     "/* ${_PRUNE_VER} — injected by ImportMuPDF.cmake (do not edit) */\n"
     "#define FZ_ENABLE_JS 0\n"
     "#define FZ_ENABLE_OCR_OUTPUT 0\n"
     "#define FZ_ENABLE_DOCX_OUTPUT 0\n"
-    "#define TOFU_SYMBOL\n")
+    "#define TOFU_SYMBOL\n"
+    "#define TOFU_CJK_LANG\n")
 string(JOIN "" _prune_str ${_prune})
 file(READ "${_MUPDF_CONFIG_H}" _cfg)
 if(NOT _cfg MATCHES "${_PRUNE_VER}")
