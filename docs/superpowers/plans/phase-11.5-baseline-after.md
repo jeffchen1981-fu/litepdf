@@ -75,3 +75,33 @@ before (63/66/59), i.e. lost in noise on this loaded run, not a real regression.
 **Takeaway:** the ~21 MB size win and cold-start are decoupled. Cold-start
 improvements, if pursued later, must target the thread/pump warm-up gap, not the
 binary footprint.
+
+## Task 8 — CJK render verdict (visual glyph-vs-tofu gate)
+
+The pruned build (Droid Sans Fallback Full) renders all three CJK fixtures as
+real glyphs — **no tofu, no coverage gap** in the sample sets. Reference renders
+are checked in at `tests/fixtures/cjk-reference/cjk-{zh-hant,ja,ko}.png`.
+
+| Fixture | Script | Sample | Verdict |
+|---------|--------|--------|---------|
+| cjk-zh-hant.pdf | Traditional Chinese | 繁體中文測試 常用字 台北 標準萬國碼 | glyphs OK — incl. Traditional-only forms (繁體標準萬國碼) |
+| cjk-ja.pdf | Japanese | 日本語のテスト ひらがな カタカナ 漢字 | glyphs OK — hiragana + katakana + kanji |
+| cjk-ko.pdf | Korean | 한국어 테스트 한글 서울 표준 | glyphs OK — Hangul syllables |
+
+**zh-Hant coverage (primary locale):** confirmed by the user on the rendered
+reference — every sampled Traditional glyph resolves to a real form, no fallback
+box. The post-v1.0 C-real system-font loader is **not** needed for this sample.
+
+**Method (deviation from plan Task 8 Step 1).** Reference PNGs were produced
+headlessly via `litepdf-cli <fixture> --render 0` (P6 PPM → PNG via Pillow), not
+a GUI window screenshot. It is the same `RenderEngine` the GUI uses; the headless
+render is reproducible and matches the Task 5 precedent (CLI render used to prove
+SVG). Each fixture also passed the liveness smoke (render exit 0).
+
+**CID-encoding scope note (do not over-claim).** The zh-Hant fixture uses
+`STSong-Light`, an Adobe-GB1 (Simplified-ordered) built-in CID font. The
+Traditional sample chars are valid Unicode and resolve through Droid Sans
+Fallback Full's broad Han coverage, so the visual gate is valid — but it tests
+**Droid glyph coverage**, not the Adobe-CNS / Traditional CID-ordering path
+(which would need `MSung-Light`). The verdict is "Droid covers these glyphs," not
+"the Traditional CID-ordering path is exercised."
