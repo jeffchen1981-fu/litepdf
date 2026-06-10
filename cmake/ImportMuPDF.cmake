@@ -154,9 +154,10 @@ foreach(_m FZ_ENABLE_JS FZ_ENABLE_OCR_OUTPUT FZ_ENABLE_DOCX_OUTPUT
        AND NOT _cfg_live MATCHES "defined[ \t]*\\([ \t]*${_m}[ \t]*\\)")
         message(FATAL_ERROR
             "Prune drift: no live #ifndef / #if-!defined guard for ${_m} in "
-            "MuPDF config.h. It was renamed/removed upstream and the injected "
-            "'#define ${_m} 0' is now a no-op. Re-audit the V9 set against this "
-            "MuPDF version before proceeding.")
+            "MuPDF config.h. Most likely your third_party/mupdf checkout is stale "
+            "(run 'git submodule update --init --recursive'); otherwise the macro "
+            "was renamed/removed upstream and the injected '#define ${_m} 0' is "
+            "now a no-op — re-audit the V9 set against this MuPDF version.")
     endif()
 endforeach()
 # TOFU_* are consulted (bare #ifndef) in the FONT source, NOT config.h.

@@ -1083,7 +1083,8 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                         L"LitePDF v0.0.13\n\n"
                         L"A lightweight PDF / ePub / CBZ / XPS viewer for Windows.\n\n"
                         L"License: AGPL-3.0\n"
-                        L"Engine: MuPDF 1.24.11\n"
+                        // Source of truth: third_party/mupdf FZ_VERSION; update on bumps.
+                        L"Engine: MuPDF 1.27.2\n"
                         L"Rendering: Direct2D",
                         kWindowTitle, MB_ICONINFORMATION);
                     return 0;
