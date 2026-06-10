@@ -9,7 +9,11 @@ on:
 
 jobs:
   build-windows:
-    runs-on: windows-latest
+    # Pinned to windows-2022 for the VS 2022 (v143) toolset. GitHub's
+    # windows-latest moved to a VS2026-only image (windows-2025-vs2026) on
+    # 2026-06-08, which breaks `cmake -G "Visual Studio 17 2022"` at project().
+    # MuPDF's vcxproj + ImportMuPDF.cmake force v143, so we stay on VS 2022.
+    runs-on: windows-2022
 
     steps:
       - name: Checkout with submodules

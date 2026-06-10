@@ -6,7 +6,9 @@ on:
 
 jobs:
   benchmark:
-    runs-on: windows-latest                 # MSVC v143 + pwsh + windows binary layout
+    # Pinned to windows-2022 (VS 2022 / v143); windows-latest moved to a
+    # VS2026-only image on 2026-06-08, breaking the v143 generator.
+    runs-on: windows-2022                   # MSVC v143 + pwsh + windows binary layout
 
     steps:
       - name: Checkout with submodules
