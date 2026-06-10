@@ -8,6 +8,26 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 
 ## [Unreleased]
 
+### Changed
+- Upgraded MuPDF 1.24.11 → 1.27.2. Search source/output is unchanged; this is a
+  behavior-identical dependency landing (Tier-1 case-sensitive search activation
+  is deferred to a later phase).
+- Reduced `litepdf.exe` from 18.25 MB to 12.25 MB by pruning non-CJK Noto
+  fallback fonts (`TOFU_NOTO`) and unused MuPDF features (barcode / brotli /
+  hyphen / office and the non-allowlist document handlers MOBI / HTML / TXT /
+  IMG). The shipped formats (PDF / EPUB / CBZ / XPS / FB2 / SVG) and CJK font
+  coverage are unaffected.
+- Latin/Base14 PDF rendering has a benign sub-pixel anti-aliasing shift under
+  1.27.2 (no content change; documented as spike M4 in
+  `docs/superpowers/plans/2026-06-08-mupdf-1.27-spike-findings.md`). CJK
+  rendering is byte-identical to 1.24.11.
+
+### Removed
+- Non-CJK Noto fallback glyphs. PDFs that do NOT embed their fonts and use
+  non-Latin/non-CJK scripts (Arabic, Hebrew, Thai, Indic, …) now render missing
+  glyphs instead of a Noto fallback. CJK, Latin (Base14), and font-embedded PDFs
+  are unaffected.
+
 ## [0.0.12-phase10] — 2026-06-01 — Installer
 
 ### Added

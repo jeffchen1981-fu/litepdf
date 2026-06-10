@@ -78,9 +78,11 @@ endforeach()
 
 # --- Phase 11.5: prune unused MuPDF features + fonts to shrink the exe ----
 # Prepend pruning #defines above config.h's `#ifndef FZ_CONFIG_H` include guard.
-# FZ_ENABLE_* are #ifndef-guarded (config.h:162-208) so an injected 0 wins; the
-# TOFU_* macros have no guard but are tested with bare #ifndef in font-table.h
-# (compiled via noto.c), so an injected #define equally takes effect.
+# FZ_ENABLE_* are #ifndef / #if-!defined-guarded in config.h so an injected 0
+# wins; the TOFU_* macros are tested with bare #ifndef in the font source
+# (source/fitz/font-table.h), so an injected #define equally takes effect. Exact
+# line numbers vary per MuPDF version — the prune-effective assertion below
+# verifies each guard/consult is still live.
 #
 # Idempotent AND re-appliable: the _PRUNE_VER marker version-stamps the injected
 # set. If config.h lacks the CURRENT marker (fresh checkout, OR the define set
@@ -88,13 +90,30 @@ endforeach()
 # tracked submodule file to pristine (dropping any older prepend so we never
 # stack two), re-prepend the current set, and delete the stamp so it rebuilds.
 set(_MUPDF_CONFIG_H "${_MUPDF_ROOT}/include/mupdf/fitz/config.h")
-set(_PRUNE_VER "LITEPDF_PRUNE_V2")   # bump when the injected define set changes
+# V9 = the spike-proven durable set (spike findings lever table, 2026-06-09).
+# V3-V8 were throwaway experiment rungs on spike/mupdf-1.27 and never landed;
+# this is the first durable bump after V2, jumping straight to V9 so the marker
+# matches the findings doc the team will reference. TOFU_EMOJI is a no-op in
+# 1.27.2 (spike V8 = 0 bytes; no standalone consult, force-defined by TOFU_NOTO)
+# but kept for spike-V9 parity — it is deliberately excluded from the assertion.
+set(_PRUNE_VER "LITEPDF_PRUNE_V9")   # bump when the injected define set changes
 set(_prune
     "/* ${_PRUNE_VER} — injected by ImportMuPDF.cmake (do not edit) */\n"
     "#define FZ_ENABLE_JS 0\n"
     "#define FZ_ENABLE_OCR_OUTPUT 0\n"
     "#define FZ_ENABLE_DOCX_OUTPUT 0\n"
+    "#define FZ_ENABLE_BARCODE 0\n"
+    "#define FZ_ENABLE_BROTLI 0\n"
+    "#define FZ_ENABLE_HYPHEN 0\n"
+    "#define FZ_ENABLE_HYPHEN_ALL 0\n"
+    "#define FZ_ENABLE_OFFICE 0\n"
+    "#define FZ_ENABLE_MOBI 0\n"
+    "#define FZ_ENABLE_HTML 0\n"
+    "#define FZ_ENABLE_TXT 0\n"
+    "#define FZ_ENABLE_IMG 0\n"
     "#define TOFU_SYMBOL\n"
+    "#define TOFU_EMOJI\n"
+    "#define TOFU_NOTO\n"
     "#define TOFU_CJK_LANG\n")
 string(JOIN "" _prune_str ${_prune})
 file(READ "${_MUPDF_CONFIG_H}" _cfg)
@@ -116,6 +135,46 @@ if(NOT _cfg MATCHES "${_PRUNE_VER}")
     file(REMOVE
         "${CMAKE_BINARY_DIR}/mupdf_ext-prefix/src/mupdf_ext-stamp/Release/mupdf_ext-build")
 endif()
+
+# --- Prune-effective assertion (spec section 5; Opus F6 + Codex #5) ----------
+# Runs on EVERY configure (outside the marker-guarded prune block) so a renamed
+# or removed macro after a future MuPDF bump fails loudly HERE, not as a late,
+# ambiguous size regression. Anchored to the actual guard/consult FORM (not a
+# bare token) so a substring (FZ_ENABLE_HYPHEN inside FZ_ENABLE_HYPHEN_ALL;
+# FZ_ENABLE_HTML inside FZ_ENABLE_HTML_ENGINE) or a comment-only opt-in line
+# cannot mask a real removal. CMake regex has no word boundary, so we require a
+# non-identifier char after the token.
+file(READ "${_MUPDF_CONFIG_H}" _cfg_live)
+foreach(_m FZ_ENABLE_JS FZ_ENABLE_OCR_OUTPUT FZ_ENABLE_DOCX_OUTPUT
+           FZ_ENABLE_BARCODE FZ_ENABLE_BROTLI FZ_ENABLE_HYPHEN
+           FZ_ENABLE_HYPHEN_ALL FZ_ENABLE_OFFICE FZ_ENABLE_MOBI
+           FZ_ENABLE_HTML FZ_ENABLE_TXT FZ_ENABLE_IMG)
+    # Accept #ifndef X  OR  #if !defined(X)  (BARCODE uses the latter).
+    if(NOT _cfg_live MATCHES "ifndef[ \t]+${_m}[^A-Za-z0-9_]"
+       AND NOT _cfg_live MATCHES "defined[ \t]*\\([ \t]*${_m}[ \t]*\\)")
+        message(FATAL_ERROR
+            "Prune drift: no live #ifndef / #if-!defined guard for ${_m} in "
+            "MuPDF config.h. Most likely your third_party/mupdf checkout is stale "
+            "(run 'git submodule update --init --recursive'); otherwise the macro "
+            "was renamed/removed upstream and the injected '#define ${_m} 0' is "
+            "now a no-op — re-audit the V9 set against this MuPDF version.")
+    endif()
+endforeach()
+# TOFU_* are consulted (bare #ifndef) in the FONT source, NOT config.h.
+# font-table.h is the canonical consult site (font.c also references CJK_LANG).
+# TOFU_EMOJI is intentionally NOT asserted: 1.27.2 has no standalone
+# '#ifndef TOFU_EMOJI' consult; it is driven by TOFU_NOTO/NOTO_SMALL and
+# measured 0 bytes in the spike (V8). It stays injected for spike-V9 parity.
+file(READ "${_MUPDF_ROOT}/source/fitz/font-table.h" _ft_src)
+foreach(_t TOFU_SYMBOL TOFU_NOTO TOFU_CJK_LANG)
+    if(NOT _ft_src MATCHES "ifndef[ \t]+${_t}[^A-Za-z0-9_]")
+        message(FATAL_ERROR
+            "Prune drift: no live '#ifndef ${_t}' consult in "
+            "source/fitz/font-table.h. The font-prune consult site moved or was "
+            "renamed upstream; the injected '#define ${_t}' is now a no-op.")
+    endif()
+endforeach()
+message(STATUS "MuPDF prune-effective assertion passed (12 FZ_ENABLE_* + 3 TOFU_*; TOFU_EMOJI exempt).")
 
 # ExternalProject builds MuPDF's sln. We target libmupdf; MSBuild
 # automatically chases its ProjectReferences (libthirdparty, libresources,

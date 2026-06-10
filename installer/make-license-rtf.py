@@ -24,15 +24,15 @@ AGPL 要求您同樣需將您的原始碼公開 (AGPL §13)。
 本程式包含之第三方元件
 ─────────────────────────────────────────────
 
-• MuPDF 1.24.11 — (c) Artifex Software, Inc. — AGPL-3.0
-• FreeType 2.13.0 — The FreeType Project — FTL
-• libjpeg 9e — Independent JPEG Group — IJG License
+• MuPDF 1.27.2 — (c) Artifex Software, Inc. — AGPL-3.0
+• FreeType 2.13.3 — The FreeType Project — FTL
+• libjpeg 9f — Independent JPEG Group — IJG License
 • OpenJPEG — UCLouvain / OpenJPEG contributors — BSD-2-Clause
 • Little CMS (lcms2) — (c) Marti Maria — MIT
 • MuJS — (c) Artifex Software, Inc. — ISC
 • jbig2dec — (c) Artifex Software, Inc. — AGPL-3.0
 • Gumbo (gumbo-parser) — (c) Google, Inc. — Apache-2.0
-• zlib 1.2.13 — (c) Jean-loup Gailly & Mark Adler — zlib License
+• zlib 1.3.1 — (c) Jean-loup Gailly & Mark Adler — zlib License
 
 Portions of this software are copyright (c) 2006-2024 The FreeType Project (www.freetype.org). All rights reserved.
 This software is based in part on the work of the Independent JPEG Group.
