@@ -13,7 +13,9 @@ concurrency:
 
 jobs:
   release:
-    runs-on: windows-latest
+    # Pinned to windows-2022 (VS 2022 / v143); windows-latest moved to a
+    # VS2026-only image on 2026-06-08, breaking the v143 generator.
+    runs-on: windows-2022
     timeout-minutes: 120
     steps:
       - name: Checkout with submodules
