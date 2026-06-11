@@ -9,6 +9,8 @@ namespace litepdf::core {
 
 enum class SessionZoom { FitWidth, FitPage, Custom };
 
+inline constexpr int kSessionVersion = 1;
+
 struct SessionTab {
     std::filesystem::path path;
     int page = 0;
@@ -23,13 +25,11 @@ struct SessionWindow {
 };
 
 struct SessionState {
-    int version = 1;
+    int version = kSessionVersion;
     SessionWindow window;
     int active_tab = 0;
     std::vector<SessionTab> tabs;
 };
-
-inline constexpr int kSessionVersion = 1;
 
 // Compact UTF-8 JSON. Paths are stored UTF-8 and JSON-escaped.
 std::string to_json(const SessionState& s);
