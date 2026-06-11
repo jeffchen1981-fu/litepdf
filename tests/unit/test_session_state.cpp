@@ -127,3 +127,42 @@ TEST_CASE("from_json tolerates an empty-tabs session", "[core][session][json]") 
     REQUIRE(r.has_value());
     REQUIRE(r->tabs.empty());
 }
+
+TEST_CASE("from_json rejects a sign-only integer", "[core][session][json]") {
+    // "active":- has a sign but no digit; strict parse must reject, not treat as 0.
+    auto r = from_json(R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":-,"tabs":[]})");
+    REQUIRE_FALSE(r.has_value());
+}
+
+TEST_CASE("from_json rejects a partial float zoom_scale", "[core][session][json]") {
+    // 1.2.3 is two dots; strtod stops at 1.2 and discards .3 — reject the leftover.
+    auto r = from_json(R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"a.pdf","page":0,"zoom_mode":"custom","zoom_scale":1.2.3}]})");
+    REQUIRE_FALSE(r.has_value());
+}
+
+TEST_CASE("from_json rejects an exponent with no digits", "[core][session][json]") {
+    // 1e has an exponent marker but no exponent digits; strtod leaves 'e' unconsumed.
+    auto r = from_json(R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"a.pdf","page":0,"zoom_mode":"custom","zoom_scale":1e}]})");
+    REQUIRE_FALSE(r.has_value());
+}
+
+TEST_CASE("from_json rejects a tab with a missing path key", "[core][session][json]") {
+    // to_json always emits "path"; a tab without it leaves path empty -> validate rejects.
+    auto r = from_json(R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"page":0,"zoom_mode":"fit_width","zoom_scale":1}]})");
+    REQUIRE_FALSE(r.has_value());
+}
+
+TEST_CASE("from_json rejects a tab with an explicit empty path", "[core][session][json]") {
+    auto r = from_json(R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"","page":0,"zoom_mode":"fit_width","zoom_scale":1}]})");
+    REQUIRE_FALSE(r.has_value());
+}
+
+TEST_CASE("from_json rejects an unescaped control char in a path", "[core][session][json]") {
+    // RFC 7159 sec 7: bytes 0x00-0x1F must be \u-escaped inside a string. A raw
+    // 0x01 byte in the path value must be rejected. Assemble as a std::string
+    // because a raw literal cannot embed a control byte cleanly.
+    std::string j = R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"a)";
+    j.push_back('\x01');
+    j += R"(.pdf","page":0,"zoom_mode":"fit_width","zoom_scale":1}]})";
+    REQUIRE_FALSE(from_json(j).has_value());
+}

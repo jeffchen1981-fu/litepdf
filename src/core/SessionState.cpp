@@ -158,6 +158,7 @@ private:
                     default: fail();
                 }
             } else {
+                if ((unsigned char)c < 0x20) fail();  // RFC 7159 sec 7: no unescaped 0x00-0x1F in strings
                 r.push_back(c);  // raw UTF-8 bytes pass through
             }
         }
@@ -167,8 +168,9 @@ private:
         ws();
         size_t start = i_;
         if (i_ < s_.size() && (s_[i_]=='-'||s_[i_]=='+')) ++i_;
+        size_t digits_start = i_;
         while (i_ < s_.size() && s_[i_]>='0' && s_[i_]<='9') ++i_;
-        if (i_ == start) fail();
+        if (i_ == digits_start) fail();   // require >= 1 digit after optional sign
         return std::strtol(std::string(s_.substr(start, i_-start)).c_str(), nullptr, 10);
     }
 
@@ -181,7 +183,11 @@ private:
             else break;
         }
         if (i_ == start) fail();
-        return std::strtod(std::string(s_.substr(start, i_-start)).c_str(), nullptr);
+        std::string tok(s_.substr(start, i_-start));
+        char* end = nullptr;
+        double v = std::strtod(tok.c_str(), &end);
+        if (end != tok.c_str() + tok.size()) fail();  // reject "1.2.3", "1e", "1e+"
+        return v;
     }
 
     SessionZoom parse_zoom() {
@@ -282,6 +288,7 @@ bool validate(const SessionState& s) {
         return false;
     }
     for (const auto& t : s.tabs) {
+        if (t.path.empty()) return false;   // missing/blank "path" — to_json never emits this
         if (t.page < 0) return false;
         if (!std::isfinite(t.zoom_scale) || t.zoom_scale <= 0.0f) return false;
     }
