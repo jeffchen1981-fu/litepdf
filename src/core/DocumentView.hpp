@@ -97,7 +97,8 @@ public:
                            float dpi = 96.0f);
 
     // Directly set a Custom zoom at an exact scale (used by session restore).
-    // Clamps to the preset span [0.5, 4.0]. Does not require viewport dims.
+    // Clamps to the preset span [0.5, 4.0]; non-finite inputs are clamped into
+    // range. Does not require viewport dims.
     void set_zoom_scale(float scale) noexcept;
 
     // Cycle through preset levels {0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0}.
