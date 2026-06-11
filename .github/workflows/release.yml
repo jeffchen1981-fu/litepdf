@@ -99,7 +99,13 @@ jobs:
             if ($LASTEXITCODE -ne 0) { Write-Error "choco install innosetup failed"; exit 1 }
           }
           if (-not (Test-Path $iscc)) { Write-Error "ISCC.exe not found at $iscc"; exit 1 }
-          Write-Host "[OK] Inno Setup 6 present."
+          # Record which compiler version actually ran. A newer ISCC warns on
+          # undefined zh_tw message keys in the vendored .isl (benign: those keys
+          # are download/web-install pages this self-contained installer never
+          # shows). Logging the version makes a real future drift diagnosable
+          # instead of silently invisible.
+          $isccVer = (Get-Item $iscc).VersionInfo.ProductVersion
+          Write-Host "[OK] Inno Setup 6 present (ISCC ProductVersion: $isccVer)."
 
       - name: Compile installer
         shell: pwsh
