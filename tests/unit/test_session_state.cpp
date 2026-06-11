@@ -79,12 +79,31 @@ TEST_CASE("from_json round-trips a CJK and a UNC path", "[core][session][json]")
 }
 
 TEST_CASE("from_json decodes a uXXXX BMP escape to UTF-8", "[core][session][json]") {
-    // A foreign writer may escape CJK codepoints as \uXXXX; we must decode them, not truncate.
-    // Raw literal => the backslash reaches from_json literally.
-    auto r = from_json(R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"C:\\中.pdf","page":0,"zoom_mode":"fit_width","zoom_scale":1}]})");
+    // A foreign writer may escape U+4E2D as a 6-char \uXXXX sequence; we must
+    // decode it, not truncate. INPUT is a raw string, so a backslash followed by
+    // the ASCII chars u 4 e 2 d reaches from_json literally and exercises the
+    // case 'u' decoder (hex4 + append_utf8). MSVC suppresses universal-character
+    // processing inside raw literals, so it stays a literal escape, not a glyph.
+    // EXPECTED is built from explicit UTF-16 code units to keep the source ASCII;
+    // the two sides MUST differ: input = literal escape text, expected = the char.
+    const std::wstring expected = {L'C', L':', L'\\', wchar_t(0x4E2D), L'.', L'p', L'd', L'f'};
+    auto r = from_json(R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"C:\\\u4e2d.pdf","page":0,"zoom_mode":"fit_width","zoom_scale":1}]})");
     REQUIRE(r.has_value());
     REQUIRE(r->tabs.size() == 1);
-    REQUIRE(r->tabs[0].path == std::filesystem::path(L"C:\\中.pdf"));   // U+4E2D 中
+    REQUIRE(r->tabs[0].path == std::filesystem::path(expected));  // U+4E2D
+}
+
+TEST_CASE("from_json decodes a surrogate pair to a 4-byte UTF-8 astral char", "[core][session][json]") {
+    // INPUT raw string holds the literal 12-char escape for a UTF-16 surrogate
+    // pair (high \ud834 + low \udd1e); the parser's surrogate combine branch
+    // (4-byte UTF-8) decodes it to U+1D11E. EXPECTED is built from the explicit
+    // surrogate code units 0xD834 0xDD1E to keep the source ASCII (a UCN glyph
+    // would otherwise need a non-ASCII literal in the file).
+    const std::wstring expected = {wchar_t(0xD834), wchar_t(0xDD1E), L'.', L'p', L'd', L'f'};
+    auto r = from_json(R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"\ud834\udd1e.pdf","page":0,"zoom_mode":"fit_width","zoom_scale":1}]})");
+    REQUIRE(r.has_value());
+    REQUIRE(r->tabs.size() == 1);
+    REQUIRE(r->tabs[0].path == std::filesystem::path(expected));  // U+1D11E
 }
 
 TEST_CASE("from_json rejects a lone surrogate escape", "[core][session][json]") {
