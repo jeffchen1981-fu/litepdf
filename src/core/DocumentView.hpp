@@ -96,6 +96,10 @@ public:
                            float viewport_h_dip,
                            float dpi = 96.0f);
 
+    // Directly set a Custom zoom at an exact scale (used by session restore).
+    // Clamps to the preset span [0.5, 4.0]. Does not require viewport dims.
+    void set_zoom_scale(float scale) noexcept;
+
     // Cycle through preset levels {0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0}.
     // Both switch the mode to Custom and return true iff the scale changed.
     bool zoom_in();

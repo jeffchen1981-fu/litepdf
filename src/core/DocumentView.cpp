@@ -245,6 +245,15 @@ void DocumentView::set_zoom_mode(ZoomMode mode,
     }
 }
 
+void DocumentView::set_zoom_scale(float scale) noexcept {
+    const float lo = Impl::kPresets[0];                                                      // 0.5f
+    const float hi = Impl::kPresets[sizeof(Impl::kPresets)/sizeof(Impl::kPresets[0]) - 1];  // 4.0f
+    if (scale < lo) scale = lo;
+    if (scale > hi) scale = hi;
+    impl_->zm    = ZoomMode::Custom;
+    impl_->scale = scale;
+}
+
 bool DocumentView::zoom_in() {
     const float cur = impl_->scale;
     for (float lvl : Impl::kPresets) {
