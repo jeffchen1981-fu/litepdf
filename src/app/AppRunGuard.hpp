@@ -8,6 +8,9 @@ public:
     // Inspects `marker`: if present => previous exit was abnormal. Then
     // creates/refreshes the marker so THIS run is tracked. Construct ONLY in
     // the primary (message-loop-owning) instance, after the single-instance gate.
+    // May throw std::bad_alloc (path/stream allocation). A marker-write failure
+    // is silently swallowed: this run is then untracked (next launch sees a clean
+    // exit) — the safe-degrade direction (a missed restore, never a false one).
     explicit AppRunGuard(std::filesystem::path marker);
 
     bool previous_exit_was_abnormal() const noexcept { return prev_abnormal_; }
