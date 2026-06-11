@@ -49,6 +49,7 @@ add_library(litepdf_core STATIC
     src/core/SearchSession.cpp     # Phase 6 Task 5
     src/app/SearchDispatcher.cpp   # Phase 6 Task 4
     src/app/CrossTabSearch.cpp     # Phase 6 Task 11
+    src/app/AppPaths.cpp           # Phase 12 Task 1
     src/core/ThumbnailModel.cpp    # Phase 7 Task 1
     src/core/ThumbCache.cpp        # Phase 7 Task 2
     src/core/ThumbnailRenderer.cpp # Phase 7 Task 3

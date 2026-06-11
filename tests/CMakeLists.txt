@@ -64,6 +64,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_cli_render_teardown.cpp  # CLI --render teardown UAF regression
     unit/test_cli_bench_teardown.cpp   # CLI --benchmark iteration teardown + contract
     unit/test_cold_start_math.cpp      # Phase 11.5 Task 1
+    unit/test_app_paths.cpp            # Phase 12 Task 1
     # The CLI helpers under test are compiled straight into the test binary
     # (they are not part of litepdf_core). Both are MuPDF-header-free and
     # resolve their fz_* calls through the litepdf::mupdf dependency that
