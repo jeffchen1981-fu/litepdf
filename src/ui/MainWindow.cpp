@@ -87,6 +87,9 @@ MainWindow::MainWindow()
     : search_dispatcher_(
           std::make_unique<litepdf::app::ThreadPoolDispatcher>(2)) {
     mru_.load();
+    // Phase 12: resolve %LOCALAPPDATA%\LitePDF (creates it + crashes\).
+    // Empty on failure => session persistence silently disabled everywhere.
+    app_data_dir_ = litepdf::app::app_data_dir();
 }
 MainWindow::~MainWindow() {
     if (haccel_) { DestroyAcceleratorTable(haccel_); haccel_ = nullptr; }
@@ -616,6 +619,8 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
     if (canvas_) canvas_->set_current_hit(std::nullopt);
     update_find_counter();
 
+    schedule_session_save();  // Phase 12: active tab / open set changed
+
     (void)new_index;
 }
 
@@ -642,6 +647,72 @@ void MainWindow::on_tab_close_request(int index) {
     // close_tab() fires on_switch (with new_active=-1 when the last tab
     // is dropped); on_tab_switch() performs all the canvas/outline/layout
     // teardown. No further work needed here.
+    schedule_session_save();  // Phase 12: a closed tab changes the set
+}
+
+// ---------------- Phase 12: crash-safe session persistence -----------------
+
+litepdf::core::SessionState MainWindow::capture_session() const {
+    litepdf::core::SessionState s;
+    s.version = litepdf::core::kSessionVersion;
+
+    WINDOWPLACEMENT wp{}; wp.length = sizeof(wp);
+    if (GetWindowPlacement(hwnd_, &wp)) {
+        s.window.flags = static_cast<int>(wp.flags);
+        s.window.show  = static_cast<int>(wp.showCmd);
+        s.window.x = wp.rcNormalPosition.left;
+        s.window.y = wp.rcNormalPosition.top;
+        s.window.w = wp.rcNormalPosition.right  - wp.rcNormalPosition.left;
+        s.window.h = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
+    }
+    // active_tab is stored as the index WITHIN the filtered (non-empty-path)
+    // tab list we actually emit, NOT the raw TabManager index — so validate()'s
+    // range check is meaningful and restore lands on the right document.
+    const int raw_active = tabs_ ? tabs_->active_index() : -1;
+    const int count      = tabs_ ? tabs_->count() : 0;
+    s.active_tab = -1;
+    for (int i = 0; i < count; ++i) {
+        auto* tab = tabs_->tab_at(i);
+        if (!tab || tab->path.empty()) continue;
+        if (i == raw_active) s.active_tab = static_cast<int>(s.tabs.size());
+        litepdf::core::SessionTab st;
+        st.path = tab->path;
+        if (auto* v = tab->view.get()) {
+            st.page = v->current_page();
+            switch (v->zoom_mode()) {
+                case litepdf::core::DocumentView::ZoomMode::FitWidth:
+                    st.zoom_mode = litepdf::core::SessionZoom::FitWidth; break;
+                case litepdf::core::DocumentView::ZoomMode::FitPage:
+                    st.zoom_mode = litepdf::core::SessionZoom::FitPage;  break;
+                case litepdf::core::DocumentView::ZoomMode::Custom:
+                    st.zoom_mode = litepdf::core::SessionZoom::Custom;   break;
+            }
+            st.zoom_scale = v->zoom_scale();
+        }
+        s.tabs.push_back(std::move(st));
+    }
+    if (s.active_tab < 0 && !s.tabs.empty()) s.active_tab = 0;  // keep validate() satisfied
+    return s;
+}
+
+void MainWindow::schedule_session_save() {
+    if (app_data_dir_.empty() || restoring_) return;   // disabled / mid-restore
+    SetTimer(hwnd_, kSessionSaveTimer, 1500, nullptr);  // coalesces bursts
+}
+
+void MainWindow::on_clean_exit() {
+    KillTimer(hwnd_, kSessionSaveTimer);            // drain any pending debounce
+    // If a restore is still in flight, do NOT touch session.json or the
+    // marker: capture_session() now would persist a HALF-restored set, and
+    // clearing the marker would suppress the next launch's prompt — together
+    // they permanently lose the unrestored remainder of the crash session.
+    // Leaving both intact means the next launch re-offers the FULL session.
+    if (restoring_) return;
+    if (!app_data_dir_.empty()) {
+        litepdf::core::save_session(
+            litepdf::app::session_file_under(app_data_dir_), capture_session());
+    }
+    if (run_guard_) run_guard_->mark_clean_exit();  // idempotent
 }
 
 LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
@@ -770,6 +841,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                         tp->set_current_page(page);
                     }
                 }
+                schedule_session_save();  // Phase 12: persist new page (debounced)
             });
 
             DragAcceptFiles(hwnd, TRUE);
@@ -813,8 +885,18 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 // the brief stutter during drag-resize is acceptable.
                 kick_render(view->current_page());
             }
+            // Phase 12: maximize/restore are discrete geometry changes that
+            // skip WM_EXITSIZEMOVE (no drag). Persist them (debounced). The
+            // schedule_session_save() restoring_ guard + the WM_TIMER re-check
+            // suppress the SetWindowPlacement-induced WM_SIZE during restore.
+            if (w == SIZE_MAXIMIZED || w == SIZE_RESTORED) schedule_session_save();
             return 0;
         }
+        case WM_EXITSIZEMOVE:
+            // Phase 12: a drag-move or drag-resize just settled. Persist the
+            // new window placement (debounced).
+            schedule_session_save();
+            return 0;
         case WM_SETFOCUS:
             if (canvas_) SetFocus(canvas_->hwnd());
             return 0;
@@ -1092,12 +1174,14 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     if (auto* view = active_view();
                         view && view->zoom_in()) {
                         kick_render(view->current_page());
+                        schedule_session_save();  // Phase 12: zoom changed
                     }
                     return 0;
                 case IDM_ZOOM_OUT:
                     if (auto* view = active_view();
                         view && view->zoom_out()) {
                         kick_render(view->current_page());
+                        schedule_session_save();  // Phase 12: zoom changed
                     }
                     return 0;
                 case IDM_ZOOM_RESET: {
@@ -1110,6 +1194,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                             static_cast<float>(rc.bottom - rc.top),
                             static_cast<float>(dpi));
                         kick_render(view->current_page());
+                        schedule_session_save();  // Phase 12: zoom mode changed
                     }
                     return 0;
                 }
@@ -1165,6 +1250,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // callback is where canvas/outline/layout/kick_render happens
             // (and, via on_tab_switch, update_canvas_hits_source()).
             (void)new_index;
+            schedule_session_save();  // Phase 12: a new tab joined the set
             return 0;
         }
         case WM_USER_OPEN_FAILED: {
@@ -1276,6 +1362,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     PostMessageW(target, WM_USER_SEARCH_UPDATE, 0, 0);
                 });
                 (void)tabs_->add_tab(std::move(tab));
+                schedule_session_save();  // Phase 12: authenticated tab joined
             } catch (...) {
                 MessageBoxW(hwnd,
                             L"Failed to open the document after authentication.",
@@ -1291,7 +1378,32 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             return 0;
         case WM_COPYDATA:
             return on_copydata(hwnd, w, l);
+        case WM_TIMER:
+            if (w == kSessionSaveTimer) {
+                KillTimer(hwnd_, kSessionSaveTimer);
+                // Defense in depth: a save timer can be armed (e.g. by the
+                // SetWindowPlacement-induced WM_SIZE during restore) BEFORE
+                // restoring_ flips true. Re-check here so a debounced save
+                // firing mid-restore can't overwrite session.json with a
+                // partial capture.
+                if (restoring_ || app_data_dir_.empty()) return 0;
+                litepdf::core::save_session(
+                    litepdf::app::session_file_under(app_data_dir_),
+                    capture_session());
+            }
+            return 0;
+        case WM_QUERYENDSESSION:
+            // We hold no unsaved-but-unsavable state; always allow shutdown.
+            return TRUE;
+        case WM_ENDSESSION:
+            // OS shutdown/reboot/logoff terminates the process WITHOUT a
+            // WM_DESTROY. Without this, every reboot with tabs open would
+            // leave the run marker behind and falsely prompt restore next
+            // launch. wParam == TRUE means the session is really ending.
+            if (w) on_clean_exit();
+            return 0;
         case WM_DESTROY:
+            on_clean_exit();      // Phase 12: flush save + clear run marker
             PostQuitMessage(0);
             return 0;
     }

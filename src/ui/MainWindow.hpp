@@ -4,8 +4,11 @@
 #include <string>
 #include <windows.h>
 
+#include "app/AppPaths.hpp"      // Phase 12: app_data_dir / session_file_under
+#include "app/AppRunGuard.hpp"   // Phase 12: abnormal-exit run marker
 #include "app/CrossTabSearch.hpp"
 #include "core/MruList.hpp"
+#include "core/SessionStore.hpp" // Phase 12: SessionState + save_session
 #include "ui/FindBar.hpp"
 #include "ui/OutlinePane.hpp"
 #include "ui/PdfCanvas.hpp"
@@ -37,6 +40,11 @@ public:
     // addition to OutputDebugStringW. Set before run().
     void set_log_timings(bool on) { log_timings_ = on; }
     bool log_timings() const { return log_timings_; }
+
+    // Phase 12: borrow the wWinMain-owned AppRunGuard (non-owning; it
+    // outlives run()). Set before run() so on_clean_exit() can clear the
+    // abnormal-exit marker. Left null => marker handling is skipped.
+    void set_run_guard(litepdf::app::AppRunGuard* g) { run_guard_ = g; }
 
 private:
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -151,6 +159,22 @@ private:
     // inherits whatever checkbox state the bar keeps internally.
     litepdf::core::MruList        mru_;
     bool                          log_timings_ = false;
+
+    // ---- Phase 12: crash-safe session persistence -----------------------
+    // Snapshot the live window + tab state into a serializable struct.
+    litepdf::core::SessionState capture_session() const;
+    // Debounced auto-save (coalesces bursts). No-op when persistence is
+    // disabled (empty app_data_dir_) or a restore is in flight.
+    void schedule_session_save();
+    // Flush a final save + clear the run marker. Shared by WM_DESTROY and
+    // WM_ENDSESSION; idempotent. Skips both while restoring_ (Task 9) so a
+    // mid-restore exit re-offers the FULL session next launch.
+    void on_clean_exit();
+
+    std::filesystem::path      app_data_dir_;          // empty => persistence disabled
+    litepdf::app::AppRunGuard* run_guard_   = nullptr; // non-owning; lives in wWinMain
+    bool                       restoring_   = false;   // suppresses auto-save mid-restore
+    static constexpr UINT_PTR  kSessionSaveTimer = 0xC0DE;
 };
 
 }  // namespace litepdf::ui
