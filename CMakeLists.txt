@@ -91,6 +91,7 @@ target_link_libraries(litepdf_core PRIVATE
 add_executable(litepdf WIN32
     src/main.cpp
     src/app/SingleInstance.cpp
+    src/app/CrashHandler.cpp     # Phase 12 Task 7 (exe-only: minidump filter)
     src/ui/ColdStartTimer.cpp
     src/ui/FindBar.cpp           # Phase 6 Task 8
     src/ui/MainWindow.cpp
@@ -109,6 +110,7 @@ litepdf_apply_flags(litepdf)
 
 target_link_libraries(litepdf PRIVATE
     comctl32
+    dbghelp        # Phase 12 Task 7: MiniDumpWriteDump (CrashHandler)
     litepdf_core
 )
 
