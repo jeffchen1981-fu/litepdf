@@ -184,11 +184,31 @@ struct RenderEngine::Impl {
             // channel-swap.
             fz_pixmap* pix = nullptr;
             if (dlist) {
+                fz_device* draw_dev = nullptr;
                 fz_try(ctx) {
                     fz_matrix m = fz_scale(req.scale, req.scale);
-                    pix = fz_new_pixmap_from_display_list(ctx, dlist, m,
-                                                          fz_device_bgr(ctx),
-                                                          1);
+                    // Render onto an OPAQUE WHITE background. The convenience
+                    // fz_new_pixmap_from_display_list with alpha=1 clears to
+                    // TRANSPARENT; the canvas's D2D bitmap is
+                    // D2D1_ALPHA_MODE_IGNORE, which paints transparent pixels as
+                    // opaque BLACK — so any page the document does not fill with
+                    // its own background (most real-world PDFs, EPUB) rendered
+                    // black. Keep the 4-channel BGRA buffer (byte-match for
+                    // DXGI_FORMAT_B8G8R8A8_UNORM) but clear it to white first,
+                    // then run the page over it. Invert (below) flips white->
+                    // black for dark mode, as before.
+                    fz_irect bbox = fz_round_rect(
+                        fz_transform_rect(fz_bound_display_list(ctx, dlist), m));
+                    pix = fz_new_pixmap_with_bbox(ctx, fz_device_bgr(ctx), bbox,
+                                                  nullptr, /*alpha*/ 1);
+                    fz_clear_pixmap_with_value(ctx, pix, 0xFF);  // opaque white
+                    draw_dev = fz_new_draw_device(ctx, fz_identity, pix);
+                    fz_run_display_list(ctx, dlist, draw_dev, m,
+                                        fz_infinite_rect, nullptr);
+                    fz_close_device(ctx, draw_dev);
+                }
+                fz_always(ctx) {
+                    if (draw_dev) fz_drop_device(ctx, draw_dev);
                 }
                 fz_catch(ctx) {
                     if (pix) { fz_drop_pixmap(ctx, pix); pix = nullptr; }

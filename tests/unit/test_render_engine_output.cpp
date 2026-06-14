@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -27,6 +28,7 @@ extern "C" {
     int  fz_pixmap_colorants(fz_context*, fz_pixmap*);
     int  fz_pixmap_alpha(fz_context*, fz_pixmap*);
     int  fz_pixmap_stride(fz_context*, fz_pixmap*);
+    unsigned char* fz_pixmap_samples(fz_context*, fz_pixmap*);
 }
 
 TEST_CASE("RenderEngine renders page 0 to a non-null pixmap with sane dimensions",
@@ -83,6 +85,63 @@ TEST_CASE("RenderEngine renders page 0 to a non-null pixmap with sane dimensions
     REQUIRE(has_alpha == 1);
     const int stride = fz_pixmap_stride(test_ctx, got);
     REQUIRE(stride >= w * 4);          // 4 bytes/pixel minimum
+
+    fz_drop_pixmap(test_ctx, got);
+    fz_drop_context(test_ctx);
+}
+
+TEST_CASE("RenderEngine renders an opaque WHITE page background",
+          "[core][render][output]") {
+    // Regression for the black-background bug: simple.pdf does NOT paint its
+    // own page background. The render must clear the BGRA pixmap to opaque
+    // white before running the page; otherwise it stays transparent and the
+    // canvas's D2D bitmap (D2D1_ALPHA_MODE_IGNORE) paints it as opaque BLACK.
+    // Empirically the bug gave a mean BGR brightness ~55; the fix gives ~233.
+    litepdf::core::Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/simple.pdf").has_value());
+    litepdf::core::RenderEngine engine(doc, 1);
+
+    std::mutex m;
+    std::condition_variable cv;
+    fz_pixmap* got = nullptr;
+    bool done = false;
+    engine.submit({0, 0, 1.0f, [&](fz_pixmap* p, fz_context*){
+        std::lock_guard<std::mutex> g(m);
+        got = p;
+        done = true;
+        cv.notify_all();
+    }});
+    {
+        std::unique_lock<std::mutex> lk(m);
+        REQUIRE(cv.wait_for(lk, std::chrono::seconds(5), [&]{ return done; }));
+    }
+    REQUIRE(got != nullptr);
+
+    fz_context* test_ctx = doc.clone_context();
+    REQUIRE(test_ctx != nullptr);
+    const int w = fz_pixmap_width(test_ctx, got);
+    const int h = fz_pixmap_height(test_ctx, got);
+    const int stride = fz_pixmap_stride(test_ctx, got);
+    const unsigned char* s = fz_pixmap_samples(test_ctx, got);
+    REQUIRE(w > 0);
+    REQUIRE(h > 0);
+    REQUIRE(s != nullptr);
+
+    // Mean of the B,G,R channels (skip alpha) across the page. A predominantly
+    // white page is well above mid-grey; the transparent/black-bg regression
+    // collapses toward ~55.
+    unsigned long long sum = 0, count = 0;
+    for (int y = 0; y < h; ++y) {
+        const unsigned char* row = s + static_cast<std::size_t>(y) * stride;
+        for (int x = 0; x < w; ++x) {
+            const unsigned char* px = row + static_cast<std::size_t>(x) * 4;
+            sum += px[0]; sum += px[1]; sum += px[2];
+            count += 3;
+        }
+    }
+    const double mean = static_cast<double>(sum) / static_cast<double>(count);
+    INFO("mean BGR brightness = " << mean);
+    REQUIRE(mean > 150.0);
 
     fz_drop_pixmap(test_ctx, got);
     fz_drop_context(test_ctx);
