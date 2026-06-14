@@ -1552,6 +1552,47 @@ git add src/main.cpp src/ui/MainWindow.hpp src/ui/MainWindow.cpp
 git commit -m "feat: sequential, path-resolved session restore after abnormal exit (prompted)"
 ```
 
+### Executor deviations (2026-06-14, vs plan text — controller-patches rule)
+
+Two deviations from the Step 1 / Step 3 pseudocode, both verified against the live code:
+
+1. **`app_data_dir` wiring — single resolution via a getter, not `window.app_data_dir_ = data_dir`.**
+   Task 8 (committed) already resolves `app_data_dir_` in the MainWindow ctor, and the member is
+   private. Rather than re-resolve in `wWinMain` (double `SHGetKnownFolderPath` + `create_directories`)
+   or expose the member, a public `const std::filesystem::path& app_data_dir() const` getter was added.
+   `wWinMain` constructs the window first (its ctor resolves the dir once), then reads it via the getter
+   to install the crash handler + `prune_crash_dumps` + construct `std::optional<AppRunGuard>` — so the
+   crash dir, run marker, and session file all share ONE resolution. The window is still constructed
+   AFTER the single-instance gate, so a forwarded second instance never reaches this code and never
+   touches the marker (the load-bearing invariant holds). Trade-off: the crash handler is installed
+   just after the (trivial: dispatcher + MRU load + path resolve) ctor instead of just before it —
+   negligible lost coverage.
+
+2. **Restore prompt is English, not the zh-TW literal.** Every existing runtime `MessageBoxW` in the
+   app is English ("Failed to open the document.", "Incorrect password.", …); a lone Chinese restore
+   dialog would be inconsistent, and the `check-chinese-in-code` hook blocks CJK in source. Used
+   `L"LitePDF closed unexpectedly last time.\nRestore the %zu previously open tab(s)?"`. The installer
+   (Task 10) stays zh-TW — it is a separate artifact with its own audience. (If the app UI is ever
+   meant to be zh-TW, that is a separate sweep translating ALL existing English strings, out of scope
+   for Task 9.)
+
+3. **v4 review fix — password failure terminals must be path-correlated (HIGH, found by the Opus
+   review lens).** Step 4's funnel text said to call `restore_on_tab_failed()` on cancel / exhaustion /
+   post-auth `catch` gated only on `restoring_`. That is wrong: `PasswordDialog::prompt` runs a modal
+   *nested* message loop, so a concurrent user/IPC open of a DIFFERENT encrypted file (drag-drop /
+   Ctrl+O / MRU / WM_COPYDATA) can be dispatched reentrantly while a restore tab sits on its password
+   modal. Cancelling/exhausting that concurrent open would call `restore_on_tab_failed()` against the
+   restore's still-pending slot, advancing `restore_index_` and clearing `restore_pending_path_` — so
+   the real restore tab loses its page/zoom (and tab order can scramble). Fix: a single
+   `is_restore_tab = restoring_ && opened == restore_pending_path_` gates ALL three password terminals
+   (and the exhaustion-box suppression), symmetric with the already-correlated `WM_USER_OPEN_OK` /
+   `WM_USER_OPEN_FAILED` paths. The Sonnet lens independently cleared the other six invariants.
+
+Verified: `litepdf` exe builds clean in Release (only pre-existing MuPDF C4702/C4703 + the pre-existing
+PrintJob::run C4834); exe ≈ 11.74 MB, ~6.69 MB under the 19,000,000 gate; unit suite still green
+(200 cases, 199 pass + 1 expected-fail). Manual restore acceptance (Step 6) is interactive GUI
+testing, folded into the Task 11 smoke pass.
+
 ---
 
 ## Task 10: Installer — update keep-config prompt wording

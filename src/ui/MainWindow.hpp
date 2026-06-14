@@ -1,7 +1,10 @@
 #pragma once
+#include <cstddef>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
+#include <vector>
 #include <windows.h>
 
 #include "app/AppPaths.hpp"      // Phase 12: app_data_dir / session_file_under
@@ -31,10 +34,14 @@ public:
     MainWindow& operator=(const MainWindow&) = delete;
 
     // Registers window class, creates HWND, runs message pump.
-    // If initial_path is non-empty, opens it asynchronously after ShowWindow.
+    // If initial_path is non-empty, opens it asynchronously after ShowWindow
+    // (deferred until a restore, if any, completes — see Task 9).
+    // offer_restore (set by wWinMain from AppRunGuard) drives the
+    // prompt-after-abnormal-exit session restore.
     // Returns WM_QUIT's wParam (0 on clean exit).
     int run(HINSTANCE hInstance, int nCmdShow,
-            const std::filesystem::path& initial_path = {});
+            const std::filesystem::path& initial_path = {},
+            bool offer_restore = false);
 
     // When true, PdfCanvas mirrors the cold-start timing line to stderr in
     // addition to OutputDebugStringW. Set before run().
@@ -45,6 +52,12 @@ public:
     // outlives run()). Set before run() so on_clean_exit() can clear the
     // abnormal-exit marker. Left null => marker handling is skipped.
     void set_run_guard(litepdf::app::AppRunGuard* g) { run_guard_ = g; }
+
+    // Phase 12: the resolved %LOCALAPPDATA%\LitePDF dir, or empty when
+    // resolution failed (persistence disabled). wWinMain reuses this single
+    // resolution for the crash handler + run marker so the crash dir, marker,
+    // and session file all share one path. Valid after construction.
+    const std::filesystem::path& app_data_dir() const { return app_data_dir_; }
 
 private:
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -175,6 +188,27 @@ private:
     litepdf::app::AppRunGuard* run_guard_   = nullptr; // non-owning; lives in wWinMain
     bool                       restoring_   = false;   // suppresses auto-save mid-restore
     static constexpr UINT_PTR  kSessionSaveTimer = 0xC0DE;
+
+    // ---- Phase 12 Task 9: sequential restore orchestrator ----------------
+    // Restore is prompt-after-abnormal-exit only and opens tabs ONE AT A TIME
+    // (saved order preserved, completion attributable, encrypted tabs handled).
+    // The CLI initial_path is deferred until restore finishes (or is declined)
+    // so it never races the restore chain. Every terminal of the in-flight
+    // open (success / failure / cancel / exhaustion) funnels back here exactly
+    // once so restoring_ can never get stuck true.
+    void maybe_offer_restore(bool offer);   // prompt, filter, place window, start
+    void restore_open_next();               // issue the next sequential open
+    void restore_on_tab_ready(const std::filesystem::path& opened);  // OPEN_OK / password-success
+    void restore_on_tab_failed();           // any non-success terminal of the in-flight open
+    void restore_finish();                  // resolve active tab by path, re-enable saves
+    void open_deferred_initial_path();      // honor the CLI file once, after restore / on decline
+
+    std::vector<litepdf::core::SessionTab> restore_queue_;
+    std::size_t                   restore_index_ = 0;
+    std::filesystem::path         restore_pending_path_;  // path restore_open_next last issued
+    std::filesystem::path         restore_active_path_;   // resolve active tab by PATH, not index
+    std::optional<std::filesystem::path> deferred_initial_path_;
+    static constexpr std::size_t  kMaxRestoreTabs = 24;   // cap a runaway restore
 };
 
 }  // namespace litepdf::ui
