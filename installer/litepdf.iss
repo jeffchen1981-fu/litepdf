@@ -151,8 +151,8 @@ begin
     ConfigDir := ExpandConstant('{localappdata}\LitePDF');
     if DirExists(ConfigDir) then
     begin
-      if MsgBox('要一併刪除 LitePDF 的設定資料嗎?' + #13#10 + ConfigDir + #13#10#13#10 +
-                '選「否」會保留您的設定 (預設)。', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+      if MsgBox('要一併刪除 LitePDF 的設定、工作階段與當機記錄嗎?' + #13#10 + ConfigDir + #13#10#13#10 +
+                '選「否」會保留這些資料 (預設)。', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
         DelTree(ConfigDir, True, True, True);
     end;
     // Refresh the shell after removing associations.
