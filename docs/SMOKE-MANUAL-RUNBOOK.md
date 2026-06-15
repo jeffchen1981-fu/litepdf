@@ -55,9 +55,8 @@ the tag.
 | D2 2nd instance opens a PDF *during* the restore chain → own tab + chain still completes | PASS: froze the chain at an encrypted tab's password prompt, injected `bookmarks.pdf` via a 2nd instance, then resumed — final set = 3 restored + 1 injected, saved-active correct |
 | D3 close window *mid-restore-chain* → full session re-offered | PASS (deterministic via a temporary env-gated restore delay, reverted): a mid-chain WM_CLOSE left `session.json` at the full count + kept the marker; next launch re-offered the full set; clean exit, no crash dump |
 
-Still REQUIRES a human (detailed below): **E1** debugger stack (needs WinDbg/VS
-+ symbol setup), **F1** install/uninstall (destructive; build a fresh installer
-first).
+Still REQUIRES a human (detailed below): **F1** install/uninstall (destructive;
+build a fresh installer first). (**E1** debugger stack is now done — see §E.)
 
 How D2/D3 were made testable (the chain is otherwise sub-second): **D2** — put
 `encrypted.pdf` in the restore set; its password prompt freezes the chain,
@@ -135,6 +134,17 @@ Microsoft.WinDbg` is the lightest).
 | # | Action | Expected (PASS) |
 |---|---|---|
 | E1 | Open the dump in **Visual Studio** (File → Open → File → the `.dmp`, then "Debug with Native Only") OR **WinDbg** | Loads and the call stack resolves to `litepdf!...` frames (not just `litepdf+0x...` module+offset) |
+
+**E1 PASS (2026-06-15)** — `winget install Microsoft.WinDbg`, then symbolized
+the sample dump with the package's `amd64\cdb.exe`. The stack resolved to named
+frames at the crash site:
+`litepdf!wWinMain+0x4cb` (faulting `mov dword ptr [0],esi` = the --crashtest null
+write, 0xC0000005) → `litepdf!invoke_main` (inline) →
+`litepdf!__scrt_common_main_seh` → `kernel32!BaseThreadInitThunk` →
+`ntdll!RtlUserThreadStart`. GOTCHA: the MSIX-packaged WinDbg redirects
+`%LOCALAPPDATA%`, so it can't open `…\AppData\Local\LitePDF\crashes\*.dmp`
+directly — copy the dump outside AppData first. Command used:
+`cdb -z <dump-copy> -y <repo>\build\RelWithDebInfo -c ".reload /f; .ecxr; k; qd"`.
 
 WinDbg / `cdb` recipe (install "Debugging Tools for Windows" from the Windows SDK
 first — neither is currently on PATH):
