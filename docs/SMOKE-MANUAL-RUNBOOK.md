@@ -30,6 +30,30 @@ Test-Path "$env:LOCALAPPDATA\LitePDF\running.lock"
 - **Abnormal exit** = Task Manager *End Task* or `Stop-Process -Name litepdf -Force` (leaves `running.lock`).
 - **Normal exit** = window *File→Exit* or close button (clears `running.lock`).
 
+## Coverage status — automated pass 2026-06-15 (fixed build, commit `88a1150`)
+
+A scripted GUI pass (PowerShell driving `PostMessage(WM_COMMAND)` + GDI screen
+capture — no computer-use; see the `reference_litepdf_scripted_gui_smoke` memo)
+exercised the items below on `build\Release\litepdf.exe`. Items marked AUTO-PASS
+need no re-run for routine releases. The human items in sections A–F still gate
+the tag.
+
+| Item | Result |
+|---|---|
+| A3 multi-tab switch + close the active middle tab (#33) | AUTO-PASS — canvas rebinds to the neighbour immediately |
+| A4 cross-tab search: panel populates + yellow highlights + row-activate → orange current hit | AUTO-PASS |
+| A6 `sample.cbz` shows real content (#32) + `encrypted.pdf` renders | AUTO-PASS (epub render CLI-verified) |
+| B restore: original ORDER + correct ACTIVE tab | AUTO-PASS |
+| B restore: encrypted tab re-prompts for password, then restores | AUTO-PASS |
+| B restore: canvas shows the ACTIVE tab's page, not the last-restored tab (#35) | FIXED in `88a1150` + AUTO-PASS (previously showed the wrong tab until a manual switch) |
+| C1 normal close → no restore prompt | AUTO-PASS |
+| C2 OS shutdown/logoff clears the marker → no prompt | AUTO-PASS via **simulated** `WM_QUERYENDSESSION`/`WM_ENDSESSION` (a REAL reboot is still the final sign-off) |
+| D1 2nd instance opening a PDF while the restore prompt is up | AUTO-PASS — no deadlock, no double-restore; the forwarded file gets its own tab and the restore still completes |
+
+Still REQUIRES a human (detailed below): **A1** Explorer association, **A2**
+drag-and-drop, **A5** visual zoom/scroll/keyboard nav, **C2** a real reboot,
+**D2/D3** mid-restore-chain timing, **E1** debugger stack, **F1** install/uninstall.
+
 ## A. Core viewer (single launch)
 
 | # | Action | Expected (PASS) |
@@ -38,7 +62,7 @@ Test-Path "$env:LOCALAPPDATA\LitePDF\running.lock"
 | A2 | Drag-and-drop a PDF from Explorer onto the window | Opens as a new tab |
 | A3 | Open 3-4 tabs, switch, close the middle one; watch Task Manager memory | Switch/close correct; memory stable (no leak) |
 | A4 | `Ctrl+Shift+F` cross-tab search a term (use `search.pdf`) | Hit list appears; clicking a hit navigates to the tab/page |
-| A5 | `Ctrl+=` / `Ctrl+-` zoom, mouse scroll, `PgUp`/`PgDn`, `Ctrl+0` reset | All respond correctly and smoothly |
+| A5 | Zoom (View menu + `Ctrl`+mouse-wheel), mouse scroll, arrow-key pan, page nav | Smooth + correct. KNOWN (#34, not a regression): the `Ctrl+=`/`Ctrl+-`/`Ctrl+0` and `PgUp`/`PgDn` *accelerators* are dead; use the View menu / mouse-wheel-zoom / arrow keys instead |
 | A6 | `encrypted.pdf` (password `test`); then `sample.epub`, `sample.cbz` | All three render (not blank/garbled) |
 
 ## B. Restore visual correctness (Phase 12 headline)
@@ -77,17 +101,49 @@ Test-Path "$env:LOCALAPPDATA\LitePDF\running.lock"
 
 ## E. Crash dump opens with a stack
 
-> The dump structure (`MDMP` magic) and retention (newest 5) are auto-verified.
-> This item needs a debugger. The shipped exe has no crash trigger, so a sample
-> dump must be produced via a temporary `--crashtest` build, or captured from a
-> real crash. Symbols require `litepdf.pdb` next to the exe.
+The dump structure (`MDMP` magic) and retention (newest 5) are auto-verified.
+Resolving a *stack* needs a debugger + symbols. A ready-to-open sample dump from
+a RelWithDebInfo build is already on disk, with matching symbols:
+
+| Artifact | Path |
+|---|---|
+| Sample dump | `%LOCALAPPDATA%\LitePDF\crashes\litepdf-389208-158592406.dmp` |
+| Symbols | `build\RelWithDebInfo\litepdf.pdb` (+ `litepdf.exe`) |
 
 | # | Action | Expected (PASS) |
 |---|---|---|
-| E1 | Open a `%LOCALAPPDATA%\LitePDF\crashes\*.dmp` in Visual Studio or WinDbg | Loads and shows a resolvable call stack (with `litepdf.pdb`) |
+| E1 | Open the dump in **Visual Studio** (File → Open → File → the `.dmp`, then "Debug with Native Only") OR **WinDbg** | Loads and the call stack resolves to `litepdf!...` frames (not just `litepdf+0x...` module+offset) |
+
+WinDbg / `cdb` recipe (install "Debugging Tools for Windows" from the Windows SDK
+first — neither is currently on PATH):
+
+```
+windbg -z "%LOCALAPPDATA%\LitePDF\crashes\litepdf-389208-158592406.dmp"
+# at the prompt (replace <repo> with this checkout's path):
+.sympath+ <repo>\build\RelWithDebInfo
+.reload /f
+k
+```
+
+> **Task 12 release-config gap (carry into `/ship`):** the **Release** config
+> emits NO `litepdf.pdb` (default `/O2`, no `/Zi`/`/DEBUG`), so dumps from the
+> *shipped* exe resolve to module+offset only. Build Release as RelWithDebInfo
+> (or add `/Zi`+`/DEBUG`) and archive `litepdf.pdb` in `release.yml`.
 
 ## F. Uninstall keep/delete prompt
 
+Requires a real install + uninstall, so it modifies installed software — run it
+yourself; do not script it. The keep/delete prompt wording is the thing under
+test (Task 10), so build a FRESH installer from the current source first.
+
+| Artifact | Path / command |
+|---|---|
+| Build installer | Compile `installer\litepdf.iss` with Inno Setup (`ISCC.exe installer\litepdf.iss`) → `installer\Output\*.exe` |
+| Installed uninstaller (existing copy) | `%LOCALAPPDATA%\Programs\LitePDF\unins000.exe` |
+
 | # | Action | Expected (PASS) |
 |---|---|---|
-| F1 | Install via the built installer → launch once (creates `%LOCALAPPDATA%\LitePDF`) → uninstall | Prompts "要一併刪除 LitePDF 的設定、工作階段與當機記錄嗎?" + shows the path; "No" keeps the dir, "Yes" deletes it |
+| F1a | Install the freshly-built installer; launch once, open a file, close (creates `%LOCALAPPDATA%\LitePDF\` with `session.json`) | Data dir present |
+| F1b | Run the uninstaller (`unins000.exe`, or Settings → Apps → LitePDF → Uninstall) | Prompts "要一併刪除 LitePDF 的設定、工作階段與當機記錄嗎?" and shows the `%LOCALAPPDATA%\LitePDF` path |
+| F1c | Click **否 (No)** | Uninstall completes; `%LOCALAPPDATA%\LitePDF\` is KEPT |
+| F1d | Re-install → re-create data → uninstall → click **是 (Yes)** | `%LOCALAPPDATA%\LitePDF\` is DELETED |
