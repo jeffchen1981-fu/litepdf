@@ -8,6 +8,39 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 
 ## [Unreleased]
 
+## [1.0.0-phase12] — 2026-06-16 — Release hardening (v1.0)
+
+First stable release. Rolls up Phase 11 (MuPDF 1.27 upgrade + binary-size prune)
+and Phase 12 (release hardening: crash-safe session restore).
+
+### Added
+- **Crash-safe session restore.** After an abnormal exit (crash, force-kill), the
+  next launch offers to restore the previously open tabs, reopening them
+  sequentially in saved order with each tab's page and zoom, and re-prompting for
+  the password of any encrypted tab. A clean exit — including a real OS
+  shutdown/logoff (`WM_ENDSESSION`) — clears the marker and never prompts.
+- **Crash minidump.** An unhandled exception writes a bounded minidump to
+  `%LOCALAPPDATA%\LitePDF\crashes\` (newest 5 retained), re-entrancy-guarded.
+- **Debounced auto-save** of the open tab set, active tab, per-tab page + zoom,
+  and window placement, so the restore set always reflects recent state.
+- **Shipped debug symbols.** Release builds now emit `litepdf.pdb` (exe size
+  unchanged) and the release publishes `litepdf-symbols-<version>.zip`, so crash
+  minidumps from the released build resolve to named frames, not module+offset.
+- **Installer keep/delete prompt.** Uninstall asks whether to also remove
+  `%LOCALAPPDATA%\LitePDF` (settings / session / crash logs); the default keeps it.
+
+### Fixed
+- Pages render on an opaque white background instead of black for documents that
+  do not paint their own page background.
+- Closing the active tab (middle tab / `Ctrl+W`) now repaints the canvas to the
+  new active tab immediately, instead of leaving the closed tab's page on screen
+  until a manual tab switch (#33).
+- After crash-restore, the canvas shows the saved-active tab's page immediately
+  rather than the last-restored tab's page until a manual switch (#35).
+- CBZ rendering verified end-to-end with a render regression test (PNG + JPEG);
+  the earlier "blank/black page" was a degenerate 1×1-pixel test fixture, not a
+  code defect — real comics render correctly (#32).
+
 ### Changed
 - Upgraded MuPDF 1.24.11 → 1.27.2. Search source/output is unchanged; this is a
   behavior-identical dependency landing (Tier-1 case-sensitive search activation
@@ -27,6 +60,13 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
   non-Latin/non-CJK scripts (Arabic, Hebrew, Thai, Indic, …) now render missing
   glyphs instead of a Noto fallback. CJK, Latin (Base14), and font-embedded PDFs
   are unaffected.
+
+### Notes
+- Milestone: v1.0 — first stable, non-prerelease build.
+- Phase 12 plan: [docs/superpowers/plans/2026-06-11-phase-12-release-hardening.md](docs/superpowers/plans/2026-06-11-phase-12-release-hardening.md)
+- Known issue (deferred post-1.0): the `Ctrl+=`/`Ctrl+-`/`Ctrl+0` and
+  `PgUp`/`PgDn` keyboard accelerators are inert (#34); use the View menu,
+  arrow keys, or `Ctrl`+mouse-wheel.
 
 ## [0.0.12-phase10] — 2026-06-01 — Installer
 
