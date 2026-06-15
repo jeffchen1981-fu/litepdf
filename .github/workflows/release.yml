@@ -177,20 +177,24 @@ jobs:
           if ($m.Success) { $m.Value.Trim() | Out-File -Encoding utf8 notes.md }
           else { "LitePDF $v" | Out-File -Encoding utf8 notes.md }
 
-      - name: Create draft prerelease
+      - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $v = "${{ steps.ver.outputs.version }}"
-          gh release create "${{ github.ref_name }}" `
-            --draft --prerelease `
-            --title "LitePDF ${{ github.ref_name }}" `
-            --notes-file notes.md `
-            "installer/Output/litepdf-setup-$v.exe" `
-            "litepdf-portable-$v.zip" `
-            "litepdf-$v-source.tar.gz" `
-            "litepdf-symbols-$v.zip"
+          $v   = "${{ steps.ver.outputs.version }}"
+          $tag = "${{ github.ref_name }}"
+          # A clean vX.Y.Z tag publishes as a full (stable) release; only a
+          # suffixed tag (e.g. v1.1.0-rc1) is flagged pre-release. Pre-1.0 builds
+          # were blanket --prerelease; v1.0.0 is the first stable release.
+          $relArgs = @("release","create","$tag","--draft",
+                       "--title","LitePDF $tag","--notes-file","notes.md")
+          if ($tag -match '-(rc|alpha|beta|pre|dev)') { $relArgs += "--prerelease" }
+          $relArgs += @("installer/Output/litepdf-setup-$v.exe",
+                        "litepdf-portable-$v.zip",
+                        "litepdf-$v-source.tar.gz",
+                        "litepdf-symbols-$v.zip")
+          gh @relArgs
 
       - name: Publish (un-draft) only after all assets uploaded
         env:
