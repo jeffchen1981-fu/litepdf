@@ -47,7 +47,7 @@ the tag.
 | B restore: encrypted tab re-prompts for password, then restores | AUTO-PASS |
 | B restore: canvas shows the ACTIVE tab's page, not the last-restored tab (#35) | FIXED in `88a1150` + AUTO-PASS (previously showed the wrong tab until a manual switch) |
 | C1 normal close → no restore prompt | AUTO-PASS |
-| C2 OS shutdown/logoff clears the marker → no prompt | AUTO-PASS via **simulated** `WM_QUERYENDSESSION`/`WM_ENDSESSION` (a REAL reboot is still the final sign-off) |
+| C2 OS shutdown/logoff clears the marker → no prompt | PASS — sim-verified, then confirmed by a REAL reboot 2026-06-15: with the app open, after restart `running.lock` was absent and launch showed no restore prompt (session.json timestamped at shutdown proves on_clean_exit ran via WM_ENDSESSION, not an OS force-kill) |
 | D1 2nd instance opening a PDF while the restore prompt is up | AUTO-PASS — no deadlock, no double-restore; the forwarded file gets its own tab and the restore still completes |
 | A1 double-click file association → opens in LitePDF | PASS (computer-use): double-clicking `search.pdf` opened it as a new tab (forwarded into the running instance) |
 | A2 drag-and-drop a PDF onto the window | PASS (computer-use): dragging `bookmarks.pdf` from Explorer opened it as a new active tab |
@@ -55,9 +55,9 @@ the tag.
 | D2 2nd instance opens a PDF *during* the restore chain → own tab + chain still completes | PASS: froze the chain at an encrypted tab's password prompt, injected `bookmarks.pdf` via a 2nd instance, then resumed — final set = 3 restored + 1 injected, saved-active correct |
 | D3 close window *mid-restore-chain* → full session re-offered | PASS (deterministic via a temporary env-gated restore delay, reverted): a mid-chain WM_CLOSE left `session.json` at the full count + kept the marker; next launch re-offered the full set; clean exit, no crash dump |
 
-Still REQUIRES a human (detailed below): **C2** a real reboot (the WM_ENDSESSION
-path is sim-verified), **E1** debugger stack (needs WinDbg/VS + symbol setup),
-**F1** install/uninstall (destructive; build a fresh installer first).
+Still REQUIRES a human (detailed below): **E1** debugger stack (needs WinDbg/VS
++ symbol setup), **F1** install/uninstall (destructive; build a fresh installer
+first).
 
 How D2/D3 were made testable (the chain is otherwise sub-second): **D2** — put
 `encrypted.pdf` in the restore set; its password prompt freezes the chain,
