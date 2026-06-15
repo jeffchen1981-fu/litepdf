@@ -122,6 +122,16 @@ a RelWithDebInfo build is already on disk, with matching symbols:
 | Sample dump | `%LOCALAPPDATA%\LitePDF\crashes\litepdf-389208-158592406.dmp` |
 | Symbols | `build\RelWithDebInfo\litepdf.pdb` (+ `litepdf.exe`) |
 
+**Structural pre-check (no debugger needed, done 2026-06-15):** parsing the
+sample dump confirms it is a valid `MDMP` (x64, 14 streams) with 6 threads and a
+real captured stack (thread 0 = 16,248 bytes), an Exception stream (code
+`0xC0000005`, the crash-test access violation), 33 modules, and a `litepdf.exe`
+PDB70 CodeView record pointing to `litepdf.pdb` (GUID
+`022C9B6C-1946-47ED-938E-70033107A197`, age 2) — and that pdb is present on disk.
+So the dump is complete and symbolizable; only the function-name resolution below
+needs an actual debugger (none is currently installed — `winget install
+Microsoft.WinDbg` is the lightest).
+
 | # | Action | Expected (PASS) |
 |---|---|---|
 | E1 | Open the dump in **Visual Studio** (File → Open → File → the `.dmp`, then "Debug with Native Only") OR **WinDbg** | Loads and the call stack resolves to `litepdf!...` frames (not just `litepdf+0x...` module+offset) |
