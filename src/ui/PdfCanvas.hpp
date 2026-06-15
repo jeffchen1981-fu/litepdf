@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -22,10 +23,13 @@ namespace litepdf::core { class DocumentView; }
 namespace litepdf::ui {
 
 // Posted by render-done callback. WPARAM = fz_pixmap* (kept by worker),
-// LPARAM = fz_context* escrow clone (also kept by worker). Both are null
-// on cancel/fail. Canvas drops the pixmap through escrow, then drops
-// escrow — staying on the pixmap's own MuPDF root even if the producing
-// DocumentView has been swapped or destroyed.
+// LPARAM = a heap RenderMeta* { fz_context* escrow clone; uint64 epoch }.
+// On cancel/fail both are null. Canvas drops the pixmap through escrow,
+// then drops escrow — staying on the pixmap's own MuPDF root even if the
+// producing DocumentView has been swapped or destroyed. The epoch is the
+// canvas render epoch captured at submit time (see render_epoch); a
+// completion whose epoch no longer matches the canvas's current epoch is
+// from a superseded view and is dropped without being painted (issue #35).
 // Must match the reservation in MainWindow.cpp (WM_USER + 3).
 inline constexpr UINT WM_USER_RENDER_DONE = WM_USER + 3;
 // (Phase 8 D10) Same payload as WM_USER_RENDER_DONE but the bitmap
@@ -48,6 +52,13 @@ public:
     // Pass nullptr to clear.
     void set_view(litepdf::core::DocumentView* view);
 
+    // Monotonic render epoch. Bumped on every set_view so that an
+    // in-flight render submitted for a now-superseded view can be told
+    // apart from one submitted for the current view. Callers capture this
+    // at submit time and pass it to post_render_done; the completion
+    // handler drops pixmaps whose epoch no longer matches (issue #35).
+    std::uint64_t render_epoch() const noexcept;
+
     // Get/set the canvas pan offset (DIPs from the centered/fit origin).
     // Used by MainWindow to snapshot/restore per-tab scroll on tab switch.
     // Both are no-ops if called before the impl is ready.
@@ -67,16 +78,20 @@ public:
     // message was successfully posted.
     //
     // Callers: MainWindow::kick_render, resubmit_current_page,
-    // on_key_down's page-change path, WM_MOUSEWHEEL zoom path.
+    // on_key_down's page-change path, WM_MOUSEWHEEL zoom path. `epoch` is
+    // the value of render_epoch() read at submit time; it rides the
+    // completion message so the handler can drop a superseded-view result.
     static bool post_render_done(HWND target,
                                  fz_pixmap* pix,
-                                 fz_context* worker_ctx);
+                                 fz_context* worker_ctx,
+                                 std::uint64_t epoch);
 
     // (Phase 8 D10) Variant that posts to the RIGHT slot of the dual-
     // page layout. Same refcount discipline as post_render_done.
     static bool post_render_done_right(HWND target,
                                        fz_pixmap* pix,
-                                       fz_context* worker_ctx);
+                                       fz_context* worker_ctx,
+                                       std::uint64_t epoch);
 
     // When true, on first real-bitmap paint the canvas calls
     // ColdStartTimer::emit_if_complete(true) so the line is mirrored to stderr.

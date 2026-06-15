@@ -10,7 +10,9 @@
 #include <d2d1_1.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <cstdint>
 #include <mutex>
+#include <new>
 #include <stdexcept>
 #pragma comment(lib, "d2d1.lib")
 
@@ -36,13 +38,24 @@ std::once_flag g_class_registered;
 
 namespace litepdf::ui {
 
+// Heap payload riding the completion message's LPARAM: the escrow ctx
+// (clone of the worker ctx) plus the canvas render epoch captured at
+// submit time. Allocated on the worker thread, freed on the UI thread in
+// the WM_USER_RENDER_DONE[_RIGHT] handler. wParam still carries the
+// fz_pixmap* directly.
+namespace {
+struct RenderMeta {
+    fz_context*   escrow;
+    std::uint64_t epoch;
+};
+
 // Internal helper: shared escrow + Post logic for both the LEFT/single
 // slot (msg = WM_USER_RENDER_DONE) and the RIGHT slot (msg =
 // WM_USER_RENDER_DONE_RIGHT). Refcount discipline is identical for both;
 // only the message ID changes.
-namespace {
 bool post_render_done_impl(HWND target, UINT msg,
-                           fz_pixmap* pix, fz_context* worker_ctx) {
+                           fz_pixmap* pix, fz_context* worker_ctx,
+                           std::uint64_t epoch) {
     if (!pix) {
         PostMessageW(target, msg,
                      reinterpret_cast<WPARAM>(nullptr),
@@ -54,11 +67,18 @@ bool post_render_done_impl(HWND target, UINT msg,
         fz_drop_pixmap(worker_ctx, pix);
         return false;
     }
-    if (!PostMessageW(target, msg,
-                      reinterpret_cast<WPARAM>(pix),
-                      reinterpret_cast<LPARAM>(escrow))) {
+    auto* meta = new (std::nothrow) RenderMeta{escrow, epoch};
+    if (!meta) {
         fz_drop_pixmap(escrow, pix);
         fz_drop_context(escrow);
+        return false;
+    }
+    if (!PostMessageW(target, msg,
+                      reinterpret_cast<WPARAM>(pix),
+                      reinterpret_cast<LPARAM>(meta))) {
+        fz_drop_pixmap(escrow, pix);
+        fz_drop_context(escrow);
+        delete meta;
         return false;
     }
     return true;
@@ -67,14 +87,18 @@ bool post_render_done_impl(HWND target, UINT msg,
 
 bool PdfCanvas::post_render_done(HWND target,
                                  fz_pixmap* pix,
-                                 fz_context* worker_ctx) {
-    return post_render_done_impl(target, WM_USER_RENDER_DONE, pix, worker_ctx);
+                                 fz_context* worker_ctx,
+                                 std::uint64_t epoch) {
+    return post_render_done_impl(target, WM_USER_RENDER_DONE, pix, worker_ctx,
+                                 epoch);
 }
 
 bool PdfCanvas::post_render_done_right(HWND target,
                                        fz_pixmap* pix,
-                                       fz_context* worker_ctx) {
-    return post_render_done_impl(target, WM_USER_RENDER_DONE_RIGHT, pix, worker_ctx);
+                                       fz_context* worker_ctx,
+                                       std::uint64_t epoch) {
+    return post_render_done_impl(target, WM_USER_RENDER_DONE_RIGHT, pix,
+                                 worker_ctx, epoch);
 }
 
 struct PdfCanvas::Impl {
@@ -83,6 +107,10 @@ struct PdfCanvas::Impl {
     ComPtr<ID2D1Bitmap>           current_bitmap;  // Task 6 populates
     D2D1_SIZE_U                   last_size = { 0, 0 };
     litepdf::core::DocumentView*  view = nullptr;  // non-owning
+    // Monotonic render epoch, bumped on every set_view. Renders carry the
+    // epoch they were submitted under; a completion whose epoch != this is
+    // from a superseded view and is dropped, not painted (issue #35).
+    std::uint64_t                 view_epoch = 0;
     // Pan offset in DIPs from the centered/fit position. Reset whenever a
     // new bitmap arrives. No clamping in Phase 3 — user can pan off-canvas.
     float                         pan_x = 0.0f;
@@ -128,6 +156,10 @@ void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
     // its view reference; the old view's pending pixmaps carry their
     // own escrow ctx and drop correctly regardless of this swap.
     impl_->view = view;
+    // Bump the render epoch on every view swap so any render still in
+    // flight for the previous view is recognised as stale at completion
+    // and dropped instead of painted over the new view (issue #35).
+    ++impl_->view_epoch;
     if (!view) {
         // No active view — whatever bitmap is on screen is tied to a
         // ctx that will soon be gone. Discard so the next paint shows
@@ -146,6 +178,10 @@ void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
     if (impl_->on_page_changed) {
         impl_->on_page_changed(view->current_page());
     }
+}
+
+std::uint64_t PdfCanvas::render_epoch() const noexcept {
+    return impl_ ? impl_->view_epoch : 0;
 }
 
 void PdfCanvas::set_on_page_changed(PageChangedCb cb) {
@@ -394,10 +430,11 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 if (changed) {
                     impl_->view->cancel_stale_renders(0);
                     HWND target = hwnd_;
+                    const std::uint64_t epoch = impl_->view_epoch;
                     impl_->view->request_render(
                         impl_->view->current_page(),
-                        [target](fz_pixmap* p, fz_context* worker_ctx) {
-                            PdfCanvas::post_render_done(target, p, worker_ctx);
+                        [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
+                            PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
                         });
                 }
                 return 0;
@@ -417,18 +454,35 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         case WM_USER_RENDER_DONE:
         case WM_USER_RENDER_DONE_RIGHT: {
             const bool is_right = (msg == WM_USER_RENDER_DONE_RIGHT);
-            auto* pix    = reinterpret_cast<fz_pixmap*>(w);
-            auto* escrow = reinterpret_cast<fz_context*>(l);
+            auto* pix  = reinterpret_cast<fz_pixmap*>(w);
+            auto* meta = reinterpret_cast<RenderMeta*>(l);
 
             if (!pix) {
                 // Render failed or cancelled (helper posts WPARAM=0 here).
-                // escrow will also be null on this path — nothing to drop.
+                // meta is also null on this path — nothing to drop.
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return 0;
             }
-            if (!escrow) {
-                // Defensive: pixmap without escrow indicates a bypassed
+            if (!meta) {
+                // Defensive: pixmap without meta indicates a bypassed
                 // post_render_done helper. Don't drop on a guessed ctx.
+                return 0;
+            }
+            fz_context* escrow = meta->escrow;
+            const std::uint64_t epoch = meta->epoch;
+            delete meta;
+            if (!escrow) {
+                // Defensive: meta without escrow — nothing safe to drop.
+                return 0;
+            }
+            // (issue #35) Drop results from a superseded view. set_view
+            // bumps the epoch on every tab switch; a render submitted for
+            // the previous view that lands after the switch would otherwise
+            // be painted over the now-active tab (the restore stale-canvas
+            // bug). Drop the pixmap + escrow and bail — do NOT adopt.
+            if (epoch != impl_->view_epoch) {
+                fz_drop_pixmap(escrow, pix);
+                fz_drop_context(escrow);
                 return 0;
             }
 
@@ -546,6 +600,7 @@ void PdfCanvas::discard_render_target() {
 void PdfCanvas::resubmit_current_page() {
     if (!impl_->view) return;
     HWND target = hwnd_;
+    const std::uint64_t epoch = impl_->view_epoch;
     if (impl_->dual_page) {
         // (Phase 8 D10) Spread mode: D2DERR_RECREATE_TARGET recovery
         // also has to cover the right slot or the right page stays
@@ -557,21 +612,21 @@ void PdfCanvas::resubmit_current_page() {
         const int right = dual_page_compute_right(left, total);
         impl_->view->cancel_stale_renders(0);
         impl_->view->request_render(left,
-            [target](fz_pixmap* p, fz_context* worker_ctx) {
-                PdfCanvas::post_render_done(target, p, worker_ctx);
+            [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
+                PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
             });
         if (right >= 0) {
             impl_->view->request_render(right,
-                [target](fz_pixmap* p, fz_context* worker_ctx) {
-                    PdfCanvas::post_render_done_right(target, p, worker_ctx);
+                [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
+                    PdfCanvas::post_render_done_right(target, p, worker_ctx, epoch);
                 });
         }
         return;
     }
     impl_->view->request_render_with_prefetch(
         impl_->view->current_page(),
-        [target](fz_pixmap* p, fz_context* worker_ctx) {
-            PdfCanvas::post_render_done(target, p, worker_ctx);
+        [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
+            PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
         });
 }
 
@@ -644,6 +699,7 @@ LRESULT PdfCanvas::on_key_down(WPARAM key) {
 
     if (changed) {
         HWND target = hwnd_;
+        const std::uint64_t epoch = impl_->view_epoch;
         if (impl_->dual_page) {
             // (Phase 8 D10) Spread mode: pair changed, so both bitmaps
             // are stale. Clear them so on_paint shows the chrome
@@ -665,13 +721,13 @@ LRESULT PdfCanvas::on_key_down(WPARAM key) {
             }
             const int right = dual_page_compute_right(left, total);
             impl_->view->request_render(left,
-                [target](fz_pixmap* p, fz_context* worker_ctx) {
-                    PdfCanvas::post_render_done(target, p, worker_ctx);
+                [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
+                    PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
                 });
             if (right >= 0) {
                 impl_->view->request_render(right,
-                    [target](fz_pixmap* p, fz_context* worker_ctx) {
-                        PdfCanvas::post_render_done_right(target, p, worker_ctx);
+                    [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
+                        PdfCanvas::post_render_done_right(target, p, worker_ctx, epoch);
                     });
             }
             InvalidateRect(hwnd_, nullptr, FALSE);
@@ -681,8 +737,8 @@ LRESULT PdfCanvas::on_key_down(WPARAM key) {
             // happen at the engine level so the next PgUp/PgDn is instant.
             impl_->view->request_render_with_prefetch(
                 impl_->view->current_page(),
-                [target](fz_pixmap* p, fz_context* worker_ctx) {
-                    PdfCanvas::post_render_done(target, p, worker_ctx);
+                [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
+                    PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
                 });
         }
     }

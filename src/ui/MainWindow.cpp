@@ -255,6 +255,11 @@ void MainWindow::kick_render(int page) {
         static_cast<float>(dpi));
 
     HWND target = canvas_->hwnd();
+    // Stamp every render with the canvas epoch at submit time so a result
+    // that lands after a tab switch (e.g. the last-restored tab's render
+    // arriving after restore_finish re-activates the saved tab) is dropped
+    // by the canvas instead of painted over the now-active tab (issue #35).
+    const std::uint64_t epoch = canvas_->render_epoch();
     if (view->dual_page()) {
         // (Phase 8 D10) Spread layout: snap to the LEFT page of the
         // pair containing `page` (cover-rule + odd-tail handled by the
@@ -266,21 +271,21 @@ void MainWindow::kick_render(int page) {
         view->cancel_stale_renders(0);
         view->set_current_page(left);
         view->request_render(left,
-            [target](fz_pixmap* p, fz_context* worker_ctx) {
-                PdfCanvas::post_render_done(target, p, worker_ctx);
+            [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
+                PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
             });
         if (right >= 0) {
             view->request_render(right,
-                [target](fz_pixmap* p, fz_context* worker_ctx) {
-                    PdfCanvas::post_render_done_right(target, p, worker_ctx);
+                [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
+                    PdfCanvas::post_render_done_right(target, p, worker_ctx, epoch);
                 });
         }
         InvalidateRect(canvas_->hwnd(), nullptr, FALSE);
         return;
     }
     view->request_render_with_prefetch(page,
-        [target](fz_pixmap* p, fz_context* worker_ctx) {
-            PdfCanvas::post_render_done(target, p, worker_ctx);
+        [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
+            PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
         });
 }
 
