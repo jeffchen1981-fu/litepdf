@@ -52,11 +52,19 @@ the tag.
 | A1 double-click file association → opens in LitePDF | PASS (computer-use): double-clicking `search.pdf` opened it as a new tab (forwarded into the running instance) |
 | A2 drag-and-drop a PDF onto the window | PASS (computer-use): dragging `bookmarks.pdf` from Explorer opened it as a new active tab |
 | A5 zoom / scroll / keyboard nav | PASS: Zoom Out visibly shrinks; Zoom In is correctly a no-op only when fit-width already exceeds the 4.0 max preset (large/maximized windows — minor UX quirk, not a bug). #34 accelerator gaps stand |
+| D2 2nd instance opens a PDF *during* the restore chain → own tab + chain still completes | PASS: froze the chain at an encrypted tab's password prompt, injected `bookmarks.pdf` via a 2nd instance, then resumed — final set = 3 restored + 1 injected, saved-active correct |
+| D3 close window *mid-restore-chain* → full session re-offered | PASS (deterministic via a temporary env-gated restore delay, reverted): a mid-chain WM_CLOSE left `session.json` at the full count + kept the marker; next launch re-offered the full set; clean exit, no crash dump |
 
 Still REQUIRES a human (detailed below): **C2** a real reboot (the WM_ENDSESSION
-path is sim-verified), **D2/D3** mid-restore-chain timing races, **E1** debugger
-stack (needs WinDbg/VS + symbol setup), **F1** install/uninstall (destructive;
-build a fresh installer first).
+path is sim-verified), **E1** debugger stack (needs WinDbg/VS + symbol setup),
+**F1** install/uninstall (destructive; build a fresh installer first).
+
+How D2/D3 were made testable (the chain is otherwise sub-second): **D2** — put
+`encrypted.pdf` in the restore set; its password prompt freezes the chain,
+giving an unbounded window to inject a 2nd-instance open. **D3** — per-tab opens
+are too fast to slow with volume alone (MuPDF opens lazily), so a temporary
+env-gated `Sleep` in `restore_open_next` (`LITEPDF_RESTORE_DELAY_MS`) made the
+mid-chain close deterministic; revert it before committing.
 
 ## A. Core viewer (single launch)
 
