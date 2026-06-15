@@ -146,3 +146,38 @@ TEST_CASE("goto_tab_index maps 1-indexed shortcut to 0-indexed slot", "[tab_nav]
     REQUIRE(goto_tab_index(0, 3) == -1);       // below range
     REQUIRE(goto_tab_index(1, 0) == -1);       // empty list
 }
+
+// Regression for issue #33: closing the *active* middle tab left the canvas
+// painting the destroyed view because close_tab gated its switch callback on
+// new_active != old_active — but removing the active tab keeps the active
+// index equal (a neighbor shifts in). close_changes_active_tab is the correct
+// gate: fire iff the active *instance* changes, i.e. iff the active tab is the
+// one being closed.
+TEST_CASE("close_changes_active_tab: closing the active tab requires a rebind",
+          "[tab_close]") {
+    // 3 tabs, active = middle (1). Closing the active middle tab is the exact
+    // #33 repro: the right neighbor shifts into index 1, so the index is
+    // unchanged but the active instance changed.
+    REQUIRE(close_changes_active_tab(/*active=*/1, /*removed=*/1, /*count=*/3));
+    // Closing the active first/last tab also changes the active instance.
+    REQUIRE(close_changes_active_tab(0, 0, 3));
+    REQUIRE(close_changes_active_tab(2, 2, 3));
+    // Closing the only tab empties the list -> active instance changes (->none).
+    REQUIRE(close_changes_active_tab(0, 0, 1));
+}
+
+TEST_CASE("close_changes_active_tab: closing a non-active tab needs no rebind",
+          "[tab_close]") {
+    // Active stays on the same instance whether the removed tab is to its
+    // left (index shifts down) or right (index unchanged). No rebind needed.
+    REQUIRE_FALSE(close_changes_active_tab(/*active=*/2, /*removed=*/0, /*count=*/3));
+    REQUIRE_FALSE(close_changes_active_tab(/*active=*/0, /*removed=*/2, /*count=*/3));
+    REQUIRE_FALSE(close_changes_active_tab(/*active=*/1, /*removed=*/2, /*count=*/3));
+}
+
+TEST_CASE("close_changes_active_tab: degenerate inputs are false", "[tab_close]") {
+    REQUIRE_FALSE(close_changes_active_tab(-1, 0, 3));   // no active tab
+    REQUIRE_FALSE(close_changes_active_tab(0, -1, 3));   // removed out of range
+    REQUIRE_FALSE(close_changes_active_tab(0, 3, 3));    // removed past end
+    REQUIRE_FALSE(close_changes_active_tab(0, 0, 0));    // empty list
+}

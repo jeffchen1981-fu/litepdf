@@ -106,4 +106,28 @@ inline int goto_tab_index(int one_indexed, int count) noexcept {
     return target;
 }
 
+// issue #33: decide whether closing the tab at `removed` changes which Tab
+// *instance* is active. TabManager::close_tab must fire its switch callback
+// (rebind the canvas to the new active view) exactly when this is true.
+//
+// A new-vs-old active *index* comparison is the wrong test: removing the
+// active tab clamps the active index to min(removed, last) (see TabList::
+// remove), so a right-neighbor shifts into the *same* index. The index stays
+// equal while the active instance changes — and without a rebind the canvas
+// keeps painting the destroyed view (stale page + dangling pointer).
+//
+// `active`/`removed`/`count` are all the PRE-removal values.
+//   removed out of [0,count)   -> false (no-op close)
+//   no active tab (active < 0) -> false (nothing bound to rebind)
+//   removed == active          -> true  (active tab destroyed; a neighbor
+//                                         shifts in, or the list becomes empty)
+//   removed != active          -> false (active instance unchanged; its index
+//                                         may shift but the canvas stays bound)
+inline bool close_changes_active_tab(int active, int removed,
+                                     int count) noexcept {
+    if (removed < 0 || removed >= count) return false;
+    if (active < 0) return false;
+    return removed == active;
+}
+
 }  // namespace litepdf::core

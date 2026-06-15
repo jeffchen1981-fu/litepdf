@@ -661,9 +661,11 @@ void MainWindow::on_tab_close_request(int index) {
         results_panel_->refresh_count();
     }
     tabs_->close_tab(index);
-    // close_tab() fires on_switch (with new_active=-1 when the last tab
-    // is dropped); on_tab_switch() performs all the canvas/outline/layout
-    // teardown. No further work needed here.
+    // close_tab() fires on_switch only when the active tab *instance* changes
+    // (closing the active tab, or dropping the last tab -> new_active=-1);
+    // on_tab_switch() then rebinds the canvas / outline / layout to the new
+    // active view. Closing a non-active tab leaves the active view bound and
+    // needs no canvas work, so no further work is needed here either way.
     schedule_session_save();  // Phase 12: a closed tab changes the set
 }
 
