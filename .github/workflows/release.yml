@@ -125,6 +125,19 @@ jobs:
           Copy-Item README.md portable\
           Compress-Archive -Path portable\* -DestinationPath "litepdf-portable-$v.zip" -Force
 
+      - name: Build symbols zip (litepdf.pdb for crash-dump symbolization)
+        shell: pwsh
+        run: |
+          # Phase 12: ship the Release .pdb so minidumps from the released exe
+          # resolve to named frames, not module+offset. Also a gate: if the
+          # Release debug-info flags (/Z7 + /DEBUG in cmake/CompilerFlags.cmake)
+          # ever regress, no .pdb is emitted and the release fails loudly here.
+          $v = "${{ steps.ver.outputs.version }}"
+          if (-not (Test-Path build\Release\litepdf.pdb)) {
+            Write-Error "build\Release\litepdf.pdb not produced - Release symbol generation regressed."; exit 1
+          }
+          Compress-Archive -Path build\Release\litepdf.pdb -DestinationPath "litepdf-symbols-$v.zip" -Force
+
       - name: Build source tarball (incl. submodules)
         shell: pwsh
         run: |
@@ -176,7 +189,8 @@ jobs:
             --notes-file notes.md `
             "installer/Output/litepdf-setup-$v.exe" `
             "litepdf-portable-$v.zip" `
-            "litepdf-$v-source.tar.gz"
+            "litepdf-$v-source.tar.gz" `
+            "litepdf-symbols-$v.zip"
 
       - name: Publish (un-draft) only after all assets uploaded
         env:
