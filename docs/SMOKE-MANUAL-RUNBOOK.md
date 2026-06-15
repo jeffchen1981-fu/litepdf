@@ -49,10 +49,14 @@ the tag.
 | C1 normal close → no restore prompt | AUTO-PASS |
 | C2 OS shutdown/logoff clears the marker → no prompt | AUTO-PASS via **simulated** `WM_QUERYENDSESSION`/`WM_ENDSESSION` (a REAL reboot is still the final sign-off) |
 | D1 2nd instance opening a PDF while the restore prompt is up | AUTO-PASS — no deadlock, no double-restore; the forwarded file gets its own tab and the restore still completes |
+| A1 double-click file association → opens in LitePDF | PASS (computer-use): double-clicking `search.pdf` opened it as a new tab (forwarded into the running instance) |
+| A2 drag-and-drop a PDF onto the window | PASS (computer-use): dragging `bookmarks.pdf` from Explorer opened it as a new active tab |
+| A5 zoom / scroll / keyboard nav | PASS: Zoom Out visibly shrinks; Zoom In is correctly a no-op only when fit-width already exceeds the 4.0 max preset (large/maximized windows — minor UX quirk, not a bug). #34 accelerator gaps stand |
 
-Still REQUIRES a human (detailed below): **A1** Explorer association, **A2**
-drag-and-drop, **A5** visual zoom/scroll/keyboard nav, **C2** a real reboot,
-**D2/D3** mid-restore-chain timing, **E1** debugger stack, **F1** install/uninstall.
+Still REQUIRES a human (detailed below): **C2** a real reboot (the WM_ENDSESSION
+path is sim-verified), **D2/D3** mid-restore-chain timing races, **E1** debugger
+stack (needs WinDbg/VS + symbol setup), **F1** install/uninstall (destructive;
+build a fresh installer first).
 
 ## A. Core viewer (single launch)
 
