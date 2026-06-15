@@ -140,6 +140,13 @@ public:
     using PageChangedCb = std::function<void(int new_page)>;
     void set_on_page_changed(PageChangedCb cb);
 
+    // Fires after a successful Ctrl+mouse-wheel zoom, the one zoom path that
+    // lives entirely in the canvas (the View-menu zoom commands persist via
+    // MainWindow directly). Owner wires this to schedule a session save so a
+    // wheel-zoom-only change survives a crash/force-kill. Pass nullptr to clear.
+    using ZoomChangedCb = std::function<void()>;
+    void set_on_zoom_changed(ZoomChangedCb cb);
+
     // Page-change entry point for external callers (MainWindow's
     // outline-navigate and cross-tab search-results paths). Wraps
     // `view->set_current_page(idx)` and fires the page-change observer

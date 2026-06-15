@@ -1024,6 +1024,10 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 schedule_session_save();  // Phase 12: persist new page (debounced)
             });
 
+            // Ctrl+wheel zoom lives in the canvas; persist it like menu zoom so
+            // a wheel-zoom-only change survives a crash/force-kill (debounced).
+            canvas_->set_on_zoom_changed([this] { schedule_session_save(); });
+
             DragAcceptFiles(hwnd, TRUE);
             return 0;
         }

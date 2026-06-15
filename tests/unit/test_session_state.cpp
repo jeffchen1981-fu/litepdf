@@ -166,3 +166,20 @@ TEST_CASE("from_json rejects an unescaped control char in a path", "[core][sessi
     j += R"(.pdf","page":0,"zoom_mode":"fit_width","zoom_scale":1}]})";
     REQUIRE_FALSE(from_json(j).has_value());
 }
+
+// Regression for the v1.0 pre-merge review: a minimized window can save a
+// fit-mode tab with zoom_scale 0 (a 0x0 client rect makes the computed fit
+// scale 0). That must NOT reject the whole session — fit modes recompute the
+// scale from the viewport on restore and never read the saved value. Custom
+// zoom, whose saved scale IS consumed on restore, must still reject 0.
+TEST_CASE("from_json accepts a fit-mode tab with zoom_scale 0", "[core][session][json]") {
+    auto r = from_json(R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"a.pdf","page":0,"zoom_mode":"fit_width","zoom_scale":0}]})");
+    REQUIRE(r.has_value());
+    REQUIRE(r->tabs.size() == 1);
+    REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitWidth);
+}
+
+TEST_CASE("from_json rejects a Custom tab with zoom_scale 0", "[core][session][json]") {
+    auto r = from_json(R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"a.pdf","page":0,"zoom_mode":"custom","zoom_scale":0}]})");
+    REQUIRE_FALSE(r.has_value());
+}

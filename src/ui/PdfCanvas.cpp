@@ -147,6 +147,8 @@ struct PdfCanvas::Impl {
     // switched tab's listener learns the page immediately, not "stale
     // until first PgDn"). May be null — checked at the fire site.
     PdfCanvas::PageChangedCb      on_page_changed;
+    // Fired after a successful Ctrl+wheel zoom so the owner can persist it.
+    PdfCanvas::ZoomChangedCb      on_zoom_changed;
 };
 
 void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
@@ -187,6 +189,11 @@ std::uint64_t PdfCanvas::render_epoch() const noexcept {
 void PdfCanvas::set_on_page_changed(PageChangedCb cb) {
     if (!impl_) return;
     impl_->on_page_changed = std::move(cb);
+}
+
+void PdfCanvas::set_on_zoom_changed(ZoomChangedCb cb) {
+    if (!impl_) return;
+    impl_->on_zoom_changed = std::move(cb);
 }
 
 bool PdfCanvas::change_current_page(int idx) {
@@ -436,6 +443,8 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                         [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
                             PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
                         });
+                    // Persist the wheel zoom (menu zoom persists via MainWindow).
+                    if (impl_->on_zoom_changed) impl_->on_zoom_changed();
                 }
                 return 0;
             }

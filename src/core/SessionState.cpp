@@ -290,7 +290,13 @@ bool validate(const SessionState& s) {
     for (const auto& t : s.tabs) {
         if (t.path.empty()) return false;   // missing/blank "path" — to_json never emits this
         if (t.page < 0) return false;
-        if (!std::isfinite(t.zoom_scale) || t.zoom_scale <= 0.0f) return false;
+        // zoom_scale only matters for Custom zoom; FitWidth/FitPage recompute it
+        // from the viewport on restore (restore_on_tab_ready) and never read the
+        // saved value. A minimized window can momentarily save a 0 fit-scale
+        // (0x0 client rect) — rejecting the whole file for that would silently
+        // drop an otherwise-valid restore set. Only enforce positivity for Custom.
+        if (t.zoom_mode == SessionZoom::Custom &&
+            (!std::isfinite(t.zoom_scale) || t.zoom_scale <= 0.0f)) return false;
     }
     // Window dims: 0 means "unset" (open at default); negative is corrupt.
     if (s.window.w < 0 || s.window.h < 0) return false;
