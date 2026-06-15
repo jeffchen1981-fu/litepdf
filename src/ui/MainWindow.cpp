@@ -742,7 +742,17 @@ void MainWindow::on_clean_exit() {
 // ------------- Phase 12 Task 9: sequential restore orchestrator ------------
 
 void MainWindow::maybe_offer_restore(bool offer) {
-    if (!offer || app_data_dir_.empty()) { open_deferred_initial_path(); return; }
+    // Test/automation hook: LITEPDF_NO_RESTORE (set to anything) suppresses the
+    // restore prompt. A driver that force-kills the app — the CI smoke test and
+    // ux-probe runs — leaves the abnormal-exit marker behind, so without this
+    // every relaunch after a kill would get the "restore previous tabs?" modal
+    // and never open the file passed on the command line.
+    const bool suppress =
+        GetEnvironmentVariableW(L"LITEPDF_NO_RESTORE", nullptr, 0) > 0;
+    if (!offer || app_data_dir_.empty() || suppress) {
+        open_deferred_initial_path();
+        return;
+    }
     auto saved = litepdf::core::load_session(
         litepdf::app::session_file_under(app_data_dir_));
     if (!saved || saved->tabs.empty()) { open_deferred_initial_path(); return; }
