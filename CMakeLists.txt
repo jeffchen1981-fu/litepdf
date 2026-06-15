@@ -49,6 +49,10 @@ add_library(litepdf_core STATIC
     src/core/SearchSession.cpp     # Phase 6 Task 5
     src/app/SearchDispatcher.cpp   # Phase 6 Task 4
     src/app/CrossTabSearch.cpp     # Phase 6 Task 11
+    src/app/AppPaths.cpp           # Phase 12 Task 1
+    src/app/AppRunGuard.cpp        # Phase 12 Task 6
+    src/core/SessionState.cpp      # Phase 12 Task 2
+    src/core/SessionStore.cpp      # Phase 12 Task 4
     src/core/ThumbnailModel.cpp    # Phase 7 Task 1
     src/core/ThumbCache.cpp        # Phase 7 Task 2
     src/core/ThumbnailRenderer.cpp # Phase 7 Task 3
@@ -87,6 +91,7 @@ target_link_libraries(litepdf_core PRIVATE
 add_executable(litepdf WIN32
     src/main.cpp
     src/app/SingleInstance.cpp
+    src/app/CrashHandler.cpp     # Phase 12 Task 7 (exe-only: minidump filter)
     src/ui/ColdStartTimer.cpp
     src/ui/FindBar.cpp           # Phase 6 Task 8
     src/ui/MainWindow.cpp
@@ -105,6 +110,7 @@ litepdf_apply_flags(litepdf)
 
 target_link_libraries(litepdf PRIVATE
     comctl32
+    dbghelp        # Phase 12 Task 7: MiniDumpWriteDump (CrashHandler)
     litepdf_core
 )
 

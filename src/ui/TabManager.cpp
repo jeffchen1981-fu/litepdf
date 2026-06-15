@@ -344,6 +344,11 @@ int TabManager::add_tab(std::unique_ptr<litepdf::core::Tab> t) {
 void TabManager::close_tab(int index) {
     if (index < 0 || index >= count()) return;
     const int old_active = impl_->list.active_index();
+    // Decide BEFORE mutating the list (close_changes_active_tab takes the
+    // pre-removal indices). Fire on_switch iff the active *instance* changes,
+    // not merely the active index — see close_changes_active_tab / issue #33.
+    const bool active_changed = litepdf::core::close_changes_active_tab(
+        old_active, index, count());
     const int new_active = impl_->list.remove(static_cast<std::size_t>(index));
     SendMessageW(impl_->hwnd, TCM_DELETEITEM,
                  static_cast<WPARAM>(index), 0);
@@ -351,8 +356,14 @@ void TabManager::close_tab(int index) {
         SendMessageW(impl_->hwnd, TCM_SETCURSEL,
                      static_cast<WPARAM>(new_active), 0);
     }
-    if (new_active != old_active && impl_->on_switch) {
-        impl_->on_switch(new_active, old_active);
+    if (active_changed && impl_->on_switch) {
+        // old_index = -1: the previously-active tab has just been erased, so
+        // there is no outgoing tab to snapshot. Passing its stale index would
+        // make on_tab_switch save state into (or cancel renders on) whichever
+        // tab now occupies that slot — a wrong-tab write at best, a freed-view
+        // touch at worst. -1 makes on_tab_switch skip the outgoing snapshot
+        // and just rebind the canvas to the new active view.
+        impl_->on_switch(new_active, -1);
     }
 }
 

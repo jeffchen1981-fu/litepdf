@@ -1,4 +1,7 @@
 // LitePDF -- Phase 5: bootstrap with single-instance gate.
+#include "app/AppPaths.hpp"      // Phase 12: crashes_dir_under / running_marker_under
+#include "app/AppRunGuard.hpp"   // Phase 12: abnormal-exit run marker
+#include "app/CrashHandler.hpp"  // Phase 12: minidump on unhandled exception
 #include "app/SingleInstance.hpp"
 #include "ui/ColdStartTimer.hpp"
 #include "ui/MainWindow.hpp"
@@ -6,6 +9,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <filesystem>
+#include <optional>
 #include <string>
 
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
@@ -56,7 +60,30 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
 
     litepdf::ui::MainWindow app;
     app.set_log_timings(log_timings);
-    int rc = app.run(hInstance, nCmdShow, initial_path);
+
+    // Phase 12: crash minidumps + abnormal-exit detection. Wired ONLY here in
+    // the primary (message-loop-owning) instance — a forwarded second instance
+    // already returned above, so it never creates the crash handler or the run
+    // marker. Reuse the window's already-resolved app data dir (set in its
+    // ctor) so the crash dir, run marker, and session file share one identical
+    // path; an empty dir means resolution failed => persistence disabled and
+    // NOTHING is created in the process CWD (often the user's documents folder
+    // for a shell-association launch). AppRunGuard is constructed AFTER the
+    // single-instance gate so only the loop-owning instance owns the marker;
+    // it lives until after app.run() returns, outliving the window.
+    std::optional<litepdf::app::AppRunGuard> run_guard;
+    bool offer_restore = false;
+    const std::filesystem::path& data_dir = app.app_data_dir();
+    if (!data_dir.empty()) {
+        const std::filesystem::path crashes = litepdf::app::crashes_dir_under(data_dir);
+        litepdf::app::install_crash_handler(crashes);
+        litepdf::app::prune_crash_dumps(crashes, 5);
+        run_guard.emplace(litepdf::app::running_marker_under(data_dir));
+        offer_restore = run_guard->previous_exit_was_abnormal();
+    }
+    app.set_run_guard(run_guard ? &*run_guard : nullptr);
+
+    int rc = app.run(hInstance, nCmdShow, initial_path, offer_restore);
 
     if (mutex) CloseHandle(mutex);
     return rc;

@@ -19,6 +19,7 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
+#include <strsafe.h>   // Phase 12: StringCchPrintfW (bounded) for the restore prompt
 #include <stdlib.h>
 #include <algorithm>
 #include <climits>
@@ -87,6 +88,9 @@ MainWindow::MainWindow()
     : search_dispatcher_(
           std::make_unique<litepdf::app::ThreadPoolDispatcher>(2)) {
     mru_.load();
+    // Phase 12: resolve %LOCALAPPDATA%\LitePDF (creates it + crashes\).
+    // Empty on failure => session persistence silently disabled everywhere.
+    app_data_dir_ = litepdf::app::app_data_dir();
 }
 MainWindow::~MainWindow() {
     if (haccel_) { DestroyAcceleratorTable(haccel_); haccel_ = nullptr; }
@@ -175,6 +179,14 @@ void MainWindow::open_tab_async(std::filesystem::path path) {
                 if (!PostMessageW(hwnd, WM_USER_PASSWORD_PROMPT,
                                   reinterpret_cast<WPARAM>(bundle), 0)) {
                     delete bundle;
+                    // Phase 12: symmetric with the OK-post-fail path below — a
+                    // dropped password-prompt post would otherwise stall a
+                    // restore chain forever (no terminal for the in-flight
+                    // encrypted open). Post a failure so the chain advances.
+                    // Best-effort: fails too if the window is gone (restore moot).
+                    PostMessageW(hwnd, WM_USER_OPEN_FAILED,
+                                 static_cast<WPARAM>(
+                                     litepdf::core::Document::OpenError::Other), 0);
                 }
                 return;
             }
@@ -211,6 +223,14 @@ void MainWindow::open_tab_async(std::filesystem::path path) {
             if (!PostMessageW(hwnd, WM_USER_OPEN_OK,
                               reinterpret_cast<WPARAM>(raw), 0)) {
                 delete raw;
+                // Phase 12: a dropped success would otherwise stall a restore
+                // chain forever (no terminal for the in-flight open). Post a
+                // failure (lParam 0) so the chain advances. Best-effort: if the
+                // OK post failed because the window is gone, this fails too —
+                // harmless, restore is moot once the window is destroyed.
+                PostMessageW(hwnd, WM_USER_OPEN_FAILED,
+                             static_cast<WPARAM>(
+                                 litepdf::core::Document::OpenError::Other), 0);
             }
         } catch (...) {
             // DocumentView ctor can throw (e.g., ui-ctx clone or worker
@@ -235,6 +255,11 @@ void MainWindow::kick_render(int page) {
         static_cast<float>(dpi));
 
     HWND target = canvas_->hwnd();
+    // Stamp every render with the canvas epoch at submit time so a result
+    // that lands after a tab switch (e.g. the last-restored tab's render
+    // arriving after restore_finish re-activates the saved tab) is dropped
+    // by the canvas instead of painted over the now-active tab (issue #35).
+    const std::uint64_t epoch = canvas_->render_epoch();
     if (view->dual_page()) {
         // (Phase 8 D10) Spread layout: snap to the LEFT page of the
         // pair containing `page` (cover-rule + odd-tail handled by the
@@ -246,21 +271,21 @@ void MainWindow::kick_render(int page) {
         view->cancel_stale_renders(0);
         view->set_current_page(left);
         view->request_render(left,
-            [target](fz_pixmap* p, fz_context* worker_ctx) {
-                PdfCanvas::post_render_done(target, p, worker_ctx);
+            [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
+                PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
             });
         if (right >= 0) {
             view->request_render(right,
-                [target](fz_pixmap* p, fz_context* worker_ctx) {
-                    PdfCanvas::post_render_done_right(target, p, worker_ctx);
+                [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
+                    PdfCanvas::post_render_done_right(target, p, worker_ctx, epoch);
                 });
         }
         InvalidateRect(canvas_->hwnd(), nullptr, FALSE);
         return;
     }
     view->request_render_with_prefetch(page,
-        [target](fz_pixmap* p, fz_context* worker_ctx) {
-            PdfCanvas::post_render_done(target, p, worker_ctx);
+        [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
+            PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
         });
 }
 
@@ -616,6 +641,8 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
     if (canvas_) canvas_->set_current_hit(std::nullopt);
     update_find_counter();
 
+    schedule_session_save();  // Phase 12: active tab / open set changed
+
     (void)new_index;
 }
 
@@ -639,9 +666,243 @@ void MainWindow::on_tab_close_request(int index) {
         results_panel_->refresh_count();
     }
     tabs_->close_tab(index);
-    // close_tab() fires on_switch (with new_active=-1 when the last tab
-    // is dropped); on_tab_switch() performs all the canvas/outline/layout
-    // teardown. No further work needed here.
+    // close_tab() fires on_switch only when the active tab *instance* changes
+    // (closing the active tab, or dropping the last tab -> new_active=-1);
+    // on_tab_switch() then rebinds the canvas / outline / layout to the new
+    // active view. Closing a non-active tab leaves the active view bound and
+    // needs no canvas work, so no further work is needed here either way.
+    schedule_session_save();  // Phase 12: a closed tab changes the set
+}
+
+// ---------------- Phase 12: crash-safe session persistence -----------------
+
+litepdf::core::SessionState MainWindow::capture_session() const {
+    litepdf::core::SessionState s;
+    s.version = litepdf::core::kSessionVersion;
+
+    WINDOWPLACEMENT wp{}; wp.length = sizeof(wp);
+    if (GetWindowPlacement(hwnd_, &wp)) {
+        s.window.flags = static_cast<int>(wp.flags);
+        s.window.show  = static_cast<int>(wp.showCmd);
+        s.window.x = wp.rcNormalPosition.left;
+        s.window.y = wp.rcNormalPosition.top;
+        s.window.w = wp.rcNormalPosition.right  - wp.rcNormalPosition.left;
+        s.window.h = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
+    }
+    // active_tab is stored as the index WITHIN the filtered (non-empty-path)
+    // tab list we actually emit, NOT the raw TabManager index — so validate()'s
+    // range check is meaningful and restore lands on the right document.
+    const int raw_active = tabs_ ? tabs_->active_index() : -1;
+    const int count      = tabs_ ? tabs_->count() : 0;
+    s.active_tab = -1;
+    for (int i = 0; i < count; ++i) {
+        auto* tab = tabs_->tab_at(i);
+        if (!tab || tab->path.empty()) continue;
+        if (i == raw_active) s.active_tab = static_cast<int>(s.tabs.size());
+        litepdf::core::SessionTab st;
+        st.path = tab->path;
+        if (auto* v = tab->view.get()) {
+            st.page = v->current_page();
+            switch (v->zoom_mode()) {
+                case litepdf::core::DocumentView::ZoomMode::FitWidth:
+                    st.zoom_mode = litepdf::core::SessionZoom::FitWidth; break;
+                case litepdf::core::DocumentView::ZoomMode::FitPage:
+                    st.zoom_mode = litepdf::core::SessionZoom::FitPage;  break;
+                case litepdf::core::DocumentView::ZoomMode::Custom:
+                    st.zoom_mode = litepdf::core::SessionZoom::Custom;   break;
+            }
+            st.zoom_scale = v->zoom_scale();
+        }
+        s.tabs.push_back(std::move(st));
+    }
+    if (s.active_tab < 0 && !s.tabs.empty()) s.active_tab = 0;  // keep validate() satisfied
+    return s;
+}
+
+void MainWindow::schedule_session_save() {
+    if (app_data_dir_.empty() || restoring_) return;   // disabled / mid-restore
+    SetTimer(hwnd_, kSessionSaveTimer, 1500, nullptr);  // coalesces bursts
+}
+
+void MainWindow::on_clean_exit() {
+    KillTimer(hwnd_, kSessionSaveTimer);            // drain any pending debounce
+    // If a restore is still in flight, do NOT touch session.json or the
+    // marker: capture_session() now would persist a HALF-restored set, and
+    // clearing the marker would suppress the next launch's prompt — together
+    // they permanently lose the unrestored remainder of the crash session.
+    // Leaving both intact means the next launch re-offers the FULL session.
+    if (restoring_) return;
+    if (!app_data_dir_.empty()) {
+        litepdf::core::save_session(
+            litepdf::app::session_file_under(app_data_dir_), capture_session());
+    }
+    if (run_guard_) run_guard_->mark_clean_exit();  // idempotent
+}
+
+// ------------- Phase 12 Task 9: sequential restore orchestrator ------------
+
+void MainWindow::maybe_offer_restore(bool offer) {
+    // Test/automation hook: LITEPDF_NO_RESTORE (set to anything) suppresses the
+    // restore prompt. A driver that force-kills the app — the CI smoke test and
+    // ux-probe runs — leaves the abnormal-exit marker behind, so without this
+    // every relaunch after a kill would get the "restore previous tabs?" modal
+    // and never open the file passed on the command line.
+    const bool suppress =
+        GetEnvironmentVariableW(L"LITEPDF_NO_RESTORE", nullptr, 0) > 0;
+    if (!offer || app_data_dir_.empty() || suppress) {
+        open_deferred_initial_path();
+        return;
+    }
+    auto saved = litepdf::core::load_session(
+        litepdf::app::session_file_under(app_data_dir_));
+    if (!saved || saved->tabs.empty()) { open_deferred_initial_path(); return; }
+
+    // Pre-filter to existing files (skip deleted/moved/disconnected silently),
+    // capped so a runaway session can't spawn an unbounded restore.
+    restore_queue_.clear();
+    restore_active_path_.clear();
+    const int saved_active = saved->active_tab;
+    for (int i = 0; i < static_cast<int>(saved->tabs.size()) &&
+                    restore_queue_.size() < kMaxRestoreTabs; ++i) {
+        std::error_code ec;
+        if (std::filesystem::exists(saved->tabs[i].path, ec) && !ec) {
+            if (i == saved_active) restore_active_path_ = saved->tabs[i].path;
+            restore_queue_.push_back(saved->tabs[i]);
+        }
+    }
+    if (restore_queue_.empty()) { open_deferred_initial_path(); return; }
+    if (restore_active_path_.empty())
+        restore_active_path_ = restore_queue_.front().path;
+
+    // English to match every other runtime MessageBoxW in this app (the plan's
+    // zh-TW literal would be the lone Chinese dialog in an English UI).
+    wchar_t msg[160];
+    StringCchPrintfW(msg, ARRAYSIZE(msg),
+                     L"LitePDF closed unexpectedly last time.\n"
+                     L"Restore the %zu previously open tab(s)?",
+                     restore_queue_.size());
+    if (MessageBoxW(hwnd_, msg, kWindowTitle,
+                    MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON1) != IDYES) {
+        restore_queue_.clear();
+        open_deferred_initial_path();
+        return;
+    }
+
+    restoring_ = true;   // BEFORE SetWindowPlacement so its WM_SIZE can't arm a save
+
+    // Window geometry, guarded against (a) an off-screen multi-monitor change
+    // and (b) a minimized / garbage show state, which would run the whole
+    // restore against a 0x0 client rect (FitWidth/FitPage scale -> 0).
+    if (saved->window.w > 0 && saved->window.h > 0) {
+        UINT show = static_cast<UINT>(saved->window.show);
+        if (show != SW_SHOWMAXIMIZED) show = SW_SHOWNORMAL;  // whitelist
+        WINDOWPLACEMENT wp{}; wp.length = sizeof(wp);
+        wp.flags   = 0;
+        wp.showCmd = show;
+        wp.rcNormalPosition = { saved->window.x, saved->window.y,
+                                saved->window.x + saved->window.w,
+                                saved->window.y + saved->window.h };
+        if (MonitorFromRect(&wp.rcNormalPosition, MONITOR_DEFAULTTONULL) != nullptr)
+            SetWindowPlacement(hwnd_, &wp);  // skip rect if entirely off all monitors
+    }
+
+    restore_index_ = 0;
+    restore_open_next();
+}
+
+void MainWindow::restore_open_next() {
+    if (restore_index_ >= restore_queue_.size()) { restore_finish(); return; }
+    restore_pending_path_ = restore_queue_[restore_index_].path;  // correlation tag
+    open_tab_async(restore_pending_path_);   // one at a time => saved order preserved
+}
+
+// Called from WM_USER_OPEN_OK AND the password-success path, AFTER add_tab has
+// inserted (and activated) the new tab. `opened` is the path that completed.
+void MainWindow::restore_on_tab_ready(const std::filesystem::path& opened) {
+    // Correlation guard: consume a queue slot ONLY if this completion is the
+    // open the orchestrator issued. A concurrent user/IPC open (drag-drop,
+    // Ctrl+O, MRU, WM_COPYDATA from a 2nd instance) completing mid-restore
+    // falls through to normal handling and must NOT shift the restore queue.
+    if (!restoring_ || restore_index_ >= restore_queue_.size() ||
+        opened != restore_pending_path_) {
+        return;
+    }
+
+    const auto& st = restore_queue_[restore_index_];
+    if (auto* v = active_view()) {   // the just-added tab is the active one
+        // add_tab fired on_tab_switch synchronously, seeding the view's
+        // viewport dims and kicking ONE render that the kick_render below
+        // cancels before it can paint (cancel-on-new-request) — no page-0 flash.
+        v->set_current_page(st.page);
+        switch (st.zoom_mode) {
+            case litepdf::core::SessionZoom::Custom:
+                v->set_zoom_scale(st.zoom_scale);  // no viewport needed (Task 5)
+                break;
+            case litepdf::core::SessionZoom::FitWidth:
+            case litepdf::core::SessionZoom::FitPage: {
+                RECT rc; GetClientRect(canvas_->hwnd(), &rc);
+                const UINT dpi = GetDpiForWindow(hwnd_);
+                v->set_zoom_mode(
+                    st.zoom_mode == litepdf::core::SessionZoom::FitWidth
+                        ? litepdf::core::DocumentView::ZoomMode::FitWidth
+                        : litepdf::core::DocumentView::ZoomMode::FitPage,
+                    static_cast<float>(rc.right - rc.left),
+                    static_cast<float>(rc.bottom - rc.top),
+                    static_cast<float>(dpi));
+                break;
+            }
+        }
+        kick_render(st.page);
+    }
+    restore_pending_path_.clear();
+    ++restore_index_;
+    restore_open_next();
+}
+
+// Called on EVERY non-success terminal of the in-flight restore open:
+// OPEN_FAILED (missing/corrupt/worker ctor-throw/dropped OK post), password
+// cancel, password exhaustion, and the post-auth construction catch. Advances
+// the chain exactly once.
+void MainWindow::restore_on_tab_failed() {
+    if (!restoring_) return;
+    restore_pending_path_.clear();
+    ++restore_index_;        // skip the failed tab, keep the chain moving
+    restore_open_next();
+}
+
+void MainWindow::restore_finish() {
+    // Resolve the active tab by PATH (indices were filtered/reordered). If the
+    // saved-active doc failed to open / was filtered out, fall back to tab 0.
+    int active = -1;
+    const int count = tabs_ ? tabs_->count() : 0;
+    for (int i = 0; i < count; ++i) {
+        auto* t = tabs_->tab_at(i);
+        if (t && t->path == restore_active_path_) { active = i; break; }
+    }
+    if (active < 0 && count > 0) active = 0;
+    if (active >= 0) tabs_->set_active(active);
+
+    restoring_ = false;             // SINGLE terminal exit: re-enables live auto-save
+    restore_queue_.clear();
+    restore_pending_path_.clear();
+    open_deferred_initial_path();   // now honor the CLI file, if any
+    schedule_session_save();        // one save reflecting the restored state
+}
+
+void MainWindow::open_deferred_initial_path() {
+    if (!deferred_initial_path_ || deferred_initial_path_->empty()) {
+        deferred_initial_path_.reset();
+        return;
+    }
+    // Replicate the eager-open block run() used to perform: canonicalize +
+    // MRU push BEFORE opening (a Phase 5 fix; dropping it regresses MRU for
+    // the most common open path — Explorer double-click / CLI).
+    std::filesystem::path normalized =
+        canonicalize_for_mru(*deferred_initial_path_);
+    mru_.push(normalized.wstring());
+    mru_.save();
+    deferred_initial_path_.reset();
+    open_tab_async(std::move(normalized));
 }
 
 LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
@@ -770,7 +1031,12 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                         tp->set_current_page(page);
                     }
                 }
+                schedule_session_save();  // Phase 12: persist new page (debounced)
             });
+
+            // Ctrl+wheel zoom lives in the canvas; persist it like menu zoom so
+            // a wheel-zoom-only change survives a crash/force-kill (debounced).
+            canvas_->set_on_zoom_changed([this] { schedule_session_save(); });
 
             DragAcceptFiles(hwnd, TRUE);
             return 0;
@@ -813,8 +1079,18 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 // the brief stutter during drag-resize is acceptable.
                 kick_render(view->current_page());
             }
+            // Phase 12: maximize/restore are discrete geometry changes that
+            // skip WM_EXITSIZEMOVE (no drag). Persist them (debounced). The
+            // schedule_session_save() restoring_ guard + the WM_TIMER re-check
+            // suppress the SetWindowPlacement-induced WM_SIZE during restore.
+            if (w == SIZE_MAXIMIZED || w == SIZE_RESTORED) schedule_session_save();
             return 0;
         }
+        case WM_EXITSIZEMOVE:
+            // Phase 12: a drag-move or drag-resize just settled. Persist the
+            // new window placement (debounced).
+            schedule_session_save();
+            return 0;
         case WM_SETFOCUS:
             if (canvas_) SetFocus(canvas_->hwnd());
             return 0;
@@ -1080,7 +1356,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     return 0;
                 case IDM_HELP_ABOUT:
                     MessageBoxW(hwnd,
-                        L"LitePDF v0.0.13\n\n"
+                        L"LitePDF v1.0.0\n\n"
                         L"A lightweight PDF / ePub / CBZ / XPS viewer for Windows.\n\n"
                         L"License: AGPL-3.0\n"
                         // Source of truth: third_party/mupdf FZ_VERSION; update on bumps.
@@ -1092,12 +1368,14 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     if (auto* view = active_view();
                         view && view->zoom_in()) {
                         kick_render(view->current_page());
+                        schedule_session_save();  // Phase 12: zoom changed
                     }
                     return 0;
                 case IDM_ZOOM_OUT:
                     if (auto* view = active_view();
                         view && view->zoom_out()) {
                         kick_render(view->current_page());
+                        schedule_session_save();  // Phase 12: zoom changed
                     }
                     return 0;
                 case IDM_ZOOM_RESET: {
@@ -1110,6 +1388,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                             static_cast<float>(rc.bottom - rc.top),
                             static_cast<float>(dpi));
                         kick_render(view->current_page());
+                        schedule_session_save();  // Phase 12: zoom mode changed
                     }
                     return 0;
                 }
@@ -1147,6 +1426,11 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             std::unique_ptr<litepdf::core::Tab> t(raw);
             ColdStartTimer::mark(2);  // Document fully loaded.
 
+            // Phase 12: capture the path BEFORE the std::move into add_tab
+            // (the unique_ptr is null afterward) so a restore completion can be
+            // correlated against the in-flight open.
+            std::filesystem::path opened = t ? t->path : std::filesystem::path{};
+
             // Phase 6 Task 10: install SearchSession observer BEFORE
             // handing ownership to tabs_. Observer fires on a worker
             // thread; we marshal to UI thread via PostMessage. Capture
@@ -1165,10 +1449,32 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // callback is where canvas/outline/layout/kick_render happens
             // (and, via on_tab_switch, update_canvas_hits_source()).
             (void)new_index;
+            // Phase 12: if this completes an in-flight restore open, apply the
+            // saved page/zoom and advance the chain. The correlation guard
+            // inside makes a concurrent user/IPC open a no-op here.
+            if (restoring_) restore_on_tab_ready(opened);
+            schedule_session_save();  // Phase 12: a new tab joined the set
             return 0;
         }
         case WM_USER_OPEN_FAILED: {
             using OE = litepdf::core::Document::OpenError;
+            // Adopt ownership of the path string the worker allocated (null /
+            // lParam 0 for the ctor-throw and dropped-OK-post cases). unique_ptr
+            // frees it on every exit below.
+            std::unique_ptr<std::wstring> failed_path(
+                reinterpret_cast<std::wstring*>(l));
+            // Phase 12: while restoring, every terminal of the in-flight open
+            // must advance the chain exactly once, and the modal is suppressed
+            // so a failed restore tab can't storm dialogs. A null path (worker
+            // ctor-throw / dropped OK post) is attributed to the in-flight slot;
+            // otherwise correlate by path so a concurrent user/IPC open that
+            // fails mid-restore still shows its own error.
+            if (restoring_ &&
+                (!failed_path ||
+                 std::filesystem::path(*failed_path) == restore_pending_path_)) {
+                restore_on_tab_failed();
+                return 0;
+            }
             const wchar_t* emsg = L"Failed to open the document.";
             switch (static_cast<OE>(w)) {
                 case OE::FileNotFound:
@@ -1192,10 +1498,6 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 default:
                     break;
             }
-            // Adopt ownership of the path string the worker allocated.
-            // unique_ptr handles the delete even if MessageBoxW throws.
-            std::unique_ptr<std::wstring> failed_path(
-                reinterpret_cast<std::wstring*>(l));
             std::wstring full_msg = emsg;
             if (failed_path && !failed_path->empty()) {
                 full_msg += L"\n\n";
@@ -1221,6 +1523,19 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 reinterpret_cast<PendingPasswordOpen*>(w));
             if (!bundle) return 0;
             const std::wstring basename = bundle->path.filename().wstring();
+            // Phase 12: capture the path for restore correlation (only doc is
+            // moved out of the bundle below; path stays valid, but copy it so
+            // the restore hooks read a stable value).
+            const std::filesystem::path opened = bundle->path;
+            // Is THIS open the one the restore orchestrator issued? Restore is
+            // sequential (only one restore open in flight) and restore_pending_
+            // path_ can't change during this handler, so this is stable here.
+            // It MUST gate every terminal below: PasswordDialog::prompt runs a
+            // modal nested message loop, so a concurrent user/IPC open of a
+            // DIFFERENT encrypted file can be dispatched reentrantly while a
+            // restore tab sits on its password modal. Cancelling/exhausting
+            // that concurrent open must NOT advance/corrupt the restore queue.
+            const bool is_restore_tab = restoring_ && opened == restore_pending_path_;
 
             auto result = litepdf::ui::try_authenticate_with_retry(
                 [parent = hwnd_, &basename](const std::wstring& status) {
@@ -1246,13 +1561,20 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             if (!result.accepted) {
                 // R11: only notify the user on attempt-exhaustion; Cancel
                 // is a silent close (the user already chose to dismiss).
-                if (result.attempts >= 3) {
+                // Phase 12: suppress the exhaustion box only for the in-flight
+                // restore tab (so restore doesn't storm dialogs); a concurrent
+                // user open that exhausts mid-restore still gets its feedback.
+                if (result.attempts >= 3 && !is_restore_tab) {
                     std::wstring full_msg =
                         L"Failed to open " + basename
                         + L": password incorrect after 3 attempts.";
                     MessageBoxW(hwnd, full_msg.c_str(), kWindowTitle,
                                 MB_OK | MB_ICONWARNING);
                 }
+                // Phase 12: cancel + exhaustion advance the chain ONLY when this
+                // is the restore-issued open (path-correlated) — a reentrant
+                // concurrent open must not consume a restore queue slot.
+                if (is_restore_tab) restore_on_tab_failed();
                 return 0;
             }
 
@@ -1276,7 +1598,19 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     PostMessageW(target, WM_USER_SEARCH_UPDATE, 0, 0);
                 });
                 (void)tabs_->add_tab(std::move(tab));
+                // Phase 12: an authenticated tab is a restore success terminal
+                // (restore_on_tab_ready also re-checks the path correlation).
+                if (is_restore_tab) restore_on_tab_ready(opened);
+                schedule_session_save();  // Phase 12: authenticated tab joined
             } catch (...) {
+                // Phase 12: a post-auth construction failure is a restore
+                // terminal too — but only for the restore-issued open. A
+                // concurrent open that throws here falls through to its error
+                // box (suppressed for the restore tab to avoid a dialog storm).
+                if (is_restore_tab) {
+                    restore_on_tab_failed();
+                    return 0;
+                }
                 MessageBoxW(hwnd,
                             L"Failed to open the document after authentication.",
                             kWindowTitle, MB_OK | MB_ICONWARNING);
@@ -1291,7 +1625,32 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             return 0;
         case WM_COPYDATA:
             return on_copydata(hwnd, w, l);
+        case WM_TIMER:
+            if (w == kSessionSaveTimer) {
+                KillTimer(hwnd_, kSessionSaveTimer);
+                // Defense in depth: a save timer can be armed (e.g. by the
+                // SetWindowPlacement-induced WM_SIZE during restore) BEFORE
+                // restoring_ flips true. Re-check here so a debounced save
+                // firing mid-restore can't overwrite session.json with a
+                // partial capture.
+                if (restoring_ || app_data_dir_.empty()) return 0;
+                litepdf::core::save_session(
+                    litepdf::app::session_file_under(app_data_dir_),
+                    capture_session());
+            }
+            return 0;
+        case WM_QUERYENDSESSION:
+            // We hold no unsaved-but-unsavable state; always allow shutdown.
+            return TRUE;
+        case WM_ENDSESSION:
+            // OS shutdown/reboot/logoff terminates the process WITHOUT a
+            // WM_DESTROY. Without this, every reboot with tabs open would
+            // leave the run marker behind and falsely prompt restore next
+            // launch. wParam == TRUE means the session is really ending.
+            if (w) on_clean_exit();
+            return 0;
         case WM_DESTROY:
+            on_clean_exit();      // Phase 12: flush save + clear run marker
             PostQuitMessage(0);
             return 0;
     }
@@ -1564,7 +1923,8 @@ LRESULT MainWindow::on_copydata(HWND hwnd, WPARAM, LPARAM l) {
 }
 
 int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
-                    const std::filesystem::path& initial_path) {
+                    const std::filesystem::path& initial_path,
+                    bool offer_restore) {
     INITCOMMONCONTROLSEX icc = { sizeof(icc),
         ICC_STANDARD_CLASSES | ICC_TAB_CLASSES |
         ICC_TREEVIEW_CLASSES | ICC_LISTVIEW_CLASSES };
@@ -1644,19 +2004,14 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
     ColdStartTimer::mark(1);  // Window visible.
     UpdateWindow(hwnd_);
 
-    if (!initial_path.empty()) {
-        // Pre-existing bug (not Phase 5): initial-path open via double-click
-        // / command-line argv bypassed mru_.push, so the user's first-ever
-        // open never entered MRU. Folded into Task 8's canonicalization
-        // sweep since the fix site is identical. Sender-side (main.cpp)
-        // already canonicalizes before handing us initial_path, but we
-        // re-canonicalize defensively for consistency with the other three
-        // call sites.
-        std::filesystem::path normalized = canonicalize_for_mru(initial_path);
-        mru_.push(normalized.wstring());
-        mru_.save();
-        open_tab_async(std::move(normalized));
-    }
+    // Phase 12 Task 9: the CLI initial_path is deferred — it must not race the
+    // restore chain. maybe_offer_restore() either runs the restore (opening the
+    // deferred file at restore_finish) or, on decline / no abnormal exit / no
+    // session, opens it immediately via open_deferred_initial_path(). The
+    // window is shown + laid out by now, so MessageBoxW has a parent and the
+    // placement / GetClientRect APIs are valid.
+    if (!initial_path.empty()) deferred_initial_path_ = initial_path;
+    maybe_offer_restore(offer_restore);
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {

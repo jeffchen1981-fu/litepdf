@@ -258,14 +258,29 @@ bool Document::with_rendered_page(
     fz_pixmap*   pix  = nullptr;
     bool         ok   = false;
 
+    fz_device* dev = nullptr;
     fz_try(ctx) {
         page = fz_load_page(ctx, doc, static_cast<int>(page_idx));
         if (page) {
             fz_matrix m = fz_scale(scale_x_px_per_pt, scale_y_px_per_pt);
             if (rotate_90) m = fz_pre_rotate(m, 90.0f);
-            pix = fz_new_pixmap_from_page(
-                ctx, page, m, fz_device_bgr(ctx), /*alpha*/1);
+            // Render onto an OPAQUE WHITE background. fz_new_pixmap_from_page
+            // with alpha=1 clears to TRANSPARENT, which a downstream consumer
+            // that ignores alpha (printer DC BitBlt, D2D ALPHA_MODE_IGNORE)
+            // paints as opaque BLACK for any unfilled page area — so pages
+            // without their own white fill printed/rendered black. Keep the
+            // 4-channel BGRA buffer but clear it to white, then run the page.
+            fz_irect bbox = fz_round_rect(
+                fz_transform_rect(fz_bound_page(ctx, page), m));
+            pix = fz_new_pixmap_with_bbox(ctx, fz_device_bgr(ctx), bbox,
+                                          nullptr, /*alpha*/ 1);
+            fz_clear_pixmap_with_value(ctx, pix, 0xFF);  // opaque white
+            dev = fz_new_draw_device(ctx, fz_identity, pix);
+            fz_run_page(ctx, page, dev, m, nullptr);
+            fz_close_device(ctx, dev);
         }
+    } fz_always(ctx) {
+        if (dev) fz_drop_device(ctx, dev);
     } fz_catch(ctx) {
         if (pix)  { fz_drop_pixmap(ctx, pix);   pix  = nullptr; }
         if (page) { fz_drop_page(ctx, page);    page = nullptr; }

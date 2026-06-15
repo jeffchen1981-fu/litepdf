@@ -6,6 +6,12 @@
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 
+# Phase 12: this script force-kills each litepdf instance, which leaves the
+# abnormal-exit marker behind, so the next launch would pop the crash-restore
+# "restore previous tabs?" modal instead of opening the file we pass. Suppress
+# restore for the whole smoke run; child processes inherit this env var.
+$env:LITEPDF_NO_RESTORE = "1"
+
 $exe     = Join-Path $repoRoot "build/Release/litepdf.exe"
 $fixture = Join-Path $repoRoot "tests/fixtures/simple.pdf"
 

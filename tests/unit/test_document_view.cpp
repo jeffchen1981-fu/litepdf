@@ -2,6 +2,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <limits>
 #include <utility>
 
 #include "app/SearchDispatcher.hpp"
@@ -138,4 +139,23 @@ TEST_CASE("DocumentView zoom_in/out cycles presets and bounds correctly",
     }
     REQUIRE(view.zoom_scale() == Catch::Approx(0.5f));
     REQUIRE_FALSE(view.zoom_out());  // already at min
+}
+
+TEST_CASE("set_zoom_scale sets Custom mode and clamps to preset span", "[core][view][zoom]") {
+    InlineDispatcher disp;
+    DocumentView view(open_simple(), disp);
+    REQUIRE(view.zoom_mode() != DocumentView::ZoomMode::Custom);  // precondition: starts non-Custom
+    view.set_zoom_scale(1.75f);
+    REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::Custom);
+    REQUIRE(view.zoom_scale() == Catch::Approx(1.75f));
+
+    view.set_zoom_scale(99.0f);                 // above preset max
+    REQUIRE(view.zoom_scale() == Catch::Approx(4.0f));
+    view.set_zoom_scale(0.01f);                 // below preset min
+    REQUIRE(view.zoom_scale() == Catch::Approx(0.5f));
+
+    view.set_zoom_scale(0.5f);  REQUIRE(view.zoom_scale() == Catch::Approx(0.5f));  // exact lower bound
+    view.set_zoom_scale(4.0f);  REQUIRE(view.zoom_scale() == Catch::Approx(4.0f));  // exact upper bound
+    view.set_zoom_scale(std::numeric_limits<float>::quiet_NaN());                    // NaN-safe guard
+    REQUIRE(view.zoom_scale() == Catch::Approx(0.5f));
 }

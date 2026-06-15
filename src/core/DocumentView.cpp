@@ -245,6 +245,17 @@ void DocumentView::set_zoom_mode(ZoomMode mode,
     }
 }
 
+void DocumentView::set_zoom_scale(float scale) noexcept {
+    const float lo = Impl::kPresets[0];                                                      // 0.5f
+    const float hi = Impl::kPresets[sizeof(Impl::kPresets)/sizeof(Impl::kPresets[0]) - 1];  // 4.0f
+    // NaN-safe clamp: NaN/-inf compare false to (scale >= lo), so the negated
+    // test pins them to lo; +inf falls to hi. Keeps the [lo,hi] contract total.
+    if (!(scale >= lo)) scale = lo;   // scale < lo, NaN, or -inf -> lo
+    if (scale > hi)     scale = hi;   // scale > hi or +inf -> hi
+    impl_->zm    = ZoomMode::Custom;
+    impl_->scale = scale;
+}
+
 bool DocumentView::zoom_in() {
     const float cur = impl_->scale;
     for (float lvl : Impl::kPresets) {
