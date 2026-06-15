@@ -55,8 +55,9 @@ the tag.
 | D2 2nd instance opens a PDF *during* the restore chain → own tab + chain still completes | PASS: froze the chain at an encrypted tab's password prompt, injected `bookmarks.pdf` via a 2nd instance, then resumed — final set = 3 restored + 1 injected, saved-active correct |
 | D3 close window *mid-restore-chain* → full session re-offered | PASS (deterministic via a temporary env-gated restore delay, reverted): a mid-chain WM_CLOSE left `session.json` at the full count + kept the marker; next launch re-offered the full set; clean exit, no crash dump |
 
-Still REQUIRES a human (detailed below): **F1** install/uninstall (destructive;
-build a fresh installer first). (**E1** debugger stack is now done — see §E.)
+All interactive items are now verified (E1 §E, F1 §F included). The only
+optional follow-up is re-running C2 on a *physically different* machine; the
+local real-reboot already passed.
 
 How D2/D3 were made testable (the chain is otherwise sub-second): **D2** — put
 `encrypted.pdf` in the restore set; its password prompt freezes the chain,
@@ -179,3 +180,13 @@ test (Task 10), so build a FRESH installer from the current source first.
 | F1b | Run the uninstaller (`unins000.exe`, or Settings → Apps → LitePDF → Uninstall) | Prompts "要一併刪除 LitePDF 的設定、工作階段與當機記錄嗎?" and shows the `%LOCALAPPDATA%\LitePDF` path |
 | F1c | Click **否 (No)** | Uninstall completes; `%LOCALAPPDATA%\LitePDF\` is KEPT |
 | F1d | Re-install → re-create data → uninstall → click **是 (Yes)** | `%LOCALAPPDATA%\LitePDF\` is DELETED |
+
+**F1 PASS (2026-06-15):** built `litepdf-setup-0.0.13-dev.exe` from the fixed
+`build\Release\litepdf.exe` (installed SHA256 == build), installed `/VERYSILENT`.
+Drove the uninstaller's keep/delete MsgBox (run `unins000.exe /VERYSILENT` — the
+wizard is skipped but that MsgBox still shows): **No (IDNO) kept**
+`%LOCALAPPDATA%\LitePDF`, **Yes (IDYES) deleted it entirely**, and the app
+uninstalled cleanly both times. Re-installed afterwards so the machine is left on
+the v1.0-candidate build. GOTCHA: an Explorer window open on the data folder
+locks it, so DelTree leaves the `crashes` subfolder behind — close folder windows
+before testing (a test artifact, not a product bug).
