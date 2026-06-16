@@ -14,8 +14,10 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
   on Enter; literal / case / whole-word search remain live as you type.
 
 ### Changed
-- Search cancels mid-page promptly when the query changes or a tab closes,
-  instead of running the in-progress page to completion.
+- Search can abort an in-progress page scan mid-page (the matcher checks a
+  cancel flag each step). Closing a tab or ending the session cuts an
+  in-flight scan short immediately; changing the query supersedes stale
+  in-flight results via a generation epoch.
 
 ### Known limitations
 - Whole-word boundaries are ASCII-only (accented / CJK words are best-effort).
