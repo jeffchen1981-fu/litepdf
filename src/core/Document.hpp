@@ -86,14 +86,13 @@ public:
     // Stateless per-page search. Callers (core::SearchSession, Task 5)
     // drive the cursor/cache and epoch-based cancellation on top of this.
     //
-    // MuPDF 1.24.11 exposes only fz_search_page which is unconditionally
-    // case-insensitive (it uppercases each codepoint via fz_toupper before
-    // matching). SearchFlags::match_case is therefore a no-op on this MuPDF
-    // release — we keep the field so the API shape is stable across the
-    // post-v1.0 MuPDF upgrade (1.27+; see page_hits) and the eventual
-    // custom-matcher fallback.
+    // Search options. On MuPDF 1.27.2 all three are honored via the
+    // incremental fz_search matcher; see SearchQuery.hpp for the
+    // flag->needle/options translation.
     struct SearchFlags {
         bool match_case = false;
+        bool whole_word = false;
+        bool regex      = false;
     };
 
     // One search hit on a page. Coordinates are in PDF user space (points),
@@ -115,18 +114,19 @@ public:
     //
     // @param page        0-based page index.
     // @param needle_utf8 UTF-8 query. Empty returns {}.
-    // @param flags       Case sensitivity (ignored on MuPDF 1.24.x; see above).
-    // @param abort_flag  Accepted for API forward-compatibility but NOT
-    //                    honored by MuPDF 1.24.11 — fz_search_page does
-    //                    not accept a cookie. A per-page search runs to
-    //                    completion once started. Cross-page cancellation
-    //                    is SearchSession's responsibility (epoch bump).
-    //                    TODO(post-v1.0): MuPDF 1.27+ ships an experimental
-    //                    stext matcher (fz_match_stext_page_cb) whose
-    //                    callback can return 1 to abort mid-page. When we
-    //                    take that upgrade, honor abort_flag by checking it
-    //                    inside the match callback (note: callback-return-
-    //                    to-abort, NOT an fz_cookie.abort field).
+    // @param flags       Case sensitivity, whole-word, and regex. ALL honored
+    //                    on MuPDF 1.27.2 via the incremental fz_search matcher
+    //                    (see SearchQuery.hpp for the flag->needle/options
+    //                    translation). An invalid regex throws inside MuPDF,
+    //                    is caught, and yields an empty result — callers
+    //                    pre-validate via query_compiles().
+    // @param abort_flag  Honored on MuPDF 1.27.2: checked at the top of every
+    //                    iteration of the incremental search loop, giving
+    //                    prompt mid-page cancellation. A non-zero value before
+    //                    or during the search yields whatever hits were already
+    //                    collected (empty if cancelled before the first match).
+    //                    Cross-page cancellation remains SearchSession's
+    //                    responsibility (epoch bump).
     //
     // Thread-safety: SAFE to call concurrently from multiple threads on
     // the same Document instance. An internal std::mutex serializes every
@@ -141,6 +141,13 @@ public:
         std::string_view needle_utf8,
         SearchFlags flags,
         std::atomic<int>* abort_flag = nullptr) const;
+
+    // One-shot validity check: compiles the regex/whole-word needle under
+    // `flags`. Returns false iff the pattern fails to compile. Empty needle or
+    // a pure-literal query → true (no compile needed). Returns true when no
+    // document is open (can't validate; the UI only calls this with an active
+    // doc). Cheap: no page is loaded/searched.
+    [[nodiscard]] bool query_compiles(std::string_view needle_utf8, SearchFlags flags) const;
 
     // Returns a freshly cloned fz_context* suitable for use on another
     // thread. MuPDF contexts are not thread-safe; RenderEngine's worker
