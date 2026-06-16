@@ -8,6 +8,19 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 
 ## [Unreleased]
 
+### Added
+- **Search: case-sensitive, regex, and whole-word.** The FindBar and cross-tab
+  results panel gain Aa / .* / W toggles. Regex uses ECMAScript syntax and runs
+  on Enter; literal / case / whole-word search remain live as you type.
+
+### Changed
+- Search cancels mid-page promptly when the query changes or a tab closes,
+  instead of running the in-progress page to completion.
+
+### Known limitations
+- Whole-word boundaries are ASCII-only (accented / CJK words are best-effort).
+- A catastrophic-backtracking regex cannot be interrupted mid-match.
+
 ## [1.0.0-phase12] — 2026-06-16 — Release hardening (v1.0)
 
 First stable release. Rolls up Phase 11 (MuPDF 1.27 upgrade + binary-size prune)
