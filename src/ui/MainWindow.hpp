@@ -92,7 +92,8 @@ private:
     // Phase 6 Tasks 11-14: cross-tab search + bottom results panel.
     void on_cross_tab_find();                        // IDM_CROSS_TAB_FIND (Ctrl+Shift+F)
     void on_toggle_results();                        // IDM_TOGGLE_RESULTS (F6)
-    void on_results_query(const std::wstring& q);    // ResultsPanel Enter on query
+    void on_results_query(const std::wstring& q, bool mc, bool ww,
+                          bool rx);                  // ResultsPanel Enter / toggle
     void on_results_row_click(std::size_t hit_idx);  // ResultsPanel row click
     void on_results_close();                         // ResultsPanel x button / cleanup
 

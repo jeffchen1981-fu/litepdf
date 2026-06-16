@@ -954,7 +954,9 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 ShowWindow(splitter_->hwnd(), SW_HIDE);
             }
             results_panel_->set_on_query_submit(
-                [this](std::wstring q) { on_results_query(q); });
+                [this](std::wstring q, bool mc, bool ww, bool rx) {
+                    on_results_query(q, mc, ww, rx);
+                });
             results_panel_->set_on_row_click(
                 [this](std::size_t i) { on_results_row_click(i); });
             results_panel_->set_on_close(
@@ -1816,7 +1818,8 @@ void MainWindow::on_toggle_results() {
     on_layout();
 }
 
-void MainWindow::on_results_query(const std::wstring& q) {
+void MainWindow::on_results_query(const std::wstring& q, bool mc, bool ww,
+                                  bool rx) {
     if (!cross_tab_ || !tabs_) return;
 
     // Snapshot open tabs for fan-out. Per §D9 the tab list at dispatch
@@ -1831,10 +1834,26 @@ void MainWindow::on_results_query(const std::wstring& q) {
         snapshot.push_back({t->view.get(), std::move(label)});
     }
 
-    // Cross-tab is independent of the find-bar's case toggle per design —
-    // an empty Flags{} matches the default (case-insensitive). Revisit if
-    // the results panel gains its own case-toggle checkbox.
-    litepdf::core::SearchSession::Flags f{};
+    // Cross-tab now carries the panel's own case/whole-word/regex toggles.
+    litepdf::core::SearchSession::Flags f{mc, ww, rx};
+
+    // Regex / whole-word patterns can fail to compile. Validate before
+    // dispatching; on failure skip the dispatch and keep the prior results in
+    // place rather than clearing to an empty search. query_compiles can only
+    // judge an OPEN document (it returns true when none is loaded), so probe
+    // the first open tab — all tabs share the same pattern grammar, so one
+    // open probe is representative. If no tab is open yet (slow-open race),
+    // dispatch anyway: each worker's page_hits catches a bad pattern and
+    // yields empty, so there is no crash.
+    if (rx || ww) {
+        for (const auto& tab : snapshot) {
+            if (tab.view && tab.view->document().is_open()) {
+                if (!tab.view->search().query_compiles(q, f)) return;
+                break;
+            }
+        }
+    }
+
     cross_tab_->dispatch(q, f, std::move(snapshot));
 
     // Refresh immediately so an empty-query / no-hits case doesn't leave
