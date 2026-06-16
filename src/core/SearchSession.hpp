@@ -33,6 +33,8 @@ class SearchSession {
 public:
     struct Flags {
         bool match_case = false;
+        bool whole_word = false;
+        bool regex      = false;
     };
 
     struct Hit {
@@ -55,6 +57,10 @@ public:
     // query clears everything and marks scan_complete=true immediately.
     void set_query(std::wstring q, Flags f);
     void clear();
+
+    // True iff `q` compiles as a search needle under `f` (delegates to
+    // Document::query_compiles after UTF-16->UTF-8). Pure check; no scan.
+    bool query_compiles(const std::wstring& q, Flags f) const;
 
     // Observer fires on the thread that completes a page task. For
     // ThreadPoolDispatcher, that's a worker thread — the observer is
