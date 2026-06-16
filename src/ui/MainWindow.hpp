@@ -83,7 +83,8 @@ private:
     void on_find_next();        // IDM_FIND_NEXT or Enter / F3
     void on_find_prev();        // IDM_FIND_PREV or Shift+Enter / Shift+F3
     void on_find_close();       // IDM_FIND_CLOSE: hide, clear highlight, refocus canvas
-    void on_find_query_changed(const std::wstring& q, bool match_case);
+    void on_find_query_changed(const std::wstring& q, bool match_case,
+                               bool whole_word, bool regex);
     void update_find_counter();           // read SearchSession -> set_counter
     void update_canvas_hits_source();     // rebind canvas HitsFn to active view
     void on_search_update_posted();       // WM_USER_SEARCH_UPDATE handler

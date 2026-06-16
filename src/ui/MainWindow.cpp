@@ -924,8 +924,8 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // callbacks before Ctrl+F can ever fire.
             find_bar_ = std::make_unique<FindBar>(cs->hInstance, hwnd);
             find_bar_->set_on_query_changed(
-                [this](std::wstring q, bool mc) {
-                    on_find_query_changed(q, mc);
+                [this](std::wstring q, bool mc, bool ww, bool rx) {
+                    on_find_query_changed(q, mc, ww, rx);
                 });
             find_bar_->set_on_next ([this] { on_find_next();  });
             find_bar_->set_on_prev ([this] { on_find_prev();  });
@@ -1684,11 +1684,21 @@ void MainWindow::on_find_open() {
     update_find_counter();
 }
 
-void MainWindow::on_find_query_changed(const std::wstring& q, bool mc) {
-    last_find_query_ = q;
+void MainWindow::on_find_query_changed(const std::wstring& q, bool mc,
+                                       bool ww, bool rx) {
+    litepdf::core::SearchSession::Flags f{mc, ww, rx};
     auto* v = active_view();
     if (!v) return;
-    v->search().set_query(q, {mc});
+    last_find_query_ = q;
+    // Regex / whole-word patterns can fail to compile. Validate before running
+    // a scan; on failure flag the find bar and leave the previous results in
+    // place rather than clearing to an empty search.
+    if ((rx || ww) && !v->search().query_compiles(q, f)) {
+        if (find_bar_) find_bar_->set_invalid_pattern(true);
+        return;
+    }
+    if (find_bar_) find_bar_->set_invalid_pattern(false);
+    v->search().set_query(q, f);
     update_find_counter();
     if (canvas_) {
         canvas_->set_current_hit(std::nullopt);

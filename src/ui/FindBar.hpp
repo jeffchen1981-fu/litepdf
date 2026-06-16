@@ -16,7 +16,9 @@ namespace litepdf::ui {
 
 class FindBar {
 public:
-    using QueryChanged = std::function<void(std::wstring, bool match_case)>;
+    // text, match_case, whole_word, regex.
+    using QueryChanged =
+        std::function<void(std::wstring, bool, bool, bool)>;
     using NavAction    = std::function<void()>;
 
     FindBar(HINSTANCE hInstance, HWND parent);
@@ -41,6 +43,11 @@ public:
 
     // Counter Static text (e.g., "3 / 12" or "3 / 12+" for scanning, "" for idle).
     void set_counter(const std::wstring& txt);
+
+    // Mark the query field as holding an invalid pattern (e.g. a malformed
+    // regex). Paints the Edit text red; cleared automatically on the next
+    // successful run or edit. Idempotent.
+    void set_invalid_pattern(bool invalid);
 
     // Callback wiring from MainWindow. All fire on UI thread.
     void set_on_query_changed(QueryChanged cb);
