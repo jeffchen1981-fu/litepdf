@@ -68,6 +68,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_session_state.cpp        # Phase 12 Task 2
     unit/test_session_store.cpp        # Phase 12 Task 4
     unit/test_run_guard.cpp            # Phase 12 Task 6
+    unit/test_search_query.cpp         # search-upgrade Task 1
     # The CLI helpers under test are compiled straight into the test binary
     # (they are not part of litepdf_core). Both are MuPDF-header-free and
     # resolve their fz_* calls through the litepdf::mupdf dependency that
