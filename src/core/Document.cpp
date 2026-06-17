@@ -1,5 +1,7 @@
 #include "core/Document.hpp"
 
+#include "core/SearchQuery.hpp"
+
 #include <mupdf/fitz.h>
 
 #include <algorithm>
@@ -479,46 +481,56 @@ std::vector<Document::PageHit> Document::page_hits(
     // thread's set_query path.
     std::lock_guard<std::mutex> lk(impl_->doc_mutex);
 
-    // match_case is intentionally ignored on MuPDF 1.24.x — see the header
-    // comment on SearchFlags. Silence the unused-parameter warning.
-    (void)flags;
-
-    // fz_search_page / fz_search_stext_page expect a NUL-terminated char*.
-    const std::string needle(needle_utf8);
+    const std::string needle =
+        build_search_needle(needle_utf8, flags.whole_word, flags.regex);
+    const auto options = static_cast<fz_search_options>(
+        search_options_value(flags.match_case, flags.regex || flags.whole_word));
 
     fz_context* ctx = impl_->ctx;
-    fz_page* pg = nullptr;
-
-    // abort_flag is accepted for API forward-compatibility but not honored
-    // by MuPDF 1.24.11 — fz_search_page takes no fz_cookie. See the header
-    // comment on page_hits for the post-v1.0 upgrade path.
-    (void)abort_flag;
-
-    // Cap per-page hits. Larger than typical query hit counts; if a page
-    // exceeds this we simply drop the tail — acceptable for v1 search UI.
+    fz_stext_page* stext = nullptr;
+    fz_search* search = nullptr;
     constexpr int kMaxQuads = 256;
     fz_quad quads[kMaxQuads] = {};
-    int marks[kMaxQuads] = {};
     int n = 0;
+    bool fed = false;
+    // fed is modified inside fz_try; fz_var it too so its value is well-defined
+    // on the (POSIX setjmp/longjmp) exception path — MSVC SEH is unaffected.
+    fz_var(stext); fz_var(search); fz_var(n); fz_var(fed);
 
     fz_try(ctx) {
-        pg = fz_load_page(ctx, impl_->doc, static_cast<int>(page));
-        // MuPDF 1.24.11 only exposes fz_search_page (always case-insensitive).
-        // TODO(post-v1.0): MuPDF 1.27+ adds fz_match_stext_page + an
-        // fz_search_options enum (FZ_SEARCH_EXACT / FZ_SEARCH_IGNORE_CASE /
-        // FZ_SEARCH_REGEXP). Upgrading means extracting an fz_stext_page first
-        // and switching the matcher on flags.match_case here. The same upgrade
-        // should honor abort_flag via fz_match_stext_page_cb (callback-return-1)
-        // — see the @param abort_flag note in the header.
-        n = fz_search_page(ctx, pg, needle.c_str(), marks, quads, kMaxQuads);
+        fz_stext_options so = { FZ_STEXT_DEHYPHENATE };   // match legacy fz_search_page
+        stext = fz_new_stext_page_from_page_number(ctx, impl_->doc,
+                                                   static_cast<int>(page), &so);
+        search = fz_new_search(ctx);
+        fz_search_set_options(ctx, search, options, needle.c_str());  // throws on bad regex
+        for (;;) {
+            if (abort_flag && abort_flag->load() != 0) break;        // mid-page cancel
+            fz_search_result r = fz_search_forwards(ctx, search);
+            if (r.reason == FZ_SEARCH_MORE_INPUT) {
+                // Single page: feed it once (search keeps its OWN ref); later
+                // requests get NULL = end-of-doc.
+                fz_feed_search(ctx, search,
+                               fed ? nullptr : fz_keep_stext_page(ctx, stext),
+                               r.u.more_input.seq_needed);
+                fed = true;
+            } else if (r.reason == FZ_SEARCH_MATCH) {
+                fz_search_result_details* d = r.u.match.result;
+                for (int i = 0; i < d->num_quads && n < kMaxQuads; ++i)
+                    quads[n++] = d->quads[i].quad;
+                if (n >= kMaxQuads) break;
+            } else {  // FZ_SEARCH_COMPLETE
+                break;
+            }
+        }
     }
     fz_always(ctx) {
-        if (pg) fz_drop_page(ctx, pg);
+        if (search) fz_drop_search(ctx, search);     // releases the fed (kept) ref
+        if (stext)  fz_drop_stext_page(ctx, stext);  // releases our own ref
     }
     fz_catch(ctx) {
         std::fprintf(stderr, "litepdf: page_hits failed on page %zu: %s\n",
                      page, fz_caught_message(ctx));
-        return out;
+        return out;   // invalid regex / load failure → empty (UI gates via query_compiles)
     }
 
     // D15: log when the per-page hit cap is reached so ops can see truncation.
@@ -545,6 +557,27 @@ std::vector<Document::PageHit> Document::page_hits(
         out.push_back(std::move(h));
     }
     return out;
+}
+
+bool Document::query_compiles(std::string_view needle_utf8, SearchFlags flags) const {
+    if (!is_open() || needle_utf8.empty()) return true;
+    if (!flags.regex && !flags.whole_word) return true;  // plain literal (no \b wrap) always compiles
+    const std::string needle =
+        build_search_needle(needle_utf8, flags.whole_word, flags.regex);
+    const auto options = static_cast<fz_search_options>(
+        search_options_value(flags.match_case, true));
+    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
+    fz_context* ctx = impl_->ctx;
+    fz_search* search = nullptr;
+    bool ok = true;
+    fz_var(search); fz_var(ok);
+    fz_try(ctx) {
+        search = fz_new_search(ctx);
+        fz_search_set_options(ctx, search, options, needle.c_str());  // compiles regex
+    }
+    fz_always(ctx) { if (search) fz_drop_search(ctx, search); }
+    fz_catch(ctx)  { ok = false; }
+    return ok;
 }
 
 std::vector<Document::OutlineEntry> Document::outline() const {

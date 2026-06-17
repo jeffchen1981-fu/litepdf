@@ -924,8 +924,8 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // callbacks before Ctrl+F can ever fire.
             find_bar_ = std::make_unique<FindBar>(cs->hInstance, hwnd);
             find_bar_->set_on_query_changed(
-                [this](std::wstring q, bool mc) {
-                    on_find_query_changed(q, mc);
+                [this](std::wstring q, bool mc, bool ww, bool rx) {
+                    on_find_query_changed(q, mc, ww, rx);
                 });
             find_bar_->set_on_next ([this] { on_find_next();  });
             find_bar_->set_on_prev ([this] { on_find_prev();  });
@@ -954,7 +954,9 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 ShowWindow(splitter_->hwnd(), SW_HIDE);
             }
             results_panel_->set_on_query_submit(
-                [this](std::wstring q) { on_results_query(q); });
+                [this](std::wstring q, bool mc, bool ww, bool rx) {
+                    on_results_query(q, mc, ww, rx);
+                });
             results_panel_->set_on_row_click(
                 [this](std::size_t i) { on_results_row_click(i); });
             results_panel_->set_on_close(
@@ -1356,7 +1358,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     return 0;
                 case IDM_HELP_ABOUT:
                     MessageBoxW(hwnd,
-                        L"LitePDF v1.0.0\n\n"
+                        L"LitePDF v1.1.0\n\n"
                         L"A lightweight PDF / ePub / CBZ / XPS viewer for Windows.\n\n"
                         L"License: AGPL-3.0\n"
                         // Source of truth: third_party/mupdf FZ_VERSION; update on bumps.
@@ -1684,11 +1686,21 @@ void MainWindow::on_find_open() {
     update_find_counter();
 }
 
-void MainWindow::on_find_query_changed(const std::wstring& q, bool mc) {
-    last_find_query_ = q;
+void MainWindow::on_find_query_changed(const std::wstring& q, bool mc,
+                                       bool ww, bool rx) {
+    litepdf::core::SearchSession::Flags f{mc, ww, rx};
     auto* v = active_view();
     if (!v) return;
-    v->search().set_query(q, {mc});
+    last_find_query_ = q;
+    // Regex / whole-word patterns can fail to compile. Validate before running
+    // a scan; on failure flag the find bar and leave the previous results in
+    // place rather than clearing to an empty search.
+    if ((rx || ww) && !v->search().query_compiles(q, f)) {
+        if (find_bar_) find_bar_->set_invalid_pattern(true);
+        return;
+    }
+    if (find_bar_) find_bar_->set_invalid_pattern(false);
+    v->search().set_query(q, f);
     update_find_counter();
     if (canvas_) {
         canvas_->set_current_hit(std::nullopt);
@@ -1806,7 +1818,8 @@ void MainWindow::on_toggle_results() {
     on_layout();
 }
 
-void MainWindow::on_results_query(const std::wstring& q) {
+void MainWindow::on_results_query(const std::wstring& q, bool mc, bool ww,
+                                  bool rx) {
     if (!cross_tab_ || !tabs_) return;
 
     // Snapshot open tabs for fan-out. Per §D9 the tab list at dispatch
@@ -1821,10 +1834,26 @@ void MainWindow::on_results_query(const std::wstring& q) {
         snapshot.push_back({t->view.get(), std::move(label)});
     }
 
-    // Cross-tab is independent of the find-bar's case toggle per design —
-    // an empty Flags{} matches the default (case-insensitive). Revisit if
-    // the results panel gains its own case-toggle checkbox.
-    litepdf::core::SearchSession::Flags f{};
+    // Cross-tab now carries the panel's own case/whole-word/regex toggles.
+    litepdf::core::SearchSession::Flags f{mc, ww, rx};
+
+    // Regex / whole-word patterns can fail to compile. Validate before
+    // dispatching; on failure skip the dispatch and keep the prior results in
+    // place rather than clearing to an empty search. query_compiles can only
+    // judge an OPEN document (it returns true when none is loaded), so probe
+    // the first open tab — all tabs share the same pattern grammar, so one
+    // open probe is representative. If no tab is open yet (slow-open race),
+    // dispatch anyway: each worker's page_hits catches a bad pattern and
+    // yields empty, so there is no crash.
+    if (rx || ww) {
+        for (const auto& tab : snapshot) {
+            if (tab.view && tab.view->document().is_open()) {
+                if (!tab.view->search().query_compiles(q, f)) return;
+                break;
+            }
+        }
+    }
+
     cross_tab_->dispatch(q, f, std::move(snapshot));
 
     // Refresh immediately so an empty-query / no-hits case doesn't leave

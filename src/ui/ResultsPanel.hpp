@@ -5,7 +5,9 @@
 //   [ListView LVS_REPORT | LVS_OWNERDATA ]    ← rest
 // Columns: File | Page | Snippet.
 // On row click: fire OnRowClick(hit_index).
-// On query Edit Enter: fire OnQuerySubmit(query).
+// On query Edit Enter (or a toggle click): fire
+// OnQuerySubmit(query, match_case, whole_word, regex).
+// Top row also carries owner-draw "Aa" / ".*" / "W" latch toggles.
 
 #include "app/CrossTabSearch.hpp"
 
@@ -19,7 +21,7 @@ namespace litepdf::ui {
 
 class ResultsPanel {
 public:
-    using OnQuerySubmit = std::function<void(std::wstring query)>;
+    using OnQuerySubmit = std::function<void(std::wstring, bool, bool, bool)>;  // q, case, whole, regex
     using OnRowClick    = std::function<void(std::size_t hit_index)>;
     using OnClose       = std::function<void()>;
 

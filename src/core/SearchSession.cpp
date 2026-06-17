@@ -30,10 +30,9 @@ struct SearchSession::Impl {
         // taking the mutex in the fast path.
         std::atomic<std::uint64_t> epoch{0};
         // Reserved for a future callback-based MuPDF search cancel path
-        // (see Document::page_hits header). Ignored by MuPDF 1.24.11 but
-        // kept wired up so that day one after the post-v1.0 MuPDF 1.27+
-        // upgrade we can flip the abort flag during set_query() and have
-        // the stext match callback observe it to cut running page scans short.
+        // (see Document::page_hits header). Honored by MuPDF 1.27.2 via
+        // the stext match callback — flip the abort flag during set_query()
+        // to cut running page scans short.
         std::atomic<int>         abort_flag{0};
         // Live counter of task lambdas that have been submitted but whose
         // run() body has not yet returned. Incremented at submit time in
@@ -98,8 +97,8 @@ SearchSession::~SearchSession() {
     auto& st = *impl_->state;
     st.epoch.fetch_add(1, std::memory_order_acq_rel);
     // Also set the abort flag for any tasks already inside page_hits().
-    // MuPDF 1.24.11 ignores it, but the post-v1.0 MuPDF 1.27+ upgrade will
-    // honor it (via the stext match callback) and cut in-progress scans short.
+    // Honored by MuPDF 1.27.2 via the stext match callback to cut
+    // in-progress scans short.
     st.abort_flag.store(1, std::memory_order_relaxed);
 
     // Step 2: spin-wait until every submitted task has executed its
@@ -207,7 +206,9 @@ void SearchSession::set_query(std::wstring q, Flags f) {
             // we were submitted but before we started running.
             if (state_strong->epoch.load(std::memory_order_acquire) != ep) return;
 
-            Document::SearchFlags df{captured_flags.match_case};
+            Document::SearchFlags df{ captured_flags.match_case,
+                                      captured_flags.whole_word,
+                                      captured_flags.regex };
             auto raw_hits = doc_ref.page_hits(i, needle_utf8, df,
                                               &state_strong->abort_flag);
 
@@ -246,6 +247,12 @@ void SearchSession::set_query(std::wstring q, Flags f) {
 
 void SearchSession::clear() {
     set_query(L"", {});
+}
+
+bool SearchSession::query_compiles(const std::wstring& q, Flags f) const {
+    const std::string utf8 = utf16_to_utf8(q);
+    Document::SearchFlags df{ f.match_case, f.whole_word, f.regex };
+    return impl_->doc.query_compiles(utf8, df);
 }
 
 // ---------------------------------------------------------------------------

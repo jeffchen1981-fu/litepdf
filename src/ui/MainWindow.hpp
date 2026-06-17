@@ -83,7 +83,8 @@ private:
     void on_find_next();        // IDM_FIND_NEXT or Enter / F3
     void on_find_prev();        // IDM_FIND_PREV or Shift+Enter / Shift+F3
     void on_find_close();       // IDM_FIND_CLOSE: hide, clear highlight, refocus canvas
-    void on_find_query_changed(const std::wstring& q, bool match_case);
+    void on_find_query_changed(const std::wstring& q, bool match_case,
+                               bool whole_word, bool regex);
     void update_find_counter();           // read SearchSession -> set_counter
     void update_canvas_hits_source();     // rebind canvas HitsFn to active view
     void on_search_update_posted();       // WM_USER_SEARCH_UPDATE handler
@@ -91,7 +92,8 @@ private:
     // Phase 6 Tasks 11-14: cross-tab search + bottom results panel.
     void on_cross_tab_find();                        // IDM_CROSS_TAB_FIND (Ctrl+Shift+F)
     void on_toggle_results();                        // IDM_TOGGLE_RESULTS (F6)
-    void on_results_query(const std::wstring& q);    // ResultsPanel Enter on query
+    void on_results_query(const std::wstring& q, bool mc, bool ww,
+                          bool rx);                  // ResultsPanel Enter / toggle
     void on_results_row_click(std::size_t hit_idx);  // ResultsPanel row click
     void on_results_close();                         // ResultsPanel x button / cleanup
 

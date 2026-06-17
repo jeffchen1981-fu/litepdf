@@ -27,6 +27,9 @@ namespace {
 constexpr int kTopRowHeightDip    = 32;
 constexpr int kInnerPadDip        = 4;
 constexpr int kEditLeftPadDip     = 6;
+constexpr int kBtnCaseWidthDip    = 28;
+constexpr int kBtnRegexWidthDip   = 28;
+constexpr int kBtnWholeWidthDip   = 28;
 constexpr int kBtnCloseWidthDip   = 28;
 constexpr int kColFileWidthDip    = 200;
 constexpr int kColPageWidthDip    = 60;
@@ -36,9 +39,11 @@ constexpr int kColSnippetMinDip   = 200;  // last-column floor
 constexpr WORD kIdEdit     = 6001;
 constexpr WORD kIdBtnClose = 6002;
 constexpr WORD kIdList     = 6003;
+constexpr WORD kIdBtnCase  = 6004;
+constexpr WORD kIdBtnRegex = 6005;
+constexpr WORD kIdBtnWhole = 6006;
 
 constexpr UINT_PTR kEditSubclassId = 0xF601;
-constexpr UINT_PTR kBtnSubclassId  = 0xF602;
 
 constexpr wchar_t kWndClass[] = L"LitePDFResultsPanel";
 
@@ -167,6 +172,9 @@ LRESULT CALLBACK results_btn_subclass(HWND hwnd, UINT msg, WPARAM w, LPARAM l,
 struct ResultsPanel::Impl {
     HWND hwnd      = nullptr;
     HWND edit      = nullptr;
+    HWND btn_case  = nullptr;
+    HWND btn_regex = nullptr;
+    HWND btn_whole = nullptr;
     HWND btn_close = nullptr;
     HWND listview  = nullptr;
 
@@ -182,8 +190,23 @@ struct ResultsPanel::Impl {
     HBRUSH bg_brush   = nullptr;
     HBRUSH edit_brush = nullptr;
 
-    // Close-button hover/pressed state for owner-draw.
+    // Toggle latching state. Each is visually "pressed" (latched) when true
+    // and folded into OnQuerySubmit so the caller sees the current mode.
+    // All default OFF — cross-tab search is case-insensitive literal until
+    // the user opts in.
+    bool case_pressed  = false;
+    bool whole_pressed = false;
+    bool regex_pressed = false;
+
+    // Per-button hover/pressed state for owner-draw (close + the three
+    // toggles). Mirrors FindBar's per-id scheme.
+    bool hover_case    = false;
+    bool hover_regex   = false;
+    bool hover_whole   = false;
     bool hover_close   = false;
+    bool pressed_case  = false;
+    bool pressed_regex = false;
+    bool pressed_whole = false;
     bool pressed_close = false;
 
     // Display buffers for LVN_GETDISPINFOW. One buffer per subItem so
@@ -200,36 +223,90 @@ struct ResultsPanel::Impl {
     OnRowClick    on_row_click;
     OnClose       on_close;
 
-    void track_button_mouse() {
-        if (!btn_close) return;
-        TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, btn_close, 0 };
+    void track_button_mouse(HWND button_hwnd) {
+        if (!button_hwnd) return;
+        TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, button_hwnd, 0 };
         TrackMouseEvent(&tme);
+    }
+
+    void invalidate_button(HWND b) {
+        if (b) InvalidateRect(b, nullptr, FALSE);
+    }
+
+    // Read the current Edit text and fire on_query_submit with the current
+    // latch flags. Shared by the Enter handler and the toggle-click handlers
+    // so toggling a mode re-runs the query with the new flags. We use this
+    // Enter-submit path (no regex_dirty bookkeeping) because the panel's Edit
+    // only ever submits on VK_RETURN — there is no live-as-you-type fire to
+    // gate against an in-progress regex.
+    void submit_current() {
+        if (!edit || !on_query_submit) return;
+        const int len = GetWindowTextLengthW(edit);
+        std::wstring txt(static_cast<std::size_t>(len), L'\0');
+        if (len > 0) {
+            GetWindowTextW(edit, txt.data(), len + 1);
+        }
+        on_query_submit(std::move(txt), case_pressed, whole_pressed,
+                        regex_pressed);
     }
 };
 
 namespace {
 
-// Owner-draw close button (mirrors FindBar's close-button look).
-void paint_close_button(const DRAWITEMSTRUCT* dis,
-                        bool hover, bool pressed,
-                        const Palette& pal, HFONT font_glyph, UINT dpi) {
+enum class ButtonKind { Close, Case, Regex, Whole };
+
+ButtonKind button_kind_of(WORD id) {
+    switch (id) {
+        case kIdBtnCase:  return ButtonKind::Case;
+        case kIdBtnRegex: return ButtonKind::Regex;
+        case kIdBtnWhole: return ButtonKind::Whole;
+        default:          return ButtonKind::Close;
+    }
+}
+
+// Owner-draw button painter (generalized from the old close-only painter;
+// mirrors FindBar's paint_button). Close keeps the red hover affordance; the
+// three toggles render a text glyph ("Aa"/".*"/"W") and adopt the pressed
+// background while latched so the active mode reads at a glance.
+void paint_button(const DRAWITEMSTRUCT* dis, ButtonKind kind,
+                  bool hover, bool pressed, bool latched,
+                  const Palette& pal, HFONT font_text, HFONT font_glyph,
+                  UINT dpi) {
     HDC  hdc = dis->hDC;
     RECT rc  = dis->rcItem;
 
     COLORREF bg = pal.btn_normal;
-    if (hover)   bg = pal.close_hover_bg;
-    if (pressed) bg = pal.btn_pressed;
+    if (kind == ButtonKind::Close && hover) {
+        bg = pal.close_hover_bg;
+    } else if (pressed) {
+        bg = pal.btn_pressed;
+    } else if (latched) {
+        bg = pal.btn_pressed;
+    } else if (hover) {
+        bg = pal.btn_hover;
+    }
 
     HBRUSH br = CreateSolidBrush(bg);
     FillRect(hdc, &rc, br);
     DeleteObject(br);
 
-    const COLORREF fg = hover ? pal.close_hover_fg : pal.btn_fg;
+    const COLORREF fg = (kind == ButtonKind::Close && hover)
+                            ? pal.close_hover_fg
+                            : pal.btn_fg;
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, fg);
 
-    HGDIOBJ old_font = SelectObject(hdc, font_glyph);
-    DrawTextW(hdc, L"\u2715", -1, &rc,  // ✕
+    const wchar_t* glyph    = L"\u2715";  // close glyph by default
+    HFONT          use_font = font_glyph;
+    switch (kind) {
+        case ButtonKind::Close:                                       break;
+        case ButtonKind::Case:  glyph = L"Aa"; use_font = font_text;  break;
+        case ButtonKind::Regex: glyph = L".*"; use_font = font_text;  break;
+        case ButtonKind::Whole: glyph = L"W";  use_font = font_text;  break;
+    }
+
+    HGDIOBJ old_font = SelectObject(hdc, use_font);
+    DrawTextW(hdc, glyph, -1, &rc,
               DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     SelectObject(hdc, old_font);
 
@@ -258,17 +335,10 @@ LRESULT CALLBACK results_edit_subclass(HWND hwnd, UINT msg, WPARAM w,
                  | DefSubclassProc(hwnd, msg, w, l);
         case WM_KEYDOWN: {
             switch (w) {
-                case VK_RETURN: {
-                    if (impl->on_query_submit) {
-                        const int len = GetWindowTextLengthW(hwnd);
-                        std::wstring txt(static_cast<std::size_t>(len), L'\0');
-                        if (len > 0) {
-                            GetWindowTextW(hwnd, txt.data(), len + 1);
-                        }
-                        impl->on_query_submit(std::move(txt));
-                    }
+                case VK_RETURN:
+                    // Submit-on-Enter, folding in the current latch flags.
+                    impl->submit_current();
                     return 0;
-                }
                 case VK_ESCAPE:
                     if (impl->on_close) impl->on_close();
                     return 0;
@@ -289,46 +359,80 @@ LRESULT CALLBACK results_edit_subclass(HWND hwnd, UINT msg, WPARAM w,
 }
 
 // ----------------------------------------------------------------------------
-// Close-button subclass — hover/pressed tracking for owner-draw.
+// Button subclass — hover/pressed tracking for the four owner-draw buttons
+// (close + the three toggles). Keyed by control id (mirrors FindBar) so the
+// subclass id is unique per HWND and NCDESTROY removes exactly its own.
 // ----------------------------------------------------------------------------
 LRESULT CALLBACK results_btn_subclass(HWND hwnd, UINT msg, WPARAM w,
                                       LPARAM l, UINT_PTR /*id*/,
                                       DWORD_PTR ref_data) {
     auto* impl = reinterpret_cast<ResultsPanel::Impl*>(ref_data);
     if (!impl) return DefSubclassProc(hwnd, msg, w, l);
+    const WORD ctl_id = static_cast<WORD>(GetDlgCtrlID(hwnd));
+
+    auto hover_ptr = [&]() -> bool* {
+        switch (ctl_id) {
+            case kIdBtnCase:  return &impl->hover_case;
+            case kIdBtnRegex: return &impl->hover_regex;
+            case kIdBtnWhole: return &impl->hover_whole;
+            case kIdBtnClose: return &impl->hover_close;
+        }
+        return nullptr;
+    };
+    auto pressed_ptr = [&]() -> bool* {
+        switch (ctl_id) {
+            case kIdBtnCase:  return &impl->pressed_case;
+            case kIdBtnRegex: return &impl->pressed_regex;
+            case kIdBtnWhole: return &impl->pressed_whole;
+            case kIdBtnClose: return &impl->pressed_close;
+        }
+        return nullptr;
+    };
 
     switch (msg) {
-        case WM_MOUSEMOVE:
-            if (!impl->hover_close) {
-                impl->hover_close = true;
-                impl->track_button_mouse();
+        case WM_MOUSEMOVE: {
+            bool* h = hover_ptr();
+            if (h && !*h) {
+                *h = true;
+                impl->track_button_mouse(hwnd);
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             break;
-        case WM_MOUSELEAVE:
-            if (impl->hover_close) {
-                impl->hover_close = false;
+        }
+        case WM_MOUSELEAVE: {
+            bool* h = hover_ptr();
+            if (h && *h) {
+                *h = false;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             break;
-        case WM_LBUTTONDOWN:
-            impl->pressed_close = true;
-            InvalidateRect(hwnd, nullptr, FALSE);
-            break;
-        case WM_LBUTTONUP:
-            if (impl->pressed_close) {
-                impl->pressed_close = false;
+        }
+        case WM_LBUTTONDOWN: {
+            bool* p = pressed_ptr();
+            if (p) {
+                *p = true;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             break;
-        case WM_CAPTURECHANGED:
-            if (impl->pressed_close) {
-                impl->pressed_close = false;
+        }
+        case WM_LBUTTONUP: {
+            bool* p = pressed_ptr();
+            if (p && *p) {
+                *p = false;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             break;
+        }
+        case WM_CAPTURECHANGED: {
+            bool* p = pressed_ptr();
+            if (p && *p) {
+                *p = false;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            break;
+        }
         case WM_NCDESTROY:
-            RemoveWindowSubclass(hwnd, results_btn_subclass, kBtnSubclassId);
+            RemoveWindowSubclass(hwnd, results_btn_subclass, ctl_id);
             break;
     }
     return DefSubclassProc(hwnd, msg, w, l);
@@ -387,9 +491,29 @@ LRESULT CALLBACK results_panel_wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) 
         case WM_COMMAND: {
             const WORD id   = LOWORD(w);
             const WORD code = HIWORD(w);
-            if (code == BN_CLICKED && id == kIdBtnClose) {
-                if (impl->on_close) impl->on_close();
-                return 0;
+            if (code == BN_CLICKED) {
+                switch (id) {
+                    case kIdBtnCase:
+                        // Flip the latch, repaint, and re-run the query with
+                        // the new flags. Re-submit reuses the Enter path.
+                        impl->case_pressed = !impl->case_pressed;
+                        impl->invalidate_button(impl->btn_case);
+                        impl->submit_current();
+                        return 0;
+                    case kIdBtnRegex:
+                        impl->regex_pressed = !impl->regex_pressed;
+                        impl->invalidate_button(impl->btn_regex);
+                        impl->submit_current();
+                        return 0;
+                    case kIdBtnWhole:
+                        impl->whole_pressed = !impl->whole_pressed;
+                        impl->invalidate_button(impl->btn_whole);
+                        impl->submit_current();
+                        return 0;
+                    case kIdBtnClose:
+                        if (impl->on_close) impl->on_close();
+                        return 0;
+                }
             }
             break;
         }
@@ -397,15 +521,31 @@ LRESULT CALLBACK results_panel_wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) 
         case WM_DRAWITEM: {
             auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(l);
             if (!dis) break;
-            if (static_cast<WORD>(dis->CtlID) == kIdBtnClose) {
-                paint_close_button(dis, impl->hover_close,
-                                   impl->pressed_close,
-                                   impl->palette,
-                                   impl->font_glyph.get(),
-                                   impl->dpi);
-                return TRUE;
+            const WORD id = static_cast<WORD>(dis->CtlID);
+            if (id != kIdBtnCase && id != kIdBtnRegex
+             && id != kIdBtnWhole && id != kIdBtnClose) {
+                break;
             }
-            break;
+            bool hover = false, pressed = false;
+            switch (id) {
+                case kIdBtnCase:
+                    hover = impl->hover_case;  pressed = impl->pressed_case;  break;
+                case kIdBtnRegex:
+                    hover = impl->hover_regex; pressed = impl->pressed_regex; break;
+                case kIdBtnWhole:
+                    hover = impl->hover_whole; pressed = impl->pressed_whole; break;
+                case kIdBtnClose:
+                default:
+                    hover = impl->hover_close; pressed = impl->pressed_close; break;
+            }
+            const bool latched =
+                (id == kIdBtnCase  && impl->case_pressed)  ||
+                (id == kIdBtnRegex && impl->regex_pressed) ||
+                (id == kIdBtnWhole && impl->whole_pressed);
+            paint_button(dis, button_kind_of(id), hover, pressed, latched,
+                         impl->palette, impl->font_text.get(),
+                         impl->font_glyph.get(), impl->dpi);
+            return TRUE;
         }
 
         case WM_NOTIFY: {
@@ -568,19 +708,41 @@ ResultsPanel::ResultsPanel(HINSTANCE hInstance, HWND parent,
                       kEditSubclassId,
                       reinterpret_cast<DWORD_PTR>(impl_.get()));
 
-    impl_->btn_close = CreateWindowExW(
-        0, L"BUTTON", L"",
-        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_NOTIFY,
-        0, 0, 0, 0,
-        impl_->hwnd,
-        reinterpret_cast<HMENU>(static_cast<UINT_PTR>(kIdBtnClose)),
-        hInstance, nullptr);
-    SetWindowSubclass(impl_->btn_close, results_btn_subclass,
-                      kBtnSubclassId,
-                      reinterpret_cast<DWORD_PTR>(impl_.get()));
-    SendMessageW(impl_->btn_close, WM_SETFONT,
-                 reinterpret_cast<WPARAM>(impl_->font_glyph.get()),
-                 MAKELPARAM(TRUE, 0));
+    // Three latch toggles (Aa / .* / W) + close, all owner-draw. Created at
+    // 0x0; positioned in set_bounds(). Toggles use the text font (so "Aa"/".*"
+    // render at body size); close uses the glyph font for the larger ✕.
+    auto make_owner_btn = [&](WORD id) -> HWND {
+        HWND b = CreateWindowExW(
+            0, L"BUTTON", L"",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_NOTIFY,
+            0, 0, 0, 0,
+            impl_->hwnd,
+            reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
+            hInstance, nullptr);
+        return b;
+    };
+
+    impl_->btn_case  = make_owner_btn(kIdBtnCase);
+    impl_->btn_regex = make_owner_btn(kIdBtnRegex);
+    impl_->btn_whole = make_owner_btn(kIdBtnWhole);
+    impl_->btn_close = make_owner_btn(kIdBtnClose);
+
+    // Subclass every button for hover/pressed tracking; key the subclass id
+    // by control id (mirrors FindBar) so each HWND removes its own on
+    // WM_NCDESTROY. Toggles take the text font; close takes the glyph font.
+    for (HWND b : { impl_->btn_case, impl_->btn_regex,
+                    impl_->btn_whole, impl_->btn_close }) {
+        if (!b) continue;
+        const UINT_PTR sub_id = static_cast<UINT_PTR>(GetDlgCtrlID(b));
+        SetWindowSubclass(b, results_btn_subclass, sub_id,
+                          reinterpret_cast<DWORD_PTR>(impl_.get()));
+        const bool is_close = (sub_id == kIdBtnClose);
+        SendMessageW(b, WM_SETFONT,
+                     reinterpret_cast<WPARAM>(
+                         is_close ? impl_->font_glyph.get()
+                                  : impl_->font_text.get()),
+                     MAKELPARAM(TRUE, 0));
+    }
 
     // ---- Virtual ListView ----
     // LVS_OWNERDATA = virtual — we supply text on demand via LVN_GETDISPINFO.
@@ -669,22 +831,46 @@ void ResultsPanel::set_bounds(const RECT& bounds) {
     const int  top_h    = dp(kTopRowHeightDip, dpi);
     const int  pad      = dp(kInnerPadDip,     dpi);
     const int  edit_pad = dp(kEditLeftPadDip,  dpi);
-    const int  btn_w    = dp(kBtnCloseWidthDip, dpi);
+    const int  w_case   = dp(kBtnCaseWidthDip,  dpi);
+    const int  w_regex  = dp(kBtnRegexWidthDip, dpi);
+    const int  w_whole  = dp(kBtnWholeWidthDip, dpi);
+    const int  w_close  = dp(kBtnCloseWidthDip, dpi);
     const int  ctrl_h   = top_h - pad * 2;
 
-    // Top row: Edit takes everything left of the close button.
+    // Top row reads [edit][Aa][.*][W][x]. The edit shrinks to leave room for
+    // the three toggles + the close button (each with a pad gap). The three
+    // new toggle widths + pads are subtracted from the edit on top of the
+    // original single-close-button reservation.
     if (impl_->edit) {
         const int edit_x = edit_pad;
         const int edit_y = pad;
         const int edit_w = std::max(0,
-            w - edit_pad - btn_w - pad * 2);
+            w - edit_pad
+              - (w_case + pad) - (w_regex + pad) - (w_whole + pad)
+              - w_close - pad * 2);
         SetWindowPos(impl_->edit, nullptr, edit_x, edit_y, edit_w, ctrl_h,
                      SWP_NOZORDER | SWP_NOACTIVATE);
     }
+    // Position right-to-left so the buttons hug the right edge: close, then
+    // W, .*, Aa walking leftward.
+    int bx = std::max(0, w - w_close - pad);
     if (impl_->btn_close) {
-        const int btn_x = std::max(0, w - btn_w - pad);
-        SetWindowPos(impl_->btn_close, nullptr,
-                     btn_x, pad, btn_w, ctrl_h,
+        SetWindowPos(impl_->btn_close, nullptr, bx, pad, w_close, ctrl_h,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    bx -= (w_whole + pad);
+    if (impl_->btn_whole) {
+        SetWindowPos(impl_->btn_whole, nullptr, bx, pad, w_whole, ctrl_h,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    bx -= (w_regex + pad);
+    if (impl_->btn_regex) {
+        SetWindowPos(impl_->btn_regex, nullptr, bx, pad, w_regex, ctrl_h,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    bx -= (w_case + pad);
+    if (impl_->btn_case) {
+        SetWindowPos(impl_->btn_case, nullptr, bx, pad, w_case, ctrl_h,
                      SWP_NOZORDER | SWP_NOACTIVATE);
     }
 

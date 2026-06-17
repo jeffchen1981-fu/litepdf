@@ -23,7 +23,10 @@ namespace {
 // (1 DIP = 1 px at 96 DPI) and scaled per the parent window's DPI at creation.
 // -----------------------------------------------------------------------------
 constexpr int kBarHeightDip        = 32;
-constexpr int kBarWidthDip         = 380;
+// Widened from 380 to fit two new toggle buttons (regex ".*" + whole-word
+// "W"), each kBtnCaseWidthDip (28) wide with a kInnerPadDip (4) gap:
+// 380 + 2 * (28 + 4) = 444.
+constexpr int kBarWidthDip         = 444;
 constexpr int kRightMarginDip      = 16;
 constexpr int kTopMarginDip        = 8;
 constexpr int kInnerPadDip         = 4;
@@ -32,6 +35,8 @@ constexpr int kEditWidthDip        = 180;
 constexpr int kCounterWidthDip     = 60;
 constexpr int kBtnNavWidthDip      = 24;
 constexpr int kBtnCaseWidthDip     = 28;
+constexpr int kBtnRegexWidthDip    = 28;
+constexpr int kBtnWholeWidthDip    = 28;
 constexpr int kBtnCloseWidthDip    = 28;
 
 // Control IDs for child HWNDs. Range is arbitrary (5001..) but must not clash
@@ -42,6 +47,8 @@ constexpr WORD kIdBtnPrev  = 5003;
 constexpr WORD kIdBtnNext  = 5004;
 constexpr WORD kIdBtnCase  = 5005;
 constexpr WORD kIdBtnClose = 5006;
+constexpr WORD kIdBtnRegex = 5007;
+constexpr WORD kIdBtnWhole = 5008;
 
 constexpr UINT_PTR kDebounceTimerId = 0xFB01;
 constexpr UINT     kDebounceMs       = 120;
@@ -166,21 +173,39 @@ struct FindBar::Impl {
     HWND btn_prev  = nullptr;
     HWND btn_next  = nullptr;
     HWND btn_case  = nullptr;
+    HWND btn_regex = nullptr;
+    HWND btn_whole = nullptr;
     HWND btn_close = nullptr;
 
-    // Case-toggle latching state. Visually "pressed" when true and factored
-    // into OnQueryChanged so the caller always sees the current case mode.
+    // Toggle latching state. Each is visually "pressed" when true and factored
+    // into OnQueryChanged so the caller always sees the current search mode.
     bool case_pressed  = false;
+    bool whole_pressed = false;
+    bool regex_pressed = false;
+
+    // Set when the query is edited while regex mode is on; cleared when the
+    // regex query is run (Enter) or when regex mode is turned off. Lets us
+    // hold off on compiling/running an in-progress regex until the user
+    // confirms with Enter.
+    bool regex_dirty = false;
+
+    // Whether the current query is an invalid pattern (e.g. malformed regex).
+    // Drives the red Edit-text affordance; cleared on next run/edit.
+    bool invalid_pattern = false;
 
     // Per-button hover / mouse-down state. Hover comes from WM_MOUSEMOVE on
     // the button HWND; pressed is set between WM_LBUTTONDOWN and WM_LBUTTONUP.
     bool hover_prev   = false;
     bool hover_next   = false;
     bool hover_case   = false;
+    bool hover_regex  = false;
+    bool hover_whole  = false;
     bool hover_close  = false;
     bool pressed_prev = false;
     bool pressed_next = false;
     bool pressed_case = false;
+    bool pressed_regex = false;
+    bool pressed_whole = false;
     bool pressed_close = false;
 
     // Cached fonts (DPI-aware). Rebuilt on WM_DPICHANGED in future; for now
@@ -209,7 +234,9 @@ struct FindBar::Impl {
     // string — the case-toggle flip still goes through because we also factor
     // case_pressed into the equality check.
     std::wstring last_query;
-    bool         last_case = false;
+    bool         last_case  = false;
+    bool         last_whole = false;
+    bool         last_regex = false;
 
     // ---- tracking helpers ----
     bool track_mouse(HWND button_hwnd) {
@@ -229,10 +256,16 @@ struct FindBar::Impl {
         if (len > 0) {
             GetWindowTextW(edit, txt.data(), len + 1);
         }
-        if (txt == last_query && case_pressed == last_case) return;
-        last_query = txt;
-        last_case  = case_pressed;
-        on_query_changed(txt, case_pressed);
+        if (txt == last_query && case_pressed == last_case &&
+            whole_pressed == last_whole && regex_pressed == last_regex) {
+            return;
+        }
+        last_query  = txt;
+        last_case   = case_pressed;
+        last_whole  = whole_pressed;
+        last_regex  = regex_pressed;
+        invalid_pattern = false;
+        on_query_changed(txt, case_pressed, whole_pressed, regex_pressed);
     }
 
     // Kill any pending debounce timer and schedule a fresh one. Always
@@ -249,7 +282,7 @@ struct FindBar::Impl {
 // -----------------------------------------------------------------------------
 namespace {
 
-enum class ButtonKind { Prev, Next, Case, Close };
+enum class ButtonKind { Prev, Next, Case, Regex, Whole, Close };
 
 struct ButtonVisual {
     bool hover;
@@ -257,21 +290,22 @@ struct ButtonVisual {
 };
 
 void paint_button(const DRAWITEMSTRUCT* dis, ButtonKind kind,
-                  const ButtonVisual& v, bool case_latched,
+                  const ButtonVisual& v, bool latched,
                   const Palette& pal, HFONT font_text, HFONT font_glyph,
                   UINT dpi) {
     HDC  hdc = dis->hDC;
     RECT rc  = dis->rcItem;
 
     // Background color. Close button gets a red hover color (destructive-ish
-    // affordance consistent with tab close). Case button uses pressed color
-    // while latched so the user sees the current mode at a glance.
+    // affordance consistent with tab close). Toggle buttons (Case/Regex/Whole)
+    // use the pressed color while latched so the user sees the current mode at
+    // a glance.
     COLORREF bg = pal.btn_normal;
     if (kind == ButtonKind::Close && v.hover) {
         bg = pal.close_hover_bg;
     } else if (v.pressed) {
         bg = pal.btn_pressed;
-    } else if (kind == ButtonKind::Case && case_latched) {
+    } else if (latched) {
         bg = pal.btn_pressed;
     } else if (v.hover) {
         bg = pal.btn_hover;
@@ -297,6 +331,14 @@ void paint_button(const DRAWITEMSTRUCT* dis, ButtonKind kind,
             glyph    = L"Aa";
             use_font = font_text;
             break;
+        case ButtonKind::Regex:
+            glyph    = L".*";
+            use_font = font_text;
+            break;
+        case ButtonKind::Whole:
+            glyph    = L"W";
+            use_font = font_text;
+            break;
     }
 
     HGDIOBJ old_font = SelectObject(hdc, use_font);
@@ -318,6 +360,8 @@ ButtonKind button_kind_of(WORD id) {
         case kIdBtnPrev:  return ButtonKind::Prev;
         case kIdBtnNext:  return ButtonKind::Next;
         case kIdBtnCase:  return ButtonKind::Case;
+        case kIdBtnRegex: return ButtonKind::Regex;
+        case kIdBtnWhole: return ButtonKind::Whole;
         default:          return ButtonKind::Close;
     }
 }
@@ -331,6 +375,10 @@ void get_button_state(const FindBar::Impl& impl, WORD id,
             out = { impl.hover_next,  impl.pressed_next  }; break;
         case kIdBtnCase:
             out = { impl.hover_case,  impl.pressed_case  }; break;
+        case kIdBtnRegex:
+            out = { impl.hover_regex, impl.pressed_regex }; break;
+        case kIdBtnWhole:
+            out = { impl.hover_whole, impl.pressed_whole }; break;
         case kIdBtnClose:
         default:
             out = { impl.hover_close, impl.pressed_close }; break;
@@ -358,6 +406,8 @@ LRESULT CALLBACK find_bar_button_subclass(HWND hwnd, UINT msg, WPARAM w,
             case kIdBtnPrev:  return &impl->hover_prev;
             case kIdBtnNext:  return &impl->hover_next;
             case kIdBtnCase:  return &impl->hover_case;
+            case kIdBtnRegex: return &impl->hover_regex;
+            case kIdBtnWhole: return &impl->hover_whole;
             case kIdBtnClose: return &impl->hover_close;
         }
         return nullptr;
@@ -367,6 +417,8 @@ LRESULT CALLBACK find_bar_button_subclass(HWND hwnd, UINT msg, WPARAM w,
             case kIdBtnPrev:  return &impl->pressed_prev;
             case kIdBtnNext:  return &impl->pressed_next;
             case kIdBtnCase:  return &impl->pressed_case;
+            case kIdBtnRegex: return &impl->pressed_regex;
+            case kIdBtnWhole: return &impl->pressed_whole;
             case kIdBtnClose: return &impl->pressed_close;
         }
         return nullptr;
@@ -445,8 +497,17 @@ LRESULT CALLBACK find_bar_edit_subclass(HWND hwnd, UINT msg, WPARAM w,
                     if (impl->on_close) impl->on_close();
                     return 0;  // consumed
                 case VK_RETURN:
-                    if (shift) { if (impl->on_prev) impl->on_prev(); }
-                    else        { if (impl->on_next) impl->on_next(); }
+                    // Regex mode defers running until Enter: if the query was
+                    // edited since the last run (regex_dirty), compile + run it
+                    // now instead of navigating hits.
+                    if (impl->regex_pressed && impl->regex_dirty) {
+                        impl->regex_dirty = false;
+                        impl->fire_query_changed();
+                    } else if (shift) {
+                        if (impl->on_prev) impl->on_prev();
+                    } else {
+                        if (impl->on_next) impl->on_next();
+                    }
                     return 0;
                 case VK_F3:
                     if (shift) { if (impl->on_prev) impl->on_prev(); }
@@ -512,7 +573,11 @@ LRESULT CALLBACK find_bar_wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
 
         case WM_CTLCOLOREDIT: {
             HDC hdc = reinterpret_cast<HDC>(w);
-            SetTextColor(hdc, impl->palette.edit_fg);
+            // Red text signals an invalid pattern (e.g. malformed regex). The
+            // bg stays the normal field color; only the text turns red.
+            SetTextColor(hdc, impl->invalid_pattern
+                                  ? RGB(0xD0, 0x2B, 0x1C)
+                                  : impl->palette.edit_fg);
             SetBkColor (hdc, impl->palette.edit_bg);
             if (!impl->edit_brush) {
                 impl->edit_brush = CreateSolidBrush(impl->palette.edit_bg);
@@ -531,7 +596,18 @@ LRESULT CALLBACK find_bar_wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             const WORD id   = LOWORD(w);
             const WORD code = HIWORD(w);
             if (id == kIdEdit && code == EN_CHANGE) {
-                impl->reschedule_debounce();
+                // Editing clears any stale "invalid pattern" affordance.
+                if (impl->invalid_pattern) {
+                    impl->invalid_pattern = false;
+                    InvalidateRect(impl->edit, nullptr, FALSE);
+                }
+                if (impl->regex_pressed) {
+                    // Regex compiles can be expensive / partial mid-typing;
+                    // hold off until the user confirms with Enter.
+                    impl->regex_dirty = true;
+                } else {
+                    impl->reschedule_debounce();
+                }
                 return 0;
             }
             if (code == BN_CLICKED) {
@@ -546,6 +622,19 @@ LRESULT CALLBACK find_bar_wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                         impl->case_pressed = !impl->case_pressed;
                         impl->invalidate_button(impl->btn_case);
                         impl->fire_query_changed();
+                        return 0;
+                    case kIdBtnRegex:
+                        impl->regex_pressed = !impl->regex_pressed;
+                        // Enabling regex requires an explicit Enter before the
+                        // first compile/run; disabling reverts to live search.
+                        impl->regex_dirty = impl->regex_pressed;
+                        impl->invalidate_button(impl->btn_regex);
+                        if (!impl->regex_pressed) impl->fire_query_changed();
+                        return 0;
+                    case kIdBtnWhole:
+                        impl->whole_pressed = !impl->whole_pressed;
+                        impl->invalidate_button(impl->btn_whole);
+                        impl->fire_query_changed();  // whole-word stays live
                         return 0;
                     case kIdBtnClose:
                         if (impl->on_close) impl->on_close();
@@ -569,12 +658,17 @@ LRESULT CALLBACK find_bar_wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             if (!dis) break;
             const WORD id = static_cast<WORD>(dis->CtlID);
             if (id != kIdBtnPrev && id != kIdBtnNext
-             && id != kIdBtnCase && id != kIdBtnClose) {
+             && id != kIdBtnCase && id != kIdBtnRegex
+             && id != kIdBtnWhole && id != kIdBtnClose) {
                 break;
             }
             ButtonVisual v{};
             get_button_state(*impl, id, v);
-            paint_button(dis, button_kind_of(id), v, impl->case_pressed,
+            const bool latched =
+                (id == kIdBtnCase  && impl->case_pressed)  ||
+                (id == kIdBtnRegex && impl->regex_pressed) ||
+                (id == kIdBtnWhole && impl->whole_pressed);
+            paint_button(dis, button_kind_of(id), v, latched,
                          impl->palette, impl->font_text.get(),
                          impl->font_glyph.get(), impl->dpi);
             return TRUE;
@@ -710,12 +804,17 @@ FindBar::FindBar(HINSTANCE hInstance, HWND parent)
                                      dp(kBtnNavWidthDip, impl_->dpi), ctrl_h);
     impl_->btn_case  = create_button(hInstance, impl_->hwnd, kIdBtnCase,
                                      dp(kBtnCaseWidthDip, impl_->dpi), ctrl_h);
+    impl_->btn_regex = create_button(hInstance, impl_->hwnd, kIdBtnRegex,
+                                     dp(kBtnRegexWidthDip, impl_->dpi), ctrl_h);
+    impl_->btn_whole = create_button(hInstance, impl_->hwnd, kIdBtnWhole,
+                                     dp(kBtnWholeWidthDip, impl_->dpi), ctrl_h);
     impl_->btn_close = create_button(hInstance, impl_->hwnd, kIdBtnClose,
                                      dp(kBtnCloseWidthDip, impl_->dpi), ctrl_h);
 
-    // Subclass all four buttons for hover / pressed tracking.
+    // Subclass all owner-draw buttons for hover / pressed tracking.
     for (HWND b : { impl_->btn_prev, impl_->btn_next,
-                    impl_->btn_case, impl_->btn_close }) {
+                    impl_->btn_case, impl_->btn_regex,
+                    impl_->btn_whole, impl_->btn_close }) {
         if (!b) continue;
         const UINT_PTR id = static_cast<UINT_PTR>(GetDlgCtrlID(b));
         SetWindowSubclass(b, find_bar_button_subclass, id,
@@ -757,6 +856,10 @@ void FindBar::hide() {
     ShowWindow(impl_->hwnd, SW_HIDE);
     // Cancel any pending debounce so a hidden bar doesn't fire once we reopen.
     KillTimer(impl_->hwnd, kDebounceTimerId);
+    // Closing clears the search session (MainWindow::on_find_close). If regex
+    // mode is on, mark the query dirty so the next reopen's Enter re-runs the
+    // pattern instead of navigating the now-empty session.
+    if (impl_->regex_pressed) impl_->regex_dirty = true;
 }
 
 bool FindBar::visible() const {
@@ -783,6 +886,8 @@ void FindBar::reposition(const RECT& canvas_rect) {
     const int w_counter = dp(kCounterWidthDip, dpi);
     const int w_nav     = dp(kBtnNavWidthDip,  dpi);
     const int w_case    = dp(kBtnCaseWidthDip, dpi);
+    const int w_regex   = dp(kBtnRegexWidthDip, dpi);
+    const int w_whole   = dp(kBtnWholeWidthDip, dpi);
     const int w_close   = dp(kBtnCloseWidthDip, dpi);
 
     SetWindowPos(impl_->edit,      nullptr, cx, pad, w_edit,    ctrl_h,
@@ -800,6 +905,12 @@ void FindBar::reposition(const RECT& canvas_rect) {
     SetWindowPos(impl_->btn_case,  nullptr, cx, pad, w_case,    ctrl_h,
                  SWP_NOZORDER | SWP_NOACTIVATE);
     cx += w_case + pad;
+    SetWindowPos(impl_->btn_regex, nullptr, cx, pad, w_regex,   ctrl_h,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+    cx += w_regex + pad;
+    SetWindowPos(impl_->btn_whole, nullptr, cx, pad, w_whole,   ctrl_h,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+    cx += w_whole + pad;
     SetWindowPos(impl_->btn_close, nullptr, cx, pad, w_close,   ctrl_h,
                  SWP_NOZORDER | SWP_NOACTIVATE);
 }
@@ -807,6 +918,14 @@ void FindBar::reposition(const RECT& canvas_rect) {
 void FindBar::set_counter(const std::wstring& txt) {
     if (!impl_ || !impl_->counter) return;
     SetWindowTextW(impl_->counter, txt.c_str());
+}
+
+void FindBar::set_invalid_pattern(bool invalid) {
+    if (!impl_) return;
+    if (impl_->invalid_pattern == invalid) return;
+    impl_->invalid_pattern = invalid;
+    // Force a repaint so WM_CTLCOLOREDIT re-runs with the new text color.
+    if (impl_->edit) InvalidateRect(impl_->edit, nullptr, FALSE);
 }
 
 void FindBar::set_on_query_changed(QueryChanged cb) {

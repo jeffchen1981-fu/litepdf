@@ -93,6 +93,35 @@ TEST_CASE("SearchSession: no-hit query yields zero hits, scan complete",
     REQUIRE(f.session->scan_complete());
 }
 
+// --- Flag threading (search-upgrade): exercises the SearchSession::Flags ->
+// Document::SearchFlags hand-off so a future field-order edit can't silently
+// misroute a flag. With InlineDispatcher the scan is synchronous, so hit_count
+// is exact right after set_query.
+TEST_CASE("SearchSession: match_case threads through to page_hits",
+          "[search][session]") {
+    Fx f;
+    f.session->set_query(L"lorem", SearchSession::Flags{false, false, false});
+    REQUIRE(f.session->hit_count() == 15);   // case-insensitive: all "Lorem"
+    f.session->set_query(L"lorem", SearchSession::Flags{true, false, false});
+    REQUIRE(f.session->hit_count() == 0);    // exact: lowercase needle, "Lorem" text
+}
+
+TEST_CASE("SearchSession: regex flag threads through to page_hits",
+          "[search][session]") {
+    Fx f;
+    f.session->set_query(L"lo.em", SearchSession::Flags{false, false, true});
+    REQUIRE(f.session->hit_count() == 15);   // '.' matches 'r' across both pages
+    f.session->set_query(L"lo.em", SearchSession::Flags{false, false, false});
+    REQUIRE(f.session->hit_count() == 0);    // literal: no "lo.em" in the text
+}
+
+TEST_CASE("SearchSession: whole_word flag threads through to page_hits",
+          "[search][session]") {
+    Fx f;
+    f.session->set_query(L"Lorem", SearchSession::Flags{false, true, false});
+    REQUIRE(f.session->hit_count() == 15);   // "Lorem" stands as a whole word
+}
+
 TEST_CASE("SearchSession: query change cancels previous",
           "[search][session]") {
     Fx f;

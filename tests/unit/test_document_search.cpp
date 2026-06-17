@@ -6,10 +6,10 @@
 //              present at least once
 //   - page 4 : no "Lorem"
 //
-// MuPDF 1.24.11 ships only fz_search_page (case-insensitive). The case-
-// sensitive test is marked [!shouldfail] so it does not fail the suite: it
-// is expected to fail until the post-v1.0 MuPDF 1.27+ upgrade or a swap to
-// stext+custom matcher.
+// MuPDF 1.27.2's incremental fz_search matcher honors case-sensitivity,
+// whole-word, and regex. The case-sensitive test that was previously tagged
+// [!shouldfail] (documenting the legacy always-case-insensitive fz_search_page
+// no-op) now passes as a normal case.
 #include "core/Document.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -49,18 +49,12 @@ TEST_CASE("page_hits: case-insensitive matches lowercase needle", "[document][se
     REQUIRE(hits.size() == 12);
 }
 
-// Revisit trigger: the post-v1.0 MuPDF 1.27+ upgrade (fz_match_stext_page +
-// FZ_SEARCH_EXACT) is expected to make this test pass. When that happens,
-// Catch2's [!shouldfail] will flip the test RED to force a manual re-audit:
-// remove the tag, adjust the case-sensitivity code path in Document.cpp, and
-// confirm the semantics still match what callers expect.
-TEST_CASE("page_hits: case-sensitive does not match mismatched case", "[document][search][!shouldfail]") {
-    // MuPDF 1.24.11's fz_search_page is always case-insensitive (canon() in
-    // stext-search.c uppercases every codepoint before matching). This test
-    // therefore fails on 1.24.x: lowercase "lorem" still matches "Lorem".
-    // Marked [!shouldfail] so Catch2 inverts the expectation — the failing
-    // REQUIRE below counts as a pass today, and if a future MuPDF upgrade
-    // makes it actually pass, Catch2 will flip it RED so we revisit.
+// Case-sensitive search now excludes wrong-case matches. On MuPDF 1.27.2 the
+// incremental fz_search matcher honors FZ_SEARCH_EXACT, so a lowercase needle
+// no longer matches the capitalized "Lorem" in the fixture. (Previously this
+// was tagged [!shouldfail] to document the legacy always-case-insensitive
+// fz_search_page no-op.)
+TEST_CASE("page_hits: case-sensitive does not match mismatched case", "[document][search]") {
     Document doc = open_search_fixture();
     Document::SearchFlags f{true};  // match_case=true
     auto hits = doc.page_hits(0, "lorem", f);  // lowercase; fixture uses "Lorem"
@@ -91,4 +85,45 @@ TEST_CASE("page_hits: quads lie in PDF coord space", "[document][search]") {
     const auto& h = hits[0];
     REQUIRE(h.ul_x >= 0.0f);  REQUIRE(h.ul_x < 1000.0f);
     REQUIRE(h.ul_y >= 0.0f);  REQUIRE(h.ul_y < 1500.0f);
+}
+
+// --- MuPDF 1.27.2 incremental matcher: case / regex / whole-word / cancel ---
+
+TEST_CASE("page_hits parity: ignore-case literal count", "[document][search]") {
+    Document d; REQUIRE_FALSE(d.open("tests/fixtures/search.pdf").has_value());
+    auto h = d.page_hits(0, "lorem", {false, false, false}, nullptr);
+    REQUIRE(h.size() == 12);   // search.pdf page 0 "Lorem" count (fixture header)
+}
+
+TEST_CASE("page_hits honors match_case", "[document][search]") {
+    Document d; REQUIRE_FALSE(d.open("tests/fixtures/search.pdf").has_value());
+    auto ci = d.page_hits(0, "Lorem", {false, false, false}, nullptr);
+    auto cs = d.page_hits(0, "lorem", {true,  false, false}, nullptr);
+    REQUIRE(ci.size() == 12);  // same count as the ignore-case parity case
+    REQUIRE(cs.size() == 0);   // lowercase needle, capitalized text
+}
+
+TEST_CASE("page_hits regex + whole_word", "[document][search]") {
+    Document d; REQUIRE_FALSE(d.open("tests/fixtures/search.pdf").has_value());
+    REQUIRE(d.page_hits(0, "lo.em", {false, false, true}).size() > 0);  // '.'='r'
+    REQUIRE(d.page_hits(0, "lorem", {false, true,  false}).size() > 0); // whole word
+}
+
+TEST_CASE("query_compiles rejects bad regex", "[document][search]") {
+    Document d; REQUIRE_FALSE(d.open("tests/fixtures/search.pdf").has_value());
+    REQUIRE(d.query_compiles("lo.em", {false, false, true}));
+    REQUIRE_FALSE(d.query_compiles("foo(", {false, false, true}));
+    REQUIRE(d.query_compiles("", {false, false, true}));
+}
+
+TEST_CASE("page_hits abort_flag + leak stress", "[document][search]") {
+    Document d; REQUIRE_FALSE(d.open("tests/fixtures/large.pdf").has_value());
+    std::atomic<int> stop{1};
+    REQUIRE(d.page_hits(0, "the", {false, false, false}, &stop).size() == 0);  // pre-aborted
+    for (int i = 0; i < 200; ++i) {
+        std::atomic<int> s{0};
+        (void)d.page_hits(0, "the", {false, false, false}, &s);
+        (void)d.page_hits(0, "foo(", {false, false, true}, nullptr);  // throws -> caught -> empty
+    }
+    REQUIRE(d.page_hits(0, "the", {false, false, false}, nullptr).size() > 0);  // still works
 }
