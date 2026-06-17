@@ -8,6 +8,8 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-06-17 — Search: case-sensitive, regex, and whole-word
+
 ### Added
 - **Search: case-sensitive, regex, and whole-word.** The FindBar and cross-tab
   results panel gain Aa / .* / W toggles. Regex uses ECMAScript syntax and runs
