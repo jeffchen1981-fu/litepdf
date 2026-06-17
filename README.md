@@ -28,12 +28,12 @@ Download the latest release from
 > The binary is the one built by the [release workflow](.github/workflows/release.yml)
 > from the tagged source.
 
-## Features (v0.0.12)
+## Features (v1.1.0)
 
 Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab independent state. Cold-start budget under 1 s on SSD; tuned for HDD-friendly I/O patterns.
 
 - **Encrypted PDFs** — modal password prompt with 3-attempt retry (Phase 8)
-- **Search** — in-document find with highlighted hits + cross-tab search panel
+- **Search** — in-document find with highlighted hits + cross-tab search panel; case-sensitive, regex (ECMAScript), and whole-word toggles, with regex run on Enter (v1.1.0)
 - **Outline / bookmarks** — click-to-navigate side pane (F5)
 - **Thumbnails** — lazy-rendered side pane (F4)
 - **Invert colors** — per-tab dark-mode toggle (Ctrl+Shift+I, Phase 8)
