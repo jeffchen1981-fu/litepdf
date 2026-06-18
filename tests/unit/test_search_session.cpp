@@ -21,8 +21,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
 #include <filesystem>
 #include <memory>
+#include <thread>
 
 using namespace litepdf::core;
 using namespace litepdf::app;
@@ -156,6 +158,34 @@ TEST_CASE("SearchSession: set_reference_page repositions cursor",
     auto h = f.session->current();
     REQUIRE(h.has_value());
     REQUIRE(h->page == 3);
+}
+
+// Real worker pool (the InlineDispatcher path above is synchronous, so it
+// never has an in-flight worker for a superseded query to abort). A burst of
+// distinct queries with no waits leaves older generations very likely still
+// scanning when the next set_query lands, exercising the per-generation abort
+// token's mid-page cancel + its lifetime across rapid generation swaps. The
+// invariant under test is correctness: no matter how many generations were
+// cancelled, the FINAL query produces exactly its own hits and the run drains
+// cleanly (a token-lifetime UAF would surface here as a crash).
+TEST_CASE("SearchSession: rapid query changes settle on correct results (ThreadPool)",
+          "[search][session][threads]") {
+    Document doc = open_search_fixture();
+    ThreadPoolDispatcher pool(2);
+    SearchSession s(doc, pool);
+
+    for (int i = 0; i < 50; ++i) {
+        s.set_query(L"Lor", SearchSession::Flags{});
+        s.set_query(L"dolor", SearchSession::Flags{});
+    }
+    s.set_query(L"Lorem", SearchSession::Flags{});  // final generation
+
+    // Wait (bounded) for the final generation to finish scanning all pages.
+    for (int i = 0; i < 500 && !s.scan_complete(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(s.scan_complete());
+    REQUIRE(s.hit_count() == 15);  // exactly Lorem's hits, no stale leakage
 }
 
 TEST_CASE("SearchSession: destruct while holding state is safe",

@@ -1,5 +1,7 @@
 #include "core/SearchSession.hpp"
 
+#include "core/GenerationAbort.hpp"
+
 #include <windows.h>  // WideCharToMultiByte for UTF-16 -> UTF-8
 
 #include <algorithm>
@@ -29,11 +31,6 @@ struct SearchSession::Impl {
         // Atomic so the task lambda can check/reject stale runs without
         // taking the mutex in the fast path.
         std::atomic<std::uint64_t> epoch{0};
-        // Reserved for a future callback-based MuPDF search cancel path
-        // (see Document::page_hits header). Honored by MuPDF 1.27.2 via
-        // the stext match callback — flip the abort flag during set_query()
-        // to cut running page scans short.
-        std::atomic<int>         abort_flag{0};
         // Live counter of task lambdas that have been submitted but whose
         // run() body has not yet returned. Incremented at submit time in
         // set_query() and decremented by an RAII scope guard at the top
@@ -53,6 +50,10 @@ struct SearchSession::Impl {
     const Document&                         doc;
     litepdf::app::ISearchDispatcher&        dispatcher;
     std::shared_ptr<State>                  state;
+    // Per-generation abort tokens. Mutated only on the UI thread (set_query /
+    // dtor); each generation's tasks capture their own token by value, so
+    // workers never touch this object. See GenerationAbort.hpp.
+    GenerationAbort                         gen;
 
     Impl(const Document& d, litepdf::app::ISearchDispatcher& disp)
         : doc(d), dispatcher(disp), state(std::make_shared<State>()) {}
@@ -96,10 +97,10 @@ SearchSession::~SearchSession() {
     // the drain loop below terminate.
     auto& st = *impl_->state;
     st.epoch.fetch_add(1, std::memory_order_acq_rel);
-    // Also set the abort flag for any tasks already inside page_hits().
-    // Honored by MuPDF 1.27.2 via the stext match callback to cut
-    // in-progress scans short.
-    st.abort_flag.store(1, std::memory_order_relaxed);
+    // Also abort the active generation's token so any task already inside
+    // page_hits() bails mid-page (its incremental search loop polls the
+    // token each iteration) instead of scanning the whole page first.
+    impl_->gen.abort_active();
 
     // Step 2: spin-wait until every submitted task has executed its
     // scope guard. Tasks that haven't run yet will be popped off the
@@ -134,10 +135,13 @@ void SearchSession::set_query(std::wstring q, Flags f) {
     const std::uint64_t ep =
         st.epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
 
-    // Reset the MuPDF abort flag for the new search. Non-atomic semantics
-    // are fine — the old generation's workers won't look at this field
-    // again (they're gated by the epoch check first).
-    st.abort_flag.store(0, std::memory_order_relaxed);
+    // Start a new abort generation: this flips the PREVIOUS generation's
+    // token so a worker still inside page_hits() for the old query bails
+    // mid-page, and mints a fresh token (value 0) that this generation's
+    // tasks capture. (A single shared flag couldn't do this — resetting it
+    // to 0 here would strand the old in-flight worker.) Empty-query clears
+    // also abort prior in-flight work, which is the desired behavior.
+    std::shared_ptr<std::atomic<int>> abort_token = impl_->gen.begin_generation();
 
     // Empty query: treat as "cleared" — no tasks, scan_complete=true
     // immediately (pages_remaining already zeroed above).
@@ -190,7 +194,8 @@ void SearchSession::set_query(std::wstring q, Flags f) {
         t.state_weak = std::weak_ptr<void>(
             std::static_pointer_cast<void>(state_strong));
         t.priority = 2;
-        t.run = [state_strong, &doc_ref, i, needle_utf8, captured_flags, ep]() {
+        t.run = [state_strong, &doc_ref, i, needle_utf8, captured_flags, ep,
+                 abort_token]() {
             // RAII drain guard: always decrement pending_tasks on return,
             // whether we hit the stale-epoch fast exit below, MuPDF
             // throws out of page_hits, or we complete normally. This is
@@ -210,7 +215,7 @@ void SearchSession::set_query(std::wstring q, Flags f) {
                                       captured_flags.whole_word,
                                       captured_flags.regex };
             auto raw_hits = doc_ref.page_hits(i, needle_utf8, df,
-                                              &state_strong->abort_flag);
+                                              abort_token.get());
 
             // Epoch check #2: we were busy in MuPDF; the user may have
             // typed more characters in the meantime. Drop stale results.
