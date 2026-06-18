@@ -173,7 +173,6 @@ void SearchSession::set_query(std::wstring q, Flags f) {
     // thread is mid-execution when the session is destroyed. The
     // dispatcher itself holds a weak_ptr for the runnability gate.
     std::shared_ptr<Impl::State> state_strong = impl_->state;
-    std::weak_ptr<Impl::State>   state_weak   = impl_->state;
     const Document&              doc_ref      = impl_->doc;
     const std::string            needle_utf8  = utf16_to_utf8(state_strong->query);
     const Flags                  captured_flags = f;
