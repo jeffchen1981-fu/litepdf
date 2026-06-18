@@ -8,6 +8,12 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 
 ## [Unreleased]
 
+### Changed
+- Changing the search query now cancels the previous query's in-flight page
+  scan mid-page, instead of only discarding its stale results once finished.
+  Each search generation owns its own abort token, so a superseded worker
+  stops promptly rather than scanning a now-irrelevant page to completion.
+
 ## [1.1.0] — 2026-06-17 — Search: case-sensitive, regex, and whole-word
 
 ### Added
