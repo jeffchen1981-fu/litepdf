@@ -164,10 +164,14 @@ TEST_CASE("SearchSession: set_reference_page repositions cursor",
 // never has an in-flight worker for a superseded query to abort). A burst of
 // distinct queries with no waits leaves older generations very likely still
 // scanning when the next set_query lands, exercising the per-generation abort
-// token's mid-page cancel + its lifetime across rapid generation swaps. The
-// invariant under test is correctness: no matter how many generations were
-// cancelled, the FINAL query produces exactly its own hits and the run drains
-// cleanly (a token-lifetime UAF would surface here as a crash).
+// token's lifetime across rapid generation swaps. The invariant under test is
+// correctness/safety: no matter how many generations were cancelled, the FINAL
+// query produces exactly its own hits and the run drains cleanly (a token-
+// lifetime UAF would surface here as a crash). It does NOT assert that a
+// superseded scan was cancelled *mid-page* — the epoch check alone already
+// guarantees the final count, so that responsiveness property is owned by the
+// deterministic test_generation_abort.cpp ("starting the next generation
+// aborts the previous"), not by this end-to-end guard.
 TEST_CASE("SearchSession: rapid query changes settle on correct results (ThreadPool)",
           "[search][session][threads]") {
     Document doc = open_search_fixture();

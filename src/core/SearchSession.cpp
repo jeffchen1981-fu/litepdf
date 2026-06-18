@@ -144,7 +144,10 @@ void SearchSession::set_query(std::wstring q, Flags f) {
     std::shared_ptr<std::atomic<int>> abort_token = impl_->gen.begin_generation();
 
     // Empty query: treat as "cleared" — no tasks, scan_complete=true
-    // immediately (pages_remaining already zeroed above).
+    // immediately (pages_remaining already zeroed above). This early return
+    // MUST stay below begin_generation() above: clearing the query still has
+    // to abort the prior generation's in-flight worker, so do not hoist this
+    // check above line 144.
     OnUpdate cb_snapshot;
     {
         std::lock_guard<std::mutex> g(st.m);
