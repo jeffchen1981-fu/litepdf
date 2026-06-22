@@ -22,9 +22,9 @@ if (-not (Test-Path $fixture)) {
     throw "fixture not found at $fixture"
 }
 
-# Size budget. Phase 11.5 pruned MuPDF (JS/OCR/DOCX off, CJK -> Droid Sans
-# Fallback Full); Release build ~18-20 MB. 25 MB leaves headroom.
-$maxBytes = 25MB
+# cjk-system-font-loader: dropped the embedded CJK font (TOFU_CJK); CJK now
+# renders from Windows system fonts. Release build ~7.25 MB. 12 MB leaves headroom.
+$maxBytes = 12MB
 $size = (Get-Item $exe).Length
 if ($size -gt $maxBytes) {
     throw "litepdf.exe is $size bytes, exceeds budget of $maxBytes bytes"

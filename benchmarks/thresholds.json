@@ -1,1 +1,1 @@
-{"time_regression_pct": 10, "time_min_delta_ms": 5, "size_regression_bytes": 262144, "size_ceiling_bytes": 19000000}
+{"time_regression_pct": 10, "time_min_delta_ms": 5, "size_regression_bytes": 262144, "size_ceiling_bytes": 9000000}
