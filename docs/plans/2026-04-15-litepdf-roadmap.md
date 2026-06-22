@@ -113,6 +113,16 @@ Captured at `v0.0.7-phase6` tag. See `docs/plans/2026-04-24-phase-6-search-desig
 - **SearchDispatcher is 2-worker fixed.** Adequate per design §5.4 "tabs run in parallel", but the Phase 11 benchmark harness may surface data motivating DPI-/CPU-count-adaptive sizing post-v1.0.
 - **Cross-tab results `N hits` counter is total-only.** Plan's ideal format is "m / n" (current / total) but `SearchSession` doesn't expose cursor index; a Phase 6.x follow-up adds `cursor_index()` and flips the counter format.
 - **FindBar counter refreshes during cross-tab scan: resolved.** `CrossTabSearch::clear()` restores each tab's previous on_update observer, so the per-tab find-bar counter resumes updating the moment the results panel is dismissed. `dispatch()` also calls `clear()` first so repeated Ctrl+Shift+F invocations don't stack chained lambdas.
+- **8 MB exe target — DONE (cjk-system-font-loader, 2026-06-22).** The embedded
+  Droid Sans Fallback Full CJK font (~4.84 MB) was dropped (`TOFU_CJK`); CJK now
+  renders from Windows system fonts via a DirectWrite `load_cjk_font` hook
+  (`src/core/SystemFonts.cpp`). `litepdf.exe` ≈ 7,251,968 bytes (down from
+  12,314,624). **Known limitation:** on a Windows install lacking the relevant
+  CJK family (Windows N, debloated, no language pack), CJK runs render as
+  `.notdef` tofu — never blank or crashing (a base14 last-resort guarantees the
+  page renders). The Han **script-fallback** path (a non-CJK base font hitting a
+  CJK codepoint) is out of scope and renders notdef, like the non-CJK scripts
+  already tofu since v1.1.0.
 
 ## Out of Scope (post-v1.0)
 
