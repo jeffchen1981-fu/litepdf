@@ -87,6 +87,7 @@ target_include_directories(litepdf_core PUBLIC src)
 
 target_link_libraries(litepdf_core PRIVATE
     litepdf::mupdf
+    dwrite          # cjk-system-font-loader: DirectWrite system-font loader
 )
 
 # --- litepdf executable ---------------------------------------------------

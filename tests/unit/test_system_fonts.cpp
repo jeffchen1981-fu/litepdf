@@ -1,4 +1,5 @@
 #include "core/SystemFonts.hpp"
+#include "core/Document.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -30,4 +31,34 @@ TEST_CASE("cjk_family_candidates: unknown ordering is empty",
           "[core][fonts][cjk]") {
     REQUIRE(cjk_family_candidates(99, 1).empty());
     REQUIRE(cjk_family_candidates(-1, 0).empty());
+}
+
+// Forward-declare the fz ABI bits the test drops. litepdf_core links mupdf
+// PRIVATE, so the test target has no mupdf include path — local extern-C decls
+// are enough (same pattern as test_document_clone_context.cpp).
+extern "C" {
+struct fz_context;
+struct fz_font;
+void fz_drop_context(fz_context* ctx);
+void fz_drop_font(fz_context* ctx, fz_font* font);
+}
+
+using litepdf::core::Document;
+using litepdf::core::resolve_cjk_system_font;
+
+TEST_CASE("resolve_cjk_system_font: never returns NULL — base14 last resort (D6)",
+          "[core][fonts][cjk][d6]") {
+    Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/simple.pdf").has_value());
+    fz_context* ctx = doc.clone_context();
+    REQUIRE(ctx != nullptr);
+
+    // Ordering 99 matches no candidate family, so DirectWrite resolution is
+    // skipped entirely and the loader must fall through to the base14 Helvetica
+    // last-resort — deterministic on any machine, even one with CJK fonts.
+    fz_font* font = resolve_cjk_system_font(ctx, "SourceHanSerif", 99, 1);
+    REQUIRE(font != nullptr);
+
+    fz_drop_font(ctx, font);
+    fz_drop_context(ctx);
 }
