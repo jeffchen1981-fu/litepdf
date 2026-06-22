@@ -48,6 +48,7 @@ add_library(litepdf_core STATIC
     src/core/TabList.cpp
     src/core/SearchSession.cpp     # Phase 6 Task 5
     src/core/SearchQuery.cpp       # search-upgrade Task 1
+    src/core/SystemFonts.cpp       # cjk-system-font-loader Task 1
     src/app/SearchDispatcher.cpp   # Phase 6 Task 4
     src/app/CrossTabSearch.cpp     # Phase 6 Task 11
     src/app/AppPaths.cpp           # Phase 12 Task 1
@@ -86,6 +87,7 @@ target_include_directories(litepdf_core PUBLIC src)
 
 target_link_libraries(litepdf_core PRIVATE
     litepdf::mupdf
+    dwrite          # cjk-system-font-loader: DirectWrite system-font loader
 )
 
 # --- litepdf executable ---------------------------------------------------

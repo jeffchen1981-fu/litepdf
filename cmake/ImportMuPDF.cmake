@@ -86,7 +86,7 @@ endforeach()
 #
 # Idempotent AND re-appliable: the _PRUNE_VER marker version-stamps the injected
 # set. If config.h lacks the CURRENT marker (fresh checkout, OR the define set
-# changed — e.g. Task 6 adds TOFU_CJK_LANG and bumps the version), restore the
+# changed — e.g. V10 adds TOFU_CJK to drop the embedded CJK font), restore the
 # tracked submodule file to pristine (dropping any older prepend so we never
 # stack two), re-prepend the current set, and delete the stamp so it rebuilds.
 set(_MUPDF_CONFIG_H "${_MUPDF_ROOT}/include/mupdf/fitz/config.h")
@@ -96,7 +96,10 @@ set(_MUPDF_CONFIG_H "${_MUPDF_ROOT}/include/mupdf/fitz/config.h")
 # matches the findings doc the team will reference. TOFU_EMOJI is a no-op in
 # 1.27.2 (spike V8 = 0 bytes; no standalone consult, force-defined by TOFU_NOTO)
 # but kept for spike-V9 parity — it is deliberately excluded from the assertion.
-set(_PRUNE_VER "LITEPDF_PRUNE_V9")   # bump when the injected define set changes
+# V10 adds TOFU_CJK to drop the embedded CJK font (~4.84 MB SourceHanSerif block
+# in font-table.h:281). CJK glyphs are now resolved at runtime from Windows system
+# fonts via the DirectWrite loader (Task 2), so the embedded fallback is redundant.
+set(_PRUNE_VER "LITEPDF_PRUNE_V10")  # bump when the injected define set changes
 set(_prune
     "/* ${_PRUNE_VER} — injected by ImportMuPDF.cmake (do not edit) */\n"
     "#define FZ_ENABLE_JS 0\n"
@@ -114,7 +117,8 @@ set(_prune
     "#define TOFU_SYMBOL\n"
     "#define TOFU_EMOJI\n"
     "#define TOFU_NOTO\n"
-    "#define TOFU_CJK_LANG\n")
+    "#define TOFU_CJK_LANG\n"
+    "#define TOFU_CJK\n")
 string(JOIN "" _prune_str ${_prune})
 file(READ "${_MUPDF_CONFIG_H}" _cfg)
 if(NOT _cfg MATCHES "${_PRUNE_VER}")
@@ -166,7 +170,7 @@ endforeach()
 # '#ifndef TOFU_EMOJI' consult; it is driven by TOFU_NOTO/NOTO_SMALL and
 # measured 0 bytes in the spike (V8). It stays injected for spike-V9 parity.
 file(READ "${_MUPDF_ROOT}/source/fitz/font-table.h" _ft_src)
-foreach(_t TOFU_SYMBOL TOFU_NOTO TOFU_CJK_LANG)
+foreach(_t TOFU_SYMBOL TOFU_NOTO TOFU_CJK_LANG TOFU_CJK)
     if(NOT _ft_src MATCHES "ifndef[ \t]+${_t}[^A-Za-z0-9_]")
         message(FATAL_ERROR
             "Prune drift: no live '#ifndef ${_t}' consult in "
@@ -174,7 +178,7 @@ foreach(_t TOFU_SYMBOL TOFU_NOTO TOFU_CJK_LANG)
             "renamed upstream; the injected '#define ${_t}' is now a no-op.")
     endif()
 endforeach()
-message(STATUS "MuPDF prune-effective assertion passed (12 FZ_ENABLE_* + 3 TOFU_*; TOFU_EMOJI exempt).")
+message(STATUS "MuPDF prune-effective assertion passed (12 FZ_ENABLE_* + 4 TOFU_*; TOFU_EMOJI exempt).")
 
 # ExternalProject builds MuPDF's sln. We target libmupdf; MSBuild
 # automatically chases its ProjectReferences (libthirdparty, libresources,

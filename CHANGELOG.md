@@ -8,11 +8,26 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-06-22 — CJK system-font loader (8 MB exe)
+
 ### Changed
+- **CJK now renders from Windows system fonts.** The embedded ~4.84 MB CJK
+  font (Droid Sans Fallback Full) was dropped; CJK text is resolved at render
+  time from the matching installed Windows family — PMingLiU / SimSun / MS
+  Mincho / Batang for serif, Microsoft JhengHei / YaHei / Yu Gothic / Malgun
+  Gothic for sans — via a DirectWrite loader. `litepdf.exe` shrinks from
+  12.31 MB to 7.25 MB.
 - Changing the search query now cancels the previous query's in-flight page
   scan mid-page, instead of only discarding its stale results once finished.
   Each search generation owns its own abort token, so a superseded worker
   stops promptly rather than scanning a now-irrelevant page to completion.
+
+### Known limitations
+- On a Windows install lacking the relevant CJK family (Windows N, debloated,
+  or no language pack), CJK runs render as `.notdef` tofu — never blank or
+  crashing (a base14 last-resort guarantees the page still renders). The Han
+  script-fallback path (a non-CJK base font hitting a CJK codepoint) renders
+  notdef, as non-CJK scripts have since v1.1.0.
 
 ## [1.1.0] — 2026-06-17 — Search: case-sensitive, regex, and whole-word
 
