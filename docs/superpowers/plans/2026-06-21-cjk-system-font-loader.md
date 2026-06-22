@@ -24,13 +24,11 @@ Run the test exe from the repo root (fixtures resolve relative to `CMAKE_SOURCE_
 - **Create** `src/core/SystemFonts.cpp` — DirectWrite resolution + process-wide cache + base14 last-resort + install. Includes the real `<mupdf/fitz.h>` (litepdf_core compiles with mupdf's include dir).
 - **Create** `tests/unit/test_system_fonts.cpp` — unit tests for the pure mapping and the D6 last-resort.
 - **Create** `tests/unit/test_cjk_extract_liveness.cpp` — open+extract liveness on the three CJK fixtures post-prune.
-- **Create** `tests/unit/test_cjk_form_appearance.cpp` — automated D6 no-blank render guard for `cjk-form.pdf`.
 - **Modify** `CMakeLists.txt` — add `SystemFonts.cpp` to `litepdf_core`; add `dwrite` to its link libs.
-- **Modify** `tests/CMakeLists.txt` — register `test_system_fonts.cpp`.
+- **Modify** `tests/CMakeLists.txt` — register **both** `test_system_fonts.cpp` (Task 1) and `test_cjk_extract_liveness.cpp` (Task 5).
 - **Modify** `src/core/Document.cpp:86` — install the hook.
 - **Modify** `cmake/ImportMuPDF.cmake` — add `TOFU_CJK`, bump `_PRUNE_VER`, extend the assertion.
 - **Modify** `benchmarks/thresholds.json`, `scripts/check-benchmark-regression.ps1`, `scripts/smoke-test.ps1` — size gates.
-- **Create** `tests/fixtures/cjk-form.pdf` + generator — CJK form-appearance fixture (D6 integration liveness).
 - **Modify** `tests/fixtures/cjk-reference/*.png` — regenerate (new system-font render).
 - **Modify** `docs/plans/2026-04-15-litepdf-roadmap.md` — mark C-real / 8 MB DONE + known limitations.
 
@@ -206,10 +204,10 @@ git commit -m "feat(fonts): cjk_family_candidates pure ordering->Windows-family 
 
 - [ ] **Step 1: Add the D6 last-resort failing test**
 
-Append to `tests/unit/test_system_fonts.cpp`:
+First add `#include "core/Document.hpp"` to the **top** of `tests/unit/test_system_fonts.cpp`
+(next to the existing `#include "core/SystemFonts.hpp"` from Task 1 — don't bury an
+`#include` mid-file). Then **append** the rest below the existing Task-1 cases:
 ```cpp
-#include "core/Document.hpp"
-
 // Forward-declare the fz ABI bits the test drops. litepdf_core links mupdf
 // PRIVATE, so the test target has no mupdf include path — local extern-C decls
 // are enough (same pattern as test_document_clone_context.cpp).
@@ -402,11 +400,13 @@ fz_font* resolve_cjk_system_font(fz_context* ctx, const char* name, int ordering
             if (font) return font;
         }
         // D6 last resort: a guaranteed base14 face so the hook never returns
-        // NULL. A NULL return makes fz_new_cjk_font throw (font.c:967), which in
-        // appearance synthesis (pdf-appearance.c:1670) blanks the page. Helvetica
-        // has no CJK glyphs, so the page renders notdef tofu instead. Catch ALL
-        // fz errors here (incl. FZ_ERROR_SYSTEM/TRYLATER, which
-        // fz_load_system_cjk_font would otherwise rethrow) and return NULL.
+        // NULL (a cheap never-NULL invariant). A NULL return makes fz_new_cjk_font
+        // throw FZ_ERROR_ARGUMENT (font.c:967); in form/annotation appearance
+        // synthesis that throw is swallowed (pdf-appearance.c:3815), leaving the
+        // CJK form field EMPTY (not a blank page). Returning base14 renders that
+        // field as .notdef tofu instead. Catch ALL fz errors here (incl.
+        // FZ_ERROR_SYSTEM/TRYLATER, which fz_load_system_cjk_font would otherwise
+        // rethrow) and return NULL only past the last resort.
         fz_font* fallback = nullptr;
         fz_var(fallback);
         fz_try(ctx) {
@@ -557,9 +557,13 @@ git commit -m "build(mupdf): TOFU_CJK prune drops embedded CJK font (V10); keep 
 **Files:**
 - Verify: `tests/unit/test_document_search.cpp` (existing CJK case, must stay green)
 - Create: `tests/unit/test_cjk_extract_liveness.cpp` + register in `tests/CMakeLists.txt`
-- Create: `tests/unit/test_cjk_form_appearance.cpp` (D6 no-blank render guard) + register
-- Create: `scripts/generate-cjk-form-fixture.py` + `tests/fixtures/cjk-form.pdf`
 - Modify: `tests/fixtures/cjk-reference/cjk-zh-hant.png`, `cjk-ja.png`, `cjk-ko.png`
+
+> **D6 guard:** the deterministic D6 last-resort test is the Task-2 unit test
+> (`resolve_cjk_system_font(…, ordering=99) != NULL`). The form-appearance
+> integration fixture/test was **dropped** (spec v4 §6) — a missing-CJK-font hook
+> leaves a form field empty, not blank-paged (the throw is swallowed at
+> pdf-appearance.c:3815), and CI has CJK fonts so the last-resort never fires there.
 
 - [ ] **Step 1: Confirm the existing CJK search/extraction test is still green**
 
@@ -579,7 +583,7 @@ Expected: `page_hits: Unicode needle matches CJK text` PASSES (extraction is ToU
 // CJK font is dropped (TOFU_CJK) and CJK is system-resolved. Extraction is
 // ToUnicode/CMap-based (font-independent), so this stays green on any runner
 // regardless of which CJK fonts it has. Glyph-rendering fidelity is checked via
-// the CLI render + manual visual vs the reference PNGs (Step 6), not in CI.
+// the CLI render + manual visual vs the reference PNGs (Step 4), not in CI.
 #include "core/Document.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -622,161 +626,7 @@ Pop-Location
 ```
 Expected: PASS (opens + extracts, no crash).
 
-- [ ] **Step 4: Create the CJK form-appearance fixture (D6 integration check)**
-
-`scripts/generate-cjk-form-fixture.py` — emits a single-page AcroForm PDF with a text field whose `/V` is a CJK string, `NeedAppearances true`, **no `/AP`**, and a non-embedded CIDFont in the AcroForm `/DR`, so MuPDF must synthesize the appearance via `fz_new_cjk_font`. (Opus round-1 note: the synthesis branch MuPDF picks is driven by the **`/V` text's script** (Han, no lang tag → MuPDF's default lang → `fz_new_cjk_font(FZ_ADOBE_JAPAN)`, pdf-appearance.c:1677), **not** by the DR font's `/Ordering (GB1)`. Either ordering reaches the hook, so D6 is exercised regardless — the `/Ordering` is incidental.) The hand-built xref must be byte-exact or MuPDF rejects the file; the automated render test in the next step opens it and asserts `page_count() == 1`, so a malformed fixture fails loudly rather than masquerading as a D6 pass.
-```python
-#!/usr/bin/env python3
-"""Generate tests/fixtures/cjk-form.pdf — a CJK AcroForm field with no /AP, so
-MuPDF synthesizes the appearance (exercising the pdf-appearance.c fz_new_cjk_font
-path that D6 protects). Deterministic raw-PDF emit (no compression)."""
-import struct, zlib  # noqa: F401
-from pathlib import Path
-
-# Minimal hand-built PDF. CJK value U+4E2D U+6587 (UTF-16BE) in the field /V.
-objs = []
-def add(s): objs.append(s); return len(objs)
-# 1 catalog, 2 pages, 3 page, 4 acroform, 5 field/widget, 6 CIDFont type0.
-cat   = "<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>"
-pages = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"
-page  = ("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] "
-         "/Annots [5 0 R] /Resources << >> >>")
-acro  = ("<< /Fields [5 0 R] /NeedAppearances true "
-         "/DR << /Font << /F0 6 0 R >> >> /DA (/F0 12 Tf 0 g) >>")
-# /V is UTF-16BE for the two CJK code points; no /AP -> MuPDF synthesizes it.
-field = ("<< /Type /Annot /Subtype /Widget /FT /Tx /T (cjk) "
-         "/Rect [10 30 190 70] /F 4 /P 3 0 R "
-         "/DA (/F0 12 Tf 0 g) /V <FEFF4E2D6587> >>")
-cid   = ("<< /Type /Font /Subtype /Type0 /BaseFont /STSong-Light "
-         "/Encoding /UniGB-UCS2-H "
-         "/DescendantFonts [<< /Type /Font /Subtype /CIDFontType0 "
-         "/BaseFont /STSong-Light "
-         "/CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 4 >> "
-         "/FontDescriptor << /Type /FontDescriptor /FontName /STSong-Light "
-         "/Flags 4 /FontBBox [0 -200 1000 900] /ItalicAngle 0 /Ascent 880 "
-         "/Descent -120 /StemV 80 >> >>] >>")
-for s in (cat, pages, page, acro, field, cid): add(s)
-
-out = bytearray(b"%PDF-1.7\n")
-offsets = []
-for i, body in enumerate(objs, start=1):
-    offsets.append(len(out))
-    out += f"{i} 0 obj\n{body}\nendobj\n".encode("latin-1")
-xref_pos = len(out)
-out += f"xref\n0 {len(objs)+1}\n".encode()
-out += b"0000000000 65535 f \n"
-for off in offsets:
-    out += f"{off:010d} 00000 n \n".encode()
-out += (f"trailer\n<< /Size {len(objs)+1} /Root 1 0 R >>\n"
-        f"startxref\n{xref_pos}\n%%EOF\n").encode()
-Path("tests/fixtures/cjk-form.pdf").write_bytes(out)
-print("wrote tests/fixtures/cjk-form.pdf", len(out), "bytes")
-```
-Run it from the repo root:
-```powershell
-Push-Location C:\Users\User\projects\litepdf
-python scripts\generate-cjk-form-fixture.py
-Pop-Location
-```
-
-- [ ] **Step 5: Automated form-appearance render test (D6 no-blank guard — Codex MAJOR)**
-
-Spec §6 requires a **committed** test asserting the CJK form page renders non-blank (not a manual command). Create `tests/unit/test_cjk_form_appearance.cpp`, mirroring the RenderEngine→pixmap pattern in `test_render_engine_output.cpp`:
-```cpp
-// Automated D6 no-blank guard. The CJK form fixture has no /AP, so MuPDF
-// synthesizes the field appearance during render (pdf_update_page ->
-// pdf-appearance.c fz_new_cjk_font). If a regression makes the CJK hook return
-// NULL, fz_new_cjk_font throws and the worker drops the display list -> the
-// callback receives a null pixmap. This asserts the page renders (non-null) AND
-// has non-white pixels (the synthesized field text). On a machine with CJK fonts
-// the field paints real glyphs; on a font-less one the base14 last-resort paints
-// notdef boxes -- both non-white. (The deterministic last-resort guard is the
-// Task-2 unit test; this guards the whole appearance path.)
-#include "core/Document.hpp"
-#include "core/RenderEngine.hpp"
-
-#include <catch2/catch_test_macros.hpp>
-
-#include <chrono>
-#include <condition_variable>
-#include <cstddef>
-#include <mutex>
-
-extern "C" {
-struct fz_context;
-struct fz_pixmap;
-void fz_drop_context(fz_context*);
-void fz_drop_pixmap(fz_context*, fz_pixmap*);
-int  fz_pixmap_width(fz_context*, fz_pixmap*);
-int  fz_pixmap_height(fz_context*, fz_pixmap*);
-int  fz_pixmap_stride(fz_context*, fz_pixmap*);
-unsigned char* fz_pixmap_samples(fz_context*, fz_pixmap*);
-}
-
-using namespace litepdf::core;
-
-TEST_CASE("CJK form appearance renders a non-blank page (D6 guard)",
-          "[core][fonts][cjk][d6][form]") {
-    Document doc;
-    REQUIRE_FALSE(doc.open("tests/fixtures/cjk-form.pdf").has_value());
-    REQUIRE(doc.page_count() == 1);  // fixture well-formed (Opus M2 sanity)
-
-    RenderEngine engine(doc, 1);
-    std::mutex m;
-    std::condition_variable cv;
-    fz_pixmap* got = nullptr;
-    bool done = false;
-    engine.submit({0, 0, 1.0f, [&](fz_pixmap* p, fz_context*) {
-        std::lock_guard<std::mutex> g(m);
-        got = p; done = true; cv.notify_all();
-    }});
-    {
-        std::unique_lock<std::mutex> lk(m);
-        REQUIRE(cv.wait_for(lk, std::chrono::seconds(5), [&]{ return done; }));
-    }
-    REQUIRE(got != nullptr);  // blank-page regression drops the dlist -> null
-
-    fz_context* ctx = doc.clone_context();
-    REQUIRE(ctx != nullptr);
-    const int w = fz_pixmap_width(ctx, got);
-    const int h = fz_pixmap_height(ctx, got);
-    const int stride = fz_pixmap_stride(ctx, got);
-    const unsigned char* s = fz_pixmap_samples(ctx, got);
-    REQUIRE(w > 0); REQUIRE(h > 0); REQUIRE(s != nullptr);
-
-    unsigned long long nonwhite = 0;
-    for (int y = 0; y < h; ++y) {
-        const unsigned char* row = s + static_cast<std::size_t>(y) * stride;
-        for (int x = 0; x < w; ++x) {
-            const unsigned char* px = row + static_cast<std::size_t>(x) * 4;
-            if (px[0] < 250 || px[1] < 250 || px[2] < 250) ++nonwhite;
-        }
-    }
-    INFO("non-white pixels = " << nonwhite);
-    REQUIRE(nonwhite > 0);
-
-    fz_drop_pixmap(ctx, got);
-    fz_drop_context(ctx);
-}
-```
-Register it in `tests/CMakeLists.txt`:
-```cmake
-    unit/test_cjk_form_appearance.cpp  # cjk-system-font-loader Task 5 (D6 guard)
-```
-Build + run:
-```powershell
-& $cmake --build C:\Users\User\projects\litepdf\build --target litepdf_unit_tests --config Release
-Push-Location C:\Users\User\projects\litepdf
-& .\build\tests\Release\litepdf_unit_tests.exe "[d6][form]"
-Pop-Location
-```
-Expected: PASS (page renders, non-white pixels present). If `page_count() == 1` fails, the hand-built fixture xref is malformed — fix the generator (Step 4) before continuing.
-
-- [ ] **Step 6: (Optional) manually prove the guard fails without D6 (dev machine)**
-
-To confirm the test actually catches a blank page: temporarily comment out the `install_system_cjk_font_loader(ctx)` line **on a machine that lacks a CJK font for the JAPAN ordering** (or stub the hook to return NULL), rebuild, and rerun `[d6][form]` — it should FAIL (`got == nullptr` or `nonwhite == 0`). Restore the line, rebuild. Note: on a dev machine that HAS Japanese fonts the hook returns a real font so removing only the *install* still tofu-renders via the embedded path pre-flip; the most reliable manual proof is to stub `resolve_cjk_system_font` to `return nullptr;`. Do not commit either change.
-
-- [ ] **Step 7: Regenerate the reference PNGs + manual visual fidelity check**
+- [ ] **Step 4: Regenerate the reference PNGs + manual visual fidelity check**
 
 The committed `tests/fixtures/cjk-reference/*.png` were rendered against Droid Sans Fallback and are now stale. `--render N` emits a **P6 PPM to stdout**; in Windows PowerShell 5.1 a `>` redirect re-encodes native binary output and corrupts the PPM (Codex MAJOR), so redirect via `cmd /c`. Render page 0 of each fixture to PPM, convert to PNG with Pillow, then eyeball real glyphs (not tofu) and that Traditional Chinese is **PMingLiU** (明體), not MingLiU_HKSCS (confirms the TTC face index):
 ```powershell
@@ -790,7 +640,7 @@ Pop-Location
 ```
 Open each PNG and confirm real CJK glyphs. **These PNGs are documentation artifacts** (manual-visual baseline + PR attachment), **not** an automated gate — system-font output is not byte-reproducible across machines, so do not wire a render-hash check against them (Opus m5). Attach before/after to the PR.
 
-- [ ] **Step 8: GUI smoke (per `reference_litepdf_scripted_gui_smoke`)**
+- [ ] **Step 5: GUI smoke (per `reference_litepdf_scripted_gui_smoke`)**
 
 Launch the GUI on the zh-Hant fixture, screenshot, confirm real glyphs render on screen:
 ```powershell
@@ -801,11 +651,11 @@ Pop-Location
 ```
 Drive + screenshot per the scripted-GUI-smoke memory; confirm the page shows real Traditional Chinese glyphs.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add tests/unit/test_cjk_extract_liveness.cpp tests/unit/test_cjk_form_appearance.cpp tests/CMakeLists.txt scripts/generate-cjk-form-fixture.py tests/fixtures/cjk-form.pdf tests/fixtures/cjk-reference/cjk-zh-hant.png tests/fixtures/cjk-reference/cjk-ja.png tests/fixtures/cjk-reference/cjk-ko.png
-git commit -m "test(fonts): CJK extract liveness + automated form-appearance render guard + refreshed reference PNGs"
+git add tests/unit/test_cjk_extract_liveness.cpp tests/CMakeLists.txt tests/fixtures/cjk-reference/cjk-zh-hant.png tests/fixtures/cjk-reference/cjk-ja.png tests/fixtures/cjk-reference/cjk-ko.png
+git commit -m "test(fonts): CJK extract liveness + refreshed reference PNGs (post-TOFU_CJK)"
 ```
 
 ---
@@ -937,6 +787,28 @@ git commit -m "docs(roadmap): 8 MB exe target reached via CJK system-font loader
 ---
 
 ## Plan Review History
+
+### v2 → v3 (plan-gate round-2 + mechanism correction, 2026-06-21)
+
+Round-2 (Opus + Sonnet + Codex) confirmed the v2 fixes correct (UTF-8 conversion,
+`fz_var`, self-test rule, `cmd /c`, all API signatures), but **Opus traced deeper
+and overturned the blank-page failure model**: a missing-CJK-font hook does NOT
+blank the page — the appearance-synthesis throw is swallowed at pdf-appearance.c:3815
+(source-verified), leaving a CJK form field merely *empty*. The user chose to keep a
+**minimal D6** and drop the integration test. Changes (see spec v4 §5/§6/§10):
+
+- **Dropped** Task 5's CJK form-appearance fixture generator, the automated
+  `test_cjk_form_appearance.cpp` render test, and the optional manual proof — the
+  no-D6 failure is a benign empty field (not a blank page), and the test can't fire
+  the last-resort on CI (which has CJK fonts). The deterministic D6 guard is the
+  Task-2 unit test (`resolve_cjk_system_font(…, ordering=99) != NULL`).
+- **Kept** the base14 last-resort in `resolve_cjk_system_font` as a cheap never-NULL
+  invariant; corrected its code comment from "blanks the page" to "leaves the form
+  field empty (throw swallowed at pdf-appearance.c:3815)".
+- File Structure: removed the form files; `tests/CMakeLists.txt` entry now lists
+  both Task-1 and Task-5 test files (Sonnet F5).
+- Moved the Task-2 `#include "core/Document.hpp"` to the file top (Sonnet F4).
+- Renumbered Task 5 steps (now 1-6) and fixed the reference-PNG cross-ref.
 
 ### v1 → v2 (plan-gate round-1: Opus + Sonnet + Codex, 2026-06-21)
 

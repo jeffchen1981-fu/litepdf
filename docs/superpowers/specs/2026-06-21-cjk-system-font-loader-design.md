@@ -1,6 +1,13 @@
 # CJK System-Font Loader — Reaching the 8 MB exe Target (Design Spec)
 
-> **Status:** v3 — brainstormed 2026-06-21, **hardened over two three-lens
+> **Status:** v4 — the plan-gate round-2 review (on the derived plan) **corrected a
+> load-bearing mechanism error that survived two spec rounds**: a missing-CJK-font
+> hook does **not** blank the page (the appearance-synthesis throw is swallowed at
+> [pdf-appearance.c:3815](../../../third_party/mupdf/source/pdf/pdf-appearance.c) —
+> source-verified). D6 is reframed from "prevents blank page" to a cheap never-NULL
+> invariant (empty-vs-tofu CJK form fields on font-less machines); the form-appearance
+> integration test is dropped, with the Task-2 unit test as the D6 guard. See §10.
+> v3 — brainstormed 2026-06-21, **hardened over two three-lens
 > spec-gate review rounds** (Opus `pr-review-toolkit:code-reviewer` + Sonnet
 > `feature-dev:code-reviewer` + Codex `codex exec` read-only). Round-1 (on v1)
 > surfaced the **blank-page** failure mode, a false caching claim, a second
@@ -79,7 +86,7 @@ or any other phase.
 | D3 | Prune macro | **Add `TOFU_CJK`; KEEP `TOFU_CJK_LANG`** | `TOFU_CJK` alone drops the embedded font (outermost guard, [font-table.h:281](../../../third_party/mupdf/source/fitz/font-table.h)). Keeping `TOFU_CJK_LANG` *also* defined leaves the second consult at [font.c:2124](../../../third_party/mupdf/source/fitz/font.c) compiled out, so the Han script-fallback path stays byte-identical to today (no new `fz_load_fallback_font` calls). Review-corrected (Codex M2). |
 | D4 | Loader implementation | **DirectWrite (Approach A), file-path memory model (`fz_new_font_from_file`)** | DirectWrite is free-threaded (matches the render-worker call site), cleanly handles TTC collections (MingLiU is a `.ttc`) and yields the correct face index, and is a natural sibling of the Direct2D stack. `fz_new_font_from_file` lets MuPDF own the font buffer (refcount-clean). **NB (Opus M2):** `fz_new_font_from_file` does a full `fz_read_file` of the whole file into a heap buffer ([font.c:868](../../../third_party/mupdf/source/fitz/font.c)) — **not** an mmap; for a multi-MB TTC this reads the whole collection on each resolution (perf: §4.1 resolution cache + §9). GDI `GetFontData` rejected: per-DC realization + ambiguous TTC face-index. |
 | D5 | CJK font style | **Honor the `serif` flag the hook receives** | The two call paths differ: `fz_new_cjk_font` hardcodes `serif=1` ([font.c:957](../../../third_party/mupdf/source/fitz/font.c)) — used by appearance synthesis, so forms/annotations always get 明體/Mincho/Batang (acceptable, matches the requested "SourceHanSerif"); `pdf_load_substitute_cjk_font` passes the PDF descriptor's `PDF_FD_SERIF` flag ([pdf-font.c:507-513](../../../third_party/mupdf/source/pdf/pdf-font.c)), so the substitute path genuinely receives `serif∈{0,1}`. The mapping table handles both. (For forms, the `fz_new_cjk_font` call is only a probe; the visible glyphs come from the Type0 font `pdf_add_cjk_font` writes, re-resolved through the substitute path — the serif outcome is consistent either way — Opus NIT-2.) |
-| D6 | Hook never returns NULL | **Last-resort fallback to base14 Helvetica** | Review-found (Codex M3): appearance synthesis calls `fz_new_cjk_font` directly ([pdf-appearance.c:1670-1691](../../../third_party/mupdf/source/pdf/pdf-appearance.c)) during `pdf_update_page` *before* content render, and that path is **not** protected by the `pdf_try_load_font` hail-mary (which only wraps content-stream font loads); if the hook returns NULL, `fz_new_cjk_font` throws ([font.c:967](../../../third_party/mupdf/source/fitz/font.c)) and litepdf's worker drops the whole display list ([RenderEngine.cpp:153-155](../../../src/core/RenderEngine.cpp)) → **blank page**, not tofu. To honor D1, the loader's final fallback returns `fz_lookup_base14_font("Helvetica") → fz_new_font_from_memory` — preferred over a DirectWrite Latin family because base14 stays compiled in under the V10 prune (`TOFU_BASE14` is not set), is OS-independent, and makes the "no candidate" branch unit-testable (§6). Round-2 (Opus + Codex) verified a non-CJK font tagged `cjk=1` renders `.notdef` tofu **safely**: CID glyph widths come from the PDF `/W`/`/DW`, vertical advances from `/W2`/`/DW2`, and the appearance path hardcodes `state->w = 1` ([pdf-appearance.c:1804](../../../third_party/mupdf/source/pdf/pdf-appearance.c)) — none depend on the substitute font's metrics. Never NULL, never throws. |
+| D6 | Hook never returns NULL | **Last-resort fallback to base14 Helvetica (cheap never-NULL invariant)** | The loader's final fallback returns `fz_lookup_base14_font("Helvetica") → fz_new_font_from_memory`, so the hook never returns NULL. **Corrected rationale (plan round-2 — the original "prevents a blank page" claim was wrong, see §5):** a NULL hook makes `fz_new_cjk_font` throw `FZ_ERROR_ARGUMENT` ([font.c:967](../../../third_party/mupdf/source/fitz/font.c)), but during form/annotation appearance synthesis that throw is **swallowed** by the inner `fz_catch` at [pdf-appearance.c:3815](../../../third_party/mupdf/source/pdf/pdf-appearance.c) (rethrows only `REPAIRED`/`SYSTEM`); the page renders fine and only that CJK **form field** is left empty. So the real, narrow effect of the base14 last-resort: on a font-less machine, CJK **form fields** render `.notdef` tofu instead of empty. base14 is preferred (compiled in under V10 since `TOFU_BASE14` is unset, OS-independent, makes the "no candidate" branch unit-testable — §6). Verified safe: a non-CJK font tagged `cjk=1` renders `.notdef` (CID widths come from the PDF `/W`/`/DW`, vertical from `/W2`/`/DW2` — never the substitute font's metrics). Kept as a 5-line invariant; the elaborate form-appearance **integration** test it once justified is **dropped** — its CI value was nil (CI has CJK fonts, so the last-resort never fires there). |
 
 ## 4. Components
 
@@ -258,23 +265,28 @@ caught at `pdf_try_load_font` ([pdf-interpret.c:785-798](../../../third_party/mu
 
 **(b) Form/widget/annotation appearance synthesis**
 ([pdf-appearance.c:1670-1691](../../../third_party/mupdf/source/pdf/pdf-appearance.c))
-calls `fz_new_cjk_font` directly (as an availability probe, immediately
-`fz_drop_font`'d at pdf-appearance.c:1673; the glyphs render via the Type0 font),
-which on a NULL hook return throws a *different* error, `FZ_ERROR_ARGUMENT`
-([font.c:967](../../../third_party/mupdf/source/fitz/font.c)). This runs in
-`pdf_update_page` *before* content rendering
-([pdf-run.c:395](../../../third_party/mupdf/source/pdf/pdf-run.c)) and is **not**
-protected by the `pdf_try_load_font` hail-mary that covers path (a) — so litepdf's
-worker `fz_catch` **drops the entire display list**
-([RenderEngine.cpp:153-155](../../../src/core/RenderEngine.cpp)) → a **blank page**.
+calls `fz_new_cjk_font` during `pdf_update_appearance`, which runs on `fz_load_page`
+via `pdf_update_page` ([pdf-annot.c:419](../../../third_party/mupdf/source/pdf/pdf-annot.c)).
+A NULL hook makes `fz_new_cjk_font` throw `FZ_ERROR_ARGUMENT`
+([font.c:967](../../../third_party/mupdf/source/fitz/font.c)) — but **verified by
+source-reading (plan round-2)** that throw is **swallowed**: the inner `fz_catch`
+at [pdf-appearance.c:3815](../../../third_party/mupdf/source/pdf/pdf-appearance.c)
+rethrows only `REPAIRED`/`SYSTEM` and `fz_warn`s the rest, and the outer catch at
+[pdf-appearance.c:3842](../../../third_party/mupdf/source/pdf/pdf-appearance.c) then
+sees no error in flight, so `pdf_update_appearance` returns normally. The field's
+appearance stream is simply not created → the widget renders **nothing** (empty
+field); **the page is not blanked and the pixmap is non-null.** (The earlier
+"blank page / dropped display list" model in spec v1–v3 was wrong — it did not
+trace past the inner catch.)
 
-**The D6 last-resort base14 font closes (b):** because the hook returns a guaranteed
-font rather than NULL, `fz_new_cjk_font` never throws, so appearance synthesis
-succeeds and the page renders with `.notdef` tofu for the CJK glyphs at correct
-spacing (the appearance layout hardcodes `state->w = 1`, so the substitute font's
-metrics are never consulted). **Result for both paths on a font-less machine: full
-page render, CJK runs are tofu — never blank, never a crash.** Latin text, graphics,
-and images are unaffected. This is the documented, accepted limitation of D1.
+**The D6 base14 last-resort (b):** because the hook returns a guaranteed font rather
+than NULL, appearance synthesis succeeds and the CJK form field renders `.notdef`
+tofu (widths from the PDF, not the substitute font). So D6 turns an **empty** CJK
+form field into a **tofu** one — a minor cosmetic improvement, not crash/blank
+prevention. **Result on a font-less machine: full page render in all cases —
+content CJK tofus via the hail-mary (a); CJK form fields render tofu (with D6) or
+empty (without) — never blank, never a crash.** Latin text, graphics, and images are
+unaffected. This is the documented, accepted limitation of D1.
 
 Other cases:
 - COM/HRESULT failure mid-resolution → treat as "candidate not found", try the
@@ -304,15 +316,14 @@ Other cases:
   `cjk-ko.pdf`, render page 1 → non-blank pixmap, no throw/crash. Passes
   regardless of glyph fidelity, so the windows-2022 CI runner stays green even if
   its installed CJK font set differs from the dev machine.
-- **CJK form appearance (covers §5(b)) — fixture must actually hit the synthesis
-  path (Sonnet MAJOR):** no AcroForm/Widget fixture exists today, so add one with
-  the load-bearing properties: a **text form field whose `/V` is a CJK string**,
-  **no pre-rendered `/AP` appearance stream** (forcing MuPDF to synthesize it), and
-  a **non-embedded CJK CID font** resource — only this combination reaches
-  `fz_new_cjk_font` at pdf-appearance.c:1670-1691. The assertion must be
-  **"rendered pixmap is non-NULL *and* has ≥1 non-white pixel"** (not mere
-  liveness): a blank page is a non-NULL white pixmap, so liveness alone would not
-  catch a D6 regression.
+- **D6 guard is the Task-2 unit test, not an integration fixture.** The deterministic
+  D6 guard is the `resolve_cjk_system_font(ctx, …, ordering=99, …) != NULL`
+  unit test above (no system CJK font needed). A form-appearance **integration**
+  fixture+render test was considered and **dropped**: it cannot fire the last-resort
+  on CI (which has CJK fonts) and the no-D6 failure is a benign empty form field, not
+  a blank page (§5b), so the elaborate hand-built AcroForm fixture is not worth its
+  cost. CJK form-field rendering on a font-less machine is covered by the
+  known-limitation note, not an automated gate.
 - **Manual visual (the real fidelity gate, per Phase 11.5 §4.3):** on the zh-TW
   dev machine, **regenerate `tests/fixtures/cjk-reference/*.png`** against the new
   system-font render, eyeball real glyphs vs tofu, and **confirm the TTC face index
@@ -379,6 +390,29 @@ Other cases:
   pixel/hash assertion on CJK) + the dev-machine manual-visual gate.
 
 ## 10. Review Changelog
+
+### v3 → v4 (plan-gate round-2 corrected the appearance mechanism, 2026-06-21)
+
+The plan-gate round-2 review (Opus) traced deeper than the two spec rounds and
+found that the **"blank page" failure model was wrong** — a fact source-verified
+here. A NULL CJK hook makes `fz_new_cjk_font` throw `FZ_ERROR_ARGUMENT`
+(font.c:967), but during appearance synthesis the inner `fz_catch` at
+pdf-appearance.c:3815 swallows it (rethrows only `REPAIRED`/`SYSTEM`) and the outer
+catch at pdf-appearance.c:3842 sees no error in flight, so `pdf_update_appearance`
+returns normally. The page is **not** blanked; the pixmap is **non-null**; only the
+CJK form field is left empty. (Codex spec-round-1 asserted the blank-page model and
+Opus spec-round-2 re-confirmed it — both stopped at the `fz_new_cjk_font` throw and
+did not trace into the appearance catch. Lesson: reviewer consensus is not
+verification.) Changes:
+
+- **D6 reframed** from "prevents a blank page" to a **cheap never-NULL invariant**:
+  its only real effect is rendering CJK **form fields** as tofu rather than empty on
+  font-less machines. The base14 last-resort + its deterministic Task-2 unit test
+  are **kept** (5 lines, OS-independent, unit-testable).
+- **Form-appearance integration test + hand-built AcroForm fixture DROPPED**
+  (§6) — it cannot fire the last-resort on CI (which has CJK fonts) and the no-D6
+  failure is a benign empty field, not a blank page, so the machinery isn't worth it.
+- §5(b) rewritten to the real (swallowed-throw) mechanism with the source citations.
 
 ### v2 → v3 (three-lens round-2, 2026-06-21)
 
