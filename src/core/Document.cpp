@@ -1,6 +1,7 @@
 #include "core/Document.hpp"
 
 #include "core/SearchQuery.hpp"
+#include "core/SystemFonts.hpp"
 
 #include <mupdf/fitz.h>
 
@@ -84,6 +85,7 @@ struct Document::Impl {
         ctx = fz_new_context(nullptr, &locks->fz, FZ_STORE_DEFAULT);
         if (!ctx) throw std::bad_alloc();
         fz_register_document_handlers(ctx);
+        install_system_cjk_font_loader(ctx);  // cjk-system-font-loader: system CJK
     }
 
     ~Impl() {
