@@ -125,7 +125,12 @@ ResolvedFace resolve_cached(int ordering, int serif) {
             if (resolve_family_path(fam, r.path, r.index)) { r.ok = true; break; }
     {
         std::lock_guard<std::mutex> lk(g_cache_mtx);
-        g_cache[key] = r;  // a redundant concurrent compute is harmless
+        // A redundant concurrent compute is harmless. A failure (r.ok=false,
+        // e.g. unknown ordering or a font-less machine) is also cached: the
+        // last-resort then fires on every subsequent call for that key (D6) —
+        // intentional, the loader is not expected to recover from a transient
+        // DirectWrite failure at runtime.
+        g_cache[key] = r;
     }
     return r;
 }
@@ -157,7 +162,8 @@ fz_font* resolve_cjk_system_font(fz_context* ctx, const char* name, int ordering
         fz_try(ctx) {
             int len = 0;
             const unsigned char* data = fz_lookup_base14_font(ctx, "Helvetica", &len);
-            if (data) fallback = fz_new_font_from_memory(ctx, name, data, len, 0, 0);
+            // use_glyph_bbox=1 to match MuPDF's own base14 load (font.c:931).
+            if (data) fallback = fz_new_font_from_memory(ctx, name, data, len, 0, 1);
         }
         fz_catch(ctx) { fallback = nullptr; }
         return fallback;
