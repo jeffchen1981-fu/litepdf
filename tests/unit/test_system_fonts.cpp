@@ -46,7 +46,10 @@ void fz_drop_font(fz_context* ctx, fz_font* font);
 using litepdf::core::Document;
 using litepdf::core::resolve_cjk_system_font;
 
-TEST_CASE("resolve_cjk_system_font: never returns NULL — base14 last resort (D6)",
+// Test-case NAME must stay ASCII: catch_discover_tests round-trips it through
+// ctest as a --filter, and a non-ASCII char (em-dash) gets mangled on Windows,
+// so ctest finds "No test cases matched" and the test fails (CI-only). ASCII '-'.
+TEST_CASE("resolve_cjk_system_font: never returns NULL - base14 last resort (D6)",
           "[core][fonts][cjk][d6]") {
     Document doc;
     REQUIRE_FALSE(doc.open("tests/fixtures/simple.pdf").has_value());
