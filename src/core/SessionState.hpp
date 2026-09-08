@@ -9,7 +9,10 @@ namespace litepdf::core {
 
 enum class SessionZoom { FitWidth, FitPage, Custom };
 
-inline constexpr int kSessionVersion = 1;
+// v2 (PR-A1): SessionTab::zoom_scale changed meaning from a point->pixel render
+// scale to a user-facing magnification percentage. from_json migrates v1 by
+// resetting Custom zooms to FitWidth; see SessionState.cpp.
+inline constexpr int kSessionVersion = 2;
 
 struct SessionTab {
     std::filesystem::path path;

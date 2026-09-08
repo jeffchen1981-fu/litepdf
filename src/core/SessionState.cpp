@@ -84,6 +84,12 @@ public:
         if (i_ != s_.size()) throw ParseError{};   // reject trailing junk
     }
 
+    // Set by parse_object when the "version" key is present. from_json needs to
+    // distinguish "absent" from "explicitly 1", because SessionState::version
+    // default-initialises to the CURRENT version -- so an absent key would
+    // otherwise claim to be v2 and skip the migration.
+    bool saw_version = false;
+
 private:
     std::string_view s_;
     size_t i_ = 0;
@@ -263,7 +269,7 @@ private:
             ws();
             std::string key = parse_string();
             ws(); expect(':');
-            if (key=="version") out.version = (int)parse_int();
+            if (key=="version") { out.version = (int)parse_int(); saw_version = true; }
             else if (key=="window") parse_window(out.window);
             else if (key=="active") out.active_tab = (int)parse_int();
             else if (key=="tabs") parse_tabs(out.tabs);
@@ -278,6 +284,9 @@ private:
 
 // Post-parse invariant validation. Returns false to reject the whole file.
 bool validate(const SessionState& s) {
+    // from_json has already migrated, so by this point the version must be
+    // exactly current. Older versions are handled before we get here; newer
+    // ones are rejected, since we cannot know what they mean.
     if (s.version != kSessionVersion) return false;
     // active_tab must index a real tab. Reject a negative active_tab whenever
     // there are tabs to restore (a stray -1 alongside non-empty tabs is the
@@ -334,10 +343,37 @@ std::string to_json(const SessionState& s) {
     return o;
 }
 
+namespace {
+// v1 -> v2: the stored scale changed from a render scale to a percentage. The
+// only Custom values v1 could persist were preset-table numbers (the removed
+// direct-scale setter clamped on write), so they are valid percentages only by
+// coincidence and never corresponded to what the user saw. Reset them rather
+// than reinterpret.
+//
+// Deliberately avoids naming the removed API here: the Definition of Done greps
+// src/ for it, and a mention in a comment would make that check unpassable.
+void migrate_v1_to_v2(SessionState& s) {
+    for (auto& t : s.tabs) {
+        if (t.zoom_mode == SessionZoom::Custom) {
+            t.zoom_mode  = SessionZoom::FitWidth;
+            t.zoom_scale = 1.0f;
+        }
+    }
+    s.version = 2;
+}
+}  // namespace
+
 std::optional<SessionState> from_json(std::string_view json) {
     try {
         SessionState s;
-        Json(json).parse_root_object_into(s);
+        Json j(json);
+        j.parse_root_object_into(s);
+        // A document with no "version" key predates the field's use as a
+        // migration gate; treat it as v1 rather than letting the struct's
+        // default (always the CURRENT version) wave it through unmigrated.
+        const int doc_version = j.saw_version ? s.version : 1;
+        if (doc_version > kSessionVersion) return std::nullopt;
+        if (doc_version == 1) migrate_v1_to_v2(s);
         if (!validate(s)) return std::nullopt;
         return s;
     } catch (const ParseError&) {
