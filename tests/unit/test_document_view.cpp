@@ -6,10 +6,13 @@
 #include "app/SearchDispatcher.hpp"
 #include "core/Document.hpp"
 #include "core/DocumentView.hpp"
+#include "ui/detail/ViewportMath.hpp"
 
 using litepdf::app::InlineDispatcher;
 using litepdf::core::Document;
 using litepdf::core::DocumentView;
+using litepdf::ui::bitmap_px_to_dip;
+using litepdf::ui::pdf_point_to_dip;
 
 namespace {
 
@@ -105,6 +108,35 @@ TEST_CASE("DocumentView FitPage recomputes from the stored viewport",
     // Same viewport, fit-page: height binds at exactly 1.0.
     view.set_zoom_mode_fit_page();
     REQUIRE(view.zoom_pct() == Catch::Approx(1.0f).epsilon(0.001));
+}
+
+// Spec S5 regression: pdf_point_to_dip(pt, zoom_pct()) -- the overlay path --
+// must agree with bitmap_px_to_dip(pt * render_scale(), dpi) -- the pixmap
+// path -- at every dpi, for a fixed zoom_pct_. This is the identity the whole
+// overlay path rests on, and it is the reversed-unit error's regression test:
+// exercised through a real DocumentView (not just the pure ViewportMath /
+// ZoomMath functions) so it also pins DocumentView::render_scale() itself.
+TEST_CASE("DocumentView quad mapping to dip is dpi invariant",
+          "[core][view][zoom]") {
+    InlineDispatcher disp;
+    DocumentView view(open_simple(), disp);
+    // Custom, set explicitly -- not the constructor default -- so zoom_pct_
+    // stays fixed across the viewport/dpi changes below instead of being
+    // re-derived by a fit mode.
+    view.set_zoom_pct(1.5f);
+    REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::Custom);
+
+    const float pt = 100.0f;  // an arbitrary PDF-point coordinate
+    for (const float dpi : {96.0f, 144.0f, 192.0f}) {
+        // Custom freezes zoom_pct_ but set_viewport still stores the new dpi,
+        // which render_scale() depends on.
+        view.set_viewport(800.0f, 600.0f, dpi);
+        REQUIRE(view.zoom_pct() == Catch::Approx(1.5f));
+
+        const float via_overlay = pdf_point_to_dip(pt, view.zoom_pct());
+        const float via_pixmap  = bitmap_px_to_dip(pt * view.render_scale(), dpi);
+        REQUIRE(via_overlay == Catch::Approx(via_pixmap));
+    }
 }
 
 TEST_CASE("DocumentView zoom ladder walks the extended preset table",
