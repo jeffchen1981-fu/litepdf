@@ -50,7 +50,18 @@ Visual Studio 17 2022, x64.
   `WORKING_DIRECTORY` is `CMAKE_SOURCE_DIR`).
 - **No `VERSION` bump in this PR.** Version bumps happen at phase boundaries only.
 - **All project artifacts in English** — code, comments, commit messages, test names.
-- Green baseline before starting: 172 cases, 171 pass + 1 `[!shouldfail]`, exit 0.
+- **Green baseline, measured on this tree at `dfddc7a` on 2026-09-08** — not quoted
+  from memory, which still carried a stale pre-Phase-12 figure:
+  - `ctest --test-dir build -C Release` from the repo root → **230/230 passed, 0
+    failed**, ~17 s.
+  - `build\tests\Release\litepdf_unit_tests.exe` with no arguments → **899 assertions
+    in 229 test cases**, all passed.
+
+  The two counts differ by one because `catch_discover_tests` registers every name
+  from `--list-test-names-only`, including the `[!shouldfail]` case, while a bare exe
+  run reports it differently. Both numbers are the "before" for every task below: if a
+  task's full-suite run lands on anything other than 230 + the cases that task adds,
+  something outside the task changed.
 
 ---
 
