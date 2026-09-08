@@ -102,11 +102,20 @@ void save_session_or_report(const std::filesystem::path& file,
     static bool reported = false;
     if (reported) return;
     reported = true;
+    // save_session returns false from five sites and this is the only signal
+    // any of them ever produces, so the message must not guess which one
+    // fired. Name the file and the one extra breadcrumb that is cheap to
+    // compute: the .v1.bak path, since an occupied backup is the STICKY
+    // failure mode (it repeats on every save, unlike a transient lock or a
+    // full disk) and therefore the most likely one a developer is chasing.
+    std::filesystem::path bak = file;
+    bak.replace_extension(L".v1.bak");
     std::wstring msg =
-        L"LitePDF: session save REFUSED (existing file could not be read; "
-        L"tabs will not persist until this clears): ";
+        L"LitePDF: session save REFUSED for ";
     msg += file.wstring();
-    msg += L"\n";
+    msg += L" (tabs will not persist until this clears). If ";
+    msg += bak.wstring();
+    msg += L" exists and cannot be overwritten, that is the likely sticky cause.\n";
     OutputDebugStringW(msg.c_str());
 }
 }  // namespace
