@@ -76,7 +76,10 @@ public:
     // stale percentage, which is why this function exists.
     void apply_viewport();
 
-    // Get/set the canvas pan offset (DIPs from the centered/fit origin).
+    // Get/set the canvas pan offset, in canvas DIPs. An axis whose content
+    // fits the viewport is centered and its pan is 0; an axis that overflows
+    // uses a TOP-LEFT origin, with the pan clamped to [viewport - content, 0]
+    // (pan 0 = content's leading edge at the viewport's leading edge).
     // Used by MainWindow to snapshot/restore per-tab scroll on tab switch.
     // Both are no-ops if called before the impl is ready.
     struct Pan { float x; float y; };
@@ -191,6 +194,14 @@ private:
     void on_paint();
     void on_size(int width, int height);
     LRESULT on_key_down(WPARAM key);
+
+    // Painted extent plus its origin, in canvas DIPs. `l`/`t` are zero for a
+    // single page and non-zero for an unequal spread, where the union of the
+    // two slots does not start at the canvas origin.
+    struct ContentBox { float l, t, w, h; };
+
+    LRESULT pan_by(float dx, float dy);
+    bool    content_extent(ContentBox& out) const;
 
     HWND hwnd_ = nullptr;
     bool log_timings_ = false;
