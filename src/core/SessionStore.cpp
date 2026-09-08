@@ -7,7 +7,36 @@
 
 namespace litepdf::core {
 
+namespace {
+// True iff `file` currently holds a parseable v1 session document. Unparseable
+// or absent files return false: there is nothing worth preserving, and the save
+// must not be blocked by a corrupt predecessor.
+bool existing_file_is_v1(const std::filesystem::path& file) {
+    std::error_code ec;
+    const auto sz = std::filesystem::file_size(file, ec);
+    if (ec || sz > kMaxSessionBytes) return false;
+    std::ifstream in(file, std::ios::binary);
+    if (!in) return false;
+    std::ostringstream ss; ss << in.rdbuf();
+    const auto v = peek_version(ss.str());
+    return v.has_value() && *v == 1;
+}
+}  // namespace
+
 bool save_session(const std::filesystem::path& file, const SessionState& s) {
+    // One-way door: once a v2 file exists, a rolled-back v1.2.0 binary rejects
+    // it and the user loses their whole session. Keep the last v1 copy, and
+    // FAIL CLOSED -- a save that destroys the only recoverable copy is exactly
+    // the failure this guards against.
+    if (existing_file_is_v1(file)) {
+        std::filesystem::path bak = file;
+        bak.replace_extension(L".v1.bak");
+        std::error_code ec;
+        std::filesystem::copy_file(
+            file, bak, std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) return false;
+    }
+
     std::filesystem::path tmp = file;
     tmp += L".tmp";
     {

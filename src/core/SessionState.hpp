@@ -43,4 +43,14 @@ std::string to_json(const SessionState& s);
 // partially apply.
 std::optional<SessionState> from_json(std::string_view json);
 
+// Report the version a document DECLARES, without migrating or validating it.
+// Returns nullopt if the document does not parse; treats an absent "version"
+// key as 1, matching from_json.
+//
+// SessionStore uses this to decide whether the file on disk is still v1. A raw
+// text scan cannot be trusted for that decision: the parser decodes \u escapes
+// in keys and lets a later duplicate key win, so a scan and the parser can
+// disagree about the one field the backup turns on.
+std::optional<int> peek_version(std::string_view json);
+
 }  // namespace litepdf::core

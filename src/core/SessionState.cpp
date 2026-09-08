@@ -381,4 +381,15 @@ std::optional<SessionState> from_json(std::string_view json) {
     }
 }
 
+std::optional<int> peek_version(std::string_view json) {
+    try {
+        SessionState s;
+        Json j(json);
+        j.parse_root_object_into(s);
+        return j.saw_version ? s.version : 1;
+    } catch (const ParseError&) {
+        return std::nullopt;
+    }
+}
+
 }  // namespace litepdf::core
