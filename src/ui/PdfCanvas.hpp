@@ -64,10 +64,16 @@ public:
     // slot and the pair's other page, because both slots share one render scale
     // and a spread of unequal pages must fit the larger one.
     //
-    // Every render-submission path calls this first: MainWindow::kick_render,
-    // on_key_down's dual branch, resubmit_current_page, and the Ctrl+wheel zoom
-    // handler. Deriving the fit in only some of them leaves the rest rendering
-    // at a stale percentage.
+    // The dual-page submission branches call this: MainWindow::kick_render's dual
+    // branch, resubmit_current_page's dual branch, and on_key_down's dual branch.
+    // kick_render's single-page branch also calls it. The single-page branches of
+    // resubmit_current_page and on_key_down do not, as deliberate exceptions:
+    // on_key_down's single branch re-derives the fit by delegation through
+    // DocumentView::set_current_page; resubmit_current_page's single branch has no
+    // caller that changes the page or the fit mode, and any resize that races a
+    // device-loss recovery is corrected by the kick_render in the same WM_SIZE
+    // handler. Deriving the fit in only some paths leaves the rest rendering at a
+    // stale percentage, which is why this function exists.
     void apply_viewport();
 
     // Get/set the canvas pan offset (DIPs from the centered/fit origin).
