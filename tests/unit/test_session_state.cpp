@@ -198,8 +198,32 @@ TEST_CASE("SessionState v2 migrates a version 1 document",
     REQUIRE(r->tabs.size() == 1);
     REQUIRE(r->tabs[0].page == 3);
     // A v1 Custom zoom held a render scale, not a percentage. It is reset
-    // rather than reinterpreted.
-    REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitWidth);
+    // rather than reinterpreted -- and reset to FitPage, not FitWidth: this
+    // release draws at natural size with no wheel scrolling, so a migrated
+    // FitWidth tab would restore into a view whose lower two thirds the user
+    // cannot reach. PR-A2 revisits this.
+    REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitPage);
+}
+
+// The v1 side of the widening that "from_json accepts a fit-mode tab with
+// zoom_scale 0" pins for v2. A v1 Custom tab with zoom_scale 0 used to be
+// rejected wholesale -- migration ran first, left the tab Custom, and
+// validate() then threw away the ENTIRE session over one tab. It now migrates
+// to a fit mode, whose saved scale is never read, so the session survives.
+TEST_CASE("SessionState v2 migrates a v1 Custom tab with zoom_scale 0",
+          "[core][session][json][migration]") {
+    const std::string v1 =
+        "{\"version\":1,\"window\":{\"flags\":0,\"show\":1,"
+        "\"x\":0,\"y\":0,\"w\":800,\"h\":600},\"active\":0,"
+        "\"tabs\":[{\"path\":\"C:\\\\a\\\\one.pdf\",\"page\":2,"
+        "\"zoom_mode\":\"custom\",\"zoom_scale\":0}]}";
+    auto r = from_json(v1);
+    REQUIRE(r.has_value());          // the whole session used to be lost here
+    REQUIRE(r->version == 2);
+    REQUIRE(r->tabs.size() == 1);
+    REQUIRE(r->tabs[0].page == 2);
+    REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitPage);
+    REQUIRE(r->tabs[0].zoom_scale == 1.0f);
 }
 
 TEST_CASE("SessionState v2 treats a missing version key as version 1",
@@ -215,7 +239,7 @@ TEST_CASE("SessionState v2 treats a missing version key as version 1",
     auto r = from_json(versionless);
     REQUIRE(r.has_value());
     REQUIRE(r->version == 2);
-    REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitWidth);
+    REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitPage);
 }
 
 TEST_CASE("SessionState v2 rejects a version above the current one",

@@ -355,7 +355,17 @@ namespace {
 void migrate_v1_to_v2(SessionState& s) {
     for (auto& t : s.tabs) {
         if (t.zoom_mode == SessionZoom::Custom) {
-            t.zoom_mode  = SessionZoom::FitWidth;
+            // Reset to FitPage, NOT FitWidth. This release's paint path draws
+            // at natural size and ships no wheel scrolling, so a FitWidth A4
+            // page stands roughly 2.8x taller than the viewport with no way to
+            // reach the rest of it. Custom is the one mode a v1 file could hold
+            // that is not already FitWidth, so migrating it into FitWidth would
+            // close the last escape hatch: this build has no Fit Width / Fit
+            // Page menu items, leaving Ctrl+0 as the only exit. PR-A2 revisits
+            // this once ScrollMath makes FitWidth navigable again. Mirrors the
+            // default in DocumentView.cpp (Impl::zm) and the restore mapping in
+            // MainWindow::restore_on_tab_ready.
+            t.zoom_mode  = SessionZoom::FitPage;
             t.zoom_scale = 1.0f;
         }
     }
