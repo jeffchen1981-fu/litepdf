@@ -79,30 +79,56 @@ public:
     bool set_current_page(int idx);  // clamps to [0, page_count-1]
 
     ZoomMode zoom_mode() const noexcept;
-    float    zoom_scale() const noexcept;
 
-    // Set zoom mode and recompute scale for the given viewport / DPI.
+    // User-facing magnification. 1.0 means ONE PDF POINT MAPS TO ONE DIP -- the
+    // conventional 96-dpi screen ratio browsers also call 100%. It is not
+    // physical actual size: a PDF point is 1/72 inch, so 1.0 renders at 0.75x
+    // ruler size. Nothing surfaces a numeric percentage today; this is the
+    // definition an eventual readout must be built on.
+    float zoom_pct() const noexcept;
+
+    // Point -> PIXEL factor handed to MuPDF (fz_scale) and used as part of the
+    // PageCache L1 key. This is the ONLY place the display dpi is applied; the
+    // shipped code applied it here AND at every caller, rendering 2x oversized
+    // at 200% scaling.
+    float render_scale() const noexcept;
+
+    // Set the viewport and, for FitWidth/FitPage, re-derive zoom_pct_ from it.
+    // Custom leaves the percentage frozen.
     //
-    // Thread-safety: must be called on the UI thread only. The computed
-    // scale_ is read by request_render() to build the CTM, and although
-    // scale_ is a plain float (not atomic), in Phase 3 all callers
-    // (kick_render, WM_SIZE, WM_DPICHANGED, zoom_in/out) run on the
-    // UI thread and always call set_zoom_mode before request_render in
-    // the same message handler — so the worker never observes a torn
-    // read. If Phase 5+ introduces off-thread zoom changes, scale_
-    // must become atomic or protected by a mutex.
-    void     set_zoom_mode(ZoomMode mode,
-                           float viewport_w_dip,
-                           float viewport_h_dip,
-                           float dpi = 96.0f);
+    // The viewport is in DEVICE PIXELS -- the raw GetClientRect extent. The
+    // parameter names say _px because the shipped signature named them _dip
+    // while every caller passed pixels, which is how the double-dpi defect got
+    // in. `dpi` is the window dpi from GetDpiForWindow.
+    //
+    // `pair_page` is the other page of a two-page spread, or -1 in single-page
+    // mode. When set, the fit uses max(width) and max(height) of the two pages
+    // so one shared render scale fits both slots; a spread of unequal pages
+    // would otherwise overflow the slot whose page is larger.
+    //
+    // Thread-safety: UI thread only, unchanged from the shipped contract. The
+    // derived percentage is read by request_render() to build the CTM; all
+    // callers set the viewport before requesting a render in the same message
+    // handler, so a worker never observes a torn read.
+    void set_viewport(float viewport_w_px, float viewport_h_px,
+                      float dpi, int pair_page = -1);
 
-    // Directly set a Custom zoom at an exact scale (used by session restore).
-    // Clamps to the preset span [0.5, 4.0]; non-finite inputs are clamped into
-    // range. Does not require viewport dims.
-    void set_zoom_scale(float scale) noexcept;
+    // Switch fit mode, re-deriving the percentage from the stored viewport.
+    void set_zoom_mode_fit_width();
+    void set_zoom_mode_fit_page();
 
-    // Cycle through preset levels {0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0}.
-    // Both switch the mode to Custom and return true iff the scale changed.
+    // Directly set a Custom percentage (session restore, and tests). Clamps to
+    // the preset span [0.25, 8.0]; non-finite inputs clamp into range. Does not
+    // require viewport dims.
+    void set_zoom_pct(float pct) noexcept;
+
+    // Step through preset percentages
+    // {0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0}.
+    // Both switch the mode to Custom and return true iff the percentage changed.
+    //
+    // The table is percentages, which is what the shipped code got wrong: it
+    // compared these values against a render scale that was routinely above 12,
+    // so zoom_in() never found a larger rung and was a permanent no-op.
     bool zoom_in();
     bool zoom_out();
 
