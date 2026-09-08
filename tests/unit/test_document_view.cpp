@@ -30,7 +30,8 @@ TEST_CASE("DocumentView constructs from opened Document", "[core][view][ctor]") 
     DocumentView view(open_simple(), disp);
     REQUIRE(view.page_count() > 0);
     REQUIRE(view.current_page() == 0);
-    REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::FitWidth);
+    // PR-A1 ships FitPage; PR-A2 restores FitWidth once wheel scrolling exists.
+    REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::FitPage);
     REQUIRE(view.ui_ctx() != nullptr);
     // source_path should round-trip through the move.
     REQUIRE(view.source_path().filename() == "simple.pdf");
