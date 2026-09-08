@@ -11,7 +11,9 @@ enum class SessionZoom { FitWidth, FitPage, Custom };
 
 // v2 (PR-A1): SessionTab::zoom_scale changed meaning from a point->pixel render
 // scale to a user-facing magnification percentage. from_json migrates v1 by
-// resetting Custom zooms to FitWidth; see SessionState.cpp.
+// resetting Custom zooms to FitPage, not FitWidth: this release ships no wheel
+// scrolling, so a FitWidth A4 page would be unreadable and unnavigable;
+// PR-A2 revisits this once ScrollMath lands. See SessionState.cpp.
 inline constexpr int kSessionVersion = 2;
 
 struct SessionTab {

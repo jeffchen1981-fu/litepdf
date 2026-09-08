@@ -1590,6 +1590,13 @@ git commit -m "fix(ui): draw bitmaps at natural size, pin render target dpi, cla
 
 ## Task 5: Session version 2 with a v1-accepting migration
 
+> **Deviation (2026-09-09):** the migration target below is written as FitWidth,
+> matching the original design. What shipped resets Custom to **FitPage**
+> instead -- a late-branch change (see Task 7): with the paint-path fix, a
+> FitWidth A4 page is unreadable with no wheel scrolling to reach the rest of
+> it. The code blocks in this task are updated below to match what shipped;
+> see `migrate_v1_to_v2` in `src/core/SessionState.cpp` for the final wording.
+
 **Files:**
 - Modify: `src/core/SessionState.hpp:12` (version constant), `:28` (struct), plus the new `peek_version` declaration
 - Modify: `src/core/SessionState.cpp:259-276` (`parse_object`), `:279-281` (`validate`), `:336-345` (`from_json`)
@@ -1620,8 +1627,9 @@ TEST_CASE("SessionState v2 migrates a version 1 document",
     REQUIRE(r->tabs.size() == 1);
     REQUIRE(r->tabs[0].page == 3);
     // A v1 Custom zoom held a render scale, not a percentage. It is reset
-    // rather than reinterpreted.
-    REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitWidth);
+    // rather than reinterpreted -- to FitPage, not FitWidth: see the
+    // deviation note at the top of this task.
+    REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitPage);
 }
 
 TEST_CASE("SessionState v2 treats a missing version key as version 1",
@@ -1637,7 +1645,7 @@ TEST_CASE("SessionState v2 treats a missing version key as version 1",
     auto r = from_json(versionless);
     REQUIRE(r.has_value());
     REQUIRE(r->version == 2);
-    REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitWidth);
+    REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitPage);
 }
 
 TEST_CASE("SessionState v2 rejects a version above the current one",
@@ -1692,7 +1700,9 @@ above go red as well; that red is expected and Step 3 fixes it.
 ```cpp
 // v2 (PR-A1): SessionTab::zoom_scale changed meaning from a point->pixel render
 // scale to a user-facing magnification percentage. from_json migrates v1 by
-// resetting Custom zooms to FitWidth; see SessionState.cpp.
+// resetting Custom zooms to FitPage, not FitWidth: this release ships no wheel
+// scrolling, so a FitWidth A4 page would be unreadable and unnavigable;
+// PR-A2 revisits this once ScrollMath lands. See SessionState.cpp.
 inline constexpr int kSessionVersion = 2;
 ```
 
@@ -1745,7 +1755,11 @@ namespace {
 void migrate_v1_to_v2(SessionState& s) {
     for (auto& t : s.tabs) {
         if (t.zoom_mode == SessionZoom::Custom) {
-            t.zoom_mode  = SessionZoom::FitWidth;
+            // Reset to FitPage, NOT FitWidth -- see the deviation note at the
+            // top of this task. This release's paint path draws at natural
+            // size and ships no wheel scrolling, so a FitWidth A4 page would
+            // be unreadable with no way to reach the rest of it.
+            t.zoom_mode  = SessionZoom::FitPage;
             t.zoom_scale = 1.0f;
         }
     }

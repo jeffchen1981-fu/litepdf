@@ -260,6 +260,17 @@ numbers. They are valid percentages by coincidence, reached through the broken
 `zoom_out()` ladder, and never corresponded to what the user saw. FitWidth is the
 honest reset.
 
+> **Deviation (2026-09-09):** PR-A1 shipped resetting Custom to **FitPage**, not
+> FitWidth as designed above. This was discovered late in the branch: with the
+> paint-path fix in this same PR, an A4 page in FitWidth stands roughly 2.8x
+> taller than the viewport, and this release ships no wheel scrolling -- so a
+> v1 Custom tab migrated into FitWidth would come back unreadable, with no way
+> to reach the rest of the page. FitPage keeps the restored tab actually
+> navigable. PR-A2 revisits this once ScrollMath makes FitWidth navigable
+> again. See `migrate_v1_to_v2` in `SessionState.cpp` and the mirrored restore
+> mapping in `MainWindow::restore_on_tab_ready`. The design intent above is
+> left as originally written; this note records what actually shipped.
+
 **Downgrade is a one-way door; the backup is the mitigation, and it is fail-closed.**
 Once A1 writes a v2 file the shipped v1.2.0 binary rejects it outright — `git show
 v1.2.0:src/core/SessionState.cpp` carries the same version check at `:281`. The

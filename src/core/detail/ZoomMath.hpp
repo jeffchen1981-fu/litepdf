@@ -3,8 +3,13 @@
 #include <algorithm>
 
 // PR-A1: pure fit and preset-ladder arithmetic for DocumentView. No MuPDF, no
-// Win32 -- so the unequal-page spread case is testable without a fixture PDF
-// whose pages differ in size (none exists in tests/fixtures).
+// Win32 -- so the unequal-page spread case is testable with arbitrary page
+// dimensions, no fixture PDF required, and DocumentView is not forced to
+// include a ui/ header just to exercise it. This PR separately added
+// tests/fixtures/spread-unequal.pdf and a DocumentView test that opens it, so
+// the same case is now also exercised through the real class; that test does
+// not replace this one -- it exists precisely so the spread fit is checked
+// through the real DocumentView too, not only as pure arithmetic here.
 //
 // UNITS. A "percentage" here is DIPs per PDF point: 1.0 means one PDF point
 // maps to one DIP, the conventional 96-dpi screen ratio. The display dpi is
