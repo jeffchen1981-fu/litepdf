@@ -933,8 +933,26 @@ void PdfCanvas::on_paint() {
                                                 pl.y + base_y + pan_y,
                                                 x0 + pl.x + pl.w + base_x + pan_x,
                                                 pl.y + pl.h + base_y + pan_y);
+            // Confine each page to its own band. `place_bitmap` returns the
+            // bitmap's FULL width (p.w == src_w) whatever the slot measures, so
+            // once the user zooms past the spread fit -- Zoom In and Ctrl+wheel
+            // both allow it, and nothing clamps to the fit -- the left page's
+            // dst runs past right_x0 and the right draw_slot call, which paints
+            // second, lands on top of it. Before PR-A1 dual mode shrink-to-fit
+            // made zoom inert here, so the overlap could not happen.
+            //
+            // This hides the overflow rather than making it reachable: the pan
+            // is clamped once against the union of both slots, so the clipped
+            // part cannot be panned into view. That belongs with PR-A2's
+            // scrolling work; a clipped page still beats one page painting over
+            // its neighbour. ALIASED matches the axis-aligned band edges and
+            // avoids a blend pass on a full-height rect.
+            impl_->rt->PushAxisAlignedClip(
+                D2D1::RectF(x0, 0.0f, x0 + slot_w, slot_h),
+                D2D1_ANTIALIAS_MODE_ALIASED);
             impl_->rt->DrawBitmap(bm, dst, 1.0f,
                                   D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            impl_->rt->PopAxisAlignedClip();
         };
         draw_slot(impl_->current_bitmap.Get(), left_x0,  le);
         draw_slot(impl_->right_bitmap.Get(),   right_x0, re);
