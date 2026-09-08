@@ -22,11 +22,22 @@ enum class V1Probe {
 };
 
 V1Probe probe_existing_v1(const std::filesystem::path& file) {
-    // `status()`, not `file_size()`, decides absent vs unreadable. `file_size`
-    // sets `ec` for both, and mistaking "unreadable" for "absent" is the whole
-    // defect; `status()` reports a missing file as `not_found` with `ec`
-    // *cleared*, and sets `ec` only for a real query failure (a sharing
-    // violation, say), which means the file is there and we cannot see it.
+    // `status()`, not `file_size()`, decides absent vs unreadable: `file_size`
+    // sets `ec` for both and gives no way to tell them apart, and mistaking
+    // "unreadable" for "absent" is the whole defect.
+    //
+    // THE ORDER OF THE TWO TESTS BELOW IS LOAD-BEARING. Do not hoist the `ec`
+    // check above the `not_found` check -- the natural "handle errors first"
+    // edit is a bug here. `status()` signals absence through the returned
+    // TYPE, not through `ec`: on this project's toolchain (MSVC 14.44) a
+    // missing file yields `file_type::not_found` AND a non-empty `ec`
+    // (ERROR_FILE_NOT_FOUND) together, because <filesystem> assigns the Win32
+    // error unconditionally. Testing `ec` first would classify the first-ever
+    // save -- the fresh profile with no session.json yet -- as Unknown; the
+    // fail-closed guard would then refuse it and LitePDF could never write its
+    // first session file. `ec` only carries information once `not_found` has
+    // been ruled out, where it means a real query failure (a sharing violation,
+    // say): the file is there and we cannot see it.
     std::error_code ec;
     const auto st = std::filesystem::status(file, ec);
     if (st.type() == std::filesystem::file_type::not_found)

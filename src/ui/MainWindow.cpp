@@ -77,6 +77,38 @@ std::wstring format_mru_label(std::size_t i, const std::wstring& full_path) {
         : std::wstring(L"1&0 ");
     return prefix + fname;
 }
+
+// save_session fails CLOSED when it cannot tell whether the file it is about to
+// replace holds a recoverable v1 session. Both call sites are fire-and-forget,
+// so without this the refusal is invisible: a transient share-mode lock
+// (antivirus, a backup agent, a sync client) silently drops one debounced save,
+// and an occupied session.v1.bak that copy_file cannot overwrite drops every
+// save from then on, permanently, with no signal anywhere. Leave a breadcrumb
+// for whoever debugs "my tabs stopped coming back".
+//
+// Deliberately NOT a MessageBox: the save is debounced and the condition is
+// usually sticky, so a modal here would fire repeatedly and be worse than the
+// silence. OutputDebugStringW is the channel this project already uses for
+// diagnostics (see ColdStartTimer). Latched to ONE emission per process for the
+// same reason -- a stuck condition must not flood the debugger. The latch is a
+// plain bool because every caller is on the UI thread, inside the wndproc.
+//
+// "Refused", not "failed": declining to destroy the user's only recoverable
+// copy is the guard working as designed, and the message should not send a
+// reader hunting for a bug in the writer.
+void save_session_or_report(const std::filesystem::path& file,
+                            const litepdf::core::SessionState& s) {
+    if (litepdf::core::save_session(file, s)) return;
+    static bool reported = false;
+    if (reported) return;
+    reported = true;
+    std::wstring msg =
+        L"LitePDF: session save REFUSED (existing file could not be read; "
+        L"tabs will not persist until this clears): ";
+    msg += file.wstring();
+    msg += L"\n";
+    OutputDebugStringW(msg.c_str());
+}
 }  // namespace
 
 namespace litepdf::ui {
@@ -733,7 +765,7 @@ void MainWindow::on_clean_exit() {
     // Leaving both intact means the next launch re-offers the FULL session.
     if (restoring_) return;
     if (!app_data_dir_.empty()) {
-        litepdf::core::save_session(
+        save_session_or_report(
             litepdf::app::session_file_under(app_data_dir_), capture_session());
     }
     if (run_guard_) run_guard_->mark_clean_exit();  // idempotent
@@ -1643,7 +1675,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 // firing mid-restore can't overwrite session.json with a
                 // partial capture.
                 if (restoring_ || app_data_dir_.empty()) return 0;
-                litepdf::core::save_session(
+                save_session_or_report(
                     litepdf::app::session_file_under(app_data_dir_),
                     capture_session());
             }
