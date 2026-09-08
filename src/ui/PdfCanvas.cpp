@@ -947,6 +947,12 @@ void PdfCanvas::on_paint() {
             // scrolling work; a clipped page still beats one page painting over
             // its neighbour. ALIASED matches the axis-aligned band edges and
             // avoids a blend pass on a full-height rect.
+            //
+            // Corner case: when the two pages differ in width and the left page
+            // fits its slot but the right page overflows, the clip hides a strip
+            // of the right page that was visible before. This is an accepted cost
+            // of the fixed-band layout—hiding content is strictly better than one
+            // page painting over another. Per-slot scrolling in PR-A2 resolves it.
             impl_->rt->PushAxisAlignedClip(
                 D2D1::RectF(x0, 0.0f, x0 + slot_w, slot_h),
                 D2D1_ANTIALIAS_MODE_ALIASED);

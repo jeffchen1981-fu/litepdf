@@ -14,8 +14,8 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
   zoom level was compared against a table in different units, and the paint path
   re-fitted every page to the window regardless. Pages also rendered at twice the
   needed resolution on 200% displays.
-- The default view is Fit Page for this release; Fit Width returns with mouse-wheel
-  scrolling.
+- Every view is Fit Page in this release — including restored and migrated sessions;
+  Fit Width returns with mouse-wheel scrolling.
 
 ### Note
 
