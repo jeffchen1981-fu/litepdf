@@ -186,6 +186,32 @@ std::uint64_t PdfCanvas::render_epoch() const noexcept {
     return impl_ ? impl_->view_epoch : 0;
 }
 
+void PdfCanvas::apply_viewport() {
+    if (!impl_ || !impl_->view || !hwnd_) return;
+    RECT rc;
+    GetClientRect(hwnd_, &rc);
+    const float dpi_f = static_cast<float>(GetDpiForWindow(hwnd_));
+    const float cw_px = static_cast<float>(rc.right - rc.left);
+    const float ch_px = static_cast<float>(rc.bottom - rc.top);
+
+    if (!impl_->dual_page) {
+        impl_->view->set_viewport(cw_px, ch_px, dpi_f);
+        return;
+    }
+    // Do NOT assume the caller already snapped current_page to the pair's LEFT
+    // page. DocumentView derives the fit from current_page and treats pair_page
+    // as the other half, so if current_page were the RIGHT page the left page's
+    // size would never enter the fit and its slot could overflow. Re-snap here,
+    // the same defensive move on_key_down's dual branch already makes.
+    const int total = impl_->view->page_count();
+    const int left  = dual_page_compute_left(impl_->view->current_page(), total);
+    if (left != impl_->view->current_page()) impl_->view->set_current_page(left);
+    const int right = dual_page_compute_right(left, total);
+    const float gutter_px = 8.0f * dpi_f / 96.0f;   // matches the 8 DIP gutter
+    const float slot_px   = std::max(0.0f, (cw_px - gutter_px) * 0.5f);
+    impl_->view->set_viewport(slot_px, ch_px, dpi_f, right);
+}
+
 void PdfCanvas::set_on_page_changed(PageChangedCb cb) {
     if (!impl_) return;
     impl_->on_page_changed = std::move(cb);
@@ -435,14 +461,12 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 bool changed = (delta > 0) ? impl_->view->zoom_in()
                                            : impl_->view->zoom_out();
                 if (changed) {
-                    impl_->view->cancel_stale_renders(0);
-                    HWND target = hwnd_;
-                    const std::uint64_t epoch = impl_->view_epoch;
-                    impl_->view->request_render(
-                        impl_->view->current_page(),
-                        [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
-                            PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
-                        });
+                    // Route through resubmit_current_page rather than submitting a
+                    // single render here: in spread mode this handler refreshed only
+                    // the left slot, which was invisible while zoom could not change
+                    // displayed size -- and becomes a spread at two different
+                    // magnifications the moment Task 4 lands.
+                    resubmit_current_page();
                     // Persist the wheel zoom (menu zoom persists via MainWindow).
                     if (impl_->on_zoom_changed) impl_->on_zoom_changed();
                 }
@@ -620,6 +644,7 @@ void PdfCanvas::resubmit_current_page() {
         const int left  = dual_page_compute_left(cur, total);
         const int right = dual_page_compute_right(left, total);
         impl_->view->cancel_stale_renders(0);
+        apply_viewport();
         impl_->view->request_render(left,
             [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
                 PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
@@ -728,6 +753,7 @@ LRESULT PdfCanvas::on_key_down(WPARAM key) {
             if (left != impl_->view->current_page()) {
                 impl_->view->set_current_page(left);
             }
+            apply_viewport();
             const int right = dual_page_compute_right(left, total);
             impl_->view->request_render(left,
                 [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {

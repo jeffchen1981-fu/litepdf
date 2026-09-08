@@ -59,6 +59,17 @@ public:
     // handler drops pixmaps whose epoch no longer matches (issue #35).
     std::uint64_t render_epoch() const noexcept;
 
+    // Push the canvas's client extent + dpi into the active DocumentView so the
+    // fit percentage is re-derived. In spread mode this passes the HALF-WIDTH
+    // slot and the pair's other page, because both slots share one render scale
+    // and a spread of unequal pages must fit the larger one.
+    //
+    // Every render-submission path calls this first: MainWindow::kick_render,
+    // on_key_down's dual branch, resubmit_current_page, and the Ctrl+wheel zoom
+    // handler. Deriving the fit in only some of them leaves the rest rendering
+    // at a stale percentage.
+    void apply_viewport();
+
     // Get/set the canvas pan offset (DIPs from the centered/fit origin).
     // Used by MainWindow to snapshot/restore per-tab scroll on tab switch.
     // Both are no-ops if called before the impl is ready.

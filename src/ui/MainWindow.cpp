@@ -246,30 +246,22 @@ void MainWindow::kick_render(int page) {
     auto* view = active_view();
     if (!view || !canvas_) return;
 
-    RECT rc;
-    GetClientRect(canvas_->hwnd(), &rc);
-    UINT dpi = GetDpiForWindow(hwnd_);
-    view->set_zoom_mode(view->zoom_mode(),
-        static_cast<float>(rc.right - rc.left),
-        static_cast<float>(rc.bottom - rc.top),
-        static_cast<float>(dpi));
-
-    HWND target = canvas_->hwnd();
-    // Stamp every render with the canvas epoch at submit time so a result
-    // that lands after a tab switch (e.g. the last-restored tab's render
-    // arriving after restore_finish re-activates the saved tab) is dropped
-    // by the canvas instead of painted over the now-active tab (issue #35).
-    const std::uint64_t epoch = canvas_->render_epoch();
     if (view->dual_page()) {
         // (Phase 8 D10) Spread layout: snap to the LEFT page of the
         // pair containing `page` (cover-rule + odd-tail handled by the
         // helper) and submit two render requests.
-        const int left  = litepdf::ui::dual_page_compute_left(
-                              page, view->page_count());
-        const int right = litepdf::ui::dual_page_compute_right(
-                              left, view->page_count());
+        //
+        // Canonicalize the pair FIRST: the fit is derived from current_page, so
+        // deriving it before the snap fits the wrong page.
+        const int total = view->page_count();
+        const int left  = litepdf::ui::dual_page_compute_left(page, total);
+        const int right = litepdf::ui::dual_page_compute_right(left, total);
         view->cancel_stale_renders(0);
         view->set_current_page(left);
+        canvas_->apply_viewport();
+
+        HWND target = canvas_->hwnd();
+        const std::uint64_t epoch = canvas_->render_epoch();
         view->request_render(left,
             [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
                 PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
@@ -283,6 +275,15 @@ void MainWindow::kick_render(int page) {
         InvalidateRect(canvas_->hwnd(), nullptr, FALSE);
         return;
     }
+
+    canvas_->apply_viewport();
+
+    HWND target = canvas_->hwnd();
+    // Stamp every render with the canvas epoch at submit time so a result
+    // that lands after a tab switch (e.g. the last-restored tab's render
+    // arriving after restore_finish re-activates the saved tab) is dropped
+    // by the canvas instead of painted over the now-active tab (issue #35).
+    const std::uint64_t epoch = canvas_->render_epoch();
     view->request_render_with_prefetch(page,
         [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
             PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
@@ -620,9 +621,8 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
     if (incoming && canvas_) {
         // Re-seed zoom for the current viewport then kick render.
         RECT rc; GetClientRect(canvas_->hwnd(), &rc);
-        UINT dpi = GetDpiForWindow(hwnd_);
-        incoming->view->set_zoom_mode(
-            incoming->view->zoom_mode(),
+        const UINT dpi = GetDpiForWindow(hwnd_);
+        incoming->view->set_viewport(
             static_cast<float>(rc.right - rc.left),
             static_cast<float>(rc.bottom - rc.top),
             static_cast<float>(dpi));
@@ -711,7 +711,7 @@ litepdf::core::SessionState MainWindow::capture_session() const {
                 case litepdf::core::DocumentView::ZoomMode::Custom:
                     st.zoom_mode = litepdf::core::SessionZoom::Custom;   break;
             }
-            st.zoom_scale = v->zoom_scale();
+            st.zoom_scale = v->zoom_pct();
         }
         s.tabs.push_back(std::move(st));
     }
@@ -836,19 +836,19 @@ void MainWindow::restore_on_tab_ready(const std::filesystem::path& opened) {
         v->set_current_page(st.page);
         switch (st.zoom_mode) {
             case litepdf::core::SessionZoom::Custom:
-                v->set_zoom_scale(st.zoom_scale);  // no viewport needed (Task 5)
+                v->set_zoom_pct(st.zoom_scale);   // no viewport needed
                 break;
             case litepdf::core::SessionZoom::FitWidth:
             case litepdf::core::SessionZoom::FitPage: {
+                if (st.zoom_mode == litepdf::core::SessionZoom::FitWidth)
+                    v->set_zoom_mode_fit_width();
+                else
+                    v->set_zoom_mode_fit_page();
                 RECT rc; GetClientRect(canvas_->hwnd(), &rc);
                 const UINT dpi = GetDpiForWindow(hwnd_);
-                v->set_zoom_mode(
-                    st.zoom_mode == litepdf::core::SessionZoom::FitWidth
-                        ? litepdf::core::DocumentView::ZoomMode::FitWidth
-                        : litepdf::core::DocumentView::ZoomMode::FitPage,
-                    static_cast<float>(rc.right - rc.left),
-                    static_cast<float>(rc.bottom - rc.top),
-                    static_cast<float>(dpi));
+                v->set_viewport(static_cast<float>(rc.right - rc.left),
+                                static_cast<float>(rc.bottom - rc.top),
+                                static_cast<float>(dpi));
                 break;
             }
         }
@@ -1382,13 +1382,12 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     return 0;
                 case IDM_ZOOM_RESET: {
                     if (auto* view = active_view(); view && canvas_) {
+                        view->set_zoom_mode_fit_page();
                         RECT rc; GetClientRect(canvas_->hwnd(), &rc);
                         UINT dpi = GetDpiForWindow(hwnd);
-                        view->set_zoom_mode(
-                            litepdf::core::DocumentView::ZoomMode::FitWidth,
-                            static_cast<float>(rc.right - rc.left),
-                            static_cast<float>(rc.bottom - rc.top),
-                            static_cast<float>(dpi));
+                        view->set_viewport(static_cast<float>(rc.right - rc.left),
+                                           static_cast<float>(rc.bottom - rc.top),
+                                           static_cast<float>(dpi));
                         kick_render(view->current_page());
                         schedule_session_save();  // Phase 12: zoom mode changed
                     }
