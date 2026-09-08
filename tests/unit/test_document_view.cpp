@@ -154,6 +154,40 @@ TEST_CASE("DocumentView set_zoom_pct clamps to the extended span",
     view.set_zoom_pct(8.0f);   REQUIRE(view.zoom_pct() == Catch::Approx(8.0f));
 }
 
+// This pins the two lines that make zoom STICK, which is the whole point of
+// PR-A1: set_zoom_pct's `zm = Custom` assignment, and set_viewport's early
+// return while the mode is Custom. Without the early return, the very next
+// set_viewport -- kick_render calls one through apply_viewport on every render,
+// resize and DPI change -- would re-derive the fit percentage and silently
+// throw the user's zoom away, which is exactly the defect this PR exists to
+// fix. Both lines were previously uncovered: deleting either left the suite
+// green.
+TEST_CASE("DocumentView Custom zoom survives a later set_viewport",
+          "[core][view][zoom]") {
+    InlineDispatcher disp;
+    DocumentView view(open_simple(), disp);
+    // Start from a fit mode with a known viewport, so the assertion below
+    // cannot pass by the fit happening to agree with the custom value.
+    view.set_zoom_mode_fit_width();
+    view.set_viewport(1190.44f, 800.0f, 96.0f);
+    REQUIRE(view.zoom_pct() == Catch::Approx(2.0f).epsilon(0.001));
+
+    view.set_zoom_pct(3.0f);
+    REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::Custom);
+    REQUIRE(view.zoom_pct() == Catch::Approx(3.0f));
+
+    // A different viewport: the fit would be 1.0 here (595.22 px / 595.22 pt),
+    // so a re-derivation is unmissable.
+    view.set_viewport(595.22f, 400.0f, 96.0f);
+    REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::Custom);
+    REQUIRE(view.zoom_pct() == Catch::Approx(3.0f));
+
+    // The viewport IS stored even while frozen -- leaving Custom must fit the
+    // dimensions just handed in, not the stale ones from before the zoom.
+    view.set_zoom_mode_fit_width();
+    REQUIRE(view.zoom_pct() == Catch::Approx(1.0f).epsilon(0.001));
+}
+
 TEST_CASE("DocumentView set_viewport fits the larger page of a spread pair",
           "[core][view][zoom]") {
     // spread-unequal.pdf: page 0 is 420x595, page 1 is 595x842. This is the
