@@ -174,7 +174,7 @@ updates them in the same commit that changes the behaviour.
   `src/ui/PdfCanvasLayout.hpp` (existing, unchanged).
 - Produces: `enum class litepdf::ui::Slot { Left, Right };` and
   `bool litepdf::ui::accept_completion(std::uint64_t meta_epoch, std::uint64_t
-  cur_epoch, std::uint64_t meta_seq, std::uint64_t newest_accepted_seq, int
+  cur_epoch, std::uint64_t meta_seq, std::uint64_t newest_submitted_seq, int
   meta_page, Slot meta_slot, int cur_page, bool dual, int page_count)`. Tasks 3–8
   rely on both names.
 
@@ -212,7 +212,7 @@ using litepdf::ui::accept_completion;
 using litepdf::ui::Slot;
 
 // Argument order, to keep the calls below readable:
-//   (meta_epoch, cur_epoch, meta_seq, newest_accepted_seq,
+//   (meta_epoch, cur_epoch, meta_seq, newest_submitted_seq,
 //    meta_page, meta_slot, cur_page, dual, page_count)
 
 TEST_CASE("CompletionMath accepts a matching single-page completion",
@@ -232,20 +232,24 @@ TEST_CASE("CompletionMath rejects a superseded submission of the same page",
     // The duplicate-P0 defect. cancel_stale_renders(0) does not cancel an
     // in-flight P0 (RenderEngine cancels priority > p only), so a zoom, resize,
     // DPI change or invert toggle can leave two P0s for the SAME page racing.
-    // (epoch, page, slot) are identical for both; only the seq differs, and
-    // the older one must not repaint the canvas at the superseded scale.
+    // (epoch, page, slot) are identical for both; only the seq differs, and the
+    // older one must not repaint the canvas at the superseded scale -- INCLUDING
+    // when it is the one that arrives first, which is why the comparison is
+    // against the newest SUBMITTED seq and not the newest accepted one.
     REQUIRE_FALSE(accept_completion(7, 7, 4, 5, 4, Slot::Left, 4, false, 10));
     REQUIRE(accept_completion(7, 7, 5, 5, 4, Slot::Left, 4, false, 10));
-    // A seq NEWER than the newest accepted is fine -- that is the normal case,
-    // since the counter is only advanced by an acceptance.
+    // A seq above the newest submitted cannot occur -- the counter is bumped
+    // before the request is issued -- but must not be rejected if it somehow
+    // does: dropping a live render is worse than accepting an impossible one.
     REQUIRE(accept_completion(7, 7, 6, 5, 4, Slot::Left, 4, false, 10));
 }
 
 TEST_CASE("CompletionMath accepts both halves of one spread submission",
           "[ui][completion]") {
-    // Both slots of a spread carry the SAME seq, so the seq test must use >=,
-    // not >. With > the second half to arrive would be rejected and half the
-    // spread would stay grey.
+    // Both slots of a spread carry the SAME seq, and that seq is also the
+    // newest submitted, so the test must use >= and not >. With > NOTHING would
+    // ever be painted: every completion of the current batch would lose to the
+    // counter that issued it.
     REQUIRE(accept_completion(7, 7, 5, 5, 3, Slot::Left,  3, true, 10));
     REQUIRE(accept_completion(7, 7, 5, 5, 4, Slot::Right, 3, true, 10));
 }
@@ -330,7 +334,7 @@ Create `src/ui/detail/CompletionMath.hpp`:
 //
 // Four things can make a completion unwanted:
 //   epoch  the view was swapped (tab switch) after the render was submitted;
-//   seq    a NEWER submission of the same page has already been accepted;
+//   seq    a NEWER submission has been issued since this one went out;
 //   page   the user paged away after the render was submitted;
 //   slot   a RIGHT-slot pixmap arrived while the layout is single-page.
 //
@@ -358,13 +362,19 @@ namespace litepdf::ui {
 enum class Slot { Left, Right };
 
 // True iff the pixmap described by (meta_epoch, meta_seq, meta_page, meta_slot)
-// is still wanted by a canvas at (cur_epoch, newest_accepted_seq, cur_page,
+// is still wanted by a canvas at (cur_epoch, newest_submitted_seq, cur_page,
 // dual, page_count).
 //
-// `newest_accepted_seq` is the seq of the most recent completion this canvas
-// ACCEPTED (0 before the first). The test is `>=`, not `>`, because both halves
-// of a spread carry one seq: with `>` the second half to arrive would be
-// rejected and half of every spread would stay grey.
+// `newest_submitted_seq` is the canvas's submission counter -- the seq of the
+// most recent batch SENT, not of the last one accepted. Comparing against the
+// last ACCEPTED seq is not enough: if the older of two racing P0s happens to
+// arrive first, nothing has been accepted yet, so it passes; and if the newer
+// one then fails or is cancelled, the superseded pixmap stays on screen. The
+// submitted counter knows the newer render exists before either lands.
+//
+// The test is `>=`, not `>`, because both halves of a spread carry one seq and
+// that seq IS the newest submitted: with `>` every completion of the current
+// batch would lose to the counter that issued it and nothing would ever paint.
 //
 // `cur_page` is re-snapped to the pair's LEFT page in dual mode. Every
 // submission path already snaps before submitting (MainWindow::kick_render,
@@ -373,11 +383,11 @@ enum class Slot { Left, Right };
 // the predicate correct regardless of the order a future caller does things in.
 inline bool accept_completion(std::uint64_t meta_epoch, std::uint64_t cur_epoch,
                               std::uint64_t meta_seq,
-                              std::uint64_t newest_accepted_seq,
+                              std::uint64_t newest_submitted_seq,
                               int meta_page, Slot meta_slot,
                               int cur_page, bool dual, int page_count) noexcept {
     if (meta_epoch != cur_epoch)          return false;
-    if (meta_seq < newest_accepted_seq)   return false;
+    if (meta_seq < newest_submitted_seq)  return false;
     if (page_count <= 0)                  return false;
 
     if (!dual) {
@@ -1028,11 +1038,6 @@ comment (`src/ui/PdfCanvas.cpp:120-123`), add:
     // same-page zoom or resize produces and what (epoch, page, slot) cannot
     // distinguish.
     std::uint64_t                 next_seq = 0;
-    // The seq of the most recent completion this canvas ACCEPTED. An older
-    // submission landing after it is dropped rather than painted -- without
-    // this, the loser of a two-P0 race repaints the canvas at the superseded
-    // scale and leaves it there until something else forces a redraw.
-    std::uint64_t                 newest_accepted_seq = 0;
 ```
 
 Add the definition immediately after `PdfCanvas::render_epoch()`
@@ -1109,16 +1114,19 @@ In the `WM_USER_RENDER_DONE` / `WM_USER_RENDER_DONE_RIGHT` case
             // stale completion can never consume it anyway (seq match).
             const int cur_page = impl_->view ? impl_->view->current_page() : 0;
             const int total    = impl_->view ? impl_->view->page_count()   : 0;
+            // next_seq is the newest submission ISSUED, which is what the seq
+            // test needs -- see ui/detail/CompletionMath.hpp. Comparing against
+            // the newest ACCEPTED seq instead would let the older of two racing
+            // P0s through whenever it happened to arrive first, and leave its
+            // superseded pixmap on screen if the newer render then failed.
             if (!accept_completion(epoch, impl_->view_epoch,
-                                   seq, impl_->newest_accepted_seq,
+                                   seq, impl_->next_seq,
                                    page, slot,
                                    cur_page, impl_->dual_page, total)) {
                 fz_drop_pixmap(escrow, pix);
                 fz_drop_context(escrow);
                 return 0;
             }
-            // Accepted: nothing older than this may repaint the canvas now.
-            impl_->newest_accepted_seq = seq;
 ```
 
 Add the using-declaration alongside the existing ones in the anonymous namespace
@@ -1662,9 +1670,6 @@ the replacement text below reproduces. (At `8bf143d` that span is
             if (apply_anchor(anchor) && anchor.kind != PageAnchor::Kind::None) {
                 impl_->anchor.mark_applied();
             }
-            // A completion landed, so a wheel flip that was waiting for one is
-            // no longer in flight (see on_wheel_scroll).
-            impl_->wheel_flip_pending = false;
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         }
@@ -2443,8 +2448,14 @@ git commit -m "feat(canvas): add pure wheel-scroll stepping, residuals and edge 
 
 **Files:**
 - Modify: `src/ui/PdfCanvas.hpp` — include `ScrollMath.hpp`; declare `on_wheel_scroll`
-- Modify: `src/ui/PdfCanvas.cpp` — `wheel_residual` in `Impl`; the non-Ctrl branch
-  of `WM_MOUSEWHEEL` (`:468-488`)
+- Modify: `src/ui/PdfCanvas.cpp` — `wheel_residual` and `wheel_flip_pending` in
+  `Impl`; the non-Ctrl branch of `WM_MOUSEWHEEL` (at `8bf143d`, `:468-488`); one line
+  at the top of the completion case; one line in `set_view`
+
+**Both `Impl` fields are declared HERE, in the task that uses them.** An earlier draft
+of this plan put the `wheel_flip_pending` clear in Task 4's completion-handler block
+while declaring the field in this task — which would have made Task 4 fail to compile
+and broken the rule that every task leaves the tree green on its own.
 
 **Interfaces:**
 - Consumes: `consume_notches`, `wheel_step_dip`, `apply_wheel`, `Flip` (Task 7);
@@ -2505,10 +2516,32 @@ In `struct PdfCanvas::Impl`, after the `anchor` member added in Task 4:
     bool                          wheel_flip_pending = false;
 ```
 
-The completion handler clears it — that line is in Task 4 Step 6's replacement block
-(`impl_->wheel_flip_pending = false;`), so it is already in place by the time this
-task runs. Add the `set_view` clear next to the `impl_->anchor.clear();` line from
-Task 4 Step 4:
+- [ ] **Step 3b: Clear the latch on EVERY completion, not just an accepted one**
+
+**The clear must go at the very top of the completion case, before any branch.** A
+render that is cancelled or fails posts `WPARAM = 0` and the handler returns at
+`if (!pix)` — long before the accepted-completion code — and a completion for a
+superseded batch is dropped by `accept_completion`. If the clear lived only in the
+accepted branch, a flip whose render never delivered would latch the flag on and the
+wheel would be dead until some unrelated render happened to be accepted.
+
+Locate the start of the `WM_USER_RENDER_DONE` / `WM_USER_RENDER_DONE_RIGHT` case and
+insert the clear immediately after the `is_right` / `pix` / `meta` locals are read,
+before the `if (!pix)` early return:
+
+```cpp
+            // A completion message for this canvas arrived, whatever its
+            // outcome. That answers the wheel flip we were waiting on: null and
+            // superseded completions never reach the accepted path below, so
+            // clearing there would leave the latch stuck on and the wheel dead.
+            // The cost of clearing here is that an unrelated older completion
+            // can release the latch one notch early -- at worst one extra page
+            // flip, against a permanently unresponsive wheel.
+            impl_->wheel_flip_pending = false;
+```
+
+Also add the `set_view` clear next to the `impl_->anchor.clear();` line from Task 4
+Step 4, so a tab switch cannot carry a latch across documents:
 
 ```cpp
     impl_->wheel_flip_pending = false;
@@ -2925,9 +2958,10 @@ git commit -m "feat(zoom): restore Fit Width as the default now that the wheel c
       now-false release note is gone (Task 9 Step 6).
 - [ ] `grep -rn "FitPage" tests/unit/test_session_state.cpp tests/unit/test_document_view.cpp`
       returns no `REQUIRE` line — all four assertions now expect FitWidth (Task 9 Step 5).
-- [ ] `grep -n "newest_accepted_seq" src/ui/PdfCanvas.cpp` shows it both read by
-      `accept_completion` and written on acceptance — the duplicate-P0 guard is live,
-      not declared-and-unused.
+- [ ] `grep -n "next_seq" src/ui/PdfCanvas.cpp` shows it passed to
+      `accept_completion` — the duplicate-P0 guard compares against the newest
+      SUBMITTED seq. If you find a `newest_accepted_seq` anywhere, a task was
+      implemented from a stale copy of this plan.
 - [ ] `grep -rn "PdfCanvas::pending_anchor\|snap_current_page\|AnchorSlot::peek" src/`
       returns nothing — these were in an earlier draft of this plan and the round-1
       review removed the need for them. If any exists, a task was implemented from a
@@ -2973,7 +3007,18 @@ State these in the PR description so a reviewer does not report them as misses.
    still removes the larger `clamp` disagreement it sat next to; fixing the origin
    properly means plumbing the right slot's placement into the hit math, which
    belongs with whatever change enables overlays in spread mode.
-7. **The wheel drops notches while a flip is in flight** rather than queueing them.
+7. **An unequal spread whose RIGHT half fails can settle slightly above the true
+   spread bottom.** If the left half lands and applies a `Bottom` anchor, the anchor
+   is marked applied and measures against the left page alone (the right bitmap is
+   still null, so `content_extent` reports the left slot only). The next submission
+   retires it, so when the right half eventually succeeds it re-clamps with `None`.
+   Deriving the outcome rather than assuming it: the left half set
+   `pan_y = vp - left_h`, and with the taller union `lo = vp - union_h < pan_y`, so
+   `clamp_pan` leaves `pan_y` untouched — the view stays where the left page put it,
+   short of the union bottom by `union_h - left_h`. It does **not** jump to the top.
+   Closing it properly needs per-slot completion accounting in `AnchorSlot`, which is
+   a lot of machinery for a bounded offset on a failed-render path.
+8. **The wheel drops notches while a flip is in flight** rather than queueing them.
    A very fast scroll therefore advances one page per completion rather than one per
    notch. This is deliberate — the alternative, discovered in review, is that each
    queued notch re-reads the outgoing page's pan and flips again, walking several
