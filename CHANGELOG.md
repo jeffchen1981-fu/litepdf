@@ -9,6 +9,7 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 ## [Unreleased]
 
 ### Added
+
 - Mouse-wheel scrolling. The wheel scrolls within a page and turns the page when
   it is already at the edge — forward lands at the top of the next page, backward
   at the bottom of the previous one, so scrolling back and forth shows continuous
@@ -22,14 +23,16 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
   zoom level was compared against a table in different units, and the paint path
   re-fitted every page to the window regardless. Pages also rendered at twice the
   needed resolution on 200% displays.
-- The default zoom mode is Fit Width again, and Reset Zoom (Ctrl+0) returns to it.
-  v1.2.0 shipped Fit Page as an interim default because that release drew pages at
-  natural size but had no way to scroll below the fold. Restored sessions now
-  honour the fit mode they recorded instead of collapsing onto Fit Page.
+- A zoom level you set by hand is reset to Fit Width when `session.json` is upgraded
+  to version 2. Version 1 stored a render scale with the display DPI folded into it,
+  which has no meaning under version 2's magnification, so a hand-set zoom cannot be
+  carried across. Fit Width and Fit Page carry over untouched — they are re-derived
+  from the window on restore.
 - A render result now carries the page, slot and submission it belongs to, so a
   pixmap for a page the reader has already left is dropped instead of painted.
 
 ### Fixed
+
 - Scroll position survives a re-render. Panning to the middle of a page and then
   zooming, resizing the window, toggling a side pane or toggling Invert Colors no
   longer snaps the view back to the top of the page.
