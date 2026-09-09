@@ -30,8 +30,22 @@ Visual Studio 17 2022, x64.
 - **Branch name:** `spec/zoom-a2-completion-lifecycle`.
 - **The spec's line numbers are STALE.** They were taken at `4c2cefe`, before
   PR-A1's 13 commits. Every anchor in this plan was re-read against `8bf143d` on
-  2026-09-09 and is current. If a task's line number does not match what you see,
-  stop and re-locate by symbol — do not edit by line number alone.
+  2026-09-09 and is current *against that baseline*.
+- **Line numbers in Task 4 and later have ALREADY DRIFTED by the time you reach
+  them, and this plan does not recompute them.** Tasks 3, 4, 5 and 6 each edit
+  `src/ui/PdfCanvas.hpp`, `src/ui/PdfCanvas.cpp` and `src/ui/MainWindow.cpp`, so a
+  citation that was exact at `8bf143d` is off by tens of lines once an earlier task
+  has run. Worked example: Task 3 Step 1 adds one `#include` and grows the
+  `post_render_done` declaration block from 26 lines to 47, so `PdfCanvas.hpp:170-176`
+  (cited in Task 4) is really at `192-198` when Task 4 executes.
+  **Therefore: every file:line in this plan is a HINT, and the quoted text is the
+  contract.** Locate each edit by searching for the quoted "replace this" text, never
+  by seeking to the line number. If the quoted text is not found verbatim, stop — an
+  earlier task did something other than what this plan said.
+- **Replacement ranges include their closing lines.** Where a step says "replace X
+  through Y", the replacement text given is the COMPLETE new text for that whole
+  span, closing braces and trailing `return` included. Do not paste it above a
+  surviving `return 0;` or `}`.
 - **Build config is Release, never Debug.** MuPDF's static libs are
   `MT_StaticRelease`; a Debug test build fails with a flood of
   `LNK2038: RuntimeLibrary mismatch`.
@@ -64,16 +78,27 @@ Visual Studio 17 2022, x64.
 
 Read these before Task 1. Each one is a decision a task would otherwise re-open.
 
-**1. `cancel_all_below_priority` is NOT changed.** Spec §3.1 lists it as one of three
-reasons a completion is unidentifiable today (`RenderEngine.cpp:417-425`,
-`entry.priority > p`, so `cancel_stale_renders(0)` never cancels a P0). But §3.1's
-single stated remedy is `RenderMeta` gaining `{page, slot, seq}` — with `seq`, two
-in-flight P0s for the same page are distinguishable, which is what the section is
-actually about. Changing `>` to `>=` would additionally turn
+**1. `cancel_all_below_priority` is NOT changed — but the defect it causes IS closed,
+in the accept predicate.** Spec §3.1 lists the engine as one of three reasons a
+completion is unidentifiable today (`RenderEngine.cpp:417-425`, `entry.priority > p`,
+so `cancel_stale_renders(0)` never cancels a P0, and two P0s for the same page can be
+in flight after a zoom, resize, DPI change or invert toggle).
+
+Changing `>` to `>=` is not available to us: it would turn
 `cancel_stale_renders(INT_MAX)` (`MainWindow.cpp:594`) from a documented no-op into
 "cancel everything on tab switch", and spec §7 records that no-op as **deliberately
-not fixed here**. Two in-flight P0s cost wasted work, not correctness, once `seq`
-lands. Leave the engine alone.
+not fixed here**.
+
+So the fix goes in the predicate instead. **`accept_completion` takes `meta_seq` and
+the newest seq already accepted, and rejects anything older** (Task 1). Two in-flight
+P0s for the same page then cost wasted work rather than a wrong picture: whichever
+lands second wins only if it is the newer submission.
+
+An earlier draft of this plan claimed the mere *existence* of `seq` in `RenderMeta`
+made the duplicate P0s harmless. That was wrong — `seq` reached only the anchor slot,
+never the accept test, so a stale larger-scale pixmap landing late would still have
+been painted and left on screen until the next redraw. The seq comparison in Task 1 is
+what actually closes it.
 
 **2. The null-completion path is NOT changed.** Spec §3.1's third bullet (a
 cancelled/failed render posts `LPARAM = 0` with no metadata) is answered by §3.2's
@@ -119,13 +144,21 @@ the exe):
 
 | file | what changes |
 |------|--------------|
-| `src/ui/PdfCanvas.hpp` | include the three new headers; `next_render_seq()`; `change_current_page(idx, anchor)`; `post_render_done*` gain `page`/`seq` |
+| `src/ui/PdfCanvas.hpp` | include the three new headers; `next_render_seq()`; `set_pending_anchor()`; `post_render_done*` gain `page`/`seq` |
 | `src/ui/PdfCanvas.cpp` | `RenderMeta` grows; completion handler uses `accept_completion` + `AnchorSlot`; `set_view` clears `right_bitmap`; new `navigate_to_page` / `page_origin_y` / `apply_anchor`; wheel scrolling |
 | `src/ui/MainWindow.cpp` | four `set_current_page` bypasses routed through `change_current_page`; submit sites pass `page`/`seq`; search paths pass a `Hit` anchor; FitWidth restore |
 | `src/core/DocumentView.cpp` | `Impl::zm` default back to `FitWidth` |
 | `src/core/SessionState.cpp` | `migrate_v1_to_v2` no longer forces FitPage |
+| `tests/unit/test_session_state.cpp` | three assertions flip FitPage → FitWidth (Task 9) |
+| `tests/unit/test_document_view.cpp` | one assertion flips FitPage → FitWidth (Task 9) |
 | `tests/CMakeLists.txt` | three new test files |
 | `CHANGELOG.md` | one Unreleased entry |
+
+**Those two existing test files are not optional.** Task 9 changes the app's default
+zoom mode and the v1 migration target, and four shipped assertions encode the PR-A1
+values: `tests/unit/test_session_state.cpp:205`, `:225`, `:242` and
+`tests/unit/test_document_view.cpp:37` all `REQUIRE(... == FitPage)`. Task 9 Step 6
+updates them in the same commit that changes the behaviour.
 
 ---
 
@@ -141,8 +174,15 @@ the exe):
   `src/ui/PdfCanvasLayout.hpp` (existing, unchanged).
 - Produces: `enum class litepdf::ui::Slot { Left, Right };` and
   `bool litepdf::ui::accept_completion(std::uint64_t meta_epoch, std::uint64_t
-  cur_epoch, int meta_page, Slot meta_slot, int cur_page, bool dual, int
-  page_count)`. Tasks 3–8 rely on both names.
+  cur_epoch, std::uint64_t meta_seq, std::uint64_t newest_accepted_seq, int
+  meta_page, Slot meta_slot, int cur_page, bool dual, int page_count)`. Tasks 3–8
+  rely on both names.
+
+**Deviation from spec §3.1's illustrative signature, deliberate.** The spec writes a
+seven-parameter predicate with no `seq`. This one takes two more, because the seq
+comparison is what closes the duplicate-P0 gap the spec's own §3.1 opens and then
+leaves to the engine — see "Scope rulings", ruling 1. A predicate that ignores `seq`
+lets an older same-page P0 landing late repaint the canvas at the wrong scale.
 
 **Why this is a pure function.** Spec §3.1 requires the predicate be extracted
 "so it is unit-testable rather than buried in the WndProc". The failure it prevents
@@ -171,38 +211,65 @@ Create `tests/unit/test_completion_math.cpp`:
 using litepdf::ui::accept_completion;
 using litepdf::ui::Slot;
 
+// Argument order, to keep the calls below readable:
+//   (meta_epoch, cur_epoch, meta_seq, newest_accepted_seq,
+//    meta_page, meta_slot, cur_page, dual, page_count)
+
 TEST_CASE("CompletionMath accepts a matching single-page completion",
           "[ui][completion]") {
-    REQUIRE(accept_completion(7, 7, 4, Slot::Left, 4, false, 10));
+    REQUIRE(accept_completion(7, 7, 5, 5, 4, Slot::Left, 4, false, 10));
 }
 
 TEST_CASE("CompletionMath rejects a completion from a superseded view epoch",
           "[ui][completion]") {
-    REQUIRE_FALSE(accept_completion(6, 7, 4, Slot::Left, 4, false, 10));
+    REQUIRE_FALSE(accept_completion(6, 7, 5, 5, 4, Slot::Left, 4, false, 10));
     // Even a perfectly matching page loses to an epoch mismatch.
-    REQUIRE_FALSE(accept_completion(0, 1, 0, Slot::Left, 0, false, 10));
+    REQUIRE_FALSE(accept_completion(0, 1, 1, 1, 0, Slot::Left, 0, false, 10));
+}
+
+TEST_CASE("CompletionMath rejects a superseded submission of the same page",
+          "[ui][completion]") {
+    // The duplicate-P0 defect. cancel_stale_renders(0) does not cancel an
+    // in-flight P0 (RenderEngine cancels priority > p only), so a zoom, resize,
+    // DPI change or invert toggle can leave two P0s for the SAME page racing.
+    // (epoch, page, slot) are identical for both; only the seq differs, and
+    // the older one must not repaint the canvas at the superseded scale.
+    REQUIRE_FALSE(accept_completion(7, 7, 4, 5, 4, Slot::Left, 4, false, 10));
+    REQUIRE(accept_completion(7, 7, 5, 5, 4, Slot::Left, 4, false, 10));
+    // A seq NEWER than the newest accepted is fine -- that is the normal case,
+    // since the counter is only advanced by an acceptance.
+    REQUIRE(accept_completion(7, 7, 6, 5, 4, Slot::Left, 4, false, 10));
+}
+
+TEST_CASE("CompletionMath accepts both halves of one spread submission",
+          "[ui][completion]") {
+    // Both slots of a spread carry the SAME seq, so the seq test must use >=,
+    // not >. With > the second half to arrive would be rejected and half the
+    // spread would stay grey.
+    REQUIRE(accept_completion(7, 7, 5, 5, 3, Slot::Left,  3, true, 10));
+    REQUIRE(accept_completion(7, 7, 5, 5, 4, Slot::Right, 3, true, 10));
 }
 
 TEST_CASE("CompletionMath rejects a left completion for another page",
           "[ui][completion]") {
-    REQUIRE_FALSE(accept_completion(7, 7, 3, Slot::Left, 4, false, 10));
-    REQUIRE_FALSE(accept_completion(7, 7, 5, Slot::Left, 4, false, 10));
+    REQUIRE_FALSE(accept_completion(7, 7, 5, 5, 3, Slot::Left, 4, false, 10));
+    REQUIRE_FALSE(accept_completion(7, 7, 5, 5, 5, Slot::Left, 4, false, 10));
 }
 
 TEST_CASE("CompletionMath rejects a right completion in single-page mode",
           "[ui][completion]") {
-    REQUIRE_FALSE(accept_completion(7, 7, 4, Slot::Right, 4, false, 10));
+    REQUIRE_FALSE(accept_completion(7, 7, 5, 5, 4, Slot::Right, 4, false, 10));
     // Not even the page that WOULD be the spread partner is accepted.
-    REQUIRE_FALSE(accept_completion(7, 7, 5, Slot::Right, 4, false, 10));
+    REQUIRE_FALSE(accept_completion(7, 7, 5, 5, 5, Slot::Right, 4, false, 10));
 }
 
 TEST_CASE("CompletionMath accepts the right completion for left plus one",
           "[ui][completion]") {
     // The spread-blanking regression. Pair (3,4), current_page snapped to 3.
-    REQUIRE(accept_completion(7, 7, 3, Slot::Left,  3, true, 10));
-    REQUIRE(accept_completion(7, 7, 4, Slot::Right, 3, true, 10));
+    REQUIRE(accept_completion(7, 7, 5, 5, 3, Slot::Left,  3, true, 10));
+    REQUIRE(accept_completion(7, 7, 5, 5, 4, Slot::Right, 3, true, 10));
     // And the left slot still rejects the partner page.
-    REQUIRE_FALSE(accept_completion(7, 7, 4, Slot::Left, 3, true, 10));
+    REQUIRE_FALSE(accept_completion(7, 7, 5, 5, 4, Slot::Left, 3, true, 10));
 }
 
 TEST_CASE("CompletionMath re-snaps an unsnapped current page in dual mode",
@@ -211,24 +278,24 @@ TEST_CASE("CompletionMath re-snaps an unsnapped current page in dual mode",
     // submitting, so this is defence in depth rather than a live path. It
     // costs one call and makes the predicate independent of call ordering.
     // Page 4 belongs to pair (3,4): left 3, right 4.
-    REQUIRE(accept_completion(7, 7, 3, Slot::Left,  4, true, 10));
-    REQUIRE(accept_completion(7, 7, 4, Slot::Right, 4, true, 10));
+    REQUIRE(accept_completion(7, 7, 5, 5, 3, Slot::Left,  4, true, 10));
+    REQUIRE(accept_completion(7, 7, 5, 5, 4, Slot::Right, 4, true, 10));
 }
 
 TEST_CASE("CompletionMath rejects a right completion for a pair that has none",
           "[ui][completion]") {
     // Cover page: page 0 renders alone, dual_page_compute_right returns -1.
-    REQUIRE(accept_completion(7, 7, 0, Slot::Left, 0, true, 10));
-    REQUIRE_FALSE(accept_completion(7, 7, 1, Slot::Right, 0, true, 10));
+    REQUIRE(accept_completion(7, 7, 5, 5, 0, Slot::Left, 0, true, 10));
+    REQUIRE_FALSE(accept_completion(7, 7, 5, 5, 1, Slot::Right, 0, true, 10));
     // Odd tail: 4-page document, pair (3,-). Left 3 exists, right does not.
-    REQUIRE(accept_completion(7, 7, 3, Slot::Left, 3, true, 4));
-    REQUIRE_FALSE(accept_completion(7, 7, 4, Slot::Right, 3, true, 4));
+    REQUIRE(accept_completion(7, 7, 5, 5, 3, Slot::Left, 3, true, 4));
+    REQUIRE_FALSE(accept_completion(7, 7, 5, 5, 4, Slot::Right, 3, true, 4));
 }
 
 TEST_CASE("CompletionMath rejects everything for a document with no pages",
           "[ui][completion]") {
-    REQUIRE_FALSE(accept_completion(7, 7, 0, Slot::Left,  0, false, 0));
-    REQUIRE_FALSE(accept_completion(7, 7, 0, Slot::Right, 0, true,  0));
+    REQUIRE_FALSE(accept_completion(7, 7, 5, 5, 0, Slot::Left,  0, false, 0));
+    REQUIRE_FALSE(accept_completion(7, 7, 5, 5, 0, Slot::Right, 0, true,  0));
 }
 ```
 
@@ -261,10 +328,17 @@ Create `src/ui/detail/CompletionMath.hpp`:
 // file decides the prior question -- whether the pixmap should be painted at
 // all.
 //
-// Three things can make a completion unwanted:
+// Four things can make a completion unwanted:
 //   epoch  the view was swapped (tab switch) after the render was submitted;
+//   seq    a NEWER submission of the same page has already been accepted;
 //   page   the user paged away after the render was submitted;
 //   slot   a RIGHT-slot pixmap arrived while the layout is single-page.
+//
+// The seq test is what covers the duplicate-P0 case the engine cannot:
+// cancel_stale_renders(0) flags only priority > 0, so a zoom / resize / DPI
+// change / invert toggle can leave two P0s for the same page in flight with
+// identical (epoch, page, slot). Whichever finishes second would otherwise win,
+// which on a zoom means the canvas keeps the superseded scale.
 //
 // SLOT IS LOAD-BEARING. In spread mode the right-slot render is submitted for
 // left+1 while current_page() has already been snapped to left, and both
@@ -283,19 +357,28 @@ namespace litepdf::ui {
 // render is Left.
 enum class Slot { Left, Right };
 
-// True iff the pixmap described by (meta_epoch, meta_page, meta_slot) is still
-// wanted by a canvas at (cur_epoch, cur_page, dual, page_count).
+// True iff the pixmap described by (meta_epoch, meta_seq, meta_page, meta_slot)
+// is still wanted by a canvas at (cur_epoch, newest_accepted_seq, cur_page,
+// dual, page_count).
+//
+// `newest_accepted_seq` is the seq of the most recent completion this canvas
+// ACCEPTED (0 before the first). The test is `>=`, not `>`, because both halves
+// of a spread carry one seq: with `>` the second half to arrive would be
+// rejected and half of every spread would stay grey.
 //
 // `cur_page` is re-snapped to the pair's LEFT page in dual mode. Every
 // submission path already snaps before submitting (MainWindow::kick_render,
 // PdfCanvas::resubmit_current_page, PdfCanvas::apply_viewport,
-// PdfCanvas::on_key_down), so the snap here is defence in depth -- it makes the
-// predicate correct regardless of the order a future caller does things in.
+// PdfCanvas::navigate_to_page), so the snap here is defence in depth -- it makes
+// the predicate correct regardless of the order a future caller does things in.
 inline bool accept_completion(std::uint64_t meta_epoch, std::uint64_t cur_epoch,
+                              std::uint64_t meta_seq,
+                              std::uint64_t newest_accepted_seq,
                               int meta_page, Slot meta_slot,
                               int cur_page, bool dual, int page_count) noexcept {
-    if (meta_epoch != cur_epoch) return false;
-    if (page_count <= 0)         return false;
+    if (meta_epoch != cur_epoch)          return false;
+    if (meta_seq < newest_accepted_seq)   return false;
+    if (page_count <= 0)                  return false;
 
     if (!dual) {
         // No right slot exists, so a right-slot pixmap has nowhere to land.
@@ -326,13 +409,13 @@ then
 "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe" --test-dir build -C Release -R CompletionMath
 ```
 
-Expected: 8 tests, 8 passed. Then the full suite:
+Expected: 10 tests, 10 passed. Then the full suite:
 
 ```bash
 "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe" --test-dir build -C Release
 ```
 
-Expected: **265/265 passed** (257 + 8).
+Expected: **267/267 passed** (257 + 10).
 
 - [ ] **Step 5: Commit**
 
@@ -356,8 +439,9 @@ git commit -m "feat(canvas): extract the render-completion accept predicate as p
 - Produces: `struct litepdf::ui::PageAnchor` with `enum class Kind { None, Top,
   Bottom, Hit }`, a `Kind kind` field, a `core::SearchSession::Hit target` field
   and static factories `none()`, `top()`, `bottom()`, `hit(const Hit&)`; and
-  `struct litepdf::ui::AnchorSlot` with `install(PageAnchor)`, `stamp(uint64_t)`,
-  `consume(uint64_t)`, `clear()`, `pending()`. Tasks 4–8 rely on all of them.
+  `class litepdf::ui::AnchorSlot` with `install(PageAnchor)`, `stamp(uint64_t)`,
+  `take(uint64_t) const`, `mark_applied()`, `clear()`, `pending()`, `applied()`.
+  Tasks 4–8 rely on all of them.
 
 **Why an `AnchorSlot` and not two fields in `PdfCanvas::Impl`.** `PdfCanvas` is
 exe-only — it pulls in Win32 and Direct2D, so nothing in it can be reached from the
@@ -371,7 +455,30 @@ already uses five times (`ThumbnailPane`, `PasswordDialog`, `password_retry`,
 request: a same-page zoom or resize produces a second P0 with an identical triple,
 so an older completion could consume an anchor meant for a newer render. The anchor
 therefore records the `seq` of the submission batch that carried it, and only a
-completion with that exact `seq` may consume it.
+completion with that exact `seq` may apply it.
+
+**Taking an anchor does NOT retire it, and that is load-bearing.** A spread submits
+two renders under one `seq`, and **both must apply the anchor**:
+
+- `Bottom` computes `pan_y = viewport − content`, and `content` is the union of the
+  two slots. Until the second half lands, that union is wrong.
+- Either half can arrive first. `RenderEngine` runs two workers by default
+  (`RenderEngine.hpp:74`) and its L1 cache hit returns before any MuPDF work
+  (`RenderEngine.cpp:120-131`), so a cached right page genuinely beats an uncached
+  left one. If taking the anchor cleared it, the right half would consume an anchor
+  it cannot yet apply — `apply_anchor` needs `current_bitmap`, which
+  `navigate_to_page` has just reset — and the left half would then find nothing.
+
+So the slot separates **taking** from **retiring**: `take(seq)` returns the anchor
+without mutating, the canvas calls `mark_applied()` only when the application
+actually happened, and the anchor is retired by the *next* `stamp()` — i.e. when a
+new submission batch opens. That gives the three behaviours the design needs:
+
+| situation | what happens |
+|---|---|
+| both halves of a spread land | each applies; the second sees the final union |
+| the render fails (null completion) | never applied, so the next `stamp` carries it forward — this is what makes a retry recover |
+| a same-page re-render follows a completed navigation | the anchor was applied, so `stamp` retires it and the completion keeps the user's pan |
 
 - [ ] **Step 1: Write the failing test**
 
@@ -419,50 +526,72 @@ TEST_CASE("PageAnchor factories carry their kind", "[ui][anchor]") {
 TEST_CASE("PageAnchor slot starts empty", "[ui][anchor]") {
     AnchorSlot slot;
     REQUIRE_FALSE(slot.pending());
+    REQUIRE_FALSE(slot.applied());
     // An empty slot never claims a completion, whatever seq it carries.
-    REQUIRE(slot.consume(0).kind == PageAnchor::Kind::None);
-    REQUIRE(slot.consume(1).kind == PageAnchor::Kind::None);
+    REQUIRE(slot.take(0).kind == PageAnchor::Kind::None);
+    REQUIRE(slot.take(1).kind == PageAnchor::Kind::None);
 }
 
-TEST_CASE("PageAnchor slot is consumed only by its own seq", "[ui][anchor]") {
+TEST_CASE("PageAnchor slot is taken only by its own seq", "[ui][anchor]") {
     AnchorSlot slot;
     slot.install(PageAnchor::top());
     slot.stamp(5);
     REQUIRE(slot.pending());
 
-    // An older completion must not consume it, and must not clear it either.
-    REQUIRE(slot.consume(4).kind == PageAnchor::Kind::None);
+    // An older completion must not take it, and must not clear it either.
+    REQUIRE(slot.take(4).kind == PageAnchor::Kind::None);
     REQUIRE(slot.pending());
 
     // A newer completion (should be impossible, but must not steal it either).
-    REQUIRE(slot.consume(6).kind == PageAnchor::Kind::None);
+    REQUIRE(slot.take(6).kind == PageAnchor::Kind::None);
     REQUIRE(slot.pending());
 
-    REQUIRE(slot.consume(5).kind == PageAnchor::Kind::Top);
-    REQUIRE_FALSE(slot.pending());
+    REQUIRE(slot.take(5).kind == PageAnchor::Kind::Top);
 }
 
-TEST_CASE("PageAnchor slot is consumed exactly once", "[ui][anchor]") {
+TEST_CASE("PageAnchor slot serves both halves of one spread", "[ui][anchor]") {
+    // A spread's two renders share one seq and BOTH must apply the anchor: the
+    // union height that Bottom measures against is only final once the second
+    // half lands, and either half can arrive first.
     AnchorSlot slot;
     slot.install(PageAnchor::bottom());
     slot.stamp(9);
-    REQUIRE(slot.consume(9).kind == PageAnchor::Kind::Bottom);
-    // The right-slot completion of the same spread carries the same seq; it
-    // must not re-apply the anchor after the left slot already used it.
-    REQUIRE(slot.consume(9).kind == PageAnchor::Kind::None);
+
+    REQUIRE(slot.take(9).kind == PageAnchor::Kind::Bottom);
+    slot.mark_applied();
+    // The other half of the same spread still gets it.
+    REQUIRE(slot.take(9).kind == PageAnchor::Kind::Bottom);
+    REQUIRE(slot.applied());
 }
 
-TEST_CASE("PageAnchor stamp carries a pending intent to a new seq",
+TEST_CASE("PageAnchor slot retires an applied anchor at the next stamp",
           "[ui][anchor]") {
-    // A resubmit with no new anchor re-stamps whatever is pending, so the
-    // intent survives a superseding render instead of being stranded on a seq
-    // that will never complete.
+    // This is what keeps a same-page re-render (zoom, resize, invert, pane
+    // toggle) from re-applying a navigation that already happened -- the defect
+    // that would otherwise snap the view back to the top on every Zoom In.
     AnchorSlot slot;
     slot.install(PageAnchor::top());
     slot.stamp(2);
-    slot.stamp(3);
-    REQUIRE(slot.consume(2).kind == PageAnchor::Kind::None);
-    REQUIRE(slot.consume(3).kind == PageAnchor::Kind::Top);
+    REQUIRE(slot.take(2).kind == PageAnchor::Kind::Top);
+    slot.mark_applied();
+
+    slot.stamp(3);                      // a new submission batch opens
+    REQUIRE_FALSE(slot.pending());
+    REQUIRE_FALSE(slot.applied());
+    REQUIRE(slot.take(3).kind == PageAnchor::Kind::None);
+}
+
+TEST_CASE("PageAnchor slot carries an UNAPPLIED intent to a new seq",
+          "[ui][anchor]") {
+    // The failed-render recovery path. The render that was going to consume the
+    // anchor never delivered (cancelled or failed -> null completion), so
+    // mark_applied was never called and the retry inherits the intent.
+    AnchorSlot slot;
+    slot.install(PageAnchor::top());
+    slot.stamp(2);
+    slot.stamp(3);                      // resubmit; nothing was ever applied
+    REQUIRE(slot.take(2).kind == PageAnchor::Kind::None);
+    REQUIRE(slot.take(3).kind == PageAnchor::Kind::Top);
 }
 
 TEST_CASE("PageAnchor install replaces a pending anchor", "[ui][anchor]") {
@@ -472,10 +601,25 @@ TEST_CASE("PageAnchor install replaces a pending anchor", "[ui][anchor]") {
     slot.install(PageAnchor::hit(make_hit(7, 90.0f)));
     slot.stamp(3);
 
-    const PageAnchor got = slot.consume(3);
+    const PageAnchor got = slot.take(3);
     REQUIRE(got.kind == PageAnchor::Kind::Hit);
     REQUIRE(got.target.page == 7u);
     REQUIRE(got.target.geom.ul_y == 90.0f);
+}
+
+TEST_CASE("PageAnchor install clears a previous applied mark", "[ui][anchor]") {
+    // Otherwise a fresh navigation installed after an applied one would be
+    // retired by its own stamp before any completion could see it.
+    AnchorSlot slot;
+    slot.install(PageAnchor::top());
+    slot.stamp(2);
+    (void)slot.take(2);
+    slot.mark_applied();
+
+    slot.install(PageAnchor::bottom());
+    slot.stamp(3);
+    REQUIRE(slot.pending());
+    REQUIRE(slot.take(3).kind == PageAnchor::Kind::Bottom);
 }
 
 TEST_CASE("PageAnchor stamp on an empty slot installs nothing",
@@ -486,7 +630,7 @@ TEST_CASE("PageAnchor stamp on an empty slot installs nothing",
     AnchorSlot slot;
     slot.stamp(11);
     REQUIRE_FALSE(slot.pending());
-    REQUIRE(slot.consume(11).kind == PageAnchor::Kind::None);
+    REQUIRE(slot.take(11).kind == PageAnchor::Kind::None);
 }
 
 TEST_CASE("PageAnchor clear drops a pending anchor", "[ui][anchor]") {
@@ -497,7 +641,8 @@ TEST_CASE("PageAnchor clear drops a pending anchor", "[ui][anchor]") {
     slot.stamp(4);
     slot.clear();
     REQUIRE_FALSE(slot.pending());
-    REQUIRE(slot.consume(4).kind == PageAnchor::Kind::None);
+    REQUIRE_FALSE(slot.applied());
+    REQUIRE(slot.take(4).kind == PageAnchor::Kind::None);
 }
 ```
 
@@ -545,15 +690,26 @@ Create `src/ui/detail/PageAnchor.hpp`:
 //
 // LIFETIME. (epoch, page, slot) does not identify a request -- a same-page zoom
 // or resize produces a second P0 with an identical triple -- so the anchor
-// records the SEQ of the submission batch that carried it and is consumed only
-// by a completion whose seq matches. It follows that a newer page change or
-// resubmit REPLACES the anchor, carrying the intent forward to the new seq
-// (which is also what makes a failed render recover: the retry re-issues it);
-// that set_view clears it; and that epoch-mismatch drops and null completions
-// leave it alone. Leaving it alone is safe precisely because of the seq match:
-// a stale anchor can never be consumed by the wrong completion.
+// records the SEQ of the submission batch that carried it and is applied only
+// by a completion whose seq matches.
+//
+// TAKING IS NOT RETIRING. A spread submits two renders under ONE seq and both
+// must apply the anchor: Bottom measures against the UNION of the two slots,
+// which is not final until the second half lands, and either half can arrive
+// first (two workers, and an L1 cache hit returns before any MuPDF work). So
+// take() does not mutate; the canvas calls mark_applied() when it actually
+// applied one; and the anchor is retired by the NEXT stamp(). That yields:
+//   - a failed render (null completion) never marks applied, so the retry's
+//     stamp carries the intent forward -- the recovery path;
+//   - a same-page re-render after a completed navigation finds the anchor
+//     retired, so it keeps the user's pan instead of snapping to the top;
+//   - set_view clears outright (new view, new epoch, different document);
+//   - epoch-mismatch drops and null completions leave it alone, which is safe
+//     precisely because of the seq match: a stale completion can never take an
+//     anchor that belongs to a different batch.
 
 #include <cstdint>
+#include <utility>
 
 #include "core/SearchSession.hpp"
 
@@ -593,41 +749,58 @@ struct PageAnchor {
 class AnchorSlot {
 public:
     // Record an intent. Replaces whatever was pending -- the newer navigation
-    // is the one the user asked for. The seq is not known yet; stamp() sets it
-    // when the submission batch is issued.
-    void install(PageAnchor a) { anchor_ = std::move(a); }
-
-    // Bind the pending intent to a submission batch. Called once per batch,
-    // from PdfCanvas::next_render_seq(). Stamping an EMPTY slot installs
-    // nothing: a same-page re-render legitimately carries no anchor.
-    void stamp(std::uint64_t seq) noexcept { seq_ = seq; }
-
-    // Take the anchor iff `completion_seq` is the batch it was stamped with.
-    // Returns Kind::None (and leaves the slot untouched) otherwise, so an
-    // out-of-order completion neither applies nor destroys a live intent.
-    // A match clears the slot, so the RIGHT-slot completion of the same spread
-    // -- which carries the same seq -- cannot re-apply it.
-    PageAnchor consume(std::uint64_t completion_seq) {
-        if (anchor_.kind == PageAnchor::Kind::None) return PageAnchor::none();
-        if (completion_seq != seq_)                 return PageAnchor::none();
-        PageAnchor out = std::move(anchor_);
-        anchor_ = PageAnchor::none();
-        return out;
+    // is the one the user asked for -- and clears the applied mark, so the
+    // fresh intent is not retired by its own stamp(). The seq is not known yet;
+    // stamp() binds it when the submission batch is issued.
+    void install(PageAnchor a) {
+        anchor_   = std::move(a);
+        applied_  = false;
     }
 
-    void clear() { anchor_ = PageAnchor::none(); }
+    // Open a submission batch. Called once per batch from
+    // PdfCanvas::next_render_seq(). An anchor that has ALREADY been applied is
+    // retired here: its navigation is done, and the batch now opening is a
+    // same-page re-render that must keep the user's pan. An anchor that was
+    // never applied is carried forward to the new seq instead -- that is what
+    // makes a failed or cancelled render recover on the retry.
+    void stamp(std::uint64_t seq) noexcept {
+        if (applied_) {
+            anchor_  = PageAnchor::none();
+            applied_ = false;
+        }
+        seq_ = seq;
+    }
+
+    // The anchor for `completion_seq`, or Kind::None. Does NOT mutate: both
+    // halves of a spread carry one seq and both must apply it (see the LIFETIME
+    // note above). An out-of-order completion gets None and leaves the slot
+    // untouched, so it can neither apply nor destroy a live intent.
+    PageAnchor take(std::uint64_t completion_seq) const {
+        if (anchor_.kind == PageAnchor::Kind::None) return PageAnchor::none();
+        if (completion_seq != seq_)                 return PageAnchor::none();
+        return anchor_;
+    }
+
+    // The canvas calls this only after an application actually happened -- not
+    // merely after take() returned something. A completion that took an anchor
+    // but could not apply it (no bitmap yet) must NOT mark it, or the intent
+    // would be retired without ever taking effect.
+    void mark_applied() noexcept { applied_ = true; }
+
+    void clear() {
+        anchor_  = PageAnchor::none();
+        applied_ = false;
+    }
 
     bool pending() const noexcept {
         return anchor_.kind != PageAnchor::Kind::None;
     }
-
-    // Read without consuming. Used by the dual-mode page snap, which must pass
-    // an existing Hit through rather than overwrite it with Top.
-    const PageAnchor& peek() const noexcept { return anchor_; }
+    bool applied() const noexcept { return applied_; }
 
 private:
     PageAnchor    anchor_{};
-    std::uint64_t seq_ = 0;
+    std::uint64_t seq_     = 0;
+    bool          applied_ = false;
 };
 
 }  // namespace litepdf::ui
@@ -645,7 +818,8 @@ then
 "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe" --test-dir build -C Release -R PageAnchor
 ```
 
-Expected: 8 tests, 8 passed. Then the full suite — expected **273/273 passed**.
+Expected: 10 tests, 10 passed. Then the full suite — expected **277/277 passed**
+(267 + 10).
 
 - [ ] **Step 5: Commit**
 
@@ -854,6 +1028,11 @@ comment (`src/ui/PdfCanvas.cpp:120-123`), add:
     // same-page zoom or resize produces and what (epoch, page, slot) cannot
     // distinguish.
     std::uint64_t                 next_seq = 0;
+    // The seq of the most recent completion this canvas ACCEPTED. An older
+    // submission landing after it is dropped rather than painted -- without
+    // this, the loser of a two-P0 race repaints the canvas at the superseded
+    // scale and leaves it there until something else forces a redraw.
+    std::uint64_t                 newest_accepted_seq = 0;
 ```
 
 Add the definition immediately after `PdfCanvas::render_epoch()`
@@ -930,13 +1109,16 @@ In the `WM_USER_RENDER_DONE` / `WM_USER_RENDER_DONE_RIGHT` case
             // stale completion can never consume it anyway (seq match).
             const int cur_page = impl_->view ? impl_->view->current_page() : 0;
             const int total    = impl_->view ? impl_->view->page_count()   : 0;
-            if (!accept_completion(epoch, impl_->view_epoch, page, slot,
+            if (!accept_completion(epoch, impl_->view_epoch,
+                                   seq, impl_->newest_accepted_seq,
+                                   page, slot,
                                    cur_page, impl_->dual_page, total)) {
                 fz_drop_pixmap(escrow, pix);
                 fz_drop_context(escrow);
                 return 0;
             }
-            (void)seq;   // Task 4 consumes the anchor with it.
+            // Accepted: nothing older than this may repaint the canvas now.
+            impl_->newest_accepted_seq = seq;
 ```
 
 Add the using-declaration alongside the existing ones in the anonymous namespace
@@ -988,7 +1170,9 @@ function body with:
         });
 ```
 
-In `on_key_down`'s `if (changed)` block (`src/ui/PdfCanvas.cpp:810-855`), replace
+In `on_key_down`, replace from `if (changed) {` **through the function's own closing
+brace, inclusive** — the replacement text below reproduces the trailing `return 0;`
+and `}`. (At `8bf143d` that span is `src/ui/PdfCanvas.cpp:810-857`.) Replace
 the two `const std::uint64_t epoch = impl_->view_epoch;` line and the four lambdas
 so the block reads:
 
@@ -1119,7 +1303,7 @@ Expected: clean. Then
 "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe" --test-dir build -C Release
 ```
 
-Expected: **273/273 passed** — this task adds no tests; it must break none either.
+Expected: **277/277 passed** — this task adds no tests; it must break none either.
 
 - [ ] **Step 10: Commit**
 
@@ -1136,20 +1320,24 @@ git commit -m "feat(canvas): give every render completion a page, slot and submi
 - Modify: `src/ui/PdfCanvas.hpp` — include `PageAnchor.hpp`; new default parameter
   on `change_current_page`; three new private members
 - Modify: `src/ui/PdfCanvas.cpp` — `AnchorSlot` in `Impl`; `next_render_seq` stamps
-  it; `change_current_page(idx, anchor)`; new `page_origin_y`, `apply_anchor`,
+  it; `set_pending_anchor`; new `page_origin_y`, `apply_anchor`,
   `navigate_to_page`; the completion handler consumes the anchor instead of zeroing
   the pan; `on_key_down` delegates to `navigate_to_page`
 
 **Interfaces:**
 - Consumes: `PageAnchor`, `AnchorSlot` (Task 2); `next_render_seq` (Task 3).
 - Produces:
-  - `bool PdfCanvas::change_current_page(int idx, PageAnchor anchor =
-    PageAnchor::top());`
+  - `void PdfCanvas::set_pending_anchor(PageAnchor anchor);` — the only way an
+    anchor is installed. `change_current_page(int idx)` keeps its existing
+    one-argument signature and never touches the anchor.
   - private `void PdfCanvas::navigate_to_page(int target, PageAnchor anchor);` —
-    change page, install the anchor, clear stale bitmaps, submit. Task 8's wheel
+    install the anchor, change page, clear stale bitmaps, submit. Task 8's wheel
     flips call it.
   - private `float PdfCanvas::page_origin_y(float src_h, float vp_h) const;` —
     the unpanned vertical origin of the left/single page. Task 6 uses it.
+  - private `bool PdfCanvas::apply_anchor(const PageAnchor&);` — returns false when
+    there is nothing rendered to measure against, which is what stops a spread's
+    early-arriving right half from retiring an intent it cannot apply.
 
 **What this fixes, concretely.** `src/ui/PdfCanvas.cpp:588-589` zeroes `pan_x` and
 `pan_y` on every left/single completion. Two shipped consequences:
@@ -1177,23 +1365,45 @@ In `src/ui/PdfCanvas.hpp`, add after the `CompletionMath.hpp` include from Task 
 #include "ui/detail/PageAnchor.hpp"
 ```
 
-Replace the `change_current_page` declaration (`src/ui/PdfCanvas.hpp:170-176`):
+**`change_current_page` keeps its existing one-argument signature.** Add
+`set_pending_anchor` next to it instead — appending an `anchor` parameter to
+`change_current_page` looks tidier and is wrong, because three distinct operations
+call it and only one of them wants an anchor:
+
+| operation | callers | anchor |
+|---|---|---|
+| navigate | PgDn/PgUp/Home/End, wheel flip, outline click, thumbnail click, search jump | Top / Bottom / Hit |
+| canonicalise ("snap") | `kick_render`'s dual snap, `apply_viewport`'s re-snap, `IDM_VIEW_DUAL_PAGE` | **none** — a snap is bookkeeping |
+| restore | `restore_on_tab_ready` | Top |
+
+A snap runs on **every** dual-mode render, including same-page ones: `MainWindow.cpp`
+has twelve `kick_render(view->current_page())` call sites (zoom in/out/reset, WM_SIZE,
+DPI change, pane toggles, invert, tab switch, the three search paths). If the snap
+installed a Top, spread mode would reset the pan on every one of them — reintroducing,
+in dual mode, the exact defect this PR exists to fix. Keeping installation explicit
+also fixes the single-page twin: `if (canvas_->change_current_page(p)) kick_render(p)`
+callers (`MainWindow.cpp:527`, `:565`, `:649`) skip the render when the page did not
+move, so an unconditional install would strand a Top that the *next* unrelated
+re-render would then apply.
+
+So: add this to the public section of `src/ui/PdfCanvas.hpp`, immediately after the
+existing `change_current_page` declaration (unchanged, at `PdfCanvas.hpp:170-176` in
+`8bf143d` numbering):
 
 ```cpp
-    // Page-change entry point for external callers (MainWindow's
-    // outline-navigate and cross-tab search-results paths). Wraps
-    // `view->set_current_page(idx)` and fires the page-change observer
-    // when the page actually moves, so all mutation sites flow through
-    // one observer fire-point. Returns true iff the page changed.
-    // Safe to call before set_view (returns false).
+    // Say where the page should land when the next submission batch completes.
     //
-    // `anchor` says where the new page should land once its pixmap arrives.
-    // The default is Top, which is what every page-turn caller wants; the
-    // search paths pass PageAnchor::hit(...) and the wheel's backward flip
-    // passes PageAnchor::bottom(). The anchor is installed even when the page
-    // does not move, because a caller that asks to land on a hit means it
-    // whether or not the hit happens to be on the page already showing.
-    bool change_current_page(int idx, PageAnchor anchor = PageAnchor::top());
+    // Deliberately NOT folded into change_current_page: a defensive page SNAP
+    // (dual-mode canonicalisation) also changes the current page, runs on every
+    // spread render including same-page ones, and must leave the pan alone.
+    // Callers that navigate install an anchor; callers that canonicalise do not.
+    //
+    // The anchor is bound to a submission by the next next_render_seq() call,
+    // so install it BEFORE kicking the render. Installing without ever
+    // submitting is harmless: the anchor sits unbound until some later batch
+    // stamps it, and the seq test keeps it from being applied by anything else
+    // in the meantime.
+    void set_pending_anchor(PageAnchor anchor);
 ```
 
 Add to the private section, after `LRESULT on_key_down(WPARAM key);`
@@ -1214,10 +1424,16 @@ Add to the private section, after `LRESULT on_key_down(WPARAM key);`
     // has t == 0, since an overflowing slot placement has y == 0).
     float page_origin_y(float src_h, float vp_h) const;
 
-    // Turn a consumed anchor into a pan. Called from the left/single
-    // completion handler once the new bitmap is installed, so the page's real
-    // height is known. Kind::None keeps the current pan and only re-clamps it.
-    void apply_anchor(const PageAnchor& anchor);
+    // Turn an anchor into a pan. Called from the completion handler once the
+    // arriving bitmap is installed, so the page's real height is known.
+    // Kind::None keeps the current pan and only re-clamps it.
+    //
+    // Returns false when there is nothing to measure against yet (no bitmap,
+    // no render target). The caller must NOT mark the anchor applied in that
+    // case, or an intent would be retired without ever taking effect -- the
+    // reachable path being a spread whose RIGHT half lands first, while
+    // navigate_to_page has just reset both bitmaps.
+    bool apply_anchor(const PageAnchor& anchor);
 ```
 
 - [ ] **Step 2: Run the build to verify it fails**
@@ -1256,22 +1472,15 @@ std::uint64_t PdfCanvas::next_render_seq() {
 }
 ```
 
-- [ ] **Step 4: Take the anchor in `change_current_page`, clear it in `set_view`**
+- [ ] **Step 4: Add `set_pending_anchor`, clear the slot in `set_view`**
 
-Replace `PdfCanvas::change_current_page` (`src/ui/PdfCanvas.cpp:237-244`):
+`PdfCanvas::change_current_page` (`src/ui/PdfCanvas.cpp:237-244`) is **unchanged**.
+Add the new setter immediately after it:
 
 ```cpp
-bool PdfCanvas::change_current_page(int idx, PageAnchor anchor) {
-    if (!impl_ || !impl_->view) return false;
-    // Install the anchor even when the page does not move: a search hit on the
-    // page already showing still has to be scrolled to. next_render_seq()
-    // binds it to the batch the caller submits next.
+void PdfCanvas::set_pending_anchor(PageAnchor anchor) {
+    if (!impl_) return;
     impl_->anchor.install(std::move(anchor));
-    const bool changed = impl_->view->set_current_page(idx);
-    if (changed && impl_->on_page_changed) {
-        impl_->on_page_changed(impl_->view->current_page());
-    }
-    return changed;
 }
 ```
 
@@ -1298,9 +1507,9 @@ float PdfCanvas::page_origin_y(float src_h, float vp_h) const {
     return place_bitmap(src_h, src_h, src_h, vp_h, 0.0f, 0.0f).y;
 }
 
-void PdfCanvas::apply_anchor(const PageAnchor& anchor) {
+bool PdfCanvas::apply_anchor(const PageAnchor& anchor) {
     ContentBox box{};
-    if (!content_extent(box)) return;
+    if (!content_extent(box)) return false;
     const D2D1_SIZE_F vp = impl_->rt->GetSize();
 
     switch (anchor.kind) {
@@ -1324,15 +1533,18 @@ void PdfCanvas::apply_anchor(const PageAnchor& anchor) {
     }
     impl_->pan_x = clamp_pan(impl_->pan_x, box.w, vp.width);
     impl_->pan_y = clamp_pan(impl_->pan_y, box.h, vp.height);
+    return true;
 }
 
 void PdfCanvas::navigate_to_page(int target, PageAnchor anchor) {
     if (!impl_ || !impl_->view) return;
-    const bool wants_move   = target != impl_->view->current_page();
-    const bool wants_anchor = anchor.kind != PageAnchor::Kind::Top;
-    if (!wants_move && !wants_anchor) return;
+    if (target == impl_->view->current_page()) return;
 
-    change_current_page(target, std::move(anchor));
+    // Install BEFORE the page change so an observer that re-enters cannot see a
+    // moved page with a stale anchor, and before next_render_seq() below, which
+    // is what binds it to this batch.
+    set_pending_anchor(std::move(anchor));
+    change_current_page(target);
 
     HWND target_hwnd = hwnd_;
     const std::uint64_t epoch = impl_->view_epoch;
@@ -1353,10 +1565,10 @@ void PdfCanvas::navigate_to_page(int target, PageAnchor anchor) {
         const int left  = dual_page_compute_left(impl_->view->current_page(),
                                                  total);
         if (left != impl_->view->current_page()) {
-            // Carry the pending anchor through: routing the snap with a fresh
-            // Top would overwrite a Hit installed moments earlier when a
-            // search lands on the RIGHT page of a spread.
-            change_current_page(left, impl_->anchor.peek());
+            // A snap, not a navigation: change_current_page never touches the
+            // anchor, so a Hit installed moments earlier -- a search landing on
+            // the RIGHT page of a spread -- survives it untouched.
+            change_current_page(left);
         }
         apply_viewport();
         const int right = dual_page_compute_right(left, total);
@@ -1424,10 +1636,11 @@ float PdfCanvas::pan_y_for_hit(const litepdf::core::SearchSession::Hit& h) const
 
 - [ ] **Step 6: Consume the anchor in the completion handler**
 
-In the completion case, replace the `(void)seq;` line added in Task 3 Step 6 with
-nothing, and replace the left/single branch (`src/ui/PdfCanvas.cpp:580-591` in the
-pre-Task-3 numbering — locate it by the `if (is_right) {` line near the end of the
-case) with:
+Locate the `if (is_right) {` line near the end of the completion case. **Replace from
+that line through the `}` that closes the whole `case` block** — i.e. including the
+`InvalidateRect(...)`, the `return 0;` and the case's closing brace, all four of which
+the replacement text below reproduces. (At `8bf143d` that span is
+`src/ui/PdfCanvas.cpp:580-594`; Task 3 has since moved it, so match on the text.)
 
 ```cpp
             if (is_right) {
@@ -1436,12 +1649,22 @@ case) with:
                 impl_->current_bitmap = std::move(bmp);
                 ColdStartTimer::mark(3);  // first pixmap -> D2D bitmap
             }
-            // Place the page. The LEFT slot is the anchor point, but the pan
-            // is clamped against the UNION of both slots, so a right-slot
-            // delivery has to re-run the placement too -- it can change the
-            // union's height. AnchorSlot::consume clears on the first match,
-            // so the right slot re-clamps without re-applying the anchor.
-            apply_anchor(impl_->anchor.consume(seq));
+            // Place the page. BOTH slots run this: the pan is clamped against
+            // the UNION of the two, so a right-slot delivery changes the height
+            // a Bottom anchor measures against, and either half can land first
+            // (two workers, and an L1 cache hit returns before any MuPDF work).
+            // take() therefore does not retire the anchor -- see
+            // ui/detail/PageAnchor.hpp -- and mark_applied() is called ONLY when
+            // the placement actually happened. A right half arriving while
+            // navigate_to_page has both bitmaps reset cannot measure anything,
+            // and must not retire an intent the left half has yet to use.
+            const PageAnchor anchor = impl_->anchor.take(seq);
+            if (apply_anchor(anchor) && anchor.kind != PageAnchor::Kind::None) {
+                impl_->anchor.mark_applied();
+            }
+            // A completion landed, so a wheel flip that was waiting for one is
+            // no longer in flight (see on_wheel_scroll).
+            impl_->wheel_flip_pending = false;
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         }
@@ -1449,9 +1672,14 @@ case) with:
 
 - [ ] **Step 7: Route `on_key_down` through `navigate_to_page`**
 
-Replace `on_key_down`'s body from `int cur = impl_->view->current_page();`
-(`src/ui/PdfCanvas.cpp:757`) through the closing brace of the `if (changed)` block
-with:
+Replace `on_key_down`'s body from `int cur = impl_->view->current_page();` **through
+the function's own closing brace, inclusive** — that is, the `return 0;` and the final
+`}` after the `if (changed)` block go too, because every `switch` case in the new
+version returns directly and the replacement text below ends with the function's `}`.
+Leaving the old `return 0; }` in place puts a statement at namespace scope and the
+translation unit will not compile. (At `8bf143d` that span is
+`src/ui/PdfCanvas.cpp:757-857`; Tasks 3 and 4 have since moved it, so match on the
+text.)
 
 ```cpp
     const int cur     = impl_->view->current_page();
@@ -1522,7 +1750,7 @@ Expected: clean. Then
 "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe" --test-dir build -C Release
 ```
 
-Expected: **273/273 passed**.
+Expected: **277/277 passed**.
 
 - [ ] **Step 9: Commit**
 
@@ -1536,13 +1764,19 @@ git commit -m "feat(canvas): anchor a page on render completion instead of zeroi
 ## Task 5: route every page-change path through `change_current_page`
 
 **Files:**
-- Modify: `src/ui/MainWindow.cpp:306` (`kick_render`'s dual snap), `:1375`
-  (`IDM_VIEW_DUAL_PAGE`), `:903` (`restore_on_tab_ready`)
-- Modify: `src/ui/PdfCanvas.cpp` — `apply_viewport`'s defensive re-snap (`:220`)
+- Modify: `src/ui/MainWindow.cpp` — `kick_render`'s dual snap, `IDM_VIEW_DUAL_PAGE`,
+  `restore_on_tab_ready`, and the three click-navigation sites
+- Modify: `src/ui/PdfCanvas.cpp` — `apply_viewport`'s defensive re-snap
+
+(Line numbers appear per step, as `8bf143d` hints only — Tasks 3 and 4 have moved
+every one of them. Match on the quoted text.)
 
 **Interfaces:**
-- Consumes: `change_current_page(idx, anchor)` (Task 4).
+- Consumes: `change_current_page(idx)` and `set_pending_anchor(anchor)` (Task 4).
 - Produces: nothing new. This task closes four observer gaps.
+- **Does NOT add `MainWindow::snap_current_page`.** An earlier draft did; with
+  anchor installation kept out of `change_current_page` there is nothing for such a
+  helper to do beyond forwarding one call.
 
 **The four bypasses and what each costs today** (spec §3.3, re-verified at
 `8bf143d`):
@@ -1557,71 +1791,31 @@ git commit -m "feat(canvas): anchor a page on render completion instead of zeroi
 `PdfCanvas.cpp:829-831` (`on_key_down`'s re-snap) was the fifth; Task 4 already
 folded it into `navigate_to_page`.
 
-**The dual snap must not clobber a pending `Hit`.** Routing a snap through
-`change_current_page` with a fresh `Top` would overwrite a `Hit` installed moments
-earlier — a search landing on the RIGHT page of a spread snaps to the left page on
-the way to rendering. Every snap below therefore passes
-`canvas_->pending_anchor()` (a new const accessor) when one is set and `Top` only
-when none is.
+**A snap installs no anchor at all.** Task 4 kept `change_current_page` free of
+anchors precisely so these sites can use it as-is: routing a snap with a fresh `Top`
+would (a) reset the pan on every same-page spread re-render — twelve
+`kick_render(view->current_page())` call sites in `MainWindow.cpp` — and (b) overwrite
+a `Hit` installed moments earlier when a search lands on the RIGHT page of a spread.
+Both fall out for free once installation is explicit, and no `pending_anchor()`
+accessor is needed.
 
-- [ ] **Step 1: Expose the pending anchor**
+- [ ] **Step 1: Route `kick_render`'s dual snap**
 
-Add to the public section of `src/ui/PdfCanvas.hpp`, after `change_current_page`:
-
-```cpp
-    // The anchor waiting for the next completion, or PageAnchor::none().
-    //
-    // Exists for one caller shape: a defensive page SNAP (dual-mode
-    // canonicalisation) is not a navigation and must not replace a navigation
-    // intent that is already pending. Such callers pass this value straight
-    // back into change_current_page when it is set, and Top when it is not.
-    PageAnchor pending_anchor() const;
-```
-
-and the definition in `src/ui/PdfCanvas.cpp`, after `change_current_page`:
+In `kick_render`'s dual branch (added in Task 3 Step 8), replace
+`view->set_current_page(left);` with:
 
 ```cpp
-PageAnchor PdfCanvas::pending_anchor() const {
-    if (!impl_) return PageAnchor::none();
-    return impl_->anchor.peek();
-}
+        // Route through the canvas so the page-change observer fires -- the
+        // thumbnail highlight is wrong in spread mode without it. No anchor:
+        // this runs on EVERY spread render, same-page ones included, and a
+        // snap must leave the reader's scroll position alone.
+        canvas_->change_current_page(left);
 ```
 
-- [ ] **Step 2: Add a snap helper to `MainWindow` and use it in `kick_render`**
+- [ ] **Step 2: Route `IDM_VIEW_DUAL_PAGE`**
 
-Declare in the private section of `src/ui/MainWindow.hpp`, next to `kick_render`:
-
-```cpp
-    // Canonicalise the current page to `page` through the canvas so the
-    // page-change observer (thumbnail highlight, and PR-B's page indicator)
-    // sees it. Preserves a pending navigation anchor: a snap is bookkeeping,
-    // not a navigation, and must not overwrite a search Hit already installed.
-    void snap_current_page(int page);
-```
-
-Define it in `src/ui/MainWindow.cpp`, immediately above `kick_render`:
-
-```cpp
-void MainWindow::snap_current_page(int page) {
-    if (!canvas_) return;
-    const auto pending = canvas_->pending_anchor();
-    canvas_->change_current_page(
-        page,
-        pending.kind == litepdf::ui::PageAnchor::Kind::None
-            ? litepdf::ui::PageAnchor::top()
-            : pending);
-}
-```
-
-In `kick_render`'s dual branch, replace `view->set_current_page(left);` with:
-
-```cpp
-        snap_current_page(left);
-```
-
-- [ ] **Step 3: Route `IDM_VIEW_DUAL_PAGE`**
-
-In `src/ui/MainWindow.cpp:1372-1376`, replace:
+Locate the spread-toggle snap (at `8bf143d`, `src/ui/MainWindow.cpp:1372-1376`) and
+replace:
 
 ```cpp
                     if (v->dual_page()) {
@@ -1637,36 +1831,37 @@ with:
                     if (v->dual_page()) {
                         p = litepdf::ui::dual_page_compute_left(
                                 p, v->page_count());
-                        snap_current_page(p);
+                        canvas_->change_current_page(p);   // snap: no anchor
                     }
 ```
 
-- [ ] **Step 4: Route `restore_on_tab_ready`**
+`canvas_` is null-checked on the line above (`if (canvas_) canvas_->set_dual_page(...)`)
+but not guarded around this statement; add the guard: `if (canvas_)
+canvas_->change_current_page(p);`.
 
-In `src/ui/MainWindow.cpp:903`, replace:
+- [ ] **Step 3: Route `restore_on_tab_ready`**
 
-```cpp
-        v->set_current_page(st.page);
-```
-
-with:
+Locate `v->set_current_page(st.page);` (at `8bf143d`, `src/ui/MainWindow.cpp:903`) and
+replace it with:
 
 ```cpp
         // Route through the canvas so the page-change observer fires: after a
         // session restore the model and the thumbnail highlight otherwise
-        // disagree until the user's first navigation. Top is right here --
-        // a restored tab has no pan to preserve (SessionTab carries page and
-        // zoom, not scroll offset).
-        canvas_->change_current_page(st.page, litepdf::ui::PageAnchor::top());
+        // disagree until the user's first navigation. This one IS a navigation,
+        // so it installs Top -- a restored tab has no pan to preserve
+        // (SessionTab carries path, page and zoom, not a scroll offset).
+        canvas_->change_current_page(st.page);
+        canvas_->set_pending_anchor(litepdf::ui::PageAnchor::top());
 ```
 
-`canvas_` is already dereferenced unconditionally two lines below
-(`GetClientRect(canvas_->hwnd(), &rc)`), so no extra null guard is warranted; the
-enclosing `if (auto* v = active_view())` runs only when a tab exists.
+`canvas_` is dereferenced unconditionally later in the same block
+(`GetClientRect(canvas_->hwnd(), &rc)` in the fit-mode branch), so no extra null guard
+is warranted; the enclosing `if (auto* v = active_view())` runs only when a tab exists.
 
-- [ ] **Step 5: Route `apply_viewport`'s defensive re-snap**
+- [ ] **Step 4: Route `apply_viewport`'s defensive re-snap**
 
-In `src/ui/PdfCanvas.cpp:220`, replace:
+Locate the re-snap in `PdfCanvas::apply_viewport` (at `8bf143d`,
+`src/ui/PdfCanvas.cpp:220`) and replace:
 
 ```cpp
     if (left != impl_->view->current_page()) impl_->view->set_current_page(left);
@@ -1677,10 +1872,38 @@ with:
 ```cpp
     if (left != impl_->view->current_page()) {
         // Route through change_current_page so the observer fires: dual-mode
-        // End otherwise reports the pre-snap page. Carry any pending anchor
-        // through -- a snap is bookkeeping and must not replace a navigation.
-        change_current_page(left, impl_->anchor.peek());
+        // End otherwise reports the pre-snap page. No anchor -- this is a snap,
+        // and change_current_page leaves the pending one untouched, so a Hit
+        // installed by a search landing on the spread's RIGHT page survives.
+        change_current_page(left);
     }
+```
+
+- [ ] **Step 5: Install a Top anchor where a click really navigates**
+
+Three call sites navigate but skip the render when the page did not move, so the
+anchor belongs inside the `if`, not in `change_current_page`. At `8bf143d` they are
+`src/ui/MainWindow.cpp:527-529` (thumbnail pane, toggle path), `:565-567` (outline
+click) and `:649-651` (thumbnail pane, tab-switch rebind path). Each reads:
+
+```cpp
+        if (canvas_ && canvas_->change_current_page(page)) {
+            kick_render(page);
+        }
+```
+
+(the outline one at `:565` has no `canvas_ &&` because `canvas_` is checked earlier in
+that function — leave that difference alone). Add the install to all three:
+
+```cpp
+        if (canvas_ && canvas_->change_current_page(page)) {
+            // A click on a different page is a navigation: land at its top.
+            // Installing here rather than inside change_current_page is what
+            // keeps a click on the page ALREADY showing from stranding a Top
+            // that some later, unrelated re-render would apply.
+            canvas_->set_pending_anchor(litepdf::ui::PageAnchor::top());
+            kick_render(page);
+        }
 ```
 
 - [ ] **Step 6: Build and run the full suite**
@@ -1695,7 +1918,7 @@ then
 "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe" --test-dir build -C Release
 ```
 
-Expected: **273/273 passed**.
+Expected: **277/277 passed**.
 
 - [ ] **Step 7: Verify no bypass remains**
 
@@ -1713,7 +1936,7 @@ internals. If any other hit remains, route it before committing.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/ui/PdfCanvas.hpp src/ui/PdfCanvas.cpp src/ui/MainWindow.hpp src/ui/MainWindow.cpp
+git add src/ui/PdfCanvas.cpp src/ui/MainWindow.cpp
 git commit -m "fix(nav): route every page-change path through the observer fire-point"
 ```
 
@@ -1722,10 +1945,10 @@ git commit -m "fix(nav): route every page-change path through the observer fire-
 ## Task 6: search navigation carries a `Hit` anchor
 
 **Files:**
-- Modify: `src/ui/PdfCanvas.cpp:295-354` (`scroll_into_view`) — extract
-  `pan_y_for_hit`, fix the dual-mode clamp
-- Modify: `src/ui/MainWindow.cpp:1790-1812` (`on_find_next` / `on_find_prev`),
-  `:1975` (`on_results_row_click`)
+- Modify: `src/ui/PdfCanvas.cpp` — `scroll_into_view` (at `8bf143d`, `:295-354`):
+  extract `pan_y_for_hit`, fix the dual-mode clamp, install the Hit conditionally
+- Modify: `src/ui/MainWindow.cpp` — `on_results_row_click` (at `8bf143d`, `:1970-1984`);
+  `on_find_next` / `on_find_prev` (`:1790-1812`) are read-and-confirm only
 
 **Interfaces:**
 - Consumes: `PageAnchor::hit`, `page_origin_y`, `apply_anchor` (Tasks 2 and 4).
@@ -1801,17 +2024,16 @@ Replace `PdfCanvas::scroll_into_view` (`src/ui/PdfCanvas.cpp:295-354`) with:
 void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     if (!impl_ || !impl_->view || !hwnd_) return;
 
-    // Install the Hit anchor unconditionally, page change or not. Two reasons:
-    // the caller's kick_render will land a fresh bitmap whose real height is
-    // what the centring actually needs (the estimate below is computed against
-    // the OUTGOING page), and a hit on the page already showing still has to be
-    // scrolled to.
-    const int target_pg = static_cast<int>(h.page);
-    change_current_page(target_pg, PageAnchor::hit(h));
+    const int  target_pg  = static_cast<int>(h.page);
+    const bool page_moved = change_current_page(target_pg);
 
-    // Best-effort immediate scroll so the view moves before the render lands.
-    // Refined by apply_anchor when the completion arrives.
-    if (!impl_->current_bitmap || !impl_->rt) {
+    if (page_moved || !impl_->current_bitmap || !impl_->rt) {
+        // Either the hit is on a different page, or we have nothing rendered to
+        // measure against. Both mean the incoming pixmap is the only thing that
+        // can place this hit -- the bitmap on screen belongs to the OUTGOING
+        // page, so a scroll computed from it would be exactly the stale estimate
+        // spec 3.4 is about. Anchor it and let the completion do the work.
+        set_pending_anchor(PageAnchor::hit(h));
         InvalidateRect(hwnd_, nullptr, FALSE);
         return;
     }
@@ -1833,17 +2055,31 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     const float q_bot_dip = origin_y + pdf_point_to_dip(q_max_y_pt, pct);
     const float margin    = 24.0f;
     if (q_top_dip >= margin && q_bot_dip <= vp.height - margin) {
+        // Visible on the page already showing: DO NOT anchor. The header
+        // contract is "If already visible, no scroll -- only the invalidate",
+        // and MainWindow kicks a render after every find, so an anchor here
+        // would re-centre the view on each F3 through hits that are all on
+        // screen together.
         InvalidateRect(hwnd_, nullptr, FALSE);
-        return;   // already visible; no scroll
+        return;
     }
 
+    // Same page, off screen: scroll now AND anchor. The anchor is computed from
+    // the same bitmap the completion will replace with an identical one (same
+    // page, same scale), so the two agree; it exists so a render that changes
+    // the page height under us still lands the hit correctly.
+    set_pending_anchor(PageAnchor::hit(h));
     impl_->pan_y = pan_y_for_hit(h);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 ```
 
-Note the removed `impl_->pan_x = 0.0f; impl_->pan_y = 0.0f;` reset on page change:
-the anchor now owns the landing position, and zeroing here would fight it.
+Two removals worth naming. The old `impl_->pan_x = 0.0f; impl_->pan_y = 0.0f;` reset
+on page change is gone — the anchor owns the landing position now, and zeroing here
+would fight it. And the pre-render estimate is no longer computed across a page
+change: measuring the new page's hit against the outgoing page's bitmap is the stale
+estimate that spec §3.4 describes, and with Task 4's "keep the pan" default it would
+persist rather than be washed away.
 
 - [ ] **Step 3: Make `on_results_row_click` pass the Hit explicitly**
 
@@ -1854,19 +2090,27 @@ installed the Hit. Step 2 makes `scroll_into_view` install it unconditionally, s
 the bug is already closed; this step removes the redundant `Top` install that would
 otherwise sit between them for one statement.
 
-Replace `src/ui/MainWindow.cpp:1970-1982` with:
+Replace from the `// Route through PdfCanvas::change_current_page so the T7 page-change`
+comment **through the `}` that closes `on_results_row_click`, inclusive** — the
+replacement text below ends with that brace. (At `8bf143d` the span is
+`src/ui/MainWindow.cpp:1970-1984`; earlier tasks have moved it, so match on the text.)
 
 ```cpp
     // Recompose a Hit for the canvas overlay + scroll. SearchSession::Hit
     // and CrossTabSearch::Hit share the (page, geom) pair; we copy into
     // the canvas-native shape.
     litepdf::core::SearchSession::Hit sh{h.page, h.geom};
-    // scroll_into_view routes through PdfCanvas::change_current_page with a
-    // Hit anchor, so the T7 page-change observer fires for cross-tab search
-    // jumps too and the completion lands the page on the hit rather than at
-    // its top. set_active above already triggered on_tab_switch ->
-    // canvas_->set_view, which fired the observer with the incoming tab's
-    // stored page; scroll_into_view's fire reflects the search-jump target.
+    // scroll_into_view calls change_current_page itself and installs the Hit
+    // anchor, so the T7 page-change observer fires for cross-tab search jumps
+    // too and the completion lands the page on the hit rather than at its top.
+    // set_active above already triggered on_tab_switch -> canvas_->set_view,
+    // which fired the observer with the incoming tab's stored page;
+    // scroll_into_view's fire reflects the search-jump target.
+    //
+    // The explicit change_current_page(h.page) that used to sit here is gone:
+    // it took the old default Top anchor and left scroll_into_view finding the
+    // page already correct, which was exactly the "never installs the Hit"
+    // defect spec 3.4 names.
     canvas_->set_current_hit(sh);
     canvas_->scroll_into_view(sh);
     kick_render(v->current_page());
@@ -1890,7 +2134,7 @@ then
 "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe" --test-dir build -C Release
 ```
 
-Expected: **273/273 passed**. `test_search_session.cpp` and
+Expected: **277/277 passed**. `test_search_session.cpp` and
 `test_cross_tab_search.cpp` exercise the model, not the canvas, so they are
 unaffected — if either moves, the change reached further than intended.
 
@@ -2183,8 +2427,8 @@ then
 "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe" --test-dir build -C Release -R ScrollMath
 ```
 
-Expected: 12 tests, 12 passed. Then the full suite — expected **285/285 passed**
-(273 + 12).
+Expected: 12 tests, 12 passed. Then the full suite — expected **289/289 passed**
+(277 + 12).
 
 - [ ] **Step 5: Commit**
 
@@ -2252,6 +2496,22 @@ In `struct PdfCanvas::Impl`, after the `anchor` member added in Task 4:
     // canvas would either round every fragment up to a full notch or drop it.
     // See ui/detail/ScrollMath.hpp.
     int                           wheel_residual = 0;
+    // True between a wheel-driven page flip and the completion that lands the
+    // new page. Without it, every further notch in that window flips again:
+    // the pan and the bitmap still describe the OLD page, so apply_wheel keeps
+    // reporting "already at the edge" and a brisk scroll walks several pages
+    // without showing any of them. Cleared by the completion handler and by
+    // set_view.
+    bool                          wheel_flip_pending = false;
+```
+
+The completion handler clears it — that line is in Task 4 Step 6's replacement block
+(`impl_->wheel_flip_pending = false;`), so it is already in place by the time this
+task runs. Add the `set_view` clear next to the `impl_->anchor.clear();` line from
+Task 4 Step 4:
+
+```cpp
+    impl_->wheel_flip_pending = false;
 ```
 
 - [ ] **Step 4: Implement `on_wheel_scroll`**
@@ -2261,6 +2521,17 @@ Insert after `PdfCanvas::pan_by` (`src/ui/PdfCanvas.cpp:752`):
 ```cpp
 LRESULT PdfCanvas::on_wheel_scroll(int delta) {
     if (!impl_ || !impl_->view) return 0;
+
+    // A flip is already on its way. Until its pixmap lands, pan_y and the
+    // bitmaps still describe the OUTGOING page, so apply_wheel would keep
+    // saying "at the edge" and every further notch would flip again -- a brisk
+    // scroll would skip several pages without showing any of them. Drop the
+    // notch AND the residual, so a fast spin does not fire the moment the new
+    // page arrives.
+    if (impl_->wheel_flip_pending) {
+        impl_->wheel_residual = 0;
+        return 0;
+    }
 
     const int notches = consume_notches(delta, impl_->wheel_residual);
     if (notches == 0) return 0;   // a fractional notch is never a page flip
@@ -2292,15 +2563,22 @@ LRESULT PdfCanvas::on_wheel_scroll(int delta) {
         target = (r.flip == Flip::Next)
                      ? dual_page_step_next_left(cur_left, total)
                      : dual_page_step_prev_left(cur_left, total);
+        // CANONICALISE before comparing. dual_page_step_next_left clamps an
+        // overshoot to the LAST page, which in an odd-page document is a RIGHT
+        // page whose pair is the spread we are already on: in a 3-page file
+        // step_next_left(1, 3) == 2 while compute_left(2, 3) == 1. Comparing
+        // the raw value would pass the guard below, re-render the same spread,
+        // and throw the reader back to its top.
+        target = dual_page_compute_left(target, total);
     } else {
         target = (r.flip == Flip::Next) ? std::min(cur + 1, max_idx)
                                         : std::max(cur - 1, 0);
     }
-    // At the first or last page the step clamps to where we already are, so
-    // navigate_to_page would still re-render for a Bottom anchor. Bail instead
-    // -- the document has no more pages and the pan is already at the edge.
+    // At the first or last page the step clamps to where we already are. Bail:
+    // the document has no more pages and the pan is already at the edge.
     if (target == cur) return 0;
 
+    impl_->wheel_flip_pending = true;
     navigate_to_page(target, (r.flip == Flip::Next) ? PageAnchor::top()
                                                     : PageAnchor::bottom());
     return 0;
@@ -2344,7 +2622,7 @@ then
 "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe" --test-dir build -C Release
 ```
 
-Expected: **285/285 passed**.
+Expected: **289/289 passed**.
 
 - [ ] **Step 7: Commit**
 
@@ -2471,7 +2749,42 @@ with:
                         view->set_zoom_mode_fit_width();
 ```
 
-- [ ] **Step 5: Confirm the session header default is now correct**
+- [ ] **Step 5: Update the four shipped assertions that encode the PR-A1 default**
+
+Steps 1-2 change behaviour that four existing assertions pin, so they change in this
+same commit. Without this step the suite is **285/289**, not green, and the
+Definition of Done cannot be met.
+
+```bash
+grep -n "FitPage" tests/unit/test_session_state.cpp tests/unit/test_document_view.cpp
+```
+
+Expected before the edit: `test_session_state.cpp:205`, `:225`, `:242` and
+`test_document_view.cpp:37`.
+
+In `tests/unit/test_session_state.cpp`, change all three
+`REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitPage);` to
+`REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitWidth);`, and replace the
+explanatory comment above the first of them (at `8bf143d`, `:200-204`) with:
+
+```cpp
+    // A v1 Custom zoom is a RENDER scale (points -> pixels, DPI folded in) and
+    // means nothing under v2's magnification semantics, so the tab is reset to a
+    // fit mode rather than reinterpreted. The target is FitWidth: the mode
+    // v1.2.0 actually persisted, and this build's default now that the wheel can
+    // reach the overflow. PR-A1 reset to FitPage only because that release had
+    // no wheel scrolling.
+```
+
+In `tests/unit/test_document_view.cpp`, replace `:36-37`:
+
+```cpp
+    // Default zoom mode is FitWidth -- page width fills the canvas, and the
+    // overflow below the fold is reached with the wheel or the arrow keys.
+    REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::FitWidth);
+```
+
+- [ ] **Step 5b: Confirm the session header default is now correct**
 
 ```bash
 grep -n "zoom_mode = SessionZoom" src/core/SessionState.hpp
@@ -2479,7 +2792,9 @@ grep -n "zoom_mode = SessionZoom" src/core/SessionState.hpp
 
 Expected: `SessionZoom zoom_mode = SessionZoom::FitWidth;` at line 22. This
 matches the app default again, so it needs no edit — the PR-A1 handoff flagged it
-only because FitWidth was temporarily not the default. Do not change it.
+only because FitWidth was temporarily not the default. Do not change it. Do check the
+comment block above it (`SessionState.hpp:12-16`), which says migration resets Custom
+zooms "to FitPage"; correct that word to FitWidth.
 
 - [ ] **Step 6: Update the CHANGELOG**
 
@@ -2544,7 +2859,7 @@ then
 "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe" --test-dir build -C Release
 ```
 
-Expected: **285/285 passed**.
+Expected: **289/289 passed**.
 
 The CI benchmark job hard-gates the exe at 19,000,000 bytes absolute. Three
 header-only additions and a handful of methods must not move it meaningfully, but
@@ -2591,7 +2906,7 @@ supplies.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add src/core/DocumentView.cpp src/core/SessionState.cpp src/ui/MainWindow.cpp CHANGELOG.md
+git add src/core/DocumentView.cpp src/core/SessionState.cpp src/core/SessionState.hpp         src/ui/MainWindow.cpp tests/unit/test_session_state.cpp         tests/unit/test_document_view.cpp CHANGELOG.md
 git commit -m "feat(zoom): restore Fit Width as the default now that the wheel can scroll"
 ```
 
@@ -2599,7 +2914,7 @@ git commit -m "feat(zoom): restore Fit Width as the default now that the wheel c
 
 ## Definition of done
 
-- [ ] `ctest --test-dir build -C Release` from the repo root: **285/285 passed**.
+- [ ] `ctest --test-dir build -C Release` from the repo root: **289/289 passed**.
 - [ ] `grep -n "set_current_page" src/ui/MainWindow.cpp src/ui/PdfCanvas.cpp`
       shows no `view->set_current_page` bypass (Task 5 Step 7).
 - [ ] `grep -rn "set_zoom_mode_fit_width" src/` shows at least one call site — the
@@ -2608,6 +2923,15 @@ git commit -m "feat(zoom): restore Fit Width as the default now that the wheel c
       `set_dual_page`, never in the completion handler.
 - [ ] `grep -n "Every view is Fit Page" CHANGELOG.md` returns nothing — PR-A1's
       now-false release note is gone (Task 9 Step 6).
+- [ ] `grep -rn "FitPage" tests/unit/test_session_state.cpp tests/unit/test_document_view.cpp`
+      returns no `REQUIRE` line — all four assertions now expect FitWidth (Task 9 Step 5).
+- [ ] `grep -n "newest_accepted_seq" src/ui/PdfCanvas.cpp` shows it both read by
+      `accept_completion` and written on acceptance — the duplicate-P0 guard is live,
+      not declared-and-unused.
+- [ ] `grep -rn "PdfCanvas::pending_anchor\|snap_current_page\|AnchorSlot::peek" src/`
+      returns nothing — these were in an earlier draft of this plan and the round-1
+      review removed the need for them. If any exists, a task was implemented from a
+      stale copy.
 - [ ] `VERSION` is unchanged at `1.2.0`.
 - [ ] `build/src/Release/litepdf.exe` is under 19,000,000 bytes.
 - [ ] The Task 9 Step 8 GUI checks are done, with item 1 (pan survives a re-render)
@@ -2639,8 +2963,21 @@ State these in the PR description so a reviewer does not report them as misses.
    scrolling would be its own design.
 5. **`navigate_to_page`, `apply_anchor` and `on_wheel_scroll` have no headless
    test** — they live in `PdfCanvas`, which is exe-only. The three pure headers
-   they are built from are covered by 28 new unit tests; what is untested is the
+   they are built from are covered by 32 new unit tests; what is untested is the
    wiring, which is what the Task 9 Step 8 GUI checks exercise.
+6. **In spread mode a `Hit` on the RIGHT page is placed using the LEFT bitmap's
+   vertical origin.** `pan_y_for_hit` reads `current_bitmap`, which is always the
+   left slot, so when the two pages differ in height and only one of them fits its
+   slot the centring is off by the left page's `place_bitmap` offset. Not reachable
+   through the highlight (the overlay is disabled in dual mode, R17), and Task 6
+   still removes the larger `clamp` disagreement it sat next to; fixing the origin
+   properly means plumbing the right slot's placement into the hit math, which
+   belongs with whatever change enables overlays in spread mode.
+7. **The wheel drops notches while a flip is in flight** rather than queueing them.
+   A very fast scroll therefore advances one page per completion rather than one per
+   notch. This is deliberate — the alternative, discovered in review, is that each
+   queued notch re-reads the outgoing page's pan and flips again, walking several
+   pages without drawing any of them.
 
 ## Self-review notes
 
@@ -2658,8 +2995,8 @@ Checked against spec §3 with fresh eyes after writing:
 - §3.6 wheel scrolling → Tasks 7 and 8, including the residual accumulator, the
   `WHEEL_PAGESCROLL` degradation, both flip directions with their landing anchors,
   the fits-entirely case, and the spread stepping. FitWidth restored in Task 9.
-- §5 A2 unit tests → `accept_completion` (Task 1, 8 cases), anchor lifetime
-  (Task 2, 8 cases), `ScrollMath` (Task 7, 12 cases).
+- §5 A2 unit tests → `accept_completion` (Task 1, 10 cases), anchor lifetime
+  (Task 2, 10 cases), `ScrollMath` (Task 7, 12 cases). 32 new cases, 257 → 289.
 - §5 A2 GUI checks → Task 9 Step 8, all six spec items plus the FitWidth default.
 
 Type consistency: `PageAnchor::Kind` is spelled the same in every task;
