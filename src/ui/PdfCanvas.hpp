@@ -31,8 +31,9 @@ namespace litepdf::ui {
 // producing DocumentView has been swapped or destroyed. The identity is
 // captured at submit time and decides whether the completion is still
 // wanted: accept_completion (ui/detail/CompletionMath.hpp) drops a result
-// from a superseded view (issue #35), from a page the user has left, and a
-// right-slot pixmap arriving while the layout is single-page.
+// from a superseded view (issue #35), from a submission a newer batch has
+// superseded, from a page the user has left, and a right-slot pixmap
+// arriving while the layout is single-page.
 // Must match the reservation in MainWindow.cpp (WM_USER + 3).
 inline constexpr UINT WM_USER_RENDER_DONE = WM_USER + 3;
 // (Phase 8 D10) Same payload as WM_USER_RENDER_DONE but the bitmap
@@ -94,10 +95,14 @@ public:
     // thread can drop the pixmap with the correct MuPDF root — even if
     // the producing DocumentView is torn down before the message lands.
     //
-    // Called from the worker thread inside the render callback. Takes
-    // an extra ref on the pixmap via fz_keep_pixmap, clones
-    // worker_ctx, and on any failure (clone OOM, post FALSE) cleans up
-    // both the kept pixmap and the escrow ctx. Returns true iff the
+    // Called from the worker thread inside the render callback, which
+    // hands its shipping ref on the pixmap over to this helper (see
+    // core/RenderEngine.cpp, D2). No extra ref is taken: on success the
+    // UI thread inherits that one ref and drops it through the escrow.
+    // On any failure (clone OOM, meta allocation, post FALSE) this helper
+    // drops the pixmap itself — on worker_ctx if the clone failed, on the
+    // escrow otherwise — and then drops the escrow ctx. Either way the
+    // caller must never drop the pixmap again. Returns true iff the
     // message was successfully posted.
     //
     // Callers: MainWindow::kick_render, resubmit_current_page,
@@ -132,9 +137,10 @@ public:
     // return its new value, which every request in this batch must carry.
     //
     // Call this ONCE per batch, before the request_render* calls — a spread's
-    // two renders share one seq. It also stamps whatever page anchor is
-    // pending (PR-A2 Task 4), which is what carries a navigation intent
-    // forward when a newer submission supersedes an older one.
+    // two renders share one seq. As of this commit the body does nothing else;
+    // PR-A2 Task 4 will additionally make it stamp whatever page anchor is
+    // pending, which is what carries a navigation intent forward when a newer
+    // submission supersedes an older one.
     std::uint64_t next_render_seq();
 
     // When true, on first real-bitmap paint the canvas calls

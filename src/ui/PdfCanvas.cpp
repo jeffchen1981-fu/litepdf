@@ -557,15 +557,19 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 return 0;
             }
 
-            // Is this pixmap still wanted? Three ways it may not be: the view
+            // Is this pixmap still wanted? Four ways it may not be: the view
             // was swapped (issue #35 — a render for the previous tab landing
             // after the switch would otherwise paint over the now-active one),
-            // the user paged away, or a RIGHT-slot pixmap arrived while the
-            // layout is single-page. accept_completion answers all three; see
+            // a NEWER submission has been issued since this one went out (the
+            // duplicate-P0 case: a zoom / resize / DPI change can leave two P0s
+            // for the same page in flight, and the loser must not repaint), the
+            // user paged away, or a RIGHT-slot pixmap arrived while the layout
+            // is single-page. accept_completion answers all four; see
             // ui/detail/CompletionMath.hpp for why the slot is load-bearing.
-            // Drop the pixmap + escrow and bail — do NOT adopt, and do NOT
-            // touch the pending anchor: it belongs to the CURRENT view, and a
-            // stale completion can never consume it anyway (seq match).
+            // Drop the pixmap + escrow and bail — do NOT adopt. Once PR-A2
+            // Task 4 adds the pending page anchor, this path must also leave it
+            // alone: it will belong to the CURRENT view, and a stale completion
+            // can never consume it anyway (the seq would have to match).
             const int cur_page = impl_->view ? impl_->view->current_page() : 0;
             const int total    = impl_->view ? impl_->view->page_count()   : 0;
             // next_seq is the newest submission ISSUED, which is what the seq
