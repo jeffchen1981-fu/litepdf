@@ -197,7 +197,7 @@ TEST_CASE("SessionState v2 migrates a version 1 document",
     REQUIRE(r->window.w == 1280);
     REQUIRE(r->tabs.size() == 1);
     REQUIRE(r->tabs[0].page == 3);
-    // A v1 Custom zoom is a RENDER scale (points -> pixels, DPI folded in) and
+    // A v1 Custom zoom is a RENDER scale (PDF point -> device pixel) and
     // means nothing under v2's magnification semantics, so the tab is reset to a
     // fit mode rather than reinterpreted. The target is FitWidth: the mode
     // v1.2.0 actually persisted, and this build's default now that the wheel can

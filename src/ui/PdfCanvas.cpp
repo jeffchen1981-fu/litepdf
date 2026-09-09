@@ -157,7 +157,7 @@ struct PdfCanvas::Impl {
     // canvas would either round every fragment up to a full notch or drop it.
     // See ui/detail/ScrollMath.hpp.
     int                           wheel_residual = 0;
-    // Non-zero between a wheel-driven page flip and the completion that lands
+    // Non-zero between a wheel-driven page flip and the completion that lands the
     // new page. Without it, every further notch in that window flips again:
     // the pan and the bitmap still describe the OLD page, so apply_wheel keeps
     // reporting "already at the edge" and a brisk scroll walks several pages
@@ -793,7 +793,7 @@ void PdfCanvas::resubmit_current_page() {
         // (Phase 8 D10) Spread mode: D2DERR_RECREATE_TARGET recovery
         // also has to cover the right slot or the right page stays
         // blank until the user pages forward. Same submission shape as
-        // on_key_down's dual branch, and one seq for both halves.
+        // navigate_to_page's dual branch, and one seq for both halves.
         const int cur   = impl_->view->current_page();
         const int total = impl_->view->page_count();
         const int left  = dual_page_compute_left(cur, total);

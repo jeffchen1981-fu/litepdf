@@ -71,10 +71,10 @@ public:
     // and a spread of unequal pages must fit the larger one.
     //
     // The dual-page submission branches call this: MainWindow::kick_render's dual
-    // branch, resubmit_current_page's dual branch, and on_key_down's dual branch.
-    // kick_render's single-page branch also calls it. The single-page branches of
-    // resubmit_current_page and on_key_down do not, as deliberate exceptions:
-    // on_key_down's single branch re-derives the fit by delegation through
+    // branch, resubmit_current_page's dual branch, and navigate_to_page's dual
+    // branch. kick_render's single-page branch also calls it. The single-page
+    // branches of resubmit_current_page and navigate_to_page do not, as deliberate
+    // exceptions: navigate_to_page's single branch re-derives the fit by delegation
     // DocumentView::set_current_page; resubmit_current_page's single branch has no
     // caller that changes the page or the fit mode, and any resize that races a
     // device-loss recovery is corrected by the kick_render in the same WM_SIZE
@@ -108,7 +108,7 @@ public:
     // message was successfully posted.
     //
     // Callers: MainWindow::kick_render, resubmit_current_page,
-    // on_key_down's page-change path, the WM_MOUSEWHEEL zoom path.
+    // navigate_to_page, the WM_MOUSEWHEEL zoom path.
     //
     // IDENTITY (PR-A2). `epoch` is render_epoch() read at submit time — it
     // says which VIEW the render belongs to. `page` says which page, and the
