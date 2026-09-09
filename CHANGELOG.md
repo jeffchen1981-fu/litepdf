@@ -24,10 +24,10 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
   re-fitted every page to the window regardless. Pages also rendered at twice the
   needed resolution on 200% displays.
 - A zoom level you set by hand is reset to Fit Width when `session.json` is upgraded
-  to version 2. Version 1 stored a render scale with the display DPI folded into it,
-  which has no meaning under version 2's magnification, so a hand-set zoom cannot be
-  carried across. Fit Width and Fit Page carry over untouched — they are re-derived
-  from the window on restore.
+  to version 2. Version 1 counted that number in device pixels per PDF point; version
+  2 counts it in device-independent pixels, so on a high-DPI display the same number
+  means a different size and cannot be carried across. Fit Width and Fit Page carry
+  over untouched — they are re-derived from the window on restore.
 - A render result now carries the page, slot and submission it belongs to, so a
   pixmap for a page the reader has already left is dropped instead of painted.
 

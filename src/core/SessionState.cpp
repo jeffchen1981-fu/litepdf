@@ -354,7 +354,7 @@ namespace {
 // src/ for it, and a mention in a comment would make that check unpassable.
 void migrate_v1_to_v2(SessionState& s) {
     // v1 and v2 differ in what zoom_scale MEANS, not in which modes exist: v1
-    // stored a render scale (PDF point -> pixel, DPI folded in), v2 stores a
+    // stored a render scale (PDF point -> device pixel), v2 stores a
     // magnification (1.0 = one point per DIP). A v1 Custom value is therefore
     // uninterpretable and its tab is reset to a fit mode; the fit modes carry
     // over untouched because they are re-derived from the viewport on restore.
