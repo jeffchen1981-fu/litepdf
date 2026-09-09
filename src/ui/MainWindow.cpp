@@ -351,11 +351,13 @@ void MainWindow::navigate_click(int page) {
     const auto canon   = [&](int p) {
         return spread ? litepdf::ui::dual_page_compute_left(p, total) : p;
     };
-    // Computed, and the anchor installed, AFTER change_current_page here --
-    // the opposite of navigate_to_page's install-before-change rule --
-    // because whether to install at all depends on change_current_page's
-    // return value. Safe only while no observer navigates or reads the
-    // pending anchor.
+    // `view_moves` MUST be computed before change_current_page: afterwards
+    // canon(v->current_page()) would equal canon(page), collapsing it to false
+    // on exactly the clicks that do move the view.
+    // The anchor is installed AFTER instead -- the opposite of
+    // navigate_to_page's install-before-change rule -- because whether to
+    // install at all depends on change_current_page's return value. Safe only
+    // while no observer navigates or reads the pending anchor.
     const bool view_moves = canon(page) != canon(v->current_page());
     if (!canvas_->change_current_page(page)) return;
     if (view_moves) {
