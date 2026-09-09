@@ -1000,6 +1000,18 @@ git commit -m "fix(core): split zoom percentage from render scale, apply dpi onc
 
 ## Task 3: Migrate MainWindow call sites and fix dual-mode fit ordering
 
+> **Deviation (2026-09-09):** the session-restore mapping below was originally
+> written to honour a persisted FitWidth. What shipped maps **both** fit modes
+> to FitPage -- the same late-branch change as Task 5's migration target (see
+> Task 7): v1.2.0 could only ever persist `fit_width` (it was that build's
+> default, and its Reset Zoom set it too), so honouring the file would drop
+> nearly every upgrading user's restored tab into a mode this build cannot
+> navigate -- the paint path now draws at natural size and this release ships
+> no wheel scrolling, so the lower two thirds of an A4 page are unreachable.
+> The restore code block in this task is updated below to match what shipped;
+> see `restore_on_tab_ready` in `src/ui/MainWindow.cpp` for the final wording.
+> PR-A2 revisits this once ScrollMath makes FitWidth navigable again.
+
 **Files:**
 - Create: nothing.
 - Modify: `src/ui/PdfCanvas.hpp` (declare `apply_viewport`), `src/ui/PdfCanvas.cpp`
@@ -1201,10 +1213,10 @@ on-disk format and Task 5 handles its changed meaning via the version bump.
                 break;
             case litepdf::core::SessionZoom::FitWidth:
             case litepdf::core::SessionZoom::FitPage: {
-                if (st.zoom_mode == litepdf::core::SessionZoom::FitWidth)
-                    v->set_zoom_mode_fit_width();
-                else
-                    v->set_zoom_mode_fit_page();
+                // BOTH fit modes restore as FitPage in this release -- a
+                // persisted FitWidth is deliberately not honoured. See the
+                // deviation note at the top of this task.
+                v->set_zoom_mode_fit_page();
                 RECT rc; GetClientRect(canvas_->hwnd(), &rc);
                 const UINT dpi = GetDpiForWindow(hwnd_);
                 v->set_viewport(static_cast<float>(rc.right - rc.left),

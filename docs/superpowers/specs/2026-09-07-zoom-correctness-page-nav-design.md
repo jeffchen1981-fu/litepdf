@@ -512,10 +512,12 @@ Catch2, **ASCII `TEST_CASE` names** — non-ASCII names mangle under
   and 192 DPI for a fixed `zoom_pct_` (regression for the reversed-unit error).
 - Dual fit — a spread of unequal pages (595×842 and 1200×2000) produces one scale
   that fits both inside a slot.
-- Session — a v1 fixture with a Custom zoom restores as v2/FitWidth with tabs and
-  window placement intact; a versionless document is migrated as v1, not accepted as
-  v2; `session.v1.bak` is byte-identical to the original before the first v2 write;
-  an induced backup failure leaves `session.json` at v1.
+- Session — a v1 fixture with a Custom zoom restores as v2/**FitPage** (not FitWidth:
+  see the 2026-09-09 deviation note in §2.5 for why what shipped differs from the
+  design intent stated there) with tabs and window placement intact; a versionless
+  document is migrated as v1, not accepted as v2; `session.v1.bak` is byte-identical
+  to the original before the first v2 write; an induced backup failure leaves
+  `session.json` at v1.
 
 **A2 unit tests**
 
