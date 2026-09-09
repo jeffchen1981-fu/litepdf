@@ -213,10 +213,11 @@ public:
     // Callers that navigate install an anchor; callers that canonicalise do not.
     //
     // The anchor is bound to a submission by the next next_render_seq() call,
-    // so install it BEFORE kicking the render. Installing without ever
-    // submitting is harmless: the anchor sits unbound until some later batch
-    // stamps it, and the seq test keeps it from being applied by anything else
-    // in the meantime.
+    // so install it BEFORE kicking the render. install() does not disturb the
+    // slot's already-stamped seq, so an anchor installed without a following
+    // submission binds to whatever batch is already in flight and is applied
+    // when that batch completes. Callers must only install on a path that
+    // goes on to submit.
     void set_pending_anchor(PageAnchor anchor);
 
     // Scroll / page-change such that `h`'s quad is visible with a 24 DIP
@@ -241,8 +242,8 @@ private:
 
     // Change page, install `anchor`, drop stale bitmaps and submit the render
     // batch. The single funnel for every in-canvas navigation: PgUp / PgDn /
-    // Home / End and the wheel's edge flips. No-op when the page does not move
-    // AND the anchor is Top (nothing to re-render, nothing to re-anchor).
+    // Home / End and the wheel's edge flips. No-op when the page does not
+    // move, regardless of anchor (nothing to re-render, nothing to re-anchor).
     void navigate_to_page(int target, PageAnchor anchor);
 
     // Put the page already on screen at its top. Home and End use this when the
