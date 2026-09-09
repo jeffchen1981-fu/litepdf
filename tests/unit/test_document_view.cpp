@@ -1,17 +1,18 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-#include <algorithm>
-#include <limits>
 #include <utility>
 
 #include "app/SearchDispatcher.hpp"
 #include "core/Document.hpp"
 #include "core/DocumentView.hpp"
+#include "ui/detail/ViewportMath.hpp"
 
 using litepdf::app::InlineDispatcher;
 using litepdf::core::Document;
 using litepdf::core::DocumentView;
+using litepdf::ui::bitmap_px_to_dip;
+using litepdf::ui::pdf_point_to_dip;
 
 namespace {
 
@@ -32,7 +33,8 @@ TEST_CASE("DocumentView constructs from opened Document", "[core][view][ctor]") 
     DocumentView view(open_simple(), disp);
     REQUIRE(view.page_count() > 0);
     REQUIRE(view.current_page() == 0);
-    REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::FitWidth);
+    // PR-A1 ships FitPage; PR-A2 restores FitWidth once wheel scrolling exists.
+    REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::FitPage);
     REQUIRE(view.ui_ctx() != nullptr);
     // source_path should round-trip through the move.
     REQUIRE(view.source_path().filename() == "simple.pdf");
@@ -71,91 +73,187 @@ TEST_CASE("DocumentView::set_current_page clamps and signals change",
     }
 }
 
-TEST_CASE("DocumentView FitWidth scale derivation at 96 DPI",
+TEST_CASE("DocumentView FitWidth derives a percentage from viewport pixels",
           "[core][view][zoom]") {
     InlineDispatcher disp;
     DocumentView view(open_simple(), disp);
-    // simple.pdf page 0 is ~595.2 x 842.0 pt (A4).
-    // FitWidth at 1190.4 DIP × 800 DIP × 96 DPI:
-    //   phys_px_w = 1190.4 * (96/96) = 1190.4
-    //   scale     = 1190.4 / 595.2 = 2.0
-    view.set_zoom_mode(DocumentView::ZoomMode::FitWidth,
-                       1190.4f, 800.0f, 96.0f);
-    REQUIRE(view.zoom_scale() == Catch::Approx(2.0f).epsilon(0.001));
+    view.set_zoom_mode_fit_width();
+    // 1190.44 px / 595.22 pt = exactly 2.0 at 96 dpi.
+    view.set_viewport(1190.44f, 800.0f, 96.0f);
     REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::FitWidth);
+    REQUIRE(view.zoom_pct()     == Catch::Approx(2.0f).epsilon(0.001));
+    REQUIRE(view.render_scale() == Catch::Approx(2.0f).epsilon(0.001));
 }
 
-TEST_CASE("DocumentView FitPage scale derivation at 96 DPI",
+TEST_CASE("DocumentView render scale carries the dpi factor",
           "[core][view][zoom]") {
     InlineDispatcher disp;
     DocumentView view(open_simple(), disp);
-    // FitPage at 595.2 × 421.0 DIP × 96 DPI on 595.2×842 page:
-    //   fit_w = 595.2/595.2 = 1.0
-    //   fit_h = 421.0/842.0 = 0.5
-    //   min   = 0.5
-    view.set_zoom_mode(DocumentView::ZoomMode::FitPage,
-                       595.2f, 421.0f, 96.0f);
-    REQUIRE(view.zoom_scale() == Catch::Approx(0.5f).epsilon(0.001));
-    REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::FitPage);
+    view.set_zoom_mode_fit_width();
+    // The same physical viewport at 192 dpi: each DIP is two device pixels, so
+    // the percentage halves while the render scale -- and the pixmap width in
+    // pixels -- is unchanged.
+    view.set_viewport(1190.44f, 800.0f, 192.0f);
+    REQUIRE(view.zoom_pct()     == Catch::Approx(1.0f).epsilon(0.001));
+    REQUIRE(view.render_scale() == Catch::Approx(2.0f).epsilon(0.001));
 }
 
-TEST_CASE("DocumentView FitPage scale uses the more restrictive dimension",
+TEST_CASE("DocumentView FitPage recomputes from the stored viewport",
           "[core][view][zoom]") {
     InlineDispatcher disp;
     DocumentView view(open_simple(), disp);
-    // simple.pdf is 595.2 x 842.0 pt.
-    // Viewport is wide + short — width would allow 2x, but height only allows ~0.95x.
-    // Expected: FitPage picks min(fit_w, fit_h) = ~0.95x.
-    view.set_zoom_mode(DocumentView::ZoomMode::FitPage,
-                       /*vp_w*/ 1190.4f, /*vp_h*/ 800.0f, /*dpi*/ 96.0f);
-    const float expected_fit_w = 1190.4f * (96.0f/96.0f) / 595.2f;  // = 2.0
-    const float expected_fit_h = 800.0f  * (96.0f/96.0f) / 842.0f;  // ~0.95
-    const float expected       = std::min(expected_fit_w, expected_fit_h);
-    REQUIRE(view.zoom_scale() == Catch::Approx(expected).epsilon(0.001));
-    // Sanity: FitPage < FitWidth in this case.
-    REQUIRE(view.zoom_scale() < 1.0f);
+    view.set_zoom_mode_fit_width();
+    view.set_viewport(1190.44f, 842.0f, 96.0f);
+    REQUIRE(view.zoom_pct() == Catch::Approx(2.0f).epsilon(0.001));
+    // Same viewport, fit-page: height binds at exactly 1.0.
+    view.set_zoom_mode_fit_page();
+    REQUIRE(view.zoom_pct() == Catch::Approx(1.0f).epsilon(0.001));
 }
 
-TEST_CASE("DocumentView zoom_in/out cycles presets and bounds correctly",
+// Spec S5 regression: pdf_point_to_dip(pt, zoom_pct()) -- the overlay path --
+// must agree with bitmap_px_to_dip(pt * render_scale(), dpi) -- the pixmap
+// path -- at every dpi, for a fixed zoom_pct_. This is the identity the whole
+// overlay path rests on, and it is the reversed-unit error's regression test:
+// exercised through a real DocumentView (not just the pure ViewportMath /
+// ZoomMath functions) so it also pins DocumentView::render_scale() itself.
+TEST_CASE("DocumentView quad mapping to dip is dpi invariant",
           "[core][view][zoom]") {
     InlineDispatcher disp;
     DocumentView view(open_simple(), disp);
+    // Custom, set explicitly -- not the constructor default -- so zoom_pct_
+    // stays fixed across the viewport/dpi changes below instead of being
+    // re-derived by a fit mode.
+    view.set_zoom_pct(1.5f);
+    REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::Custom);
 
-    // Ramp up to the top preset.
+    const float pt = 100.0f;  // an arbitrary PDF-point coordinate
+    for (const float dpi : {96.0f, 144.0f, 192.0f}) {
+        // Custom freezes zoom_pct_ but set_viewport still stores the new dpi,
+        // which render_scale() depends on.
+        view.set_viewport(800.0f, 600.0f, dpi);
+        REQUIRE(view.zoom_pct() == Catch::Approx(1.5f));
+
+        const float via_overlay = pdf_point_to_dip(pt, view.zoom_pct());
+        const float via_pixmap  = bitmap_px_to_dip(pt * view.render_scale(), dpi);
+        REQUIRE(via_overlay == Catch::Approx(via_pixmap));
+    }
+}
+
+TEST_CASE("DocumentView zoom ladder walks the extended preset table",
+          "[core][view][zoom]") {
+    InlineDispatcher disp;
+    DocumentView view(open_simple(), disp);
+    view.set_zoom_pct(1.0f);
     int up_steps = 0;
     while (view.zoom_in()) {
         ++up_steps;
-        REQUIRE(up_steps < 32);  // guard against runaway
+        REQUIRE(up_steps < 32);
     }
-    REQUIRE(view.zoom_scale() == Catch::Approx(4.0f));
+    REQUIRE(view.zoom_pct() == Catch::Approx(8.0f));
     REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::Custom);
-    REQUIRE_FALSE(view.zoom_in());  // already at max
+    REQUIRE_FALSE(view.zoom_in());
 
-    // Ramp back down.
     int down_steps = 0;
     while (view.zoom_out()) {
         ++down_steps;
         REQUIRE(down_steps < 32);
     }
-    REQUIRE(view.zoom_scale() == Catch::Approx(0.5f));
-    REQUIRE_FALSE(view.zoom_out());  // already at min
+    REQUIRE(view.zoom_pct() == Catch::Approx(0.25f));
+    REQUIRE_FALSE(view.zoom_out());
 }
 
-TEST_CASE("set_zoom_scale sets Custom mode and clamps to preset span", "[core][view][zoom]") {
+TEST_CASE("DocumentView zoom in works above the old preset ceiling",
+          "[core][view][zoom]") {
     InlineDispatcher disp;
     DocumentView view(open_simple(), disp);
-    REQUIRE(view.zoom_mode() != DocumentView::ZoomMode::Custom);  // precondition: starts non-Custom
-    view.set_zoom_scale(1.75f);
+    view.set_zoom_mode_fit_width();
+    // A wide canvas against a narrow page derives a percentage above 4.0
+    // (3000 / 595.22 = 5.04) -- exactly the state in which the shipped
+    // zoom_in() could never find a larger rung and silently did nothing.
+    view.set_viewport(3000.0f, 900.0f, 96.0f);
+    REQUIRE(view.zoom_pct() > 4.0f);
+    REQUIRE(view.zoom_in());
+    REQUIRE(view.zoom_pct() == Catch::Approx(6.0f));
+}
+
+TEST_CASE("DocumentView set_zoom_pct clamps to the extended span",
+          "[core][view][zoom]") {
+    InlineDispatcher disp;
+    DocumentView view(open_simple(), disp);
+    view.set_zoom_pct(99.0f);  REQUIRE(view.zoom_pct() == Catch::Approx(8.0f));
+    view.set_zoom_pct(0.01f);  REQUIRE(view.zoom_pct() == Catch::Approx(0.25f));
+    view.set_zoom_pct(0.25f);  REQUIRE(view.zoom_pct() == Catch::Approx(0.25f));
+    view.set_zoom_pct(8.0f);   REQUIRE(view.zoom_pct() == Catch::Approx(8.0f));
+}
+
+// This pins the two lines that make zoom STICK, which is the whole point of
+// PR-A1: set_zoom_pct's `zm = Custom` assignment, and set_viewport's early
+// return while the mode is Custom. Without the early return, the very next
+// set_viewport -- kick_render calls one through apply_viewport on every render,
+// resize and DPI change -- would re-derive the fit percentage and silently
+// throw the user's zoom away, which is exactly the defect this PR exists to
+// fix. Both lines were previously uncovered: deleting either left the suite
+// green.
+TEST_CASE("DocumentView Custom zoom survives a later set_viewport",
+          "[core][view][zoom]") {
+    InlineDispatcher disp;
+    DocumentView view(open_simple(), disp);
+    // Start from a fit mode with a known viewport, so the assertion below
+    // cannot pass by the fit happening to agree with the custom value.
+    view.set_zoom_mode_fit_width();
+    view.set_viewport(1190.44f, 800.0f, 96.0f);
+    REQUIRE(view.zoom_pct() == Catch::Approx(2.0f).epsilon(0.001));
+
+    view.set_zoom_pct(3.0f);
     REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::Custom);
-    REQUIRE(view.zoom_scale() == Catch::Approx(1.75f));
+    REQUIRE(view.zoom_pct() == Catch::Approx(3.0f));
 
-    view.set_zoom_scale(99.0f);                 // above preset max
-    REQUIRE(view.zoom_scale() == Catch::Approx(4.0f));
-    view.set_zoom_scale(0.01f);                 // below preset min
-    REQUIRE(view.zoom_scale() == Catch::Approx(0.5f));
+    // A different viewport: the fit would be 1.0 here (595.22 px / 595.22 pt),
+    // so a re-derivation is unmissable.
+    view.set_viewport(595.22f, 400.0f, 96.0f);
+    REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::Custom);
+    REQUIRE(view.zoom_pct() == Catch::Approx(3.0f));
 
-    view.set_zoom_scale(0.5f);  REQUIRE(view.zoom_scale() == Catch::Approx(0.5f));  // exact lower bound
-    view.set_zoom_scale(4.0f);  REQUIRE(view.zoom_scale() == Catch::Approx(4.0f));  // exact upper bound
-    view.set_zoom_scale(std::numeric_limits<float>::quiet_NaN());                    // NaN-safe guard
-    REQUIRE(view.zoom_scale() == Catch::Approx(0.5f));
+    // The viewport IS stored even while frozen -- leaving Custom must fit the
+    // dimensions just handed in, not the stale ones from before the zoom.
+    view.set_zoom_mode_fit_width();
+    REQUIRE(view.zoom_pct() == Catch::Approx(1.0f).epsilon(0.001));
+}
+
+TEST_CASE("DocumentView set_viewport fits the larger page of a spread pair",
+          "[core][view][zoom]") {
+    // spread-unequal.pdf: page 0 is 420x595, page 1 is 595x842. This is the
+    // test that fails if set_viewport ignores pair_page -- the ZoomMath case
+    // computes max() in the test body and so cannot detect that.
+    Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/spread-unequal.pdf").has_value());
+    InlineDispatcher disp;
+    DocumentView view(std::move(doc), disp);
+    view.set_zoom_mode_fit_page();
+
+    const float slot_px = 600.0f, slot_h_px = 900.0f;
+
+    // Without the pair: derived from page 0 (420x595) alone.
+    // min(600/420, 900/595) = 1.42857. At that scale page 1 (595x842) is
+    // 850 x 1203 -- overflowing its slot on BOTH axes. Compare width against
+    // slot width and height against slot height; crossing them silently
+    // asserts nothing.
+    view.set_viewport(slot_px, slot_h_px, 96.0f);
+    const float solo = view.zoom_pct();
+    REQUIRE(solo == Catch::Approx(1.42857f).epsilon(0.001));
+    REQUIRE(595.0f * solo > slot_px);        // page 1 too wide for its slot
+    REQUIRE(842.0f * solo > slot_h_px);      // and too tall
+
+    // With the pair: derived from max(420,595) x max(595,842).
+    view.set_viewport(slot_px, slot_h_px, 96.0f, /*pair_page=*/1);
+    const float paired = view.zoom_pct();
+    REQUIRE(paired < solo);
+    REQUIRE(420.0f * paired <= Catch::Approx(slot_px));     // page 0 width
+    REQUIRE(595.0f * paired <= Catch::Approx(slot_h_px));   // page 0 height
+    REQUIRE(595.0f * paired <= Catch::Approx(slot_px));     // page 1 width
+    REQUIRE(842.0f * paired <= Catch::Approx(slot_h_px));   // page 1 height
+
+    // An out-of-range pair index is ignored, not clamped into a wrong page.
+    view.set_viewport(slot_px, slot_h_px, 96.0f, /*pair_page=*/99);
+    REQUIRE(view.zoom_pct() == Catch::Approx(solo));
 }

@@ -77,6 +77,52 @@ std::wstring format_mru_label(std::size_t i, const std::wstring& full_path) {
         : std::wstring(L"1&0 ");
     return prefix + fname;
 }
+
+// save_session fails CLOSED when it cannot tell whether the file it is about to
+// replace holds a recoverable v1 session. Both call sites are fire-and-forget,
+// so without this the refusal is invisible: a transient share-mode lock
+// (antivirus, a backup agent, a sync client) silently drops one debounced save,
+// and an occupied session.v1.bak that copy_file cannot overwrite drops every
+// save from then on, permanently, with no signal anywhere. Leave a breadcrumb
+// for whoever debugs "my tabs stopped coming back".
+//
+// Deliberately NOT a MessageBox: the save is debounced and the condition is
+// usually sticky, so a modal here would fire repeatedly and be worse than the
+// silence. OutputDebugStringW is the channel this project already uses for
+// diagnostics (see ColdStartTimer). Latched to ONE emission per process for the
+// same reason -- a stuck condition must not flood the debugger. The latch is a
+// plain bool because every caller is on the UI thread, inside the wndproc.
+//
+// "Refused", not "failed": declining to destroy the user's only recoverable
+// copy is the guard working as designed, and the message should not send a
+// reader hunting for a bug in the writer.
+// Returns whether the save actually landed. The one-shot latch above only
+// controls the DIAGNOSTIC; the return value is per-call, so a caller that owns
+// the abnormal-exit marker can react to every refusal, not just the first one
+// (see on_clean_exit).
+bool save_session_or_report(const std::filesystem::path& file,
+                            const litepdf::core::SessionState& s) {
+    if (litepdf::core::save_session(file, s)) return true;
+    static bool reported = false;
+    if (reported) return false;
+    reported = true;
+    // save_session returns false from five sites and this is the only signal
+    // any of them ever produces, so the message must not guess which one
+    // fired. Name the file and the one extra breadcrumb that is cheap to
+    // compute: the .v1.bak path, since an occupied backup is the STICKY
+    // failure mode (it repeats on every save, unlike a transient lock or a
+    // full disk) and therefore the most likely one a developer is chasing.
+    std::filesystem::path bak = file;
+    bak.replace_extension(L".v1.bak");
+    std::wstring msg =
+        L"LitePDF: session save REFUSED for ";
+    msg += file.wstring();
+    msg += L" (tabs will not persist until this clears). If ";
+    msg += bak.wstring();
+    msg += L" exists and cannot be overwritten, that is the likely sticky cause.\n";
+    OutputDebugStringW(msg.c_str());
+    return false;
+}
 }  // namespace
 
 namespace litepdf::ui {
@@ -246,30 +292,22 @@ void MainWindow::kick_render(int page) {
     auto* view = active_view();
     if (!view || !canvas_) return;
 
-    RECT rc;
-    GetClientRect(canvas_->hwnd(), &rc);
-    UINT dpi = GetDpiForWindow(hwnd_);
-    view->set_zoom_mode(view->zoom_mode(),
-        static_cast<float>(rc.right - rc.left),
-        static_cast<float>(rc.bottom - rc.top),
-        static_cast<float>(dpi));
-
-    HWND target = canvas_->hwnd();
-    // Stamp every render with the canvas epoch at submit time so a result
-    // that lands after a tab switch (e.g. the last-restored tab's render
-    // arriving after restore_finish re-activates the saved tab) is dropped
-    // by the canvas instead of painted over the now-active tab (issue #35).
-    const std::uint64_t epoch = canvas_->render_epoch();
     if (view->dual_page()) {
         // (Phase 8 D10) Spread layout: snap to the LEFT page of the
         // pair containing `page` (cover-rule + odd-tail handled by the
         // helper) and submit two render requests.
-        const int left  = litepdf::ui::dual_page_compute_left(
-                              page, view->page_count());
-        const int right = litepdf::ui::dual_page_compute_right(
-                              left, view->page_count());
+        //
+        // Canonicalize the pair FIRST: the fit is derived from current_page, so
+        // deriving it before the snap fits the wrong page.
+        const int total = view->page_count();
+        const int left  = litepdf::ui::dual_page_compute_left(page, total);
+        const int right = litepdf::ui::dual_page_compute_right(left, total);
         view->cancel_stale_renders(0);
         view->set_current_page(left);
+        canvas_->apply_viewport();
+
+        HWND target = canvas_->hwnd();
+        const std::uint64_t epoch = canvas_->render_epoch();
         view->request_render(left,
             [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
                 PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
@@ -283,6 +321,15 @@ void MainWindow::kick_render(int page) {
         InvalidateRect(canvas_->hwnd(), nullptr, FALSE);
         return;
     }
+
+    canvas_->apply_viewport();
+
+    HWND target = canvas_->hwnd();
+    // Stamp every render with the canvas epoch at submit time so a result
+    // that lands after a tab switch (e.g. the last-restored tab's render
+    // arriving after restore_finish re-activates the saved tab) is dropped
+    // by the canvas instead of painted over the now-active tab (issue #35).
+    const std::uint64_t epoch = canvas_->render_epoch();
     view->request_render_with_prefetch(page,
         [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
             PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
@@ -620,9 +667,8 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
     if (incoming && canvas_) {
         // Re-seed zoom for the current viewport then kick render.
         RECT rc; GetClientRect(canvas_->hwnd(), &rc);
-        UINT dpi = GetDpiForWindow(hwnd_);
-        incoming->view->set_zoom_mode(
-            incoming->view->zoom_mode(),
+        const UINT dpi = GetDpiForWindow(hwnd_);
+        incoming->view->set_viewport(
             static_cast<float>(rc.right - rc.left),
             static_cast<float>(rc.bottom - rc.top),
             static_cast<float>(dpi));
@@ -711,7 +757,7 @@ litepdf::core::SessionState MainWindow::capture_session() const {
                 case litepdf::core::DocumentView::ZoomMode::Custom:
                     st.zoom_mode = litepdf::core::SessionZoom::Custom;   break;
             }
-            st.zoom_scale = v->zoom_scale();
+            st.zoom_scale = v->zoom_pct();
         }
         s.tabs.push_back(std::move(st));
     }
@@ -732,11 +778,32 @@ void MainWindow::on_clean_exit() {
     // they permanently lose the unrestored remainder of the crash session.
     // Leaving both intact means the next launch re-offers the FULL session.
     if (restoring_) return;
+    // The same coupling, second case: a REFUSED save must not clear the marker
+    // either. save_session fails closed — an Unknown v1 probe, or a
+    // session.v1.bak copy it cannot make — and when it refuses, session.json
+    // keeps its OLDER contents. Clearing the marker on top of that would tell
+    // the next launch the exit was clean, so it would never offer restore and
+    // the stale-but-readable file would go unused: every tab and page change
+    // since the last SUCCESSFUL save silently gone. Leaving the marker set
+    // instead offers restore from that stale file — the user gets their older
+    // tabs back rather than nothing, which is the same trade the restoring_
+    // comment above already makes.
+    //
+    // The cost, stated so a maintainer does not have to rediscover it: when
+    // the refusal is the sticky kind (an occupied session.v1.bak), EVERY
+    // subsequent exit leaves the marker set, so the user is offered restore on
+    // every launch until the condition clears. That is noisy, and it is still
+    // the right trade against silently losing their state.
+    //
+    // run_guard_ is null exactly when app_data_dir_ is empty (main.cpp
+    // constructs it only under a resolved data dir), so the
+    // persistence-disabled build path has no marker to strand.
+    bool saved = false;
     if (!app_data_dir_.empty()) {
-        litepdf::core::save_session(
+        saved = save_session_or_report(
             litepdf::app::session_file_under(app_data_dir_), capture_session());
     }
-    if (run_guard_) run_guard_->mark_clean_exit();  // idempotent
+    if (saved && run_guard_) run_guard_->mark_clean_exit();  // idempotent
 }
 
 // ------------- Phase 12 Task 9: sequential restore orchestrator ------------
@@ -836,19 +903,27 @@ void MainWindow::restore_on_tab_ready(const std::filesystem::path& opened) {
         v->set_current_page(st.page);
         switch (st.zoom_mode) {
             case litepdf::core::SessionZoom::Custom:
-                v->set_zoom_scale(st.zoom_scale);  // no viewport needed (Task 5)
+                v->set_zoom_pct(st.zoom_scale);   // no viewport needed
                 break;
             case litepdf::core::SessionZoom::FitWidth:
             case litepdf::core::SessionZoom::FitPage: {
+                // BOTH fit modes restore as FitPage in this release -- a
+                // persisted FitWidth is deliberately not honoured. The default
+                // alone does not cover upgrading users: v1.2.0 could only ever
+                // persist fit_width (it was that build's default, and its Reset
+                // Zoom set it too), so honouring the file would drop nearly
+                // every restored tab into a mode this build cannot navigate.
+                // The paint path now draws at natural size and there is no
+                // wheel scrolling, so the lower two thirds of an A4 page are
+                // simply unreachable. Same reasoning, and the same PR-A2
+                // restore point, as DocumentView.cpp (Impl::zm) and
+                // SessionState.cpp's migrate_v1_to_v2.
+                v->set_zoom_mode_fit_page();
                 RECT rc; GetClientRect(canvas_->hwnd(), &rc);
                 const UINT dpi = GetDpiForWindow(hwnd_);
-                v->set_zoom_mode(
-                    st.zoom_mode == litepdf::core::SessionZoom::FitWidth
-                        ? litepdf::core::DocumentView::ZoomMode::FitWidth
-                        : litepdf::core::DocumentView::ZoomMode::FitPage,
-                    static_cast<float>(rc.right - rc.left),
-                    static_cast<float>(rc.bottom - rc.top),
-                    static_cast<float>(dpi));
+                v->set_viewport(static_cast<float>(rc.right - rc.left),
+                                static_cast<float>(rc.bottom - rc.top),
+                                static_cast<float>(dpi));
                 break;
             }
         }
@@ -1382,13 +1457,12 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     return 0;
                 case IDM_ZOOM_RESET: {
                     if (auto* view = active_view(); view && canvas_) {
+                        view->set_zoom_mode_fit_page();
                         RECT rc; GetClientRect(canvas_->hwnd(), &rc);
                         UINT dpi = GetDpiForWindow(hwnd);
-                        view->set_zoom_mode(
-                            litepdf::core::DocumentView::ZoomMode::FitWidth,
-                            static_cast<float>(rc.right - rc.left),
-                            static_cast<float>(rc.bottom - rc.top),
-                            static_cast<float>(dpi));
+                        view->set_viewport(static_cast<float>(rc.right - rc.left),
+                                           static_cast<float>(rc.bottom - rc.top),
+                                           static_cast<float>(dpi));
                         kick_render(view->current_page());
                         schedule_session_save();  // Phase 12: zoom mode changed
                     }
@@ -1636,9 +1710,14 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 // firing mid-restore can't overwrite session.json with a
                 // partial capture.
                 if (restoring_ || app_data_dir_.empty()) return 0;
-                litepdf::core::save_session(
+                // Result deliberately discarded: this is the mid-session
+                // debounce, which owns no run marker — on_clean_exit is the
+                // only caller whose next step depends on the save landing.
+                // A refusal here is already latched into the diagnostic, and
+                // the next debounce (or the exit save) retries anyway.
+                static_cast<void>(save_session_or_report(
                     litepdf::app::session_file_under(app_data_dir_),
-                    capture_session());
+                    capture_session()));
             }
             return 0;
         case WM_QUERYENDSESSION:

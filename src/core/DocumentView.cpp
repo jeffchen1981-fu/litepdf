@@ -10,6 +10,7 @@
 #include "core/SearchSession.hpp"
 #include "core/ThumbCache.hpp"
 #include "core/ThumbnailRenderer.hpp"
+#include "core/detail/ZoomMath.hpp"
 #include "ui/ThumbnailPane.hpp"
 
 // DocumentView is MuPDF-aware only to the extent of holding an
@@ -45,18 +46,17 @@ struct DocumentView::Impl {
     std::unique_ptr<RenderEngine> engine;
 
     int                    current_page = 0;
-    DocumentView::ZoomMode zm           = DocumentView::ZoomMode::FitWidth;
-    float                  scale        = 1.0f;
-    float                  vp_w         = 0.0f;
-    float                  vp_h         = 0.0f;
+    // PR-A1 ships FitPage so the default view still shows a whole page: with
+    // the paint path now drawing at natural size, FitWidth overflows the
+    // viewport vertically and this PR has no wheel scrolling to navigate it.
+    // PR-A2 restores FitWidth when ScrollMath lands.
+    DocumentView::ZoomMode zm           = DocumentView::ZoomMode::FitPage;
+    float                  pct          = 1.0f;   // was: scale (a render scale)
+    float                  vp_w         = 0.0f;   // device pixels
+    float                  vp_h         = 0.0f;   // device pixels
     float                  dpi          = 96.0f;
     bool                   invert_colors = false;  // Phase 8 D7/D9
     bool                   dual_page     = false;  // Phase 8 D10
-
-    // Preset custom zoom levels.
-    static constexpr float kPresets[] = {
-        0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 3.0f, 4.0f,
-    };
 
     // Declared LAST so it destructs FIRST — see order contract above.
     // The SearchSession holds non-owning refs to `doc` and to the
@@ -186,9 +186,9 @@ bool DocumentView::set_current_page(int idx) {
     const int clamped = std::clamp(idx, 0, max_idx);
     if (clamped == impl_->current_page) return false;
     impl_->current_page = clamped;
-    // Recompute scale if not Custom (page size may differ per page).
+    // Recompute the percentage if not Custom (page size may differ per page).
     if (impl_->zm != ZoomMode::Custom) {
-        set_zoom_mode(impl_->zm, impl_->vp_w, impl_->vp_h, impl_->dpi);
+        set_viewport(impl_->vp_w, impl_->vp_h, impl_->dpi);
     }
     return true;
 }
@@ -197,86 +197,68 @@ DocumentView::ZoomMode DocumentView::zoom_mode() const noexcept {
     return impl_->zm;
 }
 
-float DocumentView::zoom_scale() const noexcept {
-    return impl_->scale;
+float DocumentView::zoom_pct() const noexcept {
+    return impl_->pct;
 }
 
-void DocumentView::set_zoom_mode(ZoomMode mode,
-                                 float viewport_w_dip,
-                                 float viewport_h_dip,
-                                 float dpi) {
-    impl_->zm  = mode;
-    impl_->vp_w = viewport_w_dip;
-    impl_->vp_h = viewport_h_dip;
+float DocumentView::render_scale() const noexcept {
+    return impl_->pct * (impl_->dpi / 96.0f);
+}
+
+void DocumentView::set_viewport(float viewport_w_px, float viewport_h_px,
+                                float dpi, int pair_page) {
+    impl_->vp_w = viewport_w_px;
+    impl_->vp_h = viewport_h_px;
     impl_->dpi  = dpi;
 
-    if (page_count() <= 0) {
-        impl_->scale = 1.0f;
-        return;
+    if (page_count() <= 0) { impl_->pct = 1.0f; return; }
+    if (impl_->zm == ZoomMode::Custom) return;   // frozen; viewport only stored
+
+    const auto a = impl_->doc.page_size(static_cast<std::size_t>(impl_->current_page));
+    float pw = a.width_pt;
+    float ph = a.height_pt;
+    if (pair_page >= 0 && pair_page < page_count()) {
+        // Two-page spread: one render scale is shared by both slots, so fit the
+        // pair's bounding size. Deriving from the current page alone overflows
+        // the slot holding the larger page once the paint path stops
+        // shrink-to-fitting.
+        const auto b = impl_->doc.page_size(static_cast<std::size_t>(pair_page));
+        pw = std::max(pw, b.width_pt);
+        ph = std::max(ph, b.height_pt);
     }
 
-    const auto size = impl_->doc.page_size(static_cast<std::size_t>(impl_->current_page));
-    const float pw = size.width_pt;
-    const float ph = size.height_pt;
-
-    // page_size is in points (1/72 inch). MuPDF's fz_scale applied during
-    // rasterize produces a pixmap whose pixel extent is page_pt * scale.
-    // We want that pixmap to cover vp_dip physical pixels, where the
-    // monitor has `dpi` DPI. At 96 DPI, 1 DIP == 1 device px; at higher
-    // DPI, 1 DIP == (dpi/96) device px.
-    //
-    //   FitWidth: page_pt_w * scale == vp_w_dip * (dpi/96)
-    //   ⇒ scale_fit_w = vp_w_dip * (dpi/96) / page_pt_w
-    const float phys_px_w = viewport_w_dip * (dpi / 96.0f);
-    const float phys_px_h = viewport_h_dip * (dpi / 96.0f);
-    const float fit_w     = (pw > 0.0f) ? (phys_px_w / pw) : 1.0f;
-    const float fit_h     = (ph > 0.0f) ? (phys_px_h / ph) : 1.0f;
-
-    switch (mode) {
-        case ZoomMode::FitWidth:
-            impl_->scale = fit_w;
-            break;
-        case ZoomMode::FitPage:
-            impl_->scale = std::min(fit_w, fit_h);
-            break;
-        case ZoomMode::Custom:
-            // Don't change scale — caller drives via zoom_in/zoom_out.
-            break;
-    }
+    impl_->pct = fit_percentage(viewport_w_px, viewport_h_px, dpi, pw, ph,
+                                impl_->zm == ZoomMode::FitPage);
 }
 
-void DocumentView::set_zoom_scale(float scale) noexcept {
-    const float lo = Impl::kPresets[0];                                                      // 0.5f
-    const float hi = Impl::kPresets[sizeof(Impl::kPresets)/sizeof(Impl::kPresets[0]) - 1];  // 4.0f
-    // NaN-safe clamp: NaN/-inf compare false to (scale >= lo), so the negated
-    // test pins them to lo; +inf falls to hi. Keeps the [lo,hi] contract total.
-    if (!(scale >= lo)) scale = lo;   // scale < lo, NaN, or -inf -> lo
-    if (scale > hi)     scale = hi;   // scale > hi or +inf -> hi
-    impl_->zm    = ZoomMode::Custom;
-    impl_->scale = scale;
+void DocumentView::set_zoom_mode_fit_width() {
+    impl_->zm = ZoomMode::FitWidth;
+    set_viewport(impl_->vp_w, impl_->vp_h, impl_->dpi);
+}
+
+void DocumentView::set_zoom_mode_fit_page() {
+    impl_->zm = ZoomMode::FitPage;
+    set_viewport(impl_->vp_w, impl_->vp_h, impl_->dpi);
+}
+
+void DocumentView::set_zoom_pct(float pct) noexcept {
+    impl_->zm  = ZoomMode::Custom;
+    impl_->pct = clamp_preset_span(pct);
 }
 
 bool DocumentView::zoom_in() {
-    const float cur = impl_->scale;
-    for (float lvl : Impl::kPresets) {
-        if (lvl > cur + 1e-4f) {
-            impl_->scale = lvl;
-            impl_->zm    = ZoomMode::Custom;
-            return true;
-        }
-    }
-    return false;
+    const float next = next_preset(impl_->pct);
+    if (next == impl_->pct) return false;
+    impl_->pct = next;
+    impl_->zm  = ZoomMode::Custom;
+    return true;
 }
 
 bool DocumentView::zoom_out() {
-    const float cur = impl_->scale;
-    float best = -1.0f;
-    for (float lvl : Impl::kPresets) {
-        if (lvl < cur - 1e-4f && lvl > best) best = lvl;
-    }
-    if (best < 0.0f) return false;
-    impl_->scale = best;
-    impl_->zm    = ZoomMode::Custom;
+    const float prev = prev_preset(impl_->pct);
+    if (prev == impl_->pct) return false;
+    impl_->pct = prev;
+    impl_->zm  = ZoomMode::Custom;
     return true;
 }
 
@@ -284,7 +266,7 @@ void DocumentView::request_render(int page, RenderCb on_complete) {
     RenderEngine::RenderRequest req;
     req.page_num    = page;
     req.priority    = 0;
-    req.scale       = impl_->scale;
+    req.scale       = render_scale();
     req.on_complete = std::move(on_complete);
     req.invert      = impl_->invert_colors;  // Phase 8 D7
     (void)impl_->engine->submit(std::move(req));
@@ -335,7 +317,7 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb) {
         RenderEngine::RenderRequest r0;
         r0.page_num    = page;
         r0.priority    = 0;
-        r0.scale       = impl_->scale;
+        r0.scale       = render_scale();
         r0.on_complete = std::move(cb);
         r0.invert      = impl_->invert_colors;  // Phase 8 D7
         (void)impl_->engine->submit(std::move(r0));
@@ -352,7 +334,7 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb) {
         RenderEngine::RenderRequest r1;
         r1.page_num    = page - 1;
         r1.priority    = 1;
-        r1.scale       = impl_->scale;
+        r1.scale       = render_scale();
         r1.on_complete = drop_cb;
         r1.invert      = impl_->invert_colors;  // Phase 8 D7
         (void)impl_->engine->submit(std::move(r1));
@@ -361,7 +343,7 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb) {
         RenderEngine::RenderRequest r1;
         r1.page_num    = page + 1;
         r1.priority    = 1;
-        r1.scale       = impl_->scale;
+        r1.scale       = render_scale();
         r1.on_complete = drop_cb;
         r1.invert      = impl_->invert_colors;  // Phase 8 D7
         (void)impl_->engine->submit(std::move(r1));

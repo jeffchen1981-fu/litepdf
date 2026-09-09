@@ -59,7 +59,27 @@ public:
     // handler drops pixmaps whose epoch no longer matches (issue #35).
     std::uint64_t render_epoch() const noexcept;
 
-    // Get/set the canvas pan offset (DIPs from the centered/fit origin).
+    // Push the canvas's client extent + dpi into the active DocumentView so the
+    // fit percentage is re-derived. In spread mode this passes the HALF-WIDTH
+    // slot and the pair's other page, because both slots share one render scale
+    // and a spread of unequal pages must fit the larger one.
+    //
+    // The dual-page submission branches call this: MainWindow::kick_render's dual
+    // branch, resubmit_current_page's dual branch, and on_key_down's dual branch.
+    // kick_render's single-page branch also calls it. The single-page branches of
+    // resubmit_current_page and on_key_down do not, as deliberate exceptions:
+    // on_key_down's single branch re-derives the fit by delegation through
+    // DocumentView::set_current_page; resubmit_current_page's single branch has no
+    // caller that changes the page or the fit mode, and any resize that races a
+    // device-loss recovery is corrected by the kick_render in the same WM_SIZE
+    // handler. Deriving the fit in only some paths leaves the rest rendering at a
+    // stale percentage, which is why this function exists.
+    void apply_viewport();
+
+    // Get/set the canvas pan offset, in canvas DIPs. An axis whose content
+    // fits the viewport is centered and its pan is 0; an axis that overflows
+    // uses a TOP-LEFT origin, with the pan clamped to [viewport - content, 0]
+    // (pan 0 = content's leading edge at the viewport's leading edge).
     // Used by MainWindow to snapshot/restore per-tab scroll on tab switch.
     // Both are no-ops if called before the impl is ready.
     struct Pan { float x; float y; };
@@ -174,6 +194,14 @@ private:
     void on_paint();
     void on_size(int width, int height);
     LRESULT on_key_down(WPARAM key);
+
+    // Painted extent plus its origin, in canvas DIPs. `l`/`t` are zero for a
+    // single page and non-zero for an unequal spread, where the union of the
+    // two slots does not start at the canvas origin.
+    struct ContentBox { float l, t, w, h; };
+
+    LRESULT pan_by(float dx, float dy);
+    bool    content_extent(ContentBox& out) const;
 
     HWND hwnd_ = nullptr;
     bool log_timings_ = false;

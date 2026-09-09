@@ -8,6 +8,21 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 
 ## [Unreleased]
 
+### Changed
+
+- Zoom now changes what you see. Zoom In / Zoom Out were previously inert: the
+  zoom level was compared against a table in different units, and the paint path
+  re-fitted every page to the window regardless. Pages also rendered at twice the
+  needed resolution on 200% displays.
+- Every view is Fit Page in this release — including restored and migrated sessions;
+  Fit Width returns with mouse-wheel scrolling.
+
+### Note
+
+- `session.json` is upgraded to version 2 on first save. Your previous file is kept
+  as `session.v1.bak` in the same folder. Version 2 cannot be read by LitePDF 1.2.0
+  or earlier, so if you roll back, restore that backup to keep your tabs.
+
 ## [1.2.0] — 2026-06-22 — CJK system-font loader (8 MB exe)
 
 ### Changed

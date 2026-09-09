@@ -39,7 +39,7 @@ TEST_CASE("to_json maps each fit zoom mode to its string", "[core][session][json
 
 TEST_CASE("from_json round-trips a two-tab session", "[core][session][json]") {
     SessionState s;
-    s.version = 1;
+    s.version = 2;
     s.window = {0, 3, 10, 20, 1280, 800};
     s.active_tab = 1;
     s.tabs.push_back({std::filesystem::path(L"C:\\a\\one.pdf"), 0,
@@ -87,7 +87,7 @@ TEST_CASE("from_json decodes a uXXXX BMP escape to UTF-8", "[core][session][json
     // EXPECTED is built from explicit UTF-16 code units to keep the source ASCII;
     // the two sides MUST differ: input = literal escape text, expected = the char.
     const std::wstring expected = {L'C', L':', L'\\', wchar_t(0x4E2D), L'.', L'p', L'd', L'f'};
-    auto r = from_json(R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"C:\\\u4e2d.pdf","page":0,"zoom_mode":"fit_width","zoom_scale":1}]})");
+    auto r = from_json(R"({"version":2,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"C:\\\u4e2d.pdf","page":0,"zoom_mode":"fit_width","zoom_scale":1}]})");
     REQUIRE(r.has_value());
     REQUIRE(r->tabs.size() == 1);
     REQUIRE(r->tabs[0].path == std::filesystem::path(expected));  // U+4E2D
@@ -100,14 +100,14 @@ TEST_CASE("from_json decodes a surrogate pair to a 4-byte UTF-8 astral char", "[
     // surrogate code units 0xD834 0xDD1E to keep the source ASCII (a UCN glyph
     // would otherwise need a non-ASCII literal in the file).
     const std::wstring expected = {wchar_t(0xD834), wchar_t(0xDD1E), L'.', L'p', L'd', L'f'};
-    auto r = from_json(R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"\ud834\udd1e.pdf","page":0,"zoom_mode":"fit_width","zoom_scale":1}]})");
+    auto r = from_json(R"({"version":2,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"\ud834\udd1e.pdf","page":0,"zoom_mode":"fit_width","zoom_scale":1}]})");
     REQUIRE(r.has_value());
     REQUIRE(r->tabs.size() == 1);
     REQUIRE(r->tabs[0].path == std::filesystem::path(expected));  // U+1D11E
 }
 
 TEST_CASE("from_json rejects a lone surrogate escape", "[core][session][json]") {
-    auto r = from_json(R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"\ud800.pdf","page":0,"zoom_mode":"fit_width","zoom_scale":1}]})");
+    auto r = from_json(R"({"version":2,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"\ud800.pdf","page":0,"zoom_mode":"fit_width","zoom_scale":1}]})");
     REQUIRE_FALSE(r.has_value());
 }
 
@@ -115,10 +115,9 @@ TEST_CASE("from_json rejects malformed / unsupported input as nullopt", "[core][
     REQUIRE_FALSE(from_json("").has_value());
     REQUIRE_FALSE(from_json("{").has_value());
     REQUIRE_FALSE(from_json("not json at all").has_value());
-    REQUIRE_FALSE(from_json("{\"version\":1,\"tabs\":[{").has_value());
+    REQUIRE_FALSE(from_json("{\"version\":2,\"tabs\":[{").has_value());
     REQUIRE_FALSE(from_json("{}garbage").has_value());                 // trailing junk
-    REQUIRE_FALSE(from_json("{\"version\":2,\"tabs\":[]}").has_value()); // unsupported version
-    REQUIRE_FALSE(from_json("{\"version\":1,\"bogus\":1,\"tabs\":[]}").has_value()); // unknown key
+    REQUIRE_FALSE(from_json("{\"version\":2,\"bogus\":1,\"tabs\":[]}").has_value()); // unknown key
 }
 
 TEST_CASE("from_json tolerates an empty-tabs session", "[core][session][json]") {
@@ -130,30 +129,30 @@ TEST_CASE("from_json tolerates an empty-tabs session", "[core][session][json]") 
 
 TEST_CASE("from_json rejects a sign-only integer", "[core][session][json]") {
     // "active":- has a sign but no digit; strict parse must reject, not treat as 0.
-    auto r = from_json(R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":-,"tabs":[]})");
+    auto r = from_json(R"({"version":2,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":-,"tabs":[]})");
     REQUIRE_FALSE(r.has_value());
 }
 
 TEST_CASE("from_json rejects a partial float zoom_scale", "[core][session][json]") {
     // 1.2.3 is two dots; strtod stops at 1.2 and discards .3 — reject the leftover.
-    auto r = from_json(R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"a.pdf","page":0,"zoom_mode":"custom","zoom_scale":1.2.3}]})");
+    auto r = from_json(R"({"version":2,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"a.pdf","page":0,"zoom_mode":"custom","zoom_scale":1.2.3}]})");
     REQUIRE_FALSE(r.has_value());
 }
 
 TEST_CASE("from_json rejects an exponent with no digits", "[core][session][json]") {
     // 1e has an exponent marker but no exponent digits; strtod leaves 'e' unconsumed.
-    auto r = from_json(R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"a.pdf","page":0,"zoom_mode":"custom","zoom_scale":1e}]})");
+    auto r = from_json(R"({"version":2,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"a.pdf","page":0,"zoom_mode":"custom","zoom_scale":1e}]})");
     REQUIRE_FALSE(r.has_value());
 }
 
 TEST_CASE("from_json rejects a tab with a missing path key", "[core][session][json]") {
     // to_json always emits "path"; a tab without it leaves path empty -> validate rejects.
-    auto r = from_json(R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"page":0,"zoom_mode":"fit_width","zoom_scale":1}]})");
+    auto r = from_json(R"({"version":2,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"page":0,"zoom_mode":"fit_width","zoom_scale":1}]})");
     REQUIRE_FALSE(r.has_value());
 }
 
 TEST_CASE("from_json rejects a tab with an explicit empty path", "[core][session][json]") {
-    auto r = from_json(R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"","page":0,"zoom_mode":"fit_width","zoom_scale":1}]})");
+    auto r = from_json(R"({"version":2,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"","page":0,"zoom_mode":"fit_width","zoom_scale":1}]})");
     REQUIRE_FALSE(r.has_value());
 }
 
@@ -161,7 +160,7 @@ TEST_CASE("from_json rejects an unescaped control char in a path", "[core][sessi
     // RFC 7159 sec 7: bytes 0x00-0x1F must be \u-escaped inside a string. A raw
     // 0x01 byte in the path value must be rejected. Assemble as a std::string
     // because a raw literal cannot embed a control byte cleanly.
-    std::string j = R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"a)";
+    std::string j = R"({"version":2,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"a)";
     j.push_back('\x01');
     j += R"(.pdf","page":0,"zoom_mode":"fit_width","zoom_scale":1}]})";
     REQUIRE_FALSE(from_json(j).has_value());
@@ -173,13 +172,77 @@ TEST_CASE("from_json rejects an unescaped control char in a path", "[core][sessi
 // scale from the viewport on restore and never read the saved value. Custom
 // zoom, whose saved scale IS consumed on restore, must still reject 0.
 TEST_CASE("from_json accepts a fit-mode tab with zoom_scale 0", "[core][session][json]") {
-    auto r = from_json(R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"a.pdf","page":0,"zoom_mode":"fit_width","zoom_scale":0}]})");
+    auto r = from_json(R"({"version":2,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"a.pdf","page":0,"zoom_mode":"fit_width","zoom_scale":0}]})");
     REQUIRE(r.has_value());
     REQUIRE(r->tabs.size() == 1);
     REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitWidth);
 }
 
 TEST_CASE("from_json rejects a Custom tab with zoom_scale 0", "[core][session][json]") {
-    auto r = from_json(R"({"version":1,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"a.pdf","page":0,"zoom_mode":"custom","zoom_scale":0}]})");
+    auto r = from_json(R"({"version":2,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"a.pdf","page":0,"zoom_mode":"custom","zoom_scale":0}]})");
     REQUIRE_FALSE(r.has_value());
+}
+
+TEST_CASE("SessionState v2 migrates a version 1 document",
+          "[core][session][json][migration]") {
+    const std::string v1 =
+        "{\"version\":1,\"window\":{\"flags\":0,\"show\":1,"
+        "\"x\":10,\"y\":20,\"w\":1280,\"h\":800},\"active\":0,"
+        "\"tabs\":[{\"path\":\"C:\\\\a\\\\one.pdf\",\"page\":3,"
+        "\"zoom_mode\":\"custom\",\"zoom_scale\":4.0}]}";
+    auto r = from_json(v1);
+    REQUIRE(r.has_value());
+    REQUIRE(r->version == 2);
+    // Window placement and tabs survive the migration intact.
+    REQUIRE(r->window.w == 1280);
+    REQUIRE(r->tabs.size() == 1);
+    REQUIRE(r->tabs[0].page == 3);
+    // A v1 Custom zoom held a render scale, not a percentage. It is reset
+    // rather than reinterpreted -- and reset to FitPage, not FitWidth: this
+    // release draws at natural size with no wheel scrolling, so a migrated
+    // FitWidth tab would restore into a view whose lower two thirds the user
+    // cannot reach. PR-A2 revisits this.
+    REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitPage);
+}
+
+// The v1 side of the widening that "from_json accepts a fit-mode tab with
+// zoom_scale 0" pins for v2. A v1 Custom tab with zoom_scale 0 used to be
+// rejected wholesale -- migration ran first, left the tab Custom, and
+// validate() then threw away the ENTIRE session over one tab. It now migrates
+// to a fit mode, whose saved scale is never read, so the session survives.
+TEST_CASE("SessionState v2 migrates a v1 Custom tab with zoom_scale 0",
+          "[core][session][json][migration]") {
+    const std::string v1 =
+        "{\"version\":1,\"window\":{\"flags\":0,\"show\":1,"
+        "\"x\":0,\"y\":0,\"w\":800,\"h\":600},\"active\":0,"
+        "\"tabs\":[{\"path\":\"C:\\\\a\\\\one.pdf\",\"page\":2,"
+        "\"zoom_mode\":\"custom\",\"zoom_scale\":0}]}";
+    auto r = from_json(v1);
+    REQUIRE(r.has_value());          // the whole session used to be lost here
+    REQUIRE(r->version == 2);
+    REQUIRE(r->tabs.size() == 1);
+    REQUIRE(r->tabs[0].page == 2);
+    REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitPage);
+    REQUIRE(r->tabs[0].zoom_scale == 1.0f);
+}
+
+TEST_CASE("SessionState v2 treats a missing version key as version 1",
+          "[core][session][json][migration]") {
+    // The parser writes out.version only when the key is present, and
+    // SessionState default-initialises it to kSessionVersion. Once that
+    // constant became 2, a versionless document would silently claim to be v2
+    // and skip the migration, restoring an old render scale as a percentage.
+    const std::string versionless =
+        "{\"window\":{\"flags\":0,\"show\":1,\"x\":0,\"y\":0,\"w\":800,\"h\":600},"
+        "\"active\":0,\"tabs\":[{\"path\":\"C:\\\\a\\\\one.pdf\",\"page\":0,"
+        "\"zoom_mode\":\"custom\",\"zoom_scale\":3.0}]}";
+    auto r = from_json(versionless);
+    REQUIRE(r.has_value());
+    REQUIRE(r->version == 2);
+    REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitPage);
+}
+
+TEST_CASE("SessionState v2 rejects a version above the current one",
+          "[core][session][json]") {
+    REQUIRE_FALSE(from_json("{\"version\":3,\"tabs\":[]}").has_value());
 }

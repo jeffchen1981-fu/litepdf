@@ -9,7 +9,12 @@ namespace litepdf::core {
 
 enum class SessionZoom { FitWidth, FitPage, Custom };
 
-inline constexpr int kSessionVersion = 1;
+// v2 (PR-A1): SessionTab::zoom_scale changed meaning from a point->pixel render
+// scale to a user-facing magnification percentage. from_json migrates v1 by
+// resetting Custom zooms to FitPage, not FitWidth: this release ships no wheel
+// scrolling, so a FitWidth A4 page would be unreadable and unnavigable;
+// PR-A2 revisits this once ScrollMath lands. See SessionState.cpp.
+inline constexpr int kSessionVersion = 2;
 
 struct SessionTab {
     std::filesystem::path path;
@@ -39,5 +44,15 @@ std::string to_json(const SessionState& s);
 // check. A corrupt session.json must degrade to "no restore", never crash or
 // partially apply.
 std::optional<SessionState> from_json(std::string_view json);
+
+// Report the version a document DECLARES, without migrating or validating it.
+// Returns nullopt if the document does not parse; treats an absent "version"
+// key as 1, matching from_json.
+//
+// SessionStore uses this to decide whether the file on disk is still v1. A raw
+// text scan cannot be trusted for that decision: the parser decodes \u escapes
+// in keys and lets a later duplicate key win, so a scan and the parser can
+// disagree about the one field the backup turns on.
+std::optional<int> peek_version(std::string_view json);
 
 }  // namespace litepdf::core

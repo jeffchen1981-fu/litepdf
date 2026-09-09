@@ -7,7 +7,95 @@
 
 namespace litepdf::core {
 
+namespace {
+// Three-way answer to "does `file` currently hold a parseable v1 session
+// document?". The third state is the point: "I could not read it" is NOT
+// "there is nothing worth preserving", because MoveFileExW's replace only
+// needs DELETE -- granted by the parent directory's FILE_DELETE_CHILD, which
+// a user-owned %LOCALAPPDATA% always gives -- so a file this function cannot
+// read is still a file the save can destroy. Collapsing the two into `false`
+// would fail OPEN and take the user's last v1 copy with it.
+enum class V1Probe {
+    No,        // demonstrably nothing to preserve; the save may proceed
+    Yes,       // a parseable v1 document; back it up before replacing it
+    Unknown,   // it exists but could not be read; the save must NOT proceed
+};
+
+V1Probe probe_existing_v1(const std::filesystem::path& file) {
+    // `status()`, not `file_size()`, decides absent vs unreadable: `file_size`
+    // sets `ec` for both and gives no way to tell them apart, and mistaking
+    // "unreadable" for "absent" is the whole defect.
+    //
+    // THE ORDER OF THE TWO TESTS BELOW IS LOAD-BEARING. Do not hoist the `ec`
+    // check above the `not_found` check -- the natural "handle errors first"
+    // edit is a bug here. `status()` signals absence through the returned
+    // TYPE, not through `ec`: on this project's toolchain (MSVC 14.44) a
+    // missing file yields `file_type::not_found` AND a non-empty `ec`
+    // (ERROR_FILE_NOT_FOUND) together, because <filesystem> assigns the Win32
+    // error unconditionally. Testing `ec` first would classify the first-ever
+    // save -- the fresh profile with no session.json yet -- as Unknown; the
+    // fail-closed guard would then refuse it and LitePDF could never write its
+    // first session file. `ec` only carries information once `not_found` has
+    // been ruled out, where it means a real query failure (a sharing violation,
+    // say): the file is there and we cannot see it.
+    std::error_code ec;
+    const auto st = std::filesystem::status(file, ec);
+    if (st.type() == std::filesystem::file_type::not_found)
+        return V1Probe::No;                              // absent: first-ever save
+    if (ec || !std::filesystem::status_known(st))
+        return V1Probe::Unknown;                         // present but unquery-able
+    if (!std::filesystem::is_regular_file(st))
+        return V1Probe::No;                              // a directory, a device: not a session
+
+    const auto sz = std::filesystem::file_size(file, ec);
+    if (ec) return V1Probe::Unknown;                     // exists, but cannot be sized
+    if (sz > kMaxSessionBytes) return V1Probe::No;
+    // Unchanged on purpose: v1.2.0's SessionStore.hpp carries the identical cap,
+    // so a file this large was already unloadable on the downgrade target. There
+    // is nothing a backup could restore.
+
+    std::ifstream in(file, std::ios::binary);
+    if (!in) return V1Probe::Unknown;                    // DACL denies read, or a share-mode lock
+
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    if (in.bad() || ss.bad()) return V1Probe::Unknown;
+    const std::string bytes = ss.str();
+    // `ss << in.rdbuf()` cannot tell "the stream ended" from "the read failed"
+    // -- a mid-file I/O error just stops early and looks like a short document,
+    // which would then parse as garbage and be discarded as worthless. Compare
+    // against the size we already measured instead. (`ss.fail()` is not usable
+    // here: the inserter sets failbit for a legitimately empty file too.)
+    if (bytes.size() != (std::size_t)sz) return V1Probe::Unknown;
+
+    const auto v = peek_version(bytes);
+    if (!v) return V1Probe::No;   // read in full and it is not JSON we understand:
+                                  // a corrupt predecessor must not block saving forever
+    return *v == 1 ? V1Probe::Yes : V1Probe::No;
+}
+}  // namespace
+
 bool save_session(const std::filesystem::path& file, const SessionState& s) {
+    // One-way door: once a v2 file exists, a rolled-back v1.2.0 binary rejects
+    // it and the user loses their whole session. Keep the last v1 copy, and
+    // FAIL CLOSED -- a save that destroys the only recoverable copy is exactly
+    // the failure this guards against.
+    switch (probe_existing_v1(file)) {
+    case V1Probe::Unknown:
+        return false;   // cannot inspect it => must not replace it
+    case V1Probe::Yes: {
+        std::filesystem::path bak = file;
+        bak.replace_extension(L".v1.bak");
+        std::error_code ec;
+        std::filesystem::copy_file(
+            file, bak, std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) return false;
+        break;
+    }
+    case V1Probe::No:
+        break;
+    }
+
     std::filesystem::path tmp = file;
     tmp += L".tmp";
     {

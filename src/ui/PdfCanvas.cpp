@@ -5,6 +5,7 @@
 #include "core/DocumentView.hpp"
 #include "ui/ColdStartTimer.hpp"
 #include "ui/PdfCanvasLayout.hpp"
+#include "ui/detail/ViewportMath.hpp"
 
 #include <d2d1.h>
 #include <d2d1_1.h>
@@ -34,6 +35,15 @@ using Microsoft::WRL::ComPtr;
 namespace {
 constexpr wchar_t kCanvasClassName[] = L"LitePDFPdfCanvas";
 std::once_flag g_class_registered;
+
+// PR-A1 placement/pan math. These are the ONLY places the canvas converts
+// between bitmap pixels, canvas DIPs and PDF points -- see ViewportMath.hpp
+// for the unit contract.
+using litepdf::ui::bitmap_px_to_dip;
+using litepdf::ui::clamp_pan;
+using litepdf::ui::pdf_point_to_dip;
+using litepdf::ui::place_bitmap;
+using litepdf::ui::Placement;
 }  // namespace
 
 namespace litepdf::ui {
@@ -111,8 +121,10 @@ struct PdfCanvas::Impl {
     // epoch they were submitted under; a completion whose epoch != this is
     // from a superseded view and is dropped, not painted (issue #35).
     std::uint64_t                 view_epoch = 0;
-    // Pan offset in DIPs from the centered/fit position. Reset whenever a
-    // new bitmap arrives. No clamping in Phase 3 — user can pan off-canvas.
+    // Pan offset in canvas DIPs. An axis whose content fits the viewport is
+    // centered and its pan is 0; an axis that overflows uses a TOP-LEFT
+    // origin with the pan clamped to [viewport - content, 0]. Reset whenever
+    // a new left/single bitmap arrives.
     float                         pan_x = 0.0f;
     float                         pan_y = 0.0f;
 
@@ -184,6 +196,32 @@ void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
 
 std::uint64_t PdfCanvas::render_epoch() const noexcept {
     return impl_ ? impl_->view_epoch : 0;
+}
+
+void PdfCanvas::apply_viewport() {
+    if (!impl_ || !impl_->view || !hwnd_) return;
+    RECT rc;
+    GetClientRect(hwnd_, &rc);
+    const float dpi_f = static_cast<float>(GetDpiForWindow(hwnd_));
+    const float cw_px = static_cast<float>(rc.right - rc.left);
+    const float ch_px = static_cast<float>(rc.bottom - rc.top);
+
+    if (!impl_->dual_page) {
+        impl_->view->set_viewport(cw_px, ch_px, dpi_f);
+        return;
+    }
+    // Do NOT assume the caller already snapped current_page to the pair's LEFT
+    // page. DocumentView derives the fit from current_page and treats pair_page
+    // as the other half, so if current_page were the RIGHT page the left page's
+    // size would never enter the fit and its slot could overflow. Re-snap here,
+    // the same defensive move on_key_down's dual branch already makes.
+    const int total = impl_->view->page_count();
+    const int left  = dual_page_compute_left(impl_->view->current_page(), total);
+    if (left != impl_->view->current_page()) impl_->view->set_current_page(left);
+    const int right = dual_page_compute_right(left, total);
+    const float gutter_px = 8.0f * dpi_f / 96.0f;   // matches the 8 DIP gutter
+    const float slot_px   = std::max(0.0f, (cw_px - gutter_px) * 0.5f);
+    impl_->view->set_viewport(slot_px, ch_px, dpi_f, right);
 }
 
 void PdfCanvas::set_on_page_changed(PageChangedCb cb) {
@@ -271,47 +309,47 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
         impl_->pan_y = 0.0f;
     }
 
-    // Transform the hit quad to viewport-DIP space using the same
-    // pdf_pt → DIP mapping as on_paint.
-    //   quad_dip_top = dst.top  + ul_y * zoom_scale * fit_scale
-    //   quad_dip_bot = dst.top  + ll_y * zoom_scale * fit_scale
+    // Transform the hit quad to canvas-DIP space using the same placement
+    // rule and the same pdf_pt -> DIP mapping as on_paint.
+    //   quad_dip_top = page_top_dip + pdf_point_to_dip(ul_y, zoom_pct)
+    //   quad_dip_bot = page_top_dip + pdf_point_to_dip(ll_y, zoom_pct)
     // We may not have a bitmap yet (e.g. after a page change), in which
-    // case fit_scale is unknown. Fall back to InvalidateRect only.
+    // case the page's placement is unknown. Fall back to InvalidateRect only.
     if (!impl_->current_bitmap || !impl_->rt) {
         InvalidateRect(hwnd_, nullptr, FALSE);
         return;
     }
 
-    D2D1_SIZE_F src = impl_->current_bitmap->GetSize();
-    D2D1_SIZE_F vp  = impl_->rt->GetSize();
-    float fit_scale = vp.width / src.width;
-    if (src.height * fit_scale > vp.height) fit_scale = vp.height / src.height;
-    const float dst_h_unpanned = src.height * fit_scale;
-    const float dy = (vp.height - dst_h_unpanned) * 0.5f;
+    const D2D1_SIZE_F src_px = impl_->current_bitmap->GetSize();
+    const D2D1_SIZE_F vp     = impl_->rt->GetSize();
+    const float rt_dpi = static_cast<float>(GetDpiForWindow(hwnd_));
+    const float src_w  = bitmap_px_to_dip(src_px.width,  rt_dpi);
+    const float src_h  = bitmap_px_to_dip(src_px.height, rt_dpi);
+    const float pct    = impl_->view->zoom_pct();
 
-    const float zoom = impl_->view->zoom_scale();
-    const float s    = zoom * fit_scale;
-
-    // Axis-aligned Y span of the quad in pdf-points.
+    // Quad extent in PDF points.
     const float q_min_y_pt = std::min({ h.geom.ul_y, h.geom.ur_y,
                                         h.geom.ll_y, h.geom.lr_y });
     const float q_max_y_pt = std::max({ h.geom.ul_y, h.geom.ur_y,
                                         h.geom.ll_y, h.geom.lr_y });
+    const float q_center_pt = (q_min_y_pt + q_max_y_pt) * 0.5f;
 
-    // Already-visible check uses the current pan_y.
-    const float q_top_dip = dy + impl_->pan_y + q_min_y_pt * s;
-    const float q_bot_dip = dy + impl_->pan_y + q_max_y_pt * s;
+    // Where the page currently sits, using the SAME placement rule as on_paint.
+    const Placement cur = place_bitmap(src_w, src_h, vp.width, vp.height,
+                                       impl_->pan_x, impl_->pan_y);
+    const float q_top_dip = cur.y + pdf_point_to_dip(q_min_y_pt, pct);
+    const float q_bot_dip = cur.y + pdf_point_to_dip(q_max_y_pt, pct);
     const float margin    = 24.0f;
     if (q_top_dip >= margin && q_bot_dip <= vp.height - margin) {
         InvalidateRect(hwnd_, nullptr, FALSE);
-        return;
+        return;   // already visible; no scroll
     }
 
-    // Pan so the quad's center sits at the viewport's vertical center.
-    // center_dip = dy + pan_y + q_center_pt * s = vp.height * 0.5
-    const float q_center_pt = (q_min_y_pt + q_max_y_pt) * 0.5f;
-    impl_->pan_y = vp.height * 0.5f - dy - q_center_pt * s;
-
+    // Center the quad vertically. place_bitmap's origin is the content's top on
+    // an overflowing axis, so the target pan is a direct offset from it; the
+    // clamp keeps it inside the page.
+    const float q_center = pdf_point_to_dip(q_center_pt, pct);
+    impl_->pan_y = clamp_pan(vp.height * 0.5f - q_center, src_h, vp.height);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -435,14 +473,12 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 bool changed = (delta > 0) ? impl_->view->zoom_in()
                                            : impl_->view->zoom_out();
                 if (changed) {
-                    impl_->view->cancel_stale_renders(0);
-                    HWND target = hwnd_;
-                    const std::uint64_t epoch = impl_->view_epoch;
-                    impl_->view->request_render(
-                        impl_->view->current_page(),
-                        [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
-                            PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
-                        });
+                    // Route through resubmit_current_page rather than submitting a
+                    // single render here: in spread mode this handler refreshed only
+                    // the left slot, which was invisible while zoom could not change
+                    // displayed size -- and becomes a spread at two different
+                    // magnifications the moment Task 4 lands.
+                    resubmit_current_page();
                     // Persist the wheel zoom (menu zoom persists via MainWindow).
                     if (impl_->on_zoom_changed) impl_->on_zoom_changed();
                 }
@@ -570,8 +606,18 @@ void PdfCanvas::create_render_target() {
     if (sz.width == 0) sz.width = 1;
     if (sz.height == 0) sz.height = 1;
 
+    // Pin the render target to THIS WINDOW's dpi, not the desktop's. The helper
+    // defaults dpiX/dpiY to 0.0, which means "desktop dpi" -- wrong on a
+    // secondary monitor with a different scale factor, and the reason the
+    // WM_DPICHANGED teardown below could not actually rebuild at the new dpi.
+    // Bitmaps stay at the D2D default of 96 (so their GetSize() is in pixels);
+    // ViewportMath::bitmap_px_to_dip is the single conversion point.
+    const float rt_dpi = static_cast<float>(GetDpiForWindow(hwnd_));
     HRESULT hr = impl_->factory->CreateHwndRenderTarget(
-        D2D1::RenderTargetProperties(),
+        D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(),
+            rt_dpi, rt_dpi),
         D2D1::HwndRenderTargetProperties(hwnd_, sz),
         &impl_->rt);
     if (FAILED(hr)) {
@@ -620,6 +666,7 @@ void PdfCanvas::resubmit_current_page() {
         const int left  = dual_page_compute_left(cur, total);
         const int right = dual_page_compute_right(left, total);
         impl_->view->cancel_stale_renders(0);
+        apply_viewport();
         impl_->view->request_render(left,
             [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
                 PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
@@ -637,6 +684,71 @@ void PdfCanvas::resubmit_current_page() {
         [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
             PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
         });
+}
+
+// Painted content box in canvas DIPs -- what clamp_pan must measure against.
+// Single page: the bitmap's DIP size at the origin. Spread: the UNION of the
+// two slot placements, INCLUDING its left/top edge, because in an unequal
+// spread that edge is not zero and the paint path has to subtract it.
+//
+// Measuring a spread against one bitmap would be wrong in the direction that
+// hides the bug: each page fits inside its own half-width slot, so clamp_pan's
+// "content fits -> pin to 0" branch would fire on every arrow key and
+// horizontal panning would silently do nothing.
+//
+// Returns false when there is nothing rendered yet.
+bool PdfCanvas::content_extent(ContentBox& out) const {
+    if (!impl_ || !impl_->rt || !impl_->current_bitmap) return false;
+    const float rt_dpi = static_cast<float>(GetDpiForWindow(hwnd_));
+    const D2D1_SIZE_F vp = impl_->rt->GetSize();
+
+    auto dip_size = [&](ID2D1Bitmap* bm, float& w, float& h) {
+        const D2D1_SIZE_F px = bm->GetSize();
+        w = bitmap_px_to_dip(px.width,  rt_dpi);
+        h = bitmap_px_to_dip(px.height, rt_dpi);
+    };
+
+    float lw = 0.0f, lh = 0.0f;
+    dip_size(impl_->current_bitmap.Get(), lw, lh);
+    if (!impl_->dual_page) {
+        out = ContentBox{0.0f, 0.0f, lw, lh};
+        return true;
+    }
+
+    // Same band geometry as on_paint's dual branch.
+    const float gutter   = 8.0f;
+    const float slot_w   = std::max(0.0f, (vp.width - gutter) * 0.5f);
+    const float slot_h   = vp.height;
+    const float left_x0  = 0.0f;
+    const float right_x0 = slot_w + gutter;
+
+    const Placement le = place_bitmap(lw, lh, slot_w, slot_h, 0.0f, 0.0f);
+    float l = left_x0 + le.x;
+    float r = left_x0 + le.x + le.w;
+    float t = le.y;
+    float b = le.y + le.h;
+
+    if (impl_->right_bitmap) {
+        float rw = 0.0f, rh = 0.0f;
+        dip_size(impl_->right_bitmap.Get(), rw, rh);
+        const Placement re = place_bitmap(rw, rh, slot_w, slot_h, 0.0f, 0.0f);
+        l = std::min(l, right_x0 + re.x);
+        r = std::max(r, right_x0 + re.x + re.w);
+        t = std::min(t, re.y);
+        b = std::max(b, re.y + re.h);
+    }
+    out = ContentBox{l, t, std::max(0.0f, r - l), std::max(0.0f, b - t)};
+    return true;
+}
+
+LRESULT PdfCanvas::pan_by(float dx, float dy) {
+    ContentBox box{};
+    if (!content_extent(box)) return 0;
+    const D2D1_SIZE_F vp = impl_->rt->GetSize();
+    impl_->pan_x = clamp_pan(impl_->pan_x + dx, box.w, vp.width);
+    impl_->pan_y = clamp_pan(impl_->pan_y + dy, box.h, vp.height);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+    return 0;
 }
 
 LRESULT PdfCanvas::on_key_down(WPARAM key) {
@@ -684,24 +796,13 @@ LRESULT PdfCanvas::on_key_down(WPARAM key) {
         case VK_END:
             changed = change_current_page(max_idx);
             break;
-        // Arrow keys: pan the bitmap by 100 DIPs. No clamping in Phase 3 —
-        // user can pan off-canvas; clamping is Phase 4 polish.
-        case VK_LEFT:
-            impl_->pan_x += 100.0f;
-            InvalidateRect(hwnd_, nullptr, FALSE);
-            return 0;
-        case VK_RIGHT:
-            impl_->pan_x -= 100.0f;
-            InvalidateRect(hwnd_, nullptr, FALSE);
-            return 0;
-        case VK_UP:
-            impl_->pan_y += 100.0f;
-            InvalidateRect(hwnd_, nullptr, FALSE);
-            return 0;
-        case VK_DOWN:
-            impl_->pan_y -= 100.0f;
-            InvalidateRect(hwnd_, nullptr, FALSE);
-            return 0;
+        // Arrow keys pan by 100 DIP, now clamped to the content. Panning is
+        // only meaningful once content can overflow the viewport, which is
+        // what the natural-size paint path in on_paint introduces.
+        case VK_LEFT:  return pan_by( 100.0f,    0.0f);
+        case VK_RIGHT: return pan_by(-100.0f,    0.0f);
+        case VK_UP:    return pan_by(   0.0f,  100.0f);
+        case VK_DOWN:  return pan_by(   0.0f, -100.0f);
         default:
             return 0;
     }
@@ -728,6 +829,7 @@ LRESULT PdfCanvas::on_key_down(WPARAM key) {
             if (left != impl_->view->current_page()) {
                 impl_->view->set_current_page(left);
             }
+            apply_viewport();
             const int right = dual_page_compute_right(left, total);
             impl_->view->request_render(left,
                 [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
@@ -796,25 +898,70 @@ void PdfCanvas::on_paint() {
         const float left_x0  = 0.0f;
         const float right_x0 = slot_w + gutter;
 
-        auto draw_slot = [&](ID2D1Bitmap* bm, float x0) {
+        const float rt_dpi = static_cast<float>(GetDpiForWindow(hwnd_));
+
+        // Unpanned placement of each slot; the pan is clamped once against the
+        // painted union of both (content_extent), never per slot -- with
+        // unequal pages a per-slot clamp describes neither what is on screen
+        // nor what the arrow keys move.
+        auto slot_placement = [&](ID2D1Bitmap* bm) -> Placement {
+            if (!bm) return Placement{};
+            const D2D1_SIZE_F src_px = bm->GetSize();
+            return place_bitmap(bitmap_px_to_dip(src_px.width,  rt_dpi),
+                                bitmap_px_to_dip(src_px.height, rt_dpi),
+                                slot_w, slot_h, 0.0f, 0.0f);
+        };
+        const Placement le = slot_placement(impl_->current_bitmap.Get());
+        const Placement re = slot_placement(impl_->right_bitmap.Get());
+
+        ContentBox box{};
+        content_extent(box);
+        const float pan_x = clamp_pan(impl_->pan_x, box.w, vp.width);
+        const float pan_y = clamp_pan(impl_->pan_y, box.h, slot_h);
+
+        // When the union overflows, pan is measured from ITS left/top edge, not
+        // from the canvas origin -- otherwise both clamp endpoints are offset by
+        // box.l and neither reaches a painted edge (pan 0 leaves a blank strip,
+        // pan at the limit stops short of the viewport edge). When it fits, the
+        // slots keep their natural centered positions and the base is zero.
+        const float base_x = (box.w > vp.width) ? -box.l : 0.0f;
+        const float base_y = (box.h > slot_h)   ? -box.t : 0.0f;
+
+        auto draw_slot = [&](ID2D1Bitmap* bm, float x0, const Placement& pl) {
             if (!bm) return;
-            D2D1_SIZE_F src = bm->GetSize();
-            float fit = (src.width  > 0.0f) ? (slot_w / src.width)  : 1.0f;
-            if (src.height * fit > slot_h && src.height > 0.0f) {
-                fit = slot_h / src.height;
-            }
-            float dst_w = src.width  * fit;
-            float dst_h = src.height * fit;
-            float dx = x0 + (slot_w - dst_w) * 0.5f;
-            float dy = (slot_h - dst_h) * 0.5f;
-            D2D1_RECT_F dst = D2D1::RectF(
-                dx + impl_->pan_x,         dy + impl_->pan_y,
-                dx + dst_w + impl_->pan_x, dy + dst_h + impl_->pan_y);
+            const D2D1_RECT_F dst = D2D1::RectF(x0 + pl.x + base_x + pan_x,
+                                                pl.y + base_y + pan_y,
+                                                x0 + pl.x + pl.w + base_x + pan_x,
+                                                pl.y + pl.h + base_y + pan_y);
+            // Confine each page to its own band. `place_bitmap` returns the
+            // bitmap's FULL width (p.w == src_w) whatever the slot measures, so
+            // once the user zooms past the spread fit -- Zoom In and Ctrl+wheel
+            // both allow it, and nothing clamps to the fit -- the left page's
+            // dst runs past right_x0 and the right draw_slot call, which paints
+            // second, lands on top of it. Before PR-A1 dual mode shrink-to-fit
+            // made zoom inert here, so the overlap could not happen.
+            //
+            // This hides the overflow rather than making it reachable: the pan
+            // is clamped once against the union of both slots, so the clipped
+            // part cannot be panned into view. That belongs with PR-A2's
+            // scrolling work; a clipped page still beats one page painting over
+            // its neighbour. ALIASED matches the axis-aligned band edges and
+            // avoids a blend pass on a full-height rect.
+            //
+            // Corner case: when the two pages differ in width and the left page
+            // fits its slot but the right page overflows, the clip hides a strip
+            // of the right page that was visible before. This is an accepted cost
+            // of the fixed-band layout—hiding content is strictly better than one
+            // page painting over another. Per-slot scrolling in PR-A2 resolves it.
+            impl_->rt->PushAxisAlignedClip(
+                D2D1::RectF(x0, 0.0f, x0 + slot_w, slot_h),
+                D2D1_ANTIALIAS_MODE_ALIASED);
             impl_->rt->DrawBitmap(bm, dst, 1.0f,
                                   D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            impl_->rt->PopAxisAlignedClip();
         };
-        draw_slot(impl_->current_bitmap.Get(), left_x0);
-        draw_slot(impl_->right_bitmap.Get(),   right_x0);
+        draw_slot(impl_->current_bitmap.Get(), left_x0,  le);
+        draw_slot(impl_->right_bitmap.Get(),   right_x0, re);
 
         // Empty-right placeholder when there is no right page (cover or
         // odd-tail). Without it the user's first Ctrl+Shift+D press on
@@ -846,43 +993,40 @@ void PdfCanvas::on_paint() {
     }
 
     if (impl_->current_bitmap) {
-        D2D1_SIZE_F src = impl_->current_bitmap->GetSize();  // DIPs at rt's DPI
-        D2D1_SIZE_F vp  = impl_->rt->GetSize();
+        const D2D1_SIZE_F src_px = impl_->current_bitmap->GetSize();  // PIXELS
+        const D2D1_SIZE_F vp     = impl_->rt->GetSize();              // DIPs
+        const float rt_dpi = static_cast<float>(GetDpiForWindow(hwnd_));
+        const float src_w  = bitmap_px_to_dip(src_px.width,  rt_dpi);
+        const float src_h  = bitmap_px_to_dip(src_px.height, rt_dpi);
 
-        // Fit the bitmap inside the viewport preserving aspect ratio.
-        float scale = vp.width / src.width;
-        if (src.height * scale > vp.height) scale = vp.height / src.height;
-        float dst_w = src.width * scale;
-        float dst_h = src.height * scale;
-        float dx = (vp.width  - dst_w) * 0.5f;
-        float dy = (vp.height - dst_h) * 0.5f;
-
-        D2D1_RECT_F dst = D2D1::RectF(dx + impl_->pan_x,
-                                      dy + impl_->pan_y,
-                                      dx + dst_w + impl_->pan_x,
-                                      dy + dst_h + impl_->pan_y);
+        // Natural size: no shrink-to-fit. The shipped code scaled the
+        // destination to fit the viewport unconditionally, which is why a
+        // changed render scale never changed the displayed size.
+        const Placement pl = place_bitmap(src_w, src_h, vp.width, vp.height,
+                                          impl_->pan_x, impl_->pan_y);
+        const D2D1_RECT_F dst = D2D1::RectF(pl.x, pl.y, pl.x + pl.w, pl.y + pl.h);
         impl_->rt->DrawBitmap(impl_->current_bitmap.Get(), dst, 1.0f,
                               D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
 
         // --- Phase 6 Task 9: search hit overlay ---
-        // PDF-point → viewport-DIP mapping:
-        //   bitmap_pixel = pdf_point * zoom_scale   (RenderEngine passes
-        //     fz_scale(scale, scale) to MuPDF; bitmap DPI is the D2D
-        //     default of 96, so bitmap DIPs equal bitmap pixels.)
-        //   viewport_DIP = bitmap_DIP * scale + dst_origin
-        // where scale/dst_origin are the fit-to-viewport values above.
-        // Combined: viewport_DIP = pdf_pt * (zoom_scale * scale)
-        //                        + (dst.left, dst.top).
+        // PDF-point -> canvas-DIP mapping:
+        //   canvas_DIP = pdf_point_to_dip(pdf_pt, zoom_pct)
+        //              + (dst.left, dst.top)
+        // where dst is the natural-size placement computed above.
         // MuPDF 1.24 page coords are top-left origin, Y-down — matching
         // D2D — so no Y-flip. Quads are drawn as axis-aligned bounding
         // boxes (v1); rotated-text quads would need a transformed
         // geometry in a follow-up.
         if (impl_->hits_fn && impl_->view
             && impl_->brush_hit_other_fill && impl_->brush_hit_current_fill) {
-            const float zoom = impl_->view->zoom_scale();
-            const float s    = zoom * scale;
-            const float ox   = dst.left;
-            const float oy   = dst.top;
+            // One PDF point is exactly zoom_pct DIPs: the pixmap is
+            // page_pt * render_scale pixels wide, and dividing that by
+            // rt_dpi/96 to reach DIPs cancels the dpi factor back out. Using
+            // render_scale() here instead would double every hit rectangle at
+            // 200% scaling.
+            const float pct = impl_->view->zoom_pct();
+            const float ox  = dst.left;
+            const float oy  = dst.top;
             const std::size_t pg = static_cast<std::size_t>(
                 impl_->view->current_page());
 
@@ -896,10 +1040,10 @@ void PdfCanvas::on_paint() {
                 const float max_y = std::max({ q.ul_y, q.ur_y, q.ll_y, q.lr_y });
 
                 D2D1_RECT_F r = D2D1::RectF(
-                    ox + min_x * s,
-                    oy + min_y * s,
-                    ox + max_x * s,
-                    oy + max_y * s);
+                    ox + pdf_point_to_dip(min_x, pct),
+                    oy + pdf_point_to_dip(min_y, pct),
+                    ox + pdf_point_to_dip(max_x, pct),
+                    oy + pdf_point_to_dip(max_y, pct));
 
                 const bool is_current =
                     impl_->current_hit.has_value()
