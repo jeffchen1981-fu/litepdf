@@ -2008,9 +2008,10 @@ void MainWindow::on_results_row_click(std::size_t idx) {
     // scroll_into_view's fire reflects the search-jump target.
     //
     // The explicit change_current_page(h.page) that used to sit here is gone:
-    // it took the old default Top anchor and left scroll_into_view finding the
-    // page already correct, which was exactly the "never installs the Hit"
-    // defect spec 3.4 names.
+    // it left scroll_into_view finding the page already correct, which before
+    // this task meant the Hit was never installed -- the defect spec 3.4 names.
+    // change_current_page installs no anchor of its own; set_pending_anchor is
+    // the only installer.
     canvas_->set_current_hit(sh);
     canvas_->scroll_into_view(sh);
     kick_render(v->current_page());

@@ -223,9 +223,10 @@ public:
     // Scroll / page-change such that `h`'s quad is visible with a 24 DIP
     // margin. If already visible, no scroll — only the invalidate. If
     // target page differs from current, page is switched via
-    // change_current_page; caller (MainWindow) is responsible for the
-    // subsequent kick_render. This method only handles pan and
-    // invalidation.
+    // change_current_page. Installs a pending Hit anchor on every path
+    // EXCEPT the already-visible one, so the caller (MainWindow) must
+    // follow this with kick_render -- both to render and to bind that
+    // anchor to the submission it opens.
     void scroll_into_view(const litepdf::core::SearchSession::Hit& h);
 
 private:
