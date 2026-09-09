@@ -143,10 +143,27 @@ struct PdfCanvas::Impl {
     // same-page zoom or resize produces and what (epoch, page, slot) cannot
     // distinguish.
     std::uint64_t                 next_seq = 0;
+    // Where the next left/single completion should put the page. Empty for a
+    // same-page re-render, which must KEEP the current pan. See
+    // ui/detail/PageAnchor.hpp for the lifetime rule.
+    AnchorSlot                    anchor;
+    // The view_epoch that current_bitmap was created under. set_view does NOT
+    // drop current_bitmap on a non-null swap -- only on the null one
+    // (PdfCanvas.cpp:177-184) -- so after a tab switch the canvas is still
+    // holding, and still painting, the OUTGOING document's page until the
+    // incoming render lands. Anything that MEASURES that bitmap has to know it
+    // belongs to a different document; see scroll_into_view (Task 6).
+    std::uint64_t                 bitmap_epoch = 0;
+    // ...and which PAGE it shows. navigate_to_page's single-page branch does not
+    // drop current_bitmap either, so between a page turn and its completion the
+    // canvas is holding the OUTGOING page of the SAME document -- an epoch check
+    // alone would call that bitmap trustworthy. Both fields are set together.
+    int                           bitmap_page  = -1;
     // Pan offset in canvas DIPs. An axis whose content fits the viewport is
     // centered and its pan is 0; an axis that overflows uses a TOP-LEFT
-    // origin with the pan clamped to [viewport - content, 0]. Reset whenever
-    // a new left/single bitmap arrives.
+    // origin with the pan clamped to [viewport - content, 0]. Re-anchored and
+    // re-clamped by apply_anchor when a completion lands -- never zeroed
+    // unconditionally; see ui/detail/PageAnchor.hpp.
     float                         pan_x = 0.0f;
     float                         pan_y = 0.0f;
 
@@ -202,6 +219,9 @@ void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
     // outgoing document's right page stayed on screen until a fresh right
     // completion landed.
     impl_->right_bitmap.Reset();
+    // New view, new epoch: an anchor installed for the outgoing document
+    // describes a page that is no longer on screen.
+    impl_->anchor.clear();
     if (!view) {
         // No active view — whatever bitmap is on screen is tied to a
         // ctx that will soon be gone. Discard so the next paint shows
@@ -228,7 +248,14 @@ std::uint64_t PdfCanvas::render_epoch() const noexcept {
 
 std::uint64_t PdfCanvas::next_render_seq() {
     if (!impl_) return 0;
-    return ++impl_->next_seq;
+    ++impl_->next_seq;
+    // Bind whatever intent is pending to THIS batch. A resubmit that installs
+    // no anchor of its own re-stamps an older pending one, which is what
+    // carries a navigation forward when a superseding render replaces the one
+    // that was going to consume it -- and what makes a failed render recover,
+    // since the retry re-issues the batch.
+    impl_->anchor.stamp(impl_->next_seq);
+    return impl_->next_seq;
 }
 
 void PdfCanvas::apply_viewport() {
@@ -274,6 +301,11 @@ bool PdfCanvas::change_current_page(int idx) {
         impl_->on_page_changed(impl_->view->current_page());
     }
     return changed;
+}
+
+void PdfCanvas::set_pending_anchor(PageAnchor anchor) {
+    if (!impl_) return;
+    impl_->anchor.install(std::move(anchor));
 }
 
 PdfCanvas::Pan PdfCanvas::pan() const {
@@ -566,10 +598,10 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // user paged away, or a RIGHT-slot pixmap arrived while the layout
             // is single-page. accept_completion answers all four; see
             // ui/detail/CompletionMath.hpp for why the slot is load-bearing.
-            // Drop the pixmap + escrow and bail — do NOT adopt. Once PR-A2
-            // Task 4 adds the pending page anchor, this path must also leave it
-            // alone: it will belong to the CURRENT view, and a stale completion
-            // can never consume it anyway (the seq would have to match).
+            // Drop the pixmap + escrow and bail — do NOT adopt. This path also
+            // leaves the pending page anchor alone: it belongs to the CURRENT
+            // view, and a stale completion can never consume it anyway (the
+            // seq would have to match).
             const int cur_page = impl_->view ? impl_->view->current_page() : 0;
             const int total    = impl_->view ? impl_->view->page_count()   : 0;
             // next_seq is the newest submission ISSUED, which is what the seq
@@ -625,13 +657,22 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 impl_->right_bitmap = std::move(bmp);
             } else {
                 impl_->current_bitmap = std::move(bmp);
-                // Reset pan only when the LEFT slot lands — that's the
-                // page-change anchor. A right-slot delivery during a
-                // dual-mode page transition arrives after the left
-                // bitmap and must NOT clobber the freshly reset pan.
-                impl_->pan_x = 0.0f;
-                impl_->pan_y = 0.0f;
+                impl_->bitmap_epoch   = epoch;
+                impl_->bitmap_page    = page;
                 ColdStartTimer::mark(3);  // first pixmap -> D2D bitmap
+            }
+            // Place the page. BOTH slots run this: the pan is clamped against
+            // the UNION of the two, so a right-slot delivery changes the height
+            // a Bottom anchor measures against, and either half can land first
+            // (two workers, and an L1 cache hit returns before any MuPDF work).
+            // take() therefore does not retire the anchor -- see
+            // ui/detail/PageAnchor.hpp -- and mark_applied() is called ONLY when
+            // the placement actually happened. A right half arriving while
+            // navigate_to_page has both bitmaps reset cannot measure anything,
+            // and must not retire an intent the left half has yet to use.
+            const PageAnchor anchor = impl_->anchor.take(seq);
+            if (apply_anchor(anchor) && anchor.kind != PageAnchor::Kind::None) {
+                impl_->anchor.mark_applied();
             }
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
@@ -801,19 +842,146 @@ LRESULT PdfCanvas::pan_by(float dx, float dy) {
     return 0;
 }
 
+float PdfCanvas::page_origin_y(float src_h, float vp_h) const {
+    // place_bitmap with pan 0 gives exactly what on_paint uses as the page's
+    // unpanned top: the centred position when the page fits, and 0 when it
+    // overflows. Width does not affect the vertical result, so any positive
+    // width will do here.
+    return place_bitmap(src_h, src_h, src_h, vp_h, 0.0f, 0.0f).y;
+}
+
+float PdfCanvas::pan_y_for_hit(const litepdf::core::SearchSession::Hit& h) const {
+    // Task 4 placeholder shape, replaced wholesale in Task 6 with the geometry
+    // extracted from scroll_into_view. Keeping the signature here lets
+    // apply_anchor be written and reviewed as one piece.
+    if (!impl_ || !impl_->current_bitmap || !impl_->rt || !impl_->view) {
+        return impl_ ? impl_->pan_y : 0.0f;
+    }
+    const D2D1_SIZE_F src_px = impl_->current_bitmap->GetSize();
+    const D2D1_SIZE_F vp     = impl_->rt->GetSize();
+    const float rt_dpi = static_cast<float>(GetDpiForWindow(hwnd_));
+    const float src_h  = bitmap_px_to_dip(src_px.height, rt_dpi);
+    const float pct    = impl_->view->zoom_pct();
+    const float q_min_y_pt = std::min({ h.geom.ul_y, h.geom.ur_y,
+                                        h.geom.ll_y, h.geom.lr_y });
+    const float q_max_y_pt = std::max({ h.geom.ul_y, h.geom.ur_y,
+                                        h.geom.ll_y, h.geom.lr_y });
+    const float q_center = pdf_point_to_dip((q_min_y_pt + q_max_y_pt) * 0.5f, pct);
+    return clamp_pan(vp.height * 0.5f - q_center - page_origin_y(src_h, vp.height),
+                     src_h, vp.height);
+}
+
+bool PdfCanvas::apply_anchor(const PageAnchor& anchor) {
+    ContentBox box{};
+    if (!content_extent(box)) return false;
+    const D2D1_SIZE_F vp = impl_->rt->GetSize();
+
+    switch (anchor.kind) {
+        case PageAnchor::Kind::Top:
+            impl_->pan_y = 0.0f;
+            break;
+        case PageAnchor::Kind::Bottom:
+            // The far end of the pan range. clamp_pan below turns this into 0
+            // when the content fits, which is the right answer -- a page that
+            // fits has no distinct bottom to land on.
+            impl_->pan_y = vp.height - box.h;
+            break;
+        case PageAnchor::Kind::Hit:
+            impl_->pan_y = pan_y_for_hit(anchor.target);
+            break;
+        case PageAnchor::Kind::None:
+            // Same-page re-render: keep the pan exactly where the user left
+            // it. Only the clamp below applies, because the content may have
+            // changed size (zoom, DPI, pane toggle, window resize).
+            break;
+    }
+    impl_->pan_x = clamp_pan(impl_->pan_x, box.w, vp.width);
+    impl_->pan_y = clamp_pan(impl_->pan_y, box.h, vp.height);
+    return true;
+}
+
+LRESULT PdfCanvas::scroll_to_top() {
+    ContentBox box{};
+    if (!content_extent(box)) return 0;
+    const D2D1_SIZE_F vp = impl_->rt->GetSize();
+    impl_->pan_y = clamp_pan(0.0f, box.h, vp.height);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+    return 0;
+}
+
+void PdfCanvas::navigate_to_page(int target, PageAnchor anchor) {
+    if (!impl_ || !impl_->view) return;
+    if (target == impl_->view->current_page()) return;
+
+    // Install BEFORE the page change so an observer that re-enters cannot see a
+    // moved page with a stale anchor, and before next_render_seq() below, which
+    // is what binds it to this batch.
+    set_pending_anchor(std::move(anchor));
+    change_current_page(target);
+
+    HWND target_hwnd = hwnd_;
+    const std::uint64_t epoch = impl_->view_epoch;
+    const std::uint64_t seq   = next_render_seq();
+    if (impl_->dual_page) {
+        // (Phase 8 D10) Spread mode: the pair changed, so both bitmaps are
+        // stale. Clear them so on_paint shows the chrome background (and the
+        // empty-right placeholder when the new pair has no right page) until
+        // the new renders land.
+        impl_->current_bitmap.Reset();
+        impl_->right_bitmap.Reset();
+        impl_->view->cancel_stale_renders(0);
+        // Defensive re-snap: any entry point that leaves current_page on a
+        // non-LEFT-aligned page must not silently mis-pair the spread. Snap
+        // the LEFT here (and write it back so observers see the canonical
+        // state) instead of trusting current_page raw.
+        const int total = impl_->view->page_count();
+        const int left  = dual_page_compute_left(impl_->view->current_page(),
+                                                 total);
+        if (left != impl_->view->current_page()) {
+            // A snap, not a navigation: change_current_page never touches the
+            // anchor, so a Hit installed moments earlier -- a search landing on
+            // the RIGHT page of a spread -- survives it untouched.
+            change_current_page(left);
+        }
+        apply_viewport();
+        const int right = dual_page_compute_right(left, total);
+        impl_->view->request_render(left,
+            [target_hwnd, epoch, left, seq](fz_pixmap* p, fz_context* worker_ctx) {
+                PdfCanvas::post_render_done(target_hwnd, p, worker_ctx, epoch,
+                                            left, seq);
+            });
+        if (right >= 0) {
+            impl_->view->request_render(right,
+                [target_hwnd, epoch, right, seq](fz_pixmap* p, fz_context* worker_ctx) {
+                    PdfCanvas::post_render_done_right(target_hwnd, p, worker_ctx,
+                                                      epoch, right, seq);
+                });
+        }
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+    // Cancel stale renders from rapid paging, submit P0 for the current page,
+    // and prefetch prev/next at P1 so the next PgUp/PgDn is instant.
+    const int page = impl_->view->current_page();
+    impl_->view->request_render_with_prefetch(page,
+        [target_hwnd, epoch, page, seq](fz_pixmap* p, fz_context* worker_ctx) {
+            PdfCanvas::post_render_done(target_hwnd, p, worker_ctx, epoch,
+                                        page, seq);
+        });
+}
+
 LRESULT PdfCanvas::on_key_down(WPARAM key) {
     if (!impl_->view) return 0;
 
-    int cur     = impl_->view->current_page();
-    int max_idx = impl_->view->page_count() - 1;
+    const int cur     = impl_->view->current_page();
+    const int max_idx = impl_->view->page_count() - 1;
 
-    bool changed = false;
     switch (key) {
         case VK_NEXT: {  // PgDn
             int next;
             if (impl_->dual_page) {
                 // (Phase 8 T4) Snap from the current spread's LEFT page,
-                // letting dual_page_step_next_left handle the cover→1
+                // letting dual_page_step_next_left handle the cover->1
                 // bootstrap explicitly — a plain `cur_left + 2` stride
                 // overshoots from cover (0+2=2) and skips spread (1,2).
                 const int total    = impl_->view->page_count();
@@ -822,8 +990,8 @@ LRESULT PdfCanvas::on_key_down(WPARAM key) {
             } else {
                 next = std::min(cur + 1, max_idx);
             }
-            changed = change_current_page(next);
-            break;
+            navigate_to_page(next, PageAnchor::top());
+            return 0;
         }
         case VK_PRIOR: {  // PgUp
             int prev;
@@ -837,18 +1005,26 @@ LRESULT PdfCanvas::on_key_down(WPARAM key) {
             } else {
                 prev = std::max(cur - 1, 0);
             }
-            changed = change_current_page(prev);
-            break;
+            // PgUp lands at the TOP of the previous page, unlike the wheel's
+            // backward flip which lands at its bottom: a key press is a
+            // discrete jump, while wheel scrolling is continuous motion whose
+            // content must not skip.
+            navigate_to_page(prev, PageAnchor::top());
+            return 0;
         }
+        // Home / End name a position, not just a page. navigate_to_page returns
+        // early when the target is the page already showing, so on the first or
+        // last page these would otherwise do nothing at all to a reader who has
+        // scrolled down -- and "go to the top" is exactly what they mean.
         case VK_HOME:
-            changed = change_current_page(0);
-            break;
+            if (cur == 0) return scroll_to_top();
+            navigate_to_page(0, PageAnchor::top());
+            return 0;
         case VK_END:
-            changed = change_current_page(max_idx);
-            break;
-        // Arrow keys pan by 100 DIP, now clamped to the content. Panning is
-        // only meaningful once content can overflow the viewport, which is
-        // what the natural-size paint path in on_paint introduces.
+            if (cur == max_idx) return scroll_to_top();
+            navigate_to_page(max_idx, PageAnchor::top());
+            return 0;
+        // Arrow keys pan by 100 DIP, clamped to the content.
         case VK_LEFT:  return pan_by( 100.0f,    0.0f);
         case VK_RIGHT: return pan_by(-100.0f,    0.0f);
         case VK_UP:    return pan_by(   0.0f,  100.0f);
@@ -856,58 +1032,6 @@ LRESULT PdfCanvas::on_key_down(WPARAM key) {
         default:
             return 0;
     }
-
-    if (changed) {
-        HWND target = hwnd_;
-        const std::uint64_t epoch = impl_->view_epoch;
-        const std::uint64_t seq   = next_render_seq();
-        if (impl_->dual_page) {
-            // (Phase 8 D10) Spread mode: pair changed, so both bitmaps
-            // are stale. Clear them so on_paint shows the chrome
-            // background (and the empty-right placeholder when the new
-            // pair has no right page) until the new renders land.
-            impl_->current_bitmap.Reset();
-            impl_->right_bitmap.Reset();
-            impl_->view->cancel_stale_renders(0);
-            // Defensive re-snap: D15 (programmatic page-jump) and any
-            // future entry point that leaves current_page on a non-LEFT-
-            // aligned page must not silently mis-pair the spread. Snap
-            // the LEFT here (and write it back so observers see the
-            // canonical state) instead of trusting current_page raw.
-            const int total    = impl_->view->page_count();
-            const int left     = dual_page_compute_left(
-                                     impl_->view->current_page(), total);
-            if (left != impl_->view->current_page()) {
-                impl_->view->set_current_page(left);
-            }
-            apply_viewport();
-            const int right = dual_page_compute_right(left, total);
-            impl_->view->request_render(left,
-                [target, epoch, left, seq](fz_pixmap* p, fz_context* worker_ctx) {
-                    PdfCanvas::post_render_done(target, p, worker_ctx, epoch,
-                                                left, seq);
-                });
-            if (right >= 0) {
-                impl_->view->request_render(right,
-                    [target, epoch, right, seq](fz_pixmap* p, fz_context* worker_ctx) {
-                        PdfCanvas::post_render_done_right(target, p, worker_ctx,
-                                                          epoch, right, seq);
-                    });
-            }
-            InvalidateRect(hwnd_, nullptr, FALSE);
-        } else {
-            // Cancel stale renders from rapid paging, submit P0 for current
-            // page, and prefetch prev/next at P1 (Task 11). Cache fills
-            // happen at the engine level so the next PgUp/PgDn is instant.
-            const int page = impl_->view->current_page();
-            impl_->view->request_render_with_prefetch(page,
-                [target, epoch, page, seq](fz_pixmap* p, fz_context* worker_ctx) {
-                    PdfCanvas::post_render_done(target, p, worker_ctx, epoch,
-                                                page, seq);
-                });
-        }
-    }
-    return 0;
 }
 
 void PdfCanvas::on_size(int w, int h) {

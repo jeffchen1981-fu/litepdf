@@ -8,6 +8,7 @@
 
 #include "core/SearchSession.hpp"
 #include "ui/detail/CompletionMath.hpp"
+#include "ui/detail/PageAnchor.hpp"
 
 // Forward-decl so the header stays COM-free. ComPtr in .cpp only.
 struct ID2D1Factory;
@@ -137,8 +138,7 @@ public:
     // return its new value, which every request in this batch must carry.
     //
     // Call this ONCE per batch, before the request_render* calls — a spread's
-    // two renders share one seq. As of this commit the body does nothing else;
-    // PR-A2 Task 4 will additionally make it stamp whatever page anchor is
+    // two renders share one seq. The body also stamps whatever page anchor is
     // pending, which is what carries a navigation intent forward when a newer
     // submission supersedes an older one.
     std::uint64_t next_render_seq();
@@ -205,6 +205,20 @@ public:
     // Safe to call before set_view (returns false).
     bool change_current_page(int idx);
 
+    // Say where the page should land when the next submission batch completes.
+    //
+    // Deliberately NOT folded into change_current_page: a defensive page SNAP
+    // (dual-mode canonicalisation) also changes the current page, runs on every
+    // spread render including same-page ones, and must leave the pan alone.
+    // Callers that navigate install an anchor; callers that canonicalise do not.
+    //
+    // The anchor is bound to a submission by the next next_render_seq() call,
+    // so install it BEFORE kicking the render. Installing without ever
+    // submitting is harmless: the anchor sits unbound until some later batch
+    // stamps it, and the seq test keeps it from being applied by anything else
+    // in the meantime.
+    void set_pending_anchor(PageAnchor anchor);
+
     // Scroll / page-change such that `h`'s quad is visible with a 24 DIP
     // margin. If already visible, no scroll — only the invalidate. If
     // target page differs from current, page is switched via
@@ -224,6 +238,41 @@ private:
     void on_paint();
     void on_size(int width, int height);
     LRESULT on_key_down(WPARAM key);
+
+    // Change page, install `anchor`, drop stale bitmaps and submit the render
+    // batch. The single funnel for every in-canvas navigation: PgUp / PgDn /
+    // Home / End and the wheel's edge flips. No-op when the page does not move
+    // AND the anchor is Top (nothing to re-render, nothing to re-anchor).
+    void navigate_to_page(int target, PageAnchor anchor);
+
+    // Put the page already on screen at its top. Home and End use this when the
+    // page they name is the one showing: they mean a position, not only a page,
+    // and navigate_to_page declines a move to where you already are.
+    LRESULT scroll_to_top();
+
+    // Unpanned vertical origin of the LEFT/single page in canvas DIPs, i.e.
+    // what on_paint would use with pan_y == 0. Single mode: place_bitmap
+    // centres a fitting page and pins an overflowing one to 0. Dual mode: the
+    // same, because the slot band is the full canvas height and on_paint's
+    // union base_y is provably 0 there (a union taller than the band always
+    // has t == 0, since an overflowing slot placement has y == 0).
+    float page_origin_y(float src_h, float vp_h) const;
+
+    // Pan that centres `h`'s quad vertically, using the same geometry as
+    // on_paint. Extracted in Task 6; scroll_into_view and the Hit anchor share
+    // it so the pre-render estimate and the post-render placement cannot drift.
+    float pan_y_for_hit(const litepdf::core::SearchSession::Hit& h) const;
+
+    // Turn an anchor into a pan. Called from the completion handler once the
+    // arriving bitmap is installed, so the page's real height is known.
+    // Kind::None keeps the current pan and only re-clamps it.
+    //
+    // Returns false when there is nothing to measure against yet (no bitmap,
+    // no render target). The caller must NOT mark the anchor applied in that
+    // case, or an intent would be retired without ever taking effect -- the
+    // reachable path being a spread whose RIGHT half lands first, while
+    // navigate_to_page has just reset both bitmaps.
+    bool apply_anchor(const PageAnchor& anchor);
 
     // Painted extent plus its origin, in canvas DIPs. `l`/`t` are zero for a
     // single page and non-zero for an unequal spread, where the union of the
