@@ -1050,6 +1050,50 @@ std::uint64_t PdfCanvas::next_render_seq() {
 }
 ```
 
+- [ ] **Step 4b: Make `discard_render_target` drop the right bitmap too**
+
+`discard_render_target` (`src/ui/PdfCanvas.cpp:646-653`) releases the brushes and
+`current_bitmap` but **not** `right_bitmap` — and the `WM_DPICHANGED_BEFOREPARENT`
+comment at `:491-492` asserts the opposite in so many words:
+
+```cpp
+            // current_bitmap is sized for the OLD DPI — discard it too
+            // (discard_render_target() resets both).
+```
+
+That sentence is false, and it is the kind of false that survives review: a
+maintainer reading it has no reason to check. An `ID2D1Bitmap` belongs to the render
+target that created it, so after a DPI change or a device-loss recovery the surviving
+`right_bitmap` is drawn onto a *different* target — and the spread keeps showing a
+page at the old DPI until a fresh right-slot render lands, or fails the draw outright.
+Same omission as the `set_view` one in the next step, in a second function.
+
+Add the reset:
+
+```cpp
+void PdfCanvas::discard_render_target() {
+    // Brushes first — they're device-bound to the rt.
+    impl_->brush_hit_other_fill.Reset();
+    impl_->brush_hit_current_fill.Reset();
+    impl_->brush_hit_current_stroke.Reset();
+    // BOTH slot bitmaps: an ID2D1Bitmap belongs to the target that made it, so
+    // neither may outlive this call. right_bitmap was missing here, while the
+    // WM_DPICHANGED_BEFOREPARENT comment claimed it was already handled.
+    impl_->current_bitmap.Reset();
+    impl_->right_bitmap.Reset();
+    impl_->rt.Reset();
+}
+```
+
+and correct the comment at the `WM_DPICHANGED_BEFOREPARENT` case so it stops
+describing behaviour that only now exists:
+
+```cpp
+            // DPI is changing. Discard render target; next paint rebuilds at new DPI.
+            // Both slot bitmaps are sized for the OLD DPI and are bound to the
+            // outgoing target — discard_render_target() drops both.
+```
+
 - [ ] **Step 5: Make `set_view` clear the right bitmap**
 
 Spec §3.1: `set_view` today clears only `current_bitmap`, and only on the null-view
@@ -1373,10 +1417,27 @@ In `src/ui/PdfCanvas.hpp`, add after the `CompletionMath.hpp` include from Task 
 #include "ui/detail/PageAnchor.hpp"
 ```
 
-**`change_current_page` keeps its existing one-argument signature.** Add
-`set_pending_anchor` next to it instead — appending an `anchor` parameter to
-`change_current_page` looks tidier and is wrong, because three distinct operations
-call it and only one of them wants an anchor:
+**`change_current_page` keeps its existing one-argument signature — a deliberate
+deviation from spec §3.2.** The spec's "API shape" paragraph
+(`2026-09-07-zoom-correctness-page-nav-design.md:354-361`) prescribes the opposite,
+verbatim:
+
+```cpp
+bool change_current_page(int idx, PageAnchor anchor = PageAnchor::top());
+```
+
+This plan does not implement that signature, and the reason is empirical: it was
+written that way first, and the plan gate found three separate defects that all trace
+to the defaulted parameter (a pan reset on every same-page spread render, a stranded
+`Top` on clicks that do not navigate, and search hits re-centring when already
+visible). The spec's own §3.2 requirement is that "`PdfCanvas` owns the single
+pending-anchor slot; nothing outside reads or writes it" — that is honoured. What
+changes is only *which* method installs into it. Everything the spec asks the anchor
+machinery to do still happens; a caller just has to say so.
+
+Add `set_pending_anchor` next to `change_current_page` instead — appending an
+`anchor` parameter looks tidier and is wrong, because three distinct operations call
+`change_current_page` and only one of them wants an anchor:
 
 | operation | callers | anchor |
 |---|---|---|
@@ -1424,6 +1485,11 @@ Add to the private section, after `LRESULT on_key_down(WPARAM key);`
     // AND the anchor is Top (nothing to re-render, nothing to re-anchor).
     void navigate_to_page(int target, PageAnchor anchor);
 
+    // Put the page already on screen at its top. Home and End use this when the
+    // page they name is the one showing: they mean a position, not only a page,
+    // and navigate_to_page declines a move to where you already are.
+    LRESULT scroll_to_top();
+
     // Unpanned vertical origin of the LEFT/single page in canvas DIPs, i.e.
     // what on_paint would use with pan_y == 0. Single mode: place_bitmap
     // centres a fitting page and pins an overflowing one to 0. Dual mode: the
@@ -1444,14 +1510,18 @@ Add to the private section, after `LRESULT on_key_down(WPARAM key);`
     bool apply_anchor(const PageAnchor& anchor);
 ```
 
-- [ ] **Step 2: Run the build to verify it fails**
+- [ ] **Step 2: Build, and expect it to PASS**
 
 ```bash
 "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" --build build --config Release
 ```
 
-Expected: FAIL — unresolved externals for `navigate_to_page`, `page_origin_y` and
-`apply_anchor`.
+Expected: **clean**. Step 1 only declared member functions, and a declaration that is
+never odr-used links fine — nothing calls `navigate_to_page`, `page_origin_y`,
+`apply_anchor`, `scroll_to_top` or `set_pending_anchor` yet. This step checks that the
+header edit itself compiles (the three new includes, the `PageAnchor` parameter types)
+before any of the bodies below depend on it. It is not a red-then-green checkpoint;
+the first of those in this task is Step 8.
 
 - [ ] **Step 3: Add the slot to `Impl` and stamp it in `next_render_seq`**
 
@@ -1469,6 +1539,11 @@ In `struct PdfCanvas::Impl`, after the `next_seq` member added in Task 3, add:
     // incoming render lands. Anything that MEASURES that bitmap has to know it
     // belongs to a different document; see scroll_into_view (Task 6).
     std::uint64_t                 bitmap_epoch = 0;
+    // ...and which PAGE it shows. navigate_to_page's single-page branch does not
+    // drop current_bitmap either, so between a page turn and its completion the
+    // canvas is holding the OUTGOING page of the SAME document -- an epoch check
+    // alone would call that bitmap trustworthy. Both fields are set together.
+    int                           bitmap_page  = -1;
 ```
 
 Replace `PdfCanvas::next_render_seq()` (added in Task 3) with:
@@ -1549,6 +1624,15 @@ bool PdfCanvas::apply_anchor(const PageAnchor& anchor) {
     impl_->pan_x = clamp_pan(impl_->pan_x, box.w, vp.width);
     impl_->pan_y = clamp_pan(impl_->pan_y, box.h, vp.height);
     return true;
+}
+
+LRESULT PdfCanvas::scroll_to_top() {
+    ContentBox box{};
+    if (!content_extent(box)) return 0;
+    const D2D1_SIZE_F vp = impl_->rt->GetSize();
+    impl_->pan_y = clamp_pan(0.0f, box.h, vp.height);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+    return 0;
 }
 
 void PdfCanvas::navigate_to_page(int target, PageAnchor anchor) {
@@ -1663,6 +1747,7 @@ the replacement text below reproduces. (At `8bf143d` that span is
             } else {
                 impl_->current_bitmap = std::move(bmp);
                 impl_->bitmap_epoch   = epoch;
+                impl_->bitmap_page    = page;
                 ColdStartTimer::mark(3);  // first pixmap -> D2D bitmap
             }
             // Place the page. BOTH slots run this: the pan is clamped against
@@ -1734,10 +1819,16 @@ text.)
             navigate_to_page(prev, PageAnchor::top());
             return 0;
         }
+        // Home / End name a position, not just a page. navigate_to_page returns
+        // early when the target is the page already showing, so on the first or
+        // last page these would otherwise do nothing at all to a reader who has
+        // scrolled down -- and "go to the top" is exactly what they mean.
         case VK_HOME:
+            if (cur == 0) return scroll_to_top();
             navigate_to_page(0, PageAnchor::top());
             return 0;
         case VK_END:
+            if (cur == max_idx) return scroll_to_top();
             navigate_to_page(max_idx, PageAnchor::top());
             return 0;
         // Arrow keys pan by 100 DIP, clamped to the content.
@@ -2078,14 +2169,17 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     const int  target_pg  = static_cast<int>(h.page);
     const bool page_moved = change_current_page(target_pg);
 
-    // A bitmap from a previous VIEW is not evidence about this one. set_view
-    // keeps current_bitmap on a non-null swap, so after a cross-tab search jump
-    // the canvas is still holding the outgoing document's page; measuring the
-    // incoming document's quad against it can report "already visible" for a hit
-    // that is actually off screen, and with the conditional install below that
-    // verdict is final -- no anchor is left for the completion to correct.
-    const bool own_bitmap =
-        impl_->current_bitmap && impl_->bitmap_epoch == impl_->view_epoch;
+    // A bitmap from a previous view, or from a previous PAGE, is not evidence
+    // about this one. Neither set_view (on a non-null swap) nor
+    // navigate_to_page's single-page branch drops current_bitmap, so the canvas
+    // can be holding the outgoing document's page after a cross-tab jump, or the
+    // outgoing PAGE of this document between a page turn and its completion.
+    // Measuring the wanted quad against either can report "already visible" for a
+    // hit that is off screen -- and with the conditional install below, that
+    // verdict is final: no anchor is left for the completion to correct.
+    const bool own_bitmap = impl_->current_bitmap
+                            && impl_->bitmap_epoch == impl_->view_epoch
+                            && impl_->bitmap_page  == impl_->view->current_page();
 
     if (page_moved || !own_bitmap || !impl_->rt) {
         // The hit is on a different page, we have nothing rendered, or what we
@@ -2503,14 +2597,14 @@ git commit -m "feat(canvas): add pure wheel-scroll stepping, residuals and edge 
 
 **Files:**
 - Modify: `src/ui/PdfCanvas.hpp` — include `ScrollMath.hpp`; declare `on_wheel_scroll`
-- Modify: `src/ui/PdfCanvas.cpp` — `wheel_residual` and `wheel_flip_pending` in
-  `Impl`; the non-Ctrl branch of `WM_MOUSEWHEEL` (at `8bf143d`, `:468-488`); one line
-  at the top of the completion case; one line in `set_view`
+- Modify: `src/ui/PdfCanvas.cpp` — `wheel_residual` and `wheel_flip_seq` in `Impl`;
+  the non-Ctrl branch of `WM_MOUSEWHEEL` (at `8bf143d`, `:468-488`); one line in the
+  completion case's null branch, one on its accepted path, one in `set_view`
 
 **Both `Impl` fields are declared HERE, in the task that uses them.** An earlier draft
-of this plan put the `wheel_flip_pending` clear in Task 4's completion-handler block
-while declaring the field in this task — which would have made Task 4 fail to compile
-and broken the rule that every task leaves the tree green on its own.
+of this plan put the flip-latch clear in Task 4's completion-handler block while
+declaring the field in this task — which would have made Task 4 fail to compile and
+broken the rule that every task leaves the tree green on its own.
 
 **Interfaces:**
 - Consumes: `consume_notches`, `wheel_step_dip`, `apply_wheel`, `Flip` (Task 7);
@@ -2568,7 +2662,18 @@ In `struct PdfCanvas::Impl`, after the `anchor` member added in Task 4:
     // reporting "already at the edge" and a brisk scroll walks several pages
     // without showing any of them. Cleared by the completion handler and by
     // set_view.
-    bool                          wheel_flip_pending = false;
+    //
+    // It holds the SEQ of the flip's submission batch, not a bare flag, for two
+    // reasons found in review. (a) A bare flag cleared by any completion could be
+    // released by a stale one, and several stale P0s can be outstanding at once,
+    // so "at most one extra flip" was not a bound anyone had proved. (b) If the
+    // flip's completion is never posted at all -- post_render_done_impl returns
+    // without posting on a clone failure, an allocation failure or a PostMessageW
+    // failure -- a flag would latch forever and the wheel would be dead for the
+    // rest of the session. Keyed by seq, the block lasts only while the flip's
+    // batch is still the newest submitted, so any later render (a keystroke, a
+    // zoom, a resize) releases it even when no completion ever arrives.
+    std::uint64_t                 wheel_flip_seq = 0;   // 0 = nothing pending
 ```
 
 - [ ] **Step 3b: Clear the latch on EVERY completion, not just an accepted one**
@@ -2584,22 +2689,39 @@ Locate the start of the `WM_USER_RENDER_DONE` / `WM_USER_RENDER_DONE_RIGHT` case
 insert the clear immediately after the `is_right` / `pix` / `meta` locals are read,
 before the `if (!pix)` early return:
 
+**Two places, not one.** A cancelled or failed render posts `WPARAM = 0` and the
+handler returns at `if (!pix)`, long before the accepted-completion code; if the
+release lived only in the accepted branch, a flip whose render never delivered would
+leave the wheel dead. But releasing on *every* message is too broad — a superseded
+completion rejected by `accept_completion` says nothing about the flip, and several
+stale P0s can be outstanding at once, so a broad release would let a fast scroll walk
+several pages after all.
+
+Add the release to the null branch, immediately before its `InvalidateRect`:
+
 ```cpp
-            // A completion message for this canvas arrived, whatever its
-            // outcome. That answers the wheel flip we were waiting on: null and
-            // superseded completions never reach the accepted path below, so
-            // clearing there would leave the latch stuck on and the wheel dead.
-            // The cost of clearing here is that an unrelated older completion
-            // can release the latch one notch early -- at worst one extra page
-            // flip, against a permanently unresponsive wheel.
-            impl_->wheel_flip_pending = false;
+            if (!pix) {
+                // Render failed or cancelled (helper posts WPARAM=0 here).
+                // meta is also null on this path — nothing to drop.
+                // This answers a pending wheel flip: no pixmap is coming for it.
+                impl_->wheel_flip_seq = 0;
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return 0;
+            }
+```
+
+and to the accepted path, next to the anchor application added in Task 4 Step 6:
+
+```cpp
+            // The flip's page is on screen; the wheel may move again.
+            impl_->wheel_flip_seq = 0;
 ```
 
 Also add the `set_view` clear next to the `impl_->anchor.clear();` line from Task 4
-Step 4, so a tab switch cannot carry a latch across documents:
+Step 4, so a tab switch cannot carry a pending flip across documents:
 
 ```cpp
-    impl_->wheel_flip_pending = false;
+    impl_->wheel_flip_seq = 0;
 ```
 
 - [ ] **Step 4: Implement `on_wheel_scroll`**
@@ -2616,7 +2738,13 @@ LRESULT PdfCanvas::on_wheel_scroll(int delta) {
     // scroll would skip several pages without showing any of them. Drop the
     // notch AND the residual, so a fast spin does not fire the moment the new
     // page arrives.
-    if (impl_->wheel_flip_pending) {
+    //
+    // The block holds only while the flip's batch is STILL the newest submitted.
+    // Anything else that submits a render -- a keystroke, a zoom, a resize --
+    // moves next_seq past it and releases the wheel, which is what keeps a flip
+    // whose completion was never posted at all from disabling the wheel for the
+    // rest of the session.
+    if (impl_->wheel_flip_seq != 0 && impl_->wheel_flip_seq == impl_->next_seq) {
         impl_->wheel_residual = 0;
         return 0;
     }
@@ -2672,9 +2800,10 @@ LRESULT PdfCanvas::on_wheel_scroll(int delta) {
                                            : cur;
     if (target == cur_canon) return 0;
 
-    impl_->wheel_flip_pending = true;
     navigate_to_page(target, (r.flip == Flip::Next) ? PageAnchor::top()
                                                     : PageAnchor::bottom());
+    // navigate_to_page opened a submission batch, so next_seq now names it.
+    impl_->wheel_flip_seq = impl_->next_seq;
     return 0;
 }
 ```
@@ -3035,9 +3164,16 @@ git commit -m "feat(zoom): restore Fit Width as the default now that the wheel c
       returns nothing — these were in an earlier draft of this plan and the round-1
       review removed the need for them. If any exists, a task was implemented from a
       stale copy.
-- [ ] `grep -n "bitmap_epoch" src/ui/PdfCanvas.cpp` shows it written where
-      `current_bitmap` is assigned and read in `scroll_into_view` — a bitmap from the
-      outgoing view must never be measured against.
+- [ ] `grep -n "bitmap_epoch\|bitmap_page" src/ui/PdfCanvas.cpp` shows both written
+      where `current_bitmap` is assigned and both read in `scroll_into_view` — a
+      bitmap from the outgoing view OR the outgoing page must never be measured
+      against.
+- [ ] `grep -n "right_bitmap" src/ui/PdfCanvas.cpp` includes a hit inside
+      `discard_render_target` — a D2D bitmap must not outlive the target that made it.
+- [ ] `grep -n "wheel_flip_seq" src/ui/PdfCanvas.cpp` shows it cleared on BOTH the
+      null-completion branch and the accepted path, and compared against `next_seq`
+      in `on_wheel_scroll` — a bare bool here was released by stale completions and
+      latched forever when no completion was posted at all.
 - [ ] `grep -cn "change_current_page(page)" src/ui/MainWindow.cpp` shows exactly one
       (inside `navigate_click`) — the three click sites are consolidated, not copied.
 - [ ] `VERSION` is unchanged at `1.2.0`.
@@ -3100,7 +3236,18 @@ State these in the PR description so a reviewer does not report them as misses.
    message, so an unrelated older completion can free it one notch early; that costs
    at most one extra flip, against a wheel that would otherwise be dead until the
    next keystroke.
-9. **A tab switch still paints the outgoing document's page** until the incoming
+9. **Spread navigation through `MainWindow::kick_render` keeps the outgoing right
+   page on screen** until the new one lands, and keeps it indefinitely if that render
+   fails. `PdfCanvas::navigate_to_page` and `on_key_down` clear both slot bitmaps
+   before submitting; `kick_render`'s dual branch never has (`MainWindow.cpp:295-322`
+   at `8bf143d` contains no `Reset`), so an outline click, a thumbnail click, a
+   session restore or a search jump that moves to a different spread paints the new
+   left page beside the old right one. Pre-existing and unchanged by this PR — the
+   asymmetry is older than PR-A1. Fixing it properly means `kick_render` knowing
+   whether the *spread* changed, which it cannot currently tell from its arguments,
+   and clearing unconditionally would flash the canvas on every same-page re-render
+   (zoom, resize, invert) in spread mode.
+10. **A tab switch still paints the outgoing document's page** until the incoming
    render lands — `set_view` drops `right_bitmap` (Task 3) but not `current_bitmap`.
    Task 6 stops that bitmap being *measured* across a view swap, which is the part
    that produced a wrong scroll position; making the canvas go blank on every switch
