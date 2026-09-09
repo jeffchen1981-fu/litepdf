@@ -3232,10 +3232,9 @@ State these in the PR description so a reviewer does not report them as misses.
    A very fast scroll therefore advances one page per completion rather than one per
    notch. This is deliberate — the alternative, discovered in review, is that each
    queued notch re-reads the outgoing page's pan and flips again, walking several
-   pages without drawing any of them. The latch is released by any completion
-   message, so an unrelated older completion can free it one notch early; that costs
-   at most one extra flip, against a wheel that would otherwise be dead until the
-   next keystroke.
+   pages without drawing any of them. The latch is keyed by the flip's submission
+   seq, so a stale completion cannot release it and a flip whose completion is never
+   posted at all is released by the next render anything else submits.
 9. **Spread navigation through `MainWindow::kick_render` keeps the outgoing right
    page on screen** until the new one lands, and keeps it indefinitely if that render
    fails. `PdfCanvas::navigate_to_page` and `on_key_down` clear both slot bitmaps
@@ -3253,6 +3252,30 @@ State these in the PR description so a reviewer does not report them as misses.
    that produced a wrong scroll position; making the canvas go blank on every switch
    instead is a visible behaviour change with its own trade-off and does not belong
    in this PR.
+
+## Gate record
+
+This plan passed a Full-tier plan gate with the high-stakes bundle on 2026-09-09.
+Four review rounds, 25 findings, all anchor-verified by the controller before any fix:
+
+| round | lens | findings | outcome |
+|---|---|---|---|
+| 1 | Fable (design) + Sonnet (mechanical), parallel | 4 Critical, 7 Important, 1 Minor | all fixed — `fa3bba7` |
+| lens 3a | Codex `terra@high` | 1 Critical, 3 Important | 3 fixed — `73a2764`; 1 severity overstated, downgraded to residual 7 |
+| 2 | Fable, scoped to the round-1 fix delta | 1 Critical + 1 Important + 1 Minor live | 2 fixed + 2 open questions closed — `72b775a` |
+| lens 3b | Codex `luna@max` | 6 Important, 2 Minor | 6 fixed — `05f9a0b`; 1 → residual 9; 1 answered as a recorded deviation |
+
+Zero findings were discarded for a missing contract field. Two independent
+convergences are worth recording, because they are what a stacked gate is for:
+round 1's two lenses both found the replacement-range off-by-one, and round 2 found
+the seq-ordering gap and the wheel-latch failure independently of `terra`, having
+never seen its output.
+
+The three defect classes that cost the most were all in this plan's own reasoning
+rather than its transcription: a defaulted parameter that silently enrolled three
+different operations into one semantic; a state machine whose prose and code
+disagreed about when an anchor retires; and two guards (`newest_accepted_seq`, the
+bool latch) that were weaker than the sentences describing them claimed.
 
 ## Self-review notes
 
