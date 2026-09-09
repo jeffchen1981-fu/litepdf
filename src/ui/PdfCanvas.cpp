@@ -367,27 +367,28 @@ bool PdfCanvas::dual_page() const noexcept {
 void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     if (!impl_ || !impl_->view || !hwnd_) return;
 
-    // Page switch if needed. Caller drives kick_render afterwards.
-    const int target_pg = static_cast<int>(h.page);
-    if (impl_->view->current_page() != target_pg) {
-        // Route through change_current_page so the T7 observer fires —
-        // search-jump is a real page transition just like PgUp/PgDn.
-        change_current_page(target_pg);
-        // Reset pan so the new page lands at its natural fit origin;
-        // new_pan_y below will then recenter on the hit once the fresh
-        // bitmap arrives. Without this, a large stale pan from the old
-        // page could push the hit off-screen on the new page.
-        impl_->pan_x = 0.0f;
-        impl_->pan_y = 0.0f;
-    }
+    const int  target_pg  = static_cast<int>(h.page);
+    const bool page_moved = change_current_page(target_pg);
 
-    // Transform the hit quad to canvas-DIP space using the same placement
-    // rule and the same pdf_pt -> DIP mapping as on_paint.
-    //   quad_dip_top = page_top_dip + pdf_point_to_dip(ul_y, zoom_pct)
-    //   quad_dip_bot = page_top_dip + pdf_point_to_dip(ll_y, zoom_pct)
-    // We may not have a bitmap yet (e.g. after a page change), in which
-    // case the page's placement is unknown. Fall back to InvalidateRect only.
-    if (!impl_->current_bitmap || !impl_->rt) {
+    // A bitmap from a previous view, or from a previous PAGE, is not evidence
+    // about this one. Neither set_view (on a non-null swap) nor
+    // navigate_to_page's single-page branch drops current_bitmap, so the canvas
+    // can be holding the outgoing document's page after a cross-tab jump, or the
+    // outgoing PAGE of this document between a page turn and its completion.
+    // Measuring the wanted quad against either can report "already visible" for a
+    // hit that is off screen -- and with the conditional install below, that
+    // verdict is final: no anchor is left for the completion to correct.
+    const bool own_bitmap = impl_->current_bitmap
+                            && impl_->bitmap_epoch == impl_->view_epoch
+                            && impl_->bitmap_page  == impl_->view->current_page();
+
+    if (page_moved || !own_bitmap || !impl_->rt) {
+        // The hit is on a different page, we have nothing rendered, or what we
+        // have belongs to another document. In every case the incoming pixmap is
+        // the only thing that can place this hit -- a scroll computed from the
+        // bitmap on screen would be exactly the stale estimate spec 3.4 is
+        // about. Anchor it and let the completion do the work.
+        set_pending_anchor(PageAnchor::hit(h));
         InvalidateRect(hwnd_, nullptr, FALSE);
         return;
     }
@@ -395,33 +396,35 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     const D2D1_SIZE_F src_px = impl_->current_bitmap->GetSize();
     const D2D1_SIZE_F vp     = impl_->rt->GetSize();
     const float rt_dpi = static_cast<float>(GetDpiForWindow(hwnd_));
-    const float src_w  = bitmap_px_to_dip(src_px.width,  rt_dpi);
     const float src_h  = bitmap_px_to_dip(src_px.height, rt_dpi);
     const float pct    = impl_->view->zoom_pct();
 
-    // Quad extent in PDF points.
     const float q_min_y_pt = std::min({ h.geom.ul_y, h.geom.ur_y,
                                         h.geom.ll_y, h.geom.lr_y });
     const float q_max_y_pt = std::max({ h.geom.ul_y, h.geom.ur_y,
                                         h.geom.ll_y, h.geom.lr_y });
-    const float q_center_pt = (q_min_y_pt + q_max_y_pt) * 0.5f;
 
-    // Where the page currently sits, using the SAME placement rule as on_paint.
-    const Placement cur = place_bitmap(src_w, src_h, vp.width, vp.height,
-                                       impl_->pan_x, impl_->pan_y);
-    const float q_top_dip = cur.y + pdf_point_to_dip(q_min_y_pt, pct);
-    const float q_bot_dip = cur.y + pdf_point_to_dip(q_max_y_pt, pct);
+    // Already visible? Measure against the SAME origin the paint path uses.
+    const float origin_y  = page_origin_y(src_h, vp.height) + impl_->pan_y;
+    const float q_top_dip = origin_y + pdf_point_to_dip(q_min_y_pt, pct);
+    const float q_bot_dip = origin_y + pdf_point_to_dip(q_max_y_pt, pct);
     const float margin    = 24.0f;
     if (q_top_dip >= margin && q_bot_dip <= vp.height - margin) {
+        // Visible on the page already showing: DO NOT anchor. The header
+        // contract is "If already visible, no scroll -- only the invalidate",
+        // and MainWindow kicks a render after every find, so an anchor here
+        // would re-centre the view on each F3 through hits that are all on
+        // screen together.
         InvalidateRect(hwnd_, nullptr, FALSE);
-        return;   // already visible; no scroll
+        return;
     }
 
-    // Center the quad vertically. place_bitmap's origin is the content's top on
-    // an overflowing axis, so the target pan is a direct offset from it; the
-    // clamp keeps it inside the page.
-    const float q_center = pdf_point_to_dip(q_center_pt, pct);
-    impl_->pan_y = clamp_pan(vp.height * 0.5f - q_center, src_h, vp.height);
+    // Same page, off screen: scroll now AND anchor. The anchor is computed from
+    // the same bitmap the completion will replace with an identical one (same
+    // page, same scale), so the two agree; it exists so a render that changes
+    // the page height under us still lands the hit correctly.
+    set_pending_anchor(PageAnchor::hit(h));
+    impl_->pan_y = pan_y_for_hit(h);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -858,24 +861,35 @@ float PdfCanvas::page_origin_y(float src_h, float vp_h) const {
 }
 
 float PdfCanvas::pan_y_for_hit(const litepdf::core::SearchSession::Hit& h) const {
-    // Task 4 placeholder shape, replaced wholesale in Task 6 with the geometry
-    // extracted from scroll_into_view. Keeping the signature here lets
-    // apply_anchor be written and reviewed as one piece.
     if (!impl_ || !impl_->current_bitmap || !impl_->rt || !impl_->view) {
         return impl_ ? impl_->pan_y : 0.0f;
     }
+    ContentBox box{};
+    if (!content_extent(box)) return impl_->pan_y;
+
     const D2D1_SIZE_F src_px = impl_->current_bitmap->GetSize();
     const D2D1_SIZE_F vp     = impl_->rt->GetSize();
     const float rt_dpi = static_cast<float>(GetDpiForWindow(hwnd_));
     const float src_h  = bitmap_px_to_dip(src_px.height, rt_dpi);
     const float pct    = impl_->view->zoom_pct();
+
+    // Quad centre in PDF points -> DIPs, measured from the page's own top.
     const float q_min_y_pt = std::min({ h.geom.ul_y, h.geom.ur_y,
                                         h.geom.ll_y, h.geom.lr_y });
     const float q_max_y_pt = std::max({ h.geom.ul_y, h.geom.ur_y,
                                         h.geom.ll_y, h.geom.lr_y });
     const float q_center = pdf_point_to_dip((q_min_y_pt + q_max_y_pt) * 0.5f, pct);
+
+    // Centre the quad in the viewport. page_origin_y is the page's unpanned
+    // top, so the pan needed to put the quad at vp/2 is the difference.
+    //
+    // The clamp measures against box.h, the PAINTED union, not against src_h.
+    // on_paint clamps the same way; using the left bitmap's own height here
+    // disagreed with the paint path in a spread whose right page is taller
+    // (PR-A1 escalated item E2), landing the hit off-centre. In single-page
+    // mode box.h IS src_h, so this is the same number the old code produced.
     return clamp_pan(vp.height * 0.5f - q_center - page_origin_y(src_h, vp.height),
-                     src_h, vp.height);
+                     box.h, vp.height);
 }
 
 bool PdfCanvas::apply_anchor(const PageAnchor& anchor) {

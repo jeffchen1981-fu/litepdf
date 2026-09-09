@@ -1996,17 +1996,21 @@ void MainWindow::on_results_row_click(std::size_t idx) {
     tabs_->set_active(target_idx);
     auto* v = active_view();
     if (!v || !canvas_) return;
-    // Route through PdfCanvas::change_current_page so the T7 page-change
-    // observer fires for cross-tab search jumps too. set_active above
-    // already triggered on_tab_switch -> canvas_->set_view, which fired
-    // the observer with the incoming tab's stored page; this second
-    // fire reflects the search-jump's target page.
-    canvas_->change_current_page(static_cast<int>(h.page));
-
     // Recompose a Hit for the canvas overlay + scroll. SearchSession::Hit
     // and CrossTabSearch::Hit share the (page, geom) pair; we copy into
     // the canvas-native shape.
     litepdf::core::SearchSession::Hit sh{h.page, h.geom};
+    // scroll_into_view calls change_current_page itself and installs the Hit
+    // anchor, so the T7 page-change observer fires for cross-tab search jumps
+    // too and the completion lands the page on the hit rather than at its top.
+    // set_active above already triggered on_tab_switch -> canvas_->set_view,
+    // which fired the observer with the incoming tab's stored page;
+    // scroll_into_view's fire reflects the search-jump target.
+    //
+    // The explicit change_current_page(h.page) that used to sit here is gone:
+    // it took the old default Top anchor and left scroll_into_view finding the
+    // page already correct, which was exactly the "never installs the Hit"
+    // defect spec 3.4 names.
     canvas_->set_current_hit(sh);
     canvas_->scroll_into_view(sh);
     kick_render(v->current_page());
