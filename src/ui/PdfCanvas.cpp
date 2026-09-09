@@ -157,7 +157,7 @@ struct PdfCanvas::Impl {
     // canvas would either round every fragment up to a full notch or drop it.
     // See ui/detail/ScrollMath.hpp.
     int                           wheel_residual = 0;
-    // True between a wheel-driven page flip and the completion that lands the
+    // Non-zero between a wheel-driven page flip and the completion that lands
     // new page. Without it, every further notch in that window flips again:
     // the pan and the bitmap still describe the OLD page, so apply_wheel keeps
     // reporting "already at the edge" and a brisk scroll walks several pages
@@ -715,7 +715,7 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             if (apply_anchor(anchor) && anchor.kind != PageAnchor::Kind::None) {
                 impl_->anchor.mark_applied();
             }
-            // The flip's page is on screen; the wheel may move again.
+            // This batch delivered; release the wheel.
             impl_->wheel_flip_seq = 0;
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
