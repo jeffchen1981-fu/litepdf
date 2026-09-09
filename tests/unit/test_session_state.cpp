@@ -197,12 +197,13 @@ TEST_CASE("SessionState v2 migrates a version 1 document",
     REQUIRE(r->window.w == 1280);
     REQUIRE(r->tabs.size() == 1);
     REQUIRE(r->tabs[0].page == 3);
-    // A v1 Custom zoom held a render scale, not a percentage. It is reset
-    // rather than reinterpreted -- and reset to FitPage, not FitWidth: this
-    // release draws at natural size with no wheel scrolling, so a migrated
-    // FitWidth tab would restore into a view whose lower two thirds the user
-    // cannot reach. PR-A2 revisits this.
-    REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitPage);
+    // A v1 Custom zoom is a RENDER scale (points -> pixels, DPI folded in) and
+    // means nothing under v2's magnification semantics, so the tab is reset to a
+    // fit mode rather than reinterpreted. The target is FitWidth: the mode
+    // v1.2.0 actually persisted, and this build's default now that the wheel can
+    // reach the overflow. PR-A1 reset to FitPage only because that release had
+    // no wheel scrolling.
+    REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitWidth);
 }
 
 // The v1 side of the widening that "from_json accepts a fit-mode tab with
@@ -222,7 +223,7 @@ TEST_CASE("SessionState v2 migrates a v1 Custom tab with zoom_scale 0",
     REQUIRE(r->version == 2);
     REQUIRE(r->tabs.size() == 1);
     REQUIRE(r->tabs[0].page == 2);
-    REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitPage);
+    REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitWidth);
     REQUIRE(r->tabs[0].zoom_scale == 1.0f);
 }
 
@@ -239,7 +240,7 @@ TEST_CASE("SessionState v2 treats a missing version key as version 1",
     auto r = from_json(versionless);
     REQUIRE(r.has_value());
     REQUIRE(r->version == 2);
-    REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitPage);
+    REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitWidth);
 }
 
 TEST_CASE("SessionState v2 rejects a version above the current one",

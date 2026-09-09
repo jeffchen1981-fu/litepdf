@@ -936,18 +936,14 @@ void MainWindow::restore_on_tab_ready(const std::filesystem::path& opened) {
                 break;
             case litepdf::core::SessionZoom::FitWidth:
             case litepdf::core::SessionZoom::FitPage: {
-                // BOTH fit modes restore as FitPage in this release -- a
-                // persisted FitWidth is deliberately not honoured. The default
-                // alone does not cover upgrading users: v1.2.0 could only ever
-                // persist fit_width (it was that build's default, and its Reset
-                // Zoom set it too), so honouring the file would drop nearly
-                // every restored tab into a mode this build cannot navigate.
-                // The paint path now draws at natural size and there is no
-                // wheel scrolling, so the lower two thirds of an A4 page are
-                // simply unreachable. Same reasoning, and the same PR-A2
-                // restore point, as DocumentView.cpp (Impl::zm) and
-                // SessionState.cpp's migrate_v1_to_v2.
-                v->set_zoom_mode_fit_page();
+                // Honour what the file says. PR-A1 collapsed both onto FitPage
+                // because that release could not navigate a FitWidth page
+                // below the fold; PR-A2's wheel scrolling removes the reason.
+                if (st.zoom_mode == litepdf::core::SessionZoom::FitWidth) {
+                    v->set_zoom_mode_fit_width();
+                } else {
+                    v->set_zoom_mode_fit_page();
+                }
                 RECT rc; GetClientRect(canvas_->hwnd(), &rc);
                 const UINT dpi = GetDpiForWindow(hwnd_);
                 v->set_viewport(static_cast<float>(rc.right - rc.left),
@@ -1486,7 +1482,11 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     return 0;
                 case IDM_ZOOM_RESET: {
                     if (auto* view = active_view(); view && canvas_) {
-                        view->set_zoom_mode_fit_page();
+                        // Ctrl+0 returns to the app default, which is FitWidth
+                        // again now that the wheel can reach the overflow.
+                        // The View menu ships no Fit Width / Fit Page items, so
+                        // this is the only mode control the user has.
+                        view->set_zoom_mode_fit_width();
                         RECT rc; GetClientRect(canvas_->hwnd(), &rc);
                         UINT dpi = GetDpiForWindow(hwnd);
                         view->set_viewport(static_cast<float>(rc.right - rc.left),

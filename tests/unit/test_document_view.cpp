@@ -33,8 +33,9 @@ TEST_CASE("DocumentView constructs from opened Document", "[core][view][ctor]") 
     DocumentView view(open_simple(), disp);
     REQUIRE(view.page_count() > 0);
     REQUIRE(view.current_page() == 0);
-    // PR-A1 ships FitPage; PR-A2 restores FitWidth once wheel scrolling exists.
-    REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::FitPage);
+    // Default zoom mode is FitWidth -- page width fills the canvas, and the
+    // overflow below the fold is reached with the wheel or the arrow keys.
+    REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::FitWidth);
     REQUIRE(view.ui_ctx() != nullptr);
     // source_path should round-trip through the move.
     REQUIRE(view.source_path().filename() == "simple.pdf");
