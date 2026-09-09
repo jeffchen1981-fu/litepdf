@@ -74,7 +74,7 @@ public:
     // branch, resubmit_current_page's dual branch, and navigate_to_page's dual
     // branch. kick_render's single-page branch also calls it. The single-page
     // branches of resubmit_current_page and navigate_to_page do not, as deliberate
-    // exceptions: navigate_to_page's single branch re-derives the fit by delegation
+    // exceptions: navigate_to_page's single branch re-derives the fit by delegation through
     // DocumentView::set_current_page; resubmit_current_page's single branch has no
     // caller that changes the page or the fit mode, and any resize that races a
     // device-loss recovery is corrected by the kick_render in the same WM_SIZE

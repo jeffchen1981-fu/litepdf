@@ -38,6 +38,9 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
   longer snaps the view back to the top of the page.
 - Per-tab scroll position is restored on tab switch. The position was captured and
   handed back correctly, then immediately discarded by the next render completion.
+  Switching between a single-page tab and a two-page spread tab still starts at the
+  top: the stored offset was measured in the other layout's geometry, so carrying it
+  across would put the page somewhere you did not leave it.
 - Search navigation centres the hit against the page it actually landed on. The
   scroll was previously computed from the outgoing page's height, which put the
   hit off-screen on a tall page.
