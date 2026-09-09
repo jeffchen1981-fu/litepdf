@@ -223,8 +223,8 @@ public:
     // Scroll / page-change such that `h`'s quad is visible with a 24 DIP
     // margin. If already visible, no scroll — only the invalidate. If
     // target page differs from current, page is switched via
-    // DocumentView::set_current_page; caller (MainWindow) is responsible
-    // for the subsequent kick_render. This method only handles pan and
+    // change_current_page; caller (MainWindow) is responsible for the
+    // subsequent kick_render. This method only handles pan and
     // invalidation.
     void scroll_into_view(const litepdf::core::SearchSession::Hit& h);
 

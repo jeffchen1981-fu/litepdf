@@ -278,10 +278,11 @@ void PdfCanvas::apply_viewport() {
     const int total = impl_->view->page_count();
     const int left  = dual_page_compute_left(impl_->view->current_page(), total);
     if (left != impl_->view->current_page()) {
-        // Route through change_current_page so the observer fires: dual-mode
-        // End otherwise reports the pre-snap page. No anchor -- this is a snap,
-        // and change_current_page leaves the pending one untouched, so a Hit
-        // installed by a search landing on the spread's RIGHT page survives.
+        // Route through change_current_page so the observer fires for any
+        // caller that reaches here without a canonical current_page. No
+        // anchor -- this is a snap, and change_current_page leaves the
+        // pending one untouched, so a Hit installed by a search landing on
+        // the spread's RIGHT page survives.
         change_current_page(left);
     }
     const int right = dual_page_compute_right(left, total);
