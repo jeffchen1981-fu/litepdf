@@ -96,11 +96,15 @@ std::wstring format_mru_label(std::size_t i, const std::wstring& full_path) {
 // "Refused", not "failed": declining to destroy the user's only recoverable
 // copy is the guard working as designed, and the message should not send a
 // reader hunting for a bug in the writer.
-void save_session_or_report(const std::filesystem::path& file,
+// Returns whether the save actually landed. The one-shot latch above only
+// controls the DIAGNOSTIC; the return value is per-call, so a caller that owns
+// the abnormal-exit marker can react to every refusal, not just the first one
+// (see on_clean_exit).
+bool save_session_or_report(const std::filesystem::path& file,
                             const litepdf::core::SessionState& s) {
-    if (litepdf::core::save_session(file, s)) return;
+    if (litepdf::core::save_session(file, s)) return true;
     static bool reported = false;
-    if (reported) return;
+    if (reported) return false;
     reported = true;
     // save_session returns false from five sites and this is the only signal
     // any of them ever produces, so the message must not guess which one
@@ -117,6 +121,7 @@ void save_session_or_report(const std::filesystem::path& file,
     msg += bak.wstring();
     msg += L" exists and cannot be overwritten, that is the likely sticky cause.\n";
     OutputDebugStringW(msg.c_str());
+    return false;
 }
 }  // namespace
 
@@ -773,11 +778,32 @@ void MainWindow::on_clean_exit() {
     // they permanently lose the unrestored remainder of the crash session.
     // Leaving both intact means the next launch re-offers the FULL session.
     if (restoring_) return;
+    // The same coupling, second case: a REFUSED save must not clear the marker
+    // either. save_session fails closed — an Unknown v1 probe, or a
+    // session.v1.bak copy it cannot make — and when it refuses, session.json
+    // keeps its OLDER contents. Clearing the marker on top of that would tell
+    // the next launch the exit was clean, so it would never offer restore and
+    // the stale-but-readable file would go unused: every tab and page change
+    // since the last SUCCESSFUL save silently gone. Leaving the marker set
+    // instead offers restore from that stale file — the user gets their older
+    // tabs back rather than nothing, which is the same trade the restoring_
+    // comment above already makes.
+    //
+    // The cost, stated so a maintainer does not have to rediscover it: when
+    // the refusal is the sticky kind (an occupied session.v1.bak), EVERY
+    // subsequent exit leaves the marker set, so the user is offered restore on
+    // every launch until the condition clears. That is noisy, and it is still
+    // the right trade against silently losing their state.
+    //
+    // run_guard_ is null exactly when app_data_dir_ is empty (main.cpp
+    // constructs it only under a resolved data dir), so the
+    // persistence-disabled build path has no marker to strand.
+    bool saved = false;
     if (!app_data_dir_.empty()) {
-        save_session_or_report(
+        saved = save_session_or_report(
             litepdf::app::session_file_under(app_data_dir_), capture_session());
     }
-    if (run_guard_) run_guard_->mark_clean_exit();  // idempotent
+    if (saved && run_guard_) run_guard_->mark_clean_exit();  // idempotent
 }
 
 // ------------- Phase 12 Task 9: sequential restore orchestrator ------------
@@ -1684,9 +1710,14 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 // firing mid-restore can't overwrite session.json with a
                 // partial capture.
                 if (restoring_ || app_data_dir_.empty()) return 0;
-                save_session_or_report(
+                // Result deliberately discarded: this is the mid-session
+                // debounce, which owns no run marker — on_clean_exit is the
+                // only caller whose next step depends on the save landing.
+                // A refusal here is already latched into the diagnostic, and
+                // the next debounce (or the exit save) retries anyway.
+                static_cast<void>(save_session_or_report(
                     litepdf::app::session_file_under(app_data_dir_),
-                    capture_session());
+                    capture_session()));
             }
             return 0;
         case WM_QUERYENDSESSION:
