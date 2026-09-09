@@ -1462,6 +1462,13 @@ In `struct PdfCanvas::Impl`, after the `next_seq` member added in Task 3, add:
     // same-page re-render, which must KEEP the current pan. See
     // ui/detail/PageAnchor.hpp for the lifetime rule.
     AnchorSlot                    anchor;
+    // The view_epoch that current_bitmap was created under. set_view does NOT
+    // drop current_bitmap on a non-null swap -- only on the null one
+    // (PdfCanvas.cpp:177-184) -- so after a tab switch the canvas is still
+    // holding, and still painting, the OUTGOING document's page until the
+    // incoming render lands. Anything that MEASURES that bitmap has to know it
+    // belongs to a different document; see scroll_into_view (Task 6).
+    std::uint64_t                 bitmap_epoch = 0;
 ```
 
 Replace `PdfCanvas::next_render_seq()` (added in Task 3) with:
@@ -1655,6 +1662,7 @@ the replacement text below reproduces. (At `8bf143d` that span is
                 impl_->right_bitmap = std::move(bmp);
             } else {
                 impl_->current_bitmap = std::move(bmp);
+                impl_->bitmap_epoch   = epoch;
                 ColdStartTimer::mark(3);  // first pixmap -> D2D bitmap
             }
             // Place the page. BOTH slots run this: the pan is clamped against
@@ -1769,16 +1777,20 @@ git commit -m "feat(canvas): anchor a page on render completion instead of zeroi
 ## Task 5: route every page-change path through `change_current_page`
 
 **Files:**
+- Modify: `src/ui/MainWindow.hpp` — declare `navigate_click`
 - Modify: `src/ui/MainWindow.cpp` — `kick_render`'s dual snap, `IDM_VIEW_DUAL_PAGE`,
-  `restore_on_tab_ready`, and the three click-navigation sites
+  `restore_on_tab_ready`, the new `navigate_click`, and the three click sites it
+  replaces
 - Modify: `src/ui/PdfCanvas.cpp` — `apply_viewport`'s defensive re-snap
 
 (Line numbers appear per step, as `8bf143d` hints only — Tasks 3 and 4 have moved
 every one of them. Match on the quoted text.)
 
 **Interfaces:**
-- Consumes: `change_current_page(idx)` and `set_pending_anchor(anchor)` (Task 4).
-- Produces: nothing new. This task closes four observer gaps.
+- Consumes: `change_current_page(idx)` and `set_pending_anchor(anchor)` (Task 4);
+  `dual_page_compute_left` (existing, `src/ui/PdfCanvasLayout.hpp:17`).
+- Produces: `MainWindow::navigate_click(int)` — the single click-navigation path.
+  Nothing outside this task depends on it.
 - **Does NOT add `MainWindow::snap_current_page`.** An earlier draft did; with
   anchor installation kept out of `change_current_page` there is nothing for such a
   helper to do beyond forwarding one call.
@@ -1898,17 +1910,51 @@ click) and `:649-651` (thumbnail pane, tab-switch rebind path). Each reads:
 ```
 
 (the outline one at `:565` has no `canvas_ &&` because `canvas_` is checked earlier in
-that function — leave that difference alone). Add the install to all three:
+that function — leave that difference alone).
+
+**A click has to be judged against the SPREAD, not the page.** In two-page mode,
+clicking the thumbnail of the right-hand page of the spread you are already looking at
+moves `current_page` (so `change_current_page` returns true) but changes nothing on
+screen — `kick_render`'s snap puts it straight back to the left page. Installing a Top
+there would reset the reader's scroll on a click to a page they can already see, which
+is the spread-mode twin of the single-page case this whole split exists to avoid.
+
+Add one private helper to `MainWindow` — it also removes the triplication these three
+sites already carry. Declare it next to `kick_render` in `src/ui/MainWindow.hpp`:
 
 ```cpp
-        if (canvas_ && canvas_->change_current_page(page)) {
-            // A click on a different page is a navigation: land at its top.
-            // Installing here rather than inside change_current_page is what
-            // keeps a click on the page ALREADY showing from stranding a Top
-            // that some later, unrelated re-render would apply.
-            canvas_->set_pending_anchor(litepdf::ui::PageAnchor::top());
-            kick_render(page);
-        }
+    // Navigate to `page` from a click (outline entry, thumbnail). Fires the
+    // page-change observer, anchors the new page at its top, and renders --
+    // but only anchors when the VIEW actually moves. In spread mode a click on
+    // the other half of the current spread changes the page without changing
+    // what is displayed, and must leave the scroll position alone.
+    void navigate_click(int page);
+```
+
+and define it in `src/ui/MainWindow.cpp`, next to `kick_render`:
+
+```cpp
+void MainWindow::navigate_click(int page) {
+    auto* v = active_view();
+    if (!v || !canvas_) return;
+    const int  total   = v->page_count();
+    const bool spread  = canvas_->dual_page();
+    const auto canon   = [&](int p) {
+        return spread ? litepdf::ui::dual_page_compute_left(p, total) : p;
+    };
+    const bool view_moves = canon(page) != canon(v->current_page());
+    if (!canvas_->change_current_page(page)) return;
+    if (view_moves) {
+        canvas_->set_pending_anchor(litepdf::ui::PageAnchor::top());
+    }
+    kick_render(page);
+}
+```
+
+Then replace all three call sites with:
+
+```cpp
+        navigate_click(page);
 ```
 
 - [ ] **Step 6: Build and run the full suite**
@@ -1941,7 +1987,7 @@ internals. If any other hit remains, route it before committing.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/ui/PdfCanvas.cpp src/ui/MainWindow.cpp
+git add src/ui/PdfCanvas.cpp src/ui/MainWindow.hpp src/ui/MainWindow.cpp
 git commit -m "fix(nav): route every page-change path through the observer fire-point"
 ```
 
@@ -2032,12 +2078,21 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     const int  target_pg  = static_cast<int>(h.page);
     const bool page_moved = change_current_page(target_pg);
 
-    if (page_moved || !impl_->current_bitmap || !impl_->rt) {
-        // Either the hit is on a different page, or we have nothing rendered to
-        // measure against. Both mean the incoming pixmap is the only thing that
-        // can place this hit -- the bitmap on screen belongs to the OUTGOING
-        // page, so a scroll computed from it would be exactly the stale estimate
-        // spec 3.4 is about. Anchor it and let the completion do the work.
+    // A bitmap from a previous VIEW is not evidence about this one. set_view
+    // keeps current_bitmap on a non-null swap, so after a cross-tab search jump
+    // the canvas is still holding the outgoing document's page; measuring the
+    // incoming document's quad against it can report "already visible" for a hit
+    // that is actually off screen, and with the conditional install below that
+    // verdict is final -- no anchor is left for the completion to correct.
+    const bool own_bitmap =
+        impl_->current_bitmap && impl_->bitmap_epoch == impl_->view_epoch;
+
+    if (page_moved || !own_bitmap || !impl_->rt) {
+        // The hit is on a different page, we have nothing rendered, or what we
+        // have belongs to another document. In every case the incoming pixmap is
+        // the only thing that can place this hit -- a scroll computed from the
+        // bitmap on screen would be exactly the stale estimate spec 3.4 is
+        // about. Anchor it and let the completion do the work.
         set_pending_anchor(PageAnchor::hit(h));
         InvalidateRect(hwnd_, nullptr, FALSE);
         return;
@@ -2609,7 +2664,13 @@ LRESULT PdfCanvas::on_wheel_scroll(int delta) {
     }
     // At the first or last page the step clamps to where we already are. Bail:
     // the document has no more pages and the pan is already at the edge.
-    if (target == cur) return 0;
+    // Compare canonical to canonical -- every kick and navigate snaps
+    // current_page to the pair's left, so `cur` should already be left-aligned
+    // in spread mode, but relying on that couples this guard to an invariant
+    // maintained four call sites away for no benefit.
+    const int cur_canon = impl_->dual_page ? dual_page_compute_left(cur, total)
+                                           : cur;
+    if (target == cur_canon) return 0;
 
     impl_->wheel_flip_pending = true;
     navigate_to_page(target, (r.flip == Flip::Next) ? PageAnchor::top()
@@ -2792,8 +2853,16 @@ Definition of Done cannot be met.
 grep -n "FitPage" tests/unit/test_session_state.cpp tests/unit/test_document_view.cpp
 ```
 
-Expected before the edit: `test_session_state.cpp:205`, `:225`, `:242` and
-`test_document_view.cpp:37`.
+Expected: **eight** lines. Only the four `REQUIRE(... == ...FitPage)` assertions
+change — `test_session_state.cpp:205`, `:225`, `:242` and `test_document_view.cpp:37`.
+The other four stay exactly as they are: `test_session_state.cpp:33` is a fixture tab
+that round-trips an explicit FitPage and must keep doing so, `:201` and
+`test_document_view.cpp:36` are comments this step rewrites separately below, and
+`test_document_view.cpp:101` is the name of a TEST_CASE about FitPage's own
+recomputation, which this PR does not touch.
+
+(Stated because this plan's Global Constraints tell you to stop when a quoted
+expectation does not match. Four of these eight are supposed to survive.)
 
 In `tests/unit/test_session_state.cpp`, change all three
 `REQUIRE(r->tabs[0].zoom_mode == SessionZoom::FitPage);` to
@@ -2966,6 +3035,11 @@ git commit -m "feat(zoom): restore Fit Width as the default now that the wheel c
       returns nothing — these were in an earlier draft of this plan and the round-1
       review removed the need for them. If any exists, a task was implemented from a
       stale copy.
+- [ ] `grep -n "bitmap_epoch" src/ui/PdfCanvas.cpp` shows it written where
+      `current_bitmap` is assigned and read in `scroll_into_view` — a bitmap from the
+      outgoing view must never be measured against.
+- [ ] `grep -cn "change_current_page(page)" src/ui/MainWindow.cpp` shows exactly one
+      (inside `navigate_click`) — the three click sites are consolidated, not copied.
 - [ ] `VERSION` is unchanged at `1.2.0`.
 - [ ] `build/src/Release/litepdf.exe` is under 19,000,000 bytes.
 - [ ] The Task 9 Step 8 GUI checks are done, with item 1 (pan survives a re-render)
@@ -3022,7 +3096,16 @@ State these in the PR description so a reviewer does not report them as misses.
    A very fast scroll therefore advances one page per completion rather than one per
    notch. This is deliberate — the alternative, discovered in review, is that each
    queued notch re-reads the outgoing page's pan and flips again, walking several
-   pages without drawing any of them.
+   pages without drawing any of them. The latch is released by any completion
+   message, so an unrelated older completion can free it one notch early; that costs
+   at most one extra flip, against a wheel that would otherwise be dead until the
+   next keystroke.
+9. **A tab switch still paints the outgoing document's page** until the incoming
+   render lands — `set_view` drops `right_bitmap` (Task 3) but not `current_bitmap`.
+   Task 6 stops that bitmap being *measured* across a view swap, which is the part
+   that produced a wrong scroll position; making the canvas go blank on every switch
+   instead is a visible behaviour change with its own trade-off and does not belong
+   in this PR.
 
 ## Self-review notes
 
