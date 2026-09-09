@@ -67,6 +67,13 @@ private:
     void open_tab_async(std::filesystem::path path);
     void kick_render(int page);  // recompute zoom, submit render, post to canvas
 
+    // Navigate to `page` from a click (outline entry, thumbnail). Fires the
+    // page-change observer, anchors the new page at its top, and renders --
+    // but only anchors when the VIEW actually moves. In spread mode a click on
+    // the other half of the current spread changes the page without changing
+    // what is displayed, and must leave the scroll position alone.
+    void navigate_click(int page);
+
     void on_layout();                    // reposition canvas + outline + tab strip
     void toggle_outline();               // F5 handler
     void toggle_thumbs();                // F4 handler (Phase 7 Task 8)

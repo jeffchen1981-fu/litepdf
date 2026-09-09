@@ -313,7 +313,11 @@ void MainWindow::kick_render(int page) {
         const int left  = litepdf::ui::dual_page_compute_left(page, total);
         const int right = litepdf::ui::dual_page_compute_right(left, total);
         view->cancel_stale_renders(0);
-        view->set_current_page(left);
+        // Route through the canvas so the page-change observer fires -- the
+        // thumbnail highlight is wrong in spread mode without it. No anchor:
+        // this runs on EVERY spread render, same-page ones included, and a
+        // snap must leave the reader's scroll position alone.
+        canvas_->change_current_page(left);
         canvas_->apply_viewport();
 
         view->request_render(left,
@@ -337,6 +341,22 @@ void MainWindow::kick_render(int page) {
         [target, epoch, page, seq](fz_pixmap* p, fz_context* worker_ctx) {
             PdfCanvas::post_render_done(target, p, worker_ctx, epoch, page, seq);
         });
+}
+
+void MainWindow::navigate_click(int page) {
+    auto* v = active_view();
+    if (!v || !canvas_) return;
+    const int  total   = v->page_count();
+    const bool spread  = canvas_->dual_page();
+    const auto canon   = [&](int p) {
+        return spread ? litepdf::ui::dual_page_compute_left(p, total) : p;
+    };
+    const bool view_moves = canon(page) != canon(v->current_page());
+    if (!canvas_->change_current_page(page)) return;
+    if (view_moves) {
+        canvas_->set_pending_anchor(litepdf::ui::PageAnchor::top());
+    }
+    kick_render(page);
 }
 
 HWND MainWindow::left_pane_hwnd() const {
@@ -518,18 +538,16 @@ void MainWindow::toggle_thumbs() {
         GetWindowLongPtrW(hwnd_, GWLP_HINSTANCE));
     auto* tp = v->ensure_thumb_pane(hinst, hwnd_);
     // Click-to-navigate. Re-set on every toggle (idempotent — ThumbnailPane
-    // just overwrites the std::function). Route through
-    // PdfCanvas::change_current_page (same as the outline pane) so the T7
-    // page-change observer fires — keeps the thumb pane's own current-page
-    // highlight in sync with the canvas, and matches the behavior of
-    // every other navigation site (PgUp/PgDn, outline click, search jump).
+    // just overwrites the std::function). Route through navigate_click (same
+    // as the outline pane) so the T7 page-change observer fires — keeps the
+    // thumb pane's own current-page highlight in sync with the canvas, and
+    // matches the behavior of every other navigation site (PgUp/PgDn,
+    // outline click, search jump).
     // Capture `this` because MainWindow outlives every DocumentView
     // (tabs_ is destroyed during ~MainWindow before the HWND tear-down
     // completes via OS WM_NCDESTROY cascade).
     tp->set_on_navigate([this](int page) {
-        if (canvas_ && canvas_->change_current_page(page)) {
-            kick_render(page);
-        }
+        navigate_click(page);
     });
 
     if (tp->visible()) {
@@ -561,13 +579,10 @@ void MainWindow::toggle_thumbs() {
 void MainWindow::on_outline_navigate(int page) {
     auto* view = active_view();
     if (!view || !canvas_) return;
-    // Route through PdfCanvas::change_current_page so the T7 page-change
-    // observer fires (T8 wires this to the per-tab thumbnail pane).
-    // Falls back to true == "page actually moved" — same semantics as
-    // the prior direct view->set_current_page call.
-    if (canvas_->change_current_page(page)) {
-        kick_render(page);
-    }
+    // navigate_click fires the T7 page-change observer (T8 wires this to the
+    // per-tab thumbnail pane), anchors the new page at its top when the view
+    // actually moves, and renders -- it no-ops when the page does not move.
+    navigate_click(page);
 }
 
 void MainWindow::on_tab_switch(int new_index, int old_index) {
@@ -649,9 +664,7 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
         // is per-tab; binding once on first show is enough but
         // re-binding on every show is cheap and trivially correct.
         tp->set_on_navigate([this](int page) {
-            if (canvas_ && canvas_->change_current_page(page)) {
-                kick_render(page);
-            }
+            navigate_click(page);
         });
         // The page count may have shifted between when ensure_thumb_pane
         // first ran and now (it shouldn't, since DocumentView's page
@@ -903,7 +916,13 @@ void MainWindow::restore_on_tab_ready(const std::filesystem::path& opened) {
         // add_tab fired on_tab_switch synchronously, seeding the view's
         // viewport dims and kicking ONE render that the kick_render below
         // cancels before it can paint (cancel-on-new-request) — no page-0 flash.
-        v->set_current_page(st.page);
+        // Route through the canvas so the page-change observer fires: after a
+        // session restore the model and the thumbnail highlight otherwise
+        // disagree until the user's first navigation. This one IS a navigation,
+        // so it installs Top -- a restored tab has no pan to preserve
+        // (SessionTab carries path, page and zoom, not a scroll offset).
+        canvas_->change_current_page(st.page);
+        canvas_->set_pending_anchor(litepdf::ui::PageAnchor::top());
         switch (st.zoom_mode) {
             case litepdf::core::SessionZoom::Custom:
                 v->set_zoom_pct(st.zoom_scale);   // no viewport needed
@@ -1375,7 +1394,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     if (v->dual_page()) {
                         p = litepdf::ui::dual_page_compute_left(
                                 p, v->page_count());
-                        v->set_current_page(p);
+                        if (canvas_) canvas_->change_current_page(p);   // snap: no anchor
                     }
                     kick_render(p);
                     return 0;

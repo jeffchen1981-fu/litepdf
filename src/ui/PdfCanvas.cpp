@@ -274,10 +274,16 @@ void PdfCanvas::apply_viewport() {
     // page. DocumentView derives the fit from current_page and treats pair_page
     // as the other half, so if current_page were the RIGHT page the left page's
     // size would never enter the fit and its slot could overflow. Re-snap here,
-    // the same defensive move on_key_down's dual branch already makes.
+    // the same defensive move navigate_to_page's dual branch already makes.
     const int total = impl_->view->page_count();
     const int left  = dual_page_compute_left(impl_->view->current_page(), total);
-    if (left != impl_->view->current_page()) impl_->view->set_current_page(left);
+    if (left != impl_->view->current_page()) {
+        // Route through change_current_page so the observer fires: dual-mode
+        // End otherwise reports the pre-snap page. No anchor -- this is a snap,
+        // and change_current_page leaves the pending one untouched, so a Hit
+        // installed by a search landing on the spread's RIGHT page survives.
+        change_current_page(left);
+    }
     const int right = dual_page_compute_right(left, total);
     const float gutter_px = 8.0f * dpi_f / 96.0f;   // matches the 8 DIP gutter
     const float slot_px   = std::max(0.0f, (cw_px - gutter_px) * 0.5f);
