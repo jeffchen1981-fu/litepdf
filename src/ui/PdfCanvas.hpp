@@ -9,6 +9,7 @@
 #include "core/SearchSession.hpp"
 #include "ui/detail/CompletionMath.hpp"
 #include "ui/detail/PageAnchor.hpp"
+#include "ui/detail/ScrollMath.hpp"
 
 // Forward-decl so the header stays COM-free. ComPtr in .cpp only.
 struct ID2D1Factory;
@@ -282,6 +283,12 @@ private:
     struct ContentBox { float l, t, w, h; };
 
     LRESULT pan_by(float dx, float dy);
+
+    // Plain (unmodified) mouse-wheel scrolling. Scrolls within the page, and
+    // flips to the neighbouring page or spread once the pan is already at the
+    // edge the wheel is pushing toward.
+    LRESULT on_wheel_scroll(int delta);
+
     bool    content_extent(ContentBox& out) const;
 
     HWND hwnd_ = nullptr;

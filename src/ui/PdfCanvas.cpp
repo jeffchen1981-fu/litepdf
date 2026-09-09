@@ -46,6 +46,11 @@ using litepdf::ui::place_bitmap;
 using litepdf::ui::Placement;
 using litepdf::ui::accept_completion;
 using litepdf::ui::Slot;
+using litepdf::ui::apply_wheel;
+using litepdf::ui::consume_notches;
+using litepdf::ui::Flip;
+using litepdf::ui::wheel_step_dip;
+using litepdf::ui::WheelResult;
 }  // namespace
 
 namespace litepdf::ui {
@@ -147,6 +152,29 @@ struct PdfCanvas::Impl {
     // same-page re-render, which must KEEP the current pan. See
     // ui/detail/PageAnchor.hpp for the lifetime rule.
     AnchorSlot                    anchor;
+    // Leftover wheel delta below one full notch. High-resolution wheels and
+    // precision touchpads deliver |delta| < WHEEL_DELTA; without this the
+    // canvas would either round every fragment up to a full notch or drop it.
+    // See ui/detail/ScrollMath.hpp.
+    int                           wheel_residual = 0;
+    // True between a wheel-driven page flip and the completion that lands the
+    // new page. Without it, every further notch in that window flips again:
+    // the pan and the bitmap still describe the OLD page, so apply_wheel keeps
+    // reporting "already at the edge" and a brisk scroll walks several pages
+    // without showing any of them. Cleared by the completion handler and by
+    // set_view.
+    //
+    // It holds the SEQ of the flip's submission batch, not a bare flag, for two
+    // reasons found in review. (a) A bare flag cleared by any completion could be
+    // released by a stale one, and several stale P0s can be outstanding at once,
+    // so "at most one extra flip" was not a bound anyone had proved. (b) If the
+    // flip's completion is never posted at all -- post_render_done_impl returns
+    // without posting on a clone failure, an allocation failure or a PostMessageW
+    // failure -- a flag would latch forever and the wheel would be dead for the
+    // rest of the session. Keyed by seq, the block lasts only while the flip's
+    // batch is still the newest submitted, so any later render (a keystroke, a
+    // zoom, a resize) releases it even when no completion ever arrives.
+    std::uint64_t                 wheel_flip_seq = 0;   // 0 = nothing pending
     // The view_epoch that current_bitmap was created under. set_view does NOT
     // drop current_bitmap on a non-null swap -- only on the null one
     // (PdfCanvas.cpp:177-184) -- so after a tab switch the canvas is still
@@ -222,6 +250,7 @@ void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
     // New view, new epoch: an anchor installed for the outgoing document
     // describes a page that is no longer on screen.
     impl_->anchor.clear();
+    impl_->wheel_flip_seq = 0;
     if (!view) {
         // No active view — whatever bitmap is on screen is tied to a
         // ctx that will soon be gone. Discard so the next paint shows
@@ -559,7 +588,7 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 }
                 return 0;
             }
-            return DefWindowProcW(hwnd_, WM_MOUSEWHEEL, w, l);
+            return on_wheel_scroll(GET_WHEEL_DELTA_WPARAM(w));
         }
         case WM_DPICHANGED_BEFOREPARENT:
             // DPI is changing. Discard render target; next paint rebuilds at new DPI.
@@ -580,6 +609,8 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             if (!pix) {
                 // Render failed or cancelled (helper posts WPARAM=0 here).
                 // meta is also null on this path — nothing to drop.
+                // This answers a pending wheel flip: no pixmap is coming for it.
+                impl_->wheel_flip_seq = 0;
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return 0;
             }
@@ -684,6 +715,8 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             if (apply_anchor(anchor) && anchor.kind != PageAnchor::Kind::None) {
                 impl_->anchor.mark_applied();
             }
+            // The flip's page is on screen; the wheel may move again.
+            impl_->wheel_flip_seq = 0;
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         }
@@ -849,6 +882,84 @@ LRESULT PdfCanvas::pan_by(float dx, float dy) {
     impl_->pan_x = clamp_pan(impl_->pan_x + dx, box.w, vp.width);
     impl_->pan_y = clamp_pan(impl_->pan_y + dy, box.h, vp.height);
     InvalidateRect(hwnd_, nullptr, FALSE);
+    return 0;
+}
+
+LRESULT PdfCanvas::on_wheel_scroll(int delta) {
+    if (!impl_ || !impl_->view) return 0;
+
+    // A flip is already on its way. Until its pixmap lands, pan_y and the
+    // bitmaps still describe the OUTGOING page, so apply_wheel would keep
+    // saying "at the edge" and every further notch would flip again -- a brisk
+    // scroll would skip several pages without showing any of them. Drop the
+    // notch AND the residual, so a fast spin does not fire the moment the new
+    // page arrives.
+    //
+    // The block holds only while the flip's batch is STILL the newest submitted.
+    // Anything else that submits a render -- a keystroke, a zoom, a resize --
+    // moves next_seq past it and releases the wheel, which is what keeps a flip
+    // whose completion was never posted at all from disabling the wheel for the
+    // rest of the session.
+    if (impl_->wheel_flip_seq != 0 && impl_->wheel_flip_seq == impl_->next_seq) {
+        impl_->wheel_residual = 0;
+        return 0;
+    }
+
+    const int notches = consume_notches(delta, impl_->wheel_residual);
+    if (notches == 0) return 0;   // a fractional notch is never a page flip
+
+    ContentBox box{};
+    if (!content_extent(box)) return 0;   // nothing rendered yet
+    const D2D1_SIZE_F vp = impl_->rt->GetSize();
+
+    UINT lines = 3;   // the Windows default, and the value if the query fails
+    SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+    const float step = wheel_step_dip(notches, lines, vp.height);
+
+    const WheelResult r = apply_wheel(impl_->pan_y, box.h, vp.height, step);
+    if (r.flip == Flip::None) {
+        impl_->pan_y = r.pan_y;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return 0;
+    }
+
+    // At the edge: turn the page. Forward lands at the new page's top;
+    // backward lands at the previous page's BOTTOM, so scrolling back shows
+    // the content the reader just scrolled past instead of skipping it.
+    const int cur     = impl_->view->current_page();
+    const int total   = impl_->view->page_count();
+    const int max_idx = total - 1;
+    int target;
+    if (impl_->dual_page) {
+        const int cur_left = dual_page_compute_left(cur, total);
+        target = (r.flip == Flip::Next)
+                     ? dual_page_step_next_left(cur_left, total)
+                     : dual_page_step_prev_left(cur_left, total);
+        // CANONICALISE before comparing. dual_page_step_next_left clamps an
+        // overshoot to the LAST page, which in an odd-page document is a RIGHT
+        // page whose pair is the spread we are already on: in a 3-page file
+        // step_next_left(1, 3) == 2 while compute_left(2, 3) == 1. Comparing
+        // the raw value would pass the guard below, re-render the same spread,
+        // and throw the reader back to its top.
+        target = dual_page_compute_left(target, total);
+    } else {
+        target = (r.flip == Flip::Next) ? std::min(cur + 1, max_idx)
+                                        : std::max(cur - 1, 0);
+    }
+    // At the first or last page the step clamps to where we already are. Bail:
+    // the document has no more pages and the pan is already at the edge.
+    // Compare canonical to canonical -- every kick and navigate snaps
+    // current_page to the pair's left, so `cur` should already be left-aligned
+    // in spread mode, but relying on that couples this guard to an invariant
+    // maintained four call sites away for no benefit.
+    const int cur_canon = impl_->dual_page ? dual_page_compute_left(cur, total)
+                                           : cur;
+    if (target == cur_canon) return 0;
+
+    navigate_to_page(target, (r.flip == Flip::Next) ? PageAnchor::top()
+                                                    : PageAnchor::bottom());
+    // navigate_to_page opened a submission batch, so next_seq now names it.
+    impl_->wheel_flip_seq = impl_->next_seq;
     return 0;
 }
 
