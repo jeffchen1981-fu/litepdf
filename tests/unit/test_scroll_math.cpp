@@ -45,6 +45,26 @@ TEST_CASE("ScrollMath accumulates negative deltas symmetrically",
     REQUIRE(residual == -30);
 }
 
+TEST_CASE("ScrollMath cancels an accumulated residual on a reversal",
+          "[ui][scroll]") {
+    // The residual keeps the SIGN of the motion, so a delta in the opposite
+    // direction reduces the pending accumulation instead of compounding it.
+    // Without that, flicking the wheel back and forth below one notch would
+    // eventually fire a notch in a direction the reader never sustained.
+    int residual = 0;
+    REQUIRE(consume_notches(80, residual) == 0);
+    REQUIRE(residual == 80);
+    // Reversal: 80 - 30, not 80 + 30.
+    REQUIRE(consume_notches(-30, residual) == 0);
+    REQUIRE(residual == 50);
+    // Crossing zero is still just accumulation; no whole notch yet.
+    REQUIRE(consume_notches(-100, residual) == 0);
+    REQUIRE(residual == -50);
+    // And the notch fires only once the accumulated total reaches -120.
+    REQUIRE(consume_notches(-70, residual) == -1);
+    REQUIRE(residual == 0);
+}
+
 TEST_CASE("ScrollMath consumes several notches from one fat delta",
           "[ui][scroll]") {
     int residual = 0;
