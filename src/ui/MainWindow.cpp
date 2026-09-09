@@ -292,6 +292,16 @@ void MainWindow::kick_render(int page) {
     auto* view = active_view();
     if (!view || !canvas_) return;
 
+    HWND target = canvas_->hwnd();
+    // Stamp every render with the canvas epoch at submit time so a result
+    // that lands after a tab switch (e.g. the last-restored tab's render
+    // arriving after restore_finish re-activates the saved tab) is dropped
+    // by the canvas instead of painted over the now-active tab (issue #35).
+    const std::uint64_t epoch = canvas_->render_epoch();
+    // One submission batch: both halves of a spread carry this seq, and it is
+    // what binds the pending page anchor to this submission (PR-A2 §3.2).
+    const std::uint64_t seq = canvas_->next_render_seq();
+
     if (view->dual_page()) {
         // (Phase 8 D10) Spread layout: snap to the LEFT page of the
         // pair containing `page` (cover-rule + odd-tail handled by the
@@ -306,16 +316,15 @@ void MainWindow::kick_render(int page) {
         view->set_current_page(left);
         canvas_->apply_viewport();
 
-        HWND target = canvas_->hwnd();
-        const std::uint64_t epoch = canvas_->render_epoch();
         view->request_render(left,
-            [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
-                PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
+            [target, epoch, left, seq](fz_pixmap* p, fz_context* worker_ctx) {
+                PdfCanvas::post_render_done(target, p, worker_ctx, epoch, left, seq);
             });
         if (right >= 0) {
             view->request_render(right,
-                [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
-                    PdfCanvas::post_render_done_right(target, p, worker_ctx, epoch);
+                [target, epoch, right, seq](fz_pixmap* p, fz_context* worker_ctx) {
+                    PdfCanvas::post_render_done_right(target, p, worker_ctx,
+                                                      epoch, right, seq);
                 });
         }
         InvalidateRect(canvas_->hwnd(), nullptr, FALSE);
@@ -324,15 +333,9 @@ void MainWindow::kick_render(int page) {
 
     canvas_->apply_viewport();
 
-    HWND target = canvas_->hwnd();
-    // Stamp every render with the canvas epoch at submit time so a result
-    // that lands after a tab switch (e.g. the last-restored tab's render
-    // arriving after restore_finish re-activates the saved tab) is dropped
-    // by the canvas instead of painted over the now-active tab (issue #35).
-    const std::uint64_t epoch = canvas_->render_epoch();
     view->request_render_with_prefetch(page,
-        [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
-            PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
+        [target, epoch, page, seq](fz_pixmap* p, fz_context* worker_ctx) {
+            PdfCanvas::post_render_done(target, p, worker_ctx, epoch, page, seq);
         });
 }
 

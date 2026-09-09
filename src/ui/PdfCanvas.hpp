@@ -7,6 +7,7 @@
 #include <windows.h>
 
 #include "core/SearchSession.hpp"
+#include "ui/detail/CompletionMath.hpp"
 
 // Forward-decl so the header stays COM-free. ComPtr in .cpp only.
 struct ID2D1Factory;
@@ -23,13 +24,15 @@ namespace litepdf::core { class DocumentView; }
 namespace litepdf::ui {
 
 // Posted by render-done callback. WPARAM = fz_pixmap* (kept by worker),
-// LPARAM = a heap RenderMeta* { fz_context* escrow clone; uint64 epoch }.
+// LPARAM = a heap RenderMeta* { fz_context* escrow clone; the render's
+// {epoch, page, slot, seq} identity }.
 // On cancel/fail both are null. Canvas drops the pixmap through escrow,
 // then drops escrow — staying on the pixmap's own MuPDF root even if the
-// producing DocumentView has been swapped or destroyed. The epoch is the
-// canvas render epoch captured at submit time (see render_epoch); a
-// completion whose epoch no longer matches the canvas's current epoch is
-// from a superseded view and is dropped without being painted (issue #35).
+// producing DocumentView has been swapped or destroyed. The identity is
+// captured at submit time and decides whether the completion is still
+// wanted: accept_completion (ui/detail/CompletionMath.hpp) drops a result
+// from a superseded view (issue #35), from a page the user has left, and a
+// right-slot pixmap arriving while the layout is single-page.
 // Must match the reservation in MainWindow.cpp (WM_USER + 3).
 inline constexpr UINT WM_USER_RENDER_DONE = WM_USER + 3;
 // (Phase 8 D10) Same payload as WM_USER_RENDER_DONE but the bitmap
@@ -98,20 +101,41 @@ public:
     // message was successfully posted.
     //
     // Callers: MainWindow::kick_render, resubmit_current_page,
-    // on_key_down's page-change path, WM_MOUSEWHEEL zoom path. `epoch` is
-    // the value of render_epoch() read at submit time; it rides the
-    // completion message so the handler can drop a superseded-view result.
+    // on_key_down's page-change path, the WM_MOUSEWHEEL zoom path.
+    //
+    // IDENTITY (PR-A2). `epoch` is render_epoch() read at submit time — it
+    // says which VIEW the render belongs to. `page` says which page, and the
+    // choice of function says which slot; together they let the handler drop a
+    // pixmap the user has already paged away from. `seq` is next_render_seq()
+    // read once for the whole submission batch — it says which SUBMISSION,
+    // which is what decides whether this completion may consume the pending
+    // page anchor. (epoch, page, slot) alone cannot: a same-page zoom or
+    // resize produces a second P0 with an identical triple.
     static bool post_render_done(HWND target,
                                  fz_pixmap* pix,
                                  fz_context* worker_ctx,
-                                 std::uint64_t epoch);
+                                 std::uint64_t epoch,
+                                 int page,
+                                 std::uint64_t seq);
 
     // (Phase 8 D10) Variant that posts to the RIGHT slot of the dual-
-    // page layout. Same refcount discipline as post_render_done.
+    // page layout. Same refcount discipline as post_render_done, and both
+    // slots of one spread carry the SAME seq.
     static bool post_render_done_right(HWND target,
                                        fz_pixmap* pix,
                                        fz_context* worker_ctx,
-                                       std::uint64_t epoch);
+                                       std::uint64_t epoch,
+                                       int page,
+                                       std::uint64_t seq);
+
+    // Open a new submission batch: bump the monotonic submission counter and
+    // return its new value, which every request in this batch must carry.
+    //
+    // Call this ONCE per batch, before the request_render* calls — a spread's
+    // two renders share one seq. It also stamps whatever page anchor is
+    // pending (PR-A2 Task 4), which is what carries a navigation intent
+    // forward when a newer submission supersedes an older one.
+    std::uint64_t next_render_seq();
 
     // When true, on first real-bitmap paint the canvas calls
     // ColdStartTimer::emit_if_complete(true) so the line is mirrored to stderr.
