@@ -8,14 +8,47 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 
 ## [Unreleased]
 
+### Added
+
+- Mouse-wheel scrolling. The wheel scrolls within a page and turns the page when
+  it is already at the edge — forward lands at the top of the next page, backward
+  at the bottom of the previous one, so scrolling back and forth shows continuous
+  content. Honours the system "lines per notch" setting, including "one screen at
+  a time", and accumulates sub-notch deltas from high-resolution wheels and
+  precision touchpads. In two-page spread mode the flip steps by spread.
+
 ### Changed
 
 - Zoom now changes what you see. Zoom In / Zoom Out were previously inert: the
   zoom level was compared against a table in different units, and the paint path
   re-fitted every page to the window regardless. Pages also rendered at twice the
   needed resolution on 200% displays.
-- Every view is Fit Page in this release — including restored and migrated sessions;
-  Fit Width returns with mouse-wheel scrolling.
+- A zoom level you set by hand is reset to Fit Width when `session.json` is upgraded
+  to version 2. Version 1 counted that number in device pixels per PDF point; version
+  2 counts it in device-independent pixels, so on a high-DPI display the same number
+  means a different size and cannot be carried across. Fit Width and Fit Page carry
+  over untouched — they are re-derived from the window on restore.
+- A render result now carries the page, slot and submission it belongs to, so a
+  pixmap for a page the reader has already left is dropped instead of painted.
+
+### Fixed
+
+- Scroll position survives a re-render. Panning to the middle of a page and then
+  zooming, resizing the window, toggling a side pane or toggling Invert Colors no
+  longer snaps the view back to the top of the page.
+- Per-tab scroll position is restored on tab switch. The position was captured and
+  handed back correctly, then immediately discarded by the next render completion.
+  Switching between a single-page tab and a two-page spread tab still starts at the
+  top: the stored offset was measured in the other layout's geometry, so carrying it
+  across would put the page somewhere you did not leave it.
+- Search navigation centres the hit against the page it actually landed on. The
+  scroll was previously computed from the outgoing page's height, which put the
+  hit off-screen on a tall page.
+- Switching between two tabs that are both in two-page spread mode no longer shows
+  the previous document's right-hand page until a new render arrives.
+- The thumbnail highlight tracks the current page in spread mode, after a session
+  restore, and after End in spread mode. Four navigation paths bypassed the
+  page-change notification.
 
 ### Note
 

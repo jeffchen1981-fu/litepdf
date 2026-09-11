@@ -7,6 +7,9 @@
 #include <windows.h>
 
 #include "core/SearchSession.hpp"
+#include "ui/detail/CompletionMath.hpp"
+#include "ui/detail/PageAnchor.hpp"
+#include "ui/detail/ScrollMath.hpp"
 
 // Forward-decl so the header stays COM-free. ComPtr in .cpp only.
 struct ID2D1Factory;
@@ -23,13 +26,16 @@ namespace litepdf::core { class DocumentView; }
 namespace litepdf::ui {
 
 // Posted by render-done callback. WPARAM = fz_pixmap* (kept by worker),
-// LPARAM = a heap RenderMeta* { fz_context* escrow clone; uint64 epoch }.
+// LPARAM = a heap RenderMeta* { fz_context* escrow clone; the render's
+// {epoch, page, slot, seq} identity }.
 // On cancel/fail both are null. Canvas drops the pixmap through escrow,
 // then drops escrow — staying on the pixmap's own MuPDF root even if the
-// producing DocumentView has been swapped or destroyed. The epoch is the
-// canvas render epoch captured at submit time (see render_epoch); a
-// completion whose epoch no longer matches the canvas's current epoch is
-// from a superseded view and is dropped without being painted (issue #35).
+// producing DocumentView has been swapped or destroyed. The identity is
+// captured at submit time and decides whether the completion is still
+// wanted: accept_completion (ui/detail/CompletionMath.hpp) drops a result
+// from a superseded view (issue #35), from a submission a newer batch has
+// superseded, from a page the user has left, and a right-slot pixmap
+// arriving while the layout is single-page.
 // Must match the reservation in MainWindow.cpp (WM_USER + 3).
 inline constexpr UINT WM_USER_RENDER_DONE = WM_USER + 3;
 // (Phase 8 D10) Same payload as WM_USER_RENDER_DONE but the bitmap
@@ -65,10 +71,10 @@ public:
     // and a spread of unequal pages must fit the larger one.
     //
     // The dual-page submission branches call this: MainWindow::kick_render's dual
-    // branch, resubmit_current_page's dual branch, and on_key_down's dual branch.
-    // kick_render's single-page branch also calls it. The single-page branches of
-    // resubmit_current_page and on_key_down do not, as deliberate exceptions:
-    // on_key_down's single branch re-derives the fit by delegation through
+    // branch, resubmit_current_page's dual branch, and navigate_to_page's dual
+    // branch. kick_render's single-page branch also calls it. The single-page
+    // branches of resubmit_current_page and navigate_to_page do not, as deliberate
+    // exceptions: navigate_to_page's single branch re-derives the fit by delegation through
     // DocumentView::set_current_page; resubmit_current_page's single branch has no
     // caller that changes the page or the fit mode, and any resize that races a
     // device-loss recovery is corrected by the kick_render in the same WM_SIZE
@@ -91,27 +97,52 @@ public:
     // thread can drop the pixmap with the correct MuPDF root — even if
     // the producing DocumentView is torn down before the message lands.
     //
-    // Called from the worker thread inside the render callback. Takes
-    // an extra ref on the pixmap via fz_keep_pixmap, clones
-    // worker_ctx, and on any failure (clone OOM, post FALSE) cleans up
-    // both the kept pixmap and the escrow ctx. Returns true iff the
+    // Called from the worker thread inside the render callback, which
+    // hands its shipping ref on the pixmap over to this helper (see
+    // core/RenderEngine.cpp, D2). No extra ref is taken: on success the
+    // UI thread inherits that one ref and drops it through the escrow.
+    // On any failure (clone OOM, meta allocation, post FALSE) this helper
+    // drops the pixmap itself — on worker_ctx if the clone failed, on the
+    // escrow otherwise — and then drops the escrow ctx. Either way the
+    // caller must never drop the pixmap again. Returns true iff the
     // message was successfully posted.
     //
     // Callers: MainWindow::kick_render, resubmit_current_page,
-    // on_key_down's page-change path, WM_MOUSEWHEEL zoom path. `epoch` is
-    // the value of render_epoch() read at submit time; it rides the
-    // completion message so the handler can drop a superseded-view result.
+    // navigate_to_page, the WM_MOUSEWHEEL zoom path.
+    //
+    // IDENTITY (PR-A2). `epoch` is render_epoch() read at submit time — it
+    // says which VIEW the render belongs to. `page` says which page, and the
+    // choice of function says which slot; together they let the handler drop a
+    // pixmap the user has already paged away from. `seq` is next_render_seq()
+    // read once for the whole submission batch — it says which SUBMISSION,
+    // which is what decides whether this completion may consume the pending
+    // page anchor. (epoch, page, slot) alone cannot: a same-page zoom or
+    // resize produces a second P0 with an identical triple.
     static bool post_render_done(HWND target,
                                  fz_pixmap* pix,
                                  fz_context* worker_ctx,
-                                 std::uint64_t epoch);
+                                 std::uint64_t epoch,
+                                 int page,
+                                 std::uint64_t seq);
 
     // (Phase 8 D10) Variant that posts to the RIGHT slot of the dual-
-    // page layout. Same refcount discipline as post_render_done.
+    // page layout. Same refcount discipline as post_render_done, and both
+    // slots of one spread carry the SAME seq.
     static bool post_render_done_right(HWND target,
                                        fz_pixmap* pix,
                                        fz_context* worker_ctx,
-                                       std::uint64_t epoch);
+                                       std::uint64_t epoch,
+                                       int page,
+                                       std::uint64_t seq);
+
+    // Open a new submission batch: bump the monotonic submission counter and
+    // return its new value, which every request in this batch must carry.
+    //
+    // Call this ONCE per batch, before the request_render* calls — a spread's
+    // two renders share one seq. The body also stamps whatever page anchor is
+    // pending, which is what carries a navigation intent forward when a newer
+    // submission supersedes an older one.
+    std::uint64_t next_render_seq();
 
     // When true, on first real-bitmap paint the canvas calls
     // ColdStartTimer::emit_if_complete(true) so the line is mirrored to stderr.
@@ -175,12 +206,28 @@ public:
     // Safe to call before set_view (returns false).
     bool change_current_page(int idx);
 
+    // Say where the page should land when the next submission batch completes.
+    //
+    // Deliberately NOT folded into change_current_page: a defensive page SNAP
+    // (dual-mode canonicalisation) also changes the current page, runs on every
+    // spread render including same-page ones, and must leave the pan alone.
+    // Callers that navigate install an anchor; callers that canonicalise do not.
+    //
+    // The anchor is bound to a submission by the next next_render_seq() call,
+    // so install it BEFORE kicking the render. install() does not disturb the
+    // slot's already-stamped seq, so an anchor installed without a following
+    // submission binds to whatever batch is already in flight and is applied
+    // when that batch completes. Callers must only install on a path that
+    // goes on to submit.
+    void set_pending_anchor(PageAnchor anchor);
+
     // Scroll / page-change such that `h`'s quad is visible with a 24 DIP
     // margin. If already visible, no scroll — only the invalidate. If
     // target page differs from current, page is switched via
-    // DocumentView::set_current_page; caller (MainWindow) is responsible
-    // for the subsequent kick_render. This method only handles pan and
-    // invalidation.
+    // change_current_page. Installs a pending Hit anchor on every path
+    // EXCEPT the already-visible one, so the caller (MainWindow) must
+    // follow this with kick_render -- both to render and to bind that
+    // anchor to the submission it opens.
     void scroll_into_view(const litepdf::core::SearchSession::Hit& h);
 
 private:
@@ -195,12 +242,53 @@ private:
     void on_size(int width, int height);
     LRESULT on_key_down(WPARAM key);
 
+    // Change page, install `anchor`, drop stale bitmaps and submit the render
+    // batch. The single funnel for every in-canvas navigation: PgUp / PgDn /
+    // Home / End and the wheel's edge flips. No-op when the page does not
+    // move, regardless of anchor (nothing to re-render, nothing to re-anchor).
+    void navigate_to_page(int target, PageAnchor anchor);
+
+    // Put the page already on screen at its top. Home and End use this when the
+    // page they name is the one showing: they mean a position, not only a page,
+    // and navigate_to_page declines a move to where you already are.
+    LRESULT scroll_to_top();
+
+    // Unpanned vertical origin of the LEFT/single page in canvas DIPs, i.e.
+    // what on_paint would use with pan_y == 0. Single mode: place_bitmap
+    // centres a fitting page and pins an overflowing one to 0. Dual mode: the
+    // same, because the slot band is the full canvas height and on_paint's
+    // union base_y is provably 0 there (a union taller than the band always
+    // has t == 0, since an overflowing slot placement has y == 0).
+    float page_origin_y(float src_h, float vp_h) const;
+
+    // Pan that centres `h`'s quad vertically, using the same geometry as
+    // on_paint. Extracted in Task 6; scroll_into_view and the Hit anchor share
+    // it so the pre-render estimate and the post-render placement cannot drift.
+    float pan_y_for_hit(const litepdf::core::SearchSession::Hit& h) const;
+
+    // Turn an anchor into a pan. Called from the completion handler once the
+    // arriving bitmap is installed, so the page's real height is known.
+    // Kind::None keeps the current pan and only re-clamps it.
+    //
+    // Returns false when there is nothing to measure against yet (no bitmap,
+    // no render target). The caller must NOT mark the anchor applied in that
+    // case, or an intent would be retired without ever taking effect -- the
+    // reachable path being a spread whose RIGHT half lands first, while
+    // navigate_to_page has just reset both bitmaps.
+    bool apply_anchor(const PageAnchor& anchor);
+
     // Painted extent plus its origin, in canvas DIPs. `l`/`t` are zero for a
     // single page and non-zero for an unequal spread, where the union of the
     // two slots does not start at the canvas origin.
     struct ContentBox { float l, t, w, h; };
 
     LRESULT pan_by(float dx, float dy);
+
+    // Plain (unmodified) mouse-wheel scrolling. Scrolls within the page, and
+    // flips to the neighbouring page or spread once the pan is already at the
+    // edge the wheel is pushing toward.
+    LRESULT on_wheel_scroll(int delta);
+
     bool    content_extent(ContentBox& out) const;
 
     HWND hwnd_ = nullptr;

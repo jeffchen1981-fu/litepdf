@@ -292,6 +292,16 @@ void MainWindow::kick_render(int page) {
     auto* view = active_view();
     if (!view || !canvas_) return;
 
+    HWND target = canvas_->hwnd();
+    // Stamp every render with the canvas epoch at submit time so a result
+    // that lands after a tab switch (e.g. the last-restored tab's render
+    // arriving after restore_finish re-activates the saved tab) is dropped
+    // by the canvas instead of painted over the now-active tab (issue #35).
+    const std::uint64_t epoch = canvas_->render_epoch();
+    // One submission batch: both halves of a spread carry this seq, and it is
+    // what binds the pending page anchor to this submission (PR-A2 §3.2).
+    const std::uint64_t seq = canvas_->next_render_seq();
+
     if (view->dual_page()) {
         // (Phase 8 D10) Spread layout: snap to the LEFT page of the
         // pair containing `page` (cover-rule + odd-tail handled by the
@@ -303,19 +313,22 @@ void MainWindow::kick_render(int page) {
         const int left  = litepdf::ui::dual_page_compute_left(page, total);
         const int right = litepdf::ui::dual_page_compute_right(left, total);
         view->cancel_stale_renders(0);
-        view->set_current_page(left);
+        // Route through the canvas so the page-change observer fires -- the
+        // thumbnail highlight is wrong in spread mode without it. No anchor:
+        // this runs on EVERY spread render, same-page ones included, and a
+        // snap must leave the reader's scroll position alone.
+        canvas_->change_current_page(left);
         canvas_->apply_viewport();
 
-        HWND target = canvas_->hwnd();
-        const std::uint64_t epoch = canvas_->render_epoch();
         view->request_render(left,
-            [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
-                PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
+            [target, epoch, left, seq](fz_pixmap* p, fz_context* worker_ctx) {
+                PdfCanvas::post_render_done(target, p, worker_ctx, epoch, left, seq);
             });
         if (right >= 0) {
             view->request_render(right,
-                [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
-                    PdfCanvas::post_render_done_right(target, p, worker_ctx, epoch);
+                [target, epoch, right, seq](fz_pixmap* p, fz_context* worker_ctx) {
+                    PdfCanvas::post_render_done_right(target, p, worker_ctx,
+                                                      epoch, right, seq);
                 });
         }
         InvalidateRect(canvas_->hwnd(), nullptr, FALSE);
@@ -324,16 +337,33 @@ void MainWindow::kick_render(int page) {
 
     canvas_->apply_viewport();
 
-    HWND target = canvas_->hwnd();
-    // Stamp every render with the canvas epoch at submit time so a result
-    // that lands after a tab switch (e.g. the last-restored tab's render
-    // arriving after restore_finish re-activates the saved tab) is dropped
-    // by the canvas instead of painted over the now-active tab (issue #35).
-    const std::uint64_t epoch = canvas_->render_epoch();
     view->request_render_with_prefetch(page,
-        [target, epoch](fz_pixmap* p, fz_context* worker_ctx) {
-            PdfCanvas::post_render_done(target, p, worker_ctx, epoch);
+        [target, epoch, page, seq](fz_pixmap* p, fz_context* worker_ctx) {
+            PdfCanvas::post_render_done(target, p, worker_ctx, epoch, page, seq);
         });
+}
+
+void MainWindow::navigate_click(int page) {
+    auto* v = active_view();
+    if (!v || !canvas_) return;
+    const int  total   = v->page_count();
+    const bool spread  = canvas_->dual_page();
+    const auto canon   = [&](int p) {
+        return spread ? litepdf::ui::dual_page_compute_left(p, total) : p;
+    };
+    // `view_moves` MUST be computed before change_current_page: afterwards
+    // canon(v->current_page()) would equal canon(page), collapsing it to false
+    // on exactly the clicks that do move the view.
+    // The anchor is installed AFTER instead -- the opposite of
+    // navigate_to_page's install-before-change rule -- because whether to
+    // install at all depends on change_current_page's return value. Safe only
+    // while no observer navigates or reads the pending anchor.
+    const bool view_moves = canon(page) != canon(v->current_page());
+    if (!canvas_->change_current_page(page)) return;
+    if (view_moves) {
+        canvas_->set_pending_anchor(litepdf::ui::PageAnchor::top());
+    }
+    kick_render(page);
 }
 
 HWND MainWindow::left_pane_hwnd() const {
@@ -515,18 +545,16 @@ void MainWindow::toggle_thumbs() {
         GetWindowLongPtrW(hwnd_, GWLP_HINSTANCE));
     auto* tp = v->ensure_thumb_pane(hinst, hwnd_);
     // Click-to-navigate. Re-set on every toggle (idempotent — ThumbnailPane
-    // just overwrites the std::function). Route through
-    // PdfCanvas::change_current_page (same as the outline pane) so the T7
-    // page-change observer fires — keeps the thumb pane's own current-page
-    // highlight in sync with the canvas, and matches the behavior of
-    // every other navigation site (PgUp/PgDn, outline click, search jump).
+    // just overwrites the std::function). Route through navigate_click (same
+    // as the outline pane) so the T7 page-change observer fires — keeps the
+    // thumb pane's own current-page highlight in sync with the canvas, and
+    // matches the behavior of every other navigation site (PgUp/PgDn,
+    // outline click, search jump).
     // Capture `this` because MainWindow outlives every DocumentView
     // (tabs_ is destroyed during ~MainWindow before the HWND tear-down
     // completes via OS WM_NCDESTROY cascade).
     tp->set_on_navigate([this](int page) {
-        if (canvas_ && canvas_->change_current_page(page)) {
-            kick_render(page);
-        }
+        navigate_click(page);
     });
 
     if (tp->visible()) {
@@ -558,13 +586,10 @@ void MainWindow::toggle_thumbs() {
 void MainWindow::on_outline_navigate(int page) {
     auto* view = active_view();
     if (!view || !canvas_) return;
-    // Route through PdfCanvas::change_current_page so the T7 page-change
-    // observer fires (T8 wires this to the per-tab thumbnail pane).
-    // Falls back to true == "page actually moved" — same semantics as
-    // the prior direct view->set_current_page call.
-    if (canvas_->change_current_page(page)) {
-        kick_render(page);
-    }
+    // navigate_click fires the T7 page-change observer (T8 wires this to the
+    // per-tab thumbnail pane), anchors the new page at its top when the view
+    // actually moves, and renders -- it no-ops when the page does not move.
+    navigate_click(page);
 }
 
 void MainWindow::on_tab_switch(int new_index, int old_index) {
@@ -646,9 +671,7 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
         // is per-tab; binding once on first show is enough but
         // re-binding on every show is cheap and trivially correct.
         tp->set_on_navigate([this](int page) {
-            if (canvas_ && canvas_->change_current_page(page)) {
-                kick_render(page);
-            }
+            navigate_click(page);
         });
         // The page count may have shifted between when ensure_thumb_pane
         // first ran and now (it shouldn't, since DocumentView's page
@@ -900,25 +923,27 @@ void MainWindow::restore_on_tab_ready(const std::filesystem::path& opened) {
         // add_tab fired on_tab_switch synchronously, seeding the view's
         // viewport dims and kicking ONE render that the kick_render below
         // cancels before it can paint (cancel-on-new-request) — no page-0 flash.
-        v->set_current_page(st.page);
+        // Route through the canvas so the page-change observer fires: after a
+        // session restore the model and the thumbnail highlight otherwise
+        // disagree until the user's first navigation. This one IS a navigation,
+        // so it installs Top -- a restored tab has no pan to preserve
+        // (SessionTab carries path, page and zoom, not a scroll offset).
+        canvas_->change_current_page(st.page);
+        canvas_->set_pending_anchor(litepdf::ui::PageAnchor::top());
         switch (st.zoom_mode) {
             case litepdf::core::SessionZoom::Custom:
                 v->set_zoom_pct(st.zoom_scale);   // no viewport needed
                 break;
             case litepdf::core::SessionZoom::FitWidth:
             case litepdf::core::SessionZoom::FitPage: {
-                // BOTH fit modes restore as FitPage in this release -- a
-                // persisted FitWidth is deliberately not honoured. The default
-                // alone does not cover upgrading users: v1.2.0 could only ever
-                // persist fit_width (it was that build's default, and its Reset
-                // Zoom set it too), so honouring the file would drop nearly
-                // every restored tab into a mode this build cannot navigate.
-                // The paint path now draws at natural size and there is no
-                // wheel scrolling, so the lower two thirds of an A4 page are
-                // simply unreachable. Same reasoning, and the same PR-A2
-                // restore point, as DocumentView.cpp (Impl::zm) and
-                // SessionState.cpp's migrate_v1_to_v2.
-                v->set_zoom_mode_fit_page();
+                // Honour what the file says. PR-A1 collapsed both onto FitPage
+                // because that release could not navigate a FitWidth page
+                // below the fold; PR-A2's wheel scrolling removes the reason.
+                if (st.zoom_mode == litepdf::core::SessionZoom::FitWidth) {
+                    v->set_zoom_mode_fit_width();
+                } else {
+                    v->set_zoom_mode_fit_page();
+                }
                 RECT rc; GetClientRect(canvas_->hwnd(), &rc);
                 const UINT dpi = GetDpiForWindow(hwnd_);
                 v->set_viewport(static_cast<float>(rc.right - rc.left),
@@ -1372,7 +1397,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     if (v->dual_page()) {
                         p = litepdf::ui::dual_page_compute_left(
                                 p, v->page_count());
-                        v->set_current_page(p);
+                        if (canvas_) canvas_->change_current_page(p);   // snap: no anchor
                     }
                     kick_render(p);
                     return 0;
@@ -1457,7 +1482,11 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     return 0;
                 case IDM_ZOOM_RESET: {
                     if (auto* view = active_view(); view && canvas_) {
-                        view->set_zoom_mode_fit_page();
+                        // Ctrl+0 returns to the app default, which is FitWidth
+                        // again now that the wheel can reach the overflow.
+                        // The View menu ships no Fit Width / Fit Page items, so
+                        // this is the only mode control the user has.
+                        view->set_zoom_mode_fit_width();
                         RECT rc; GetClientRect(canvas_->hwnd(), &rc);
                         UINT dpi = GetDpiForWindow(hwnd);
                         view->set_viewport(static_cast<float>(rc.right - rc.left),
@@ -1967,17 +1996,22 @@ void MainWindow::on_results_row_click(std::size_t idx) {
     tabs_->set_active(target_idx);
     auto* v = active_view();
     if (!v || !canvas_) return;
-    // Route through PdfCanvas::change_current_page so the T7 page-change
-    // observer fires for cross-tab search jumps too. set_active above
-    // already triggered on_tab_switch -> canvas_->set_view, which fired
-    // the observer with the incoming tab's stored page; this second
-    // fire reflects the search-jump's target page.
-    canvas_->change_current_page(static_cast<int>(h.page));
-
     // Recompose a Hit for the canvas overlay + scroll. SearchSession::Hit
     // and CrossTabSearch::Hit share the (page, geom) pair; we copy into
     // the canvas-native shape.
     litepdf::core::SearchSession::Hit sh{h.page, h.geom};
+    // scroll_into_view calls change_current_page itself and installs the Hit
+    // anchor, so the T7 page-change observer fires for cross-tab search jumps
+    // too and the completion lands the page on the hit rather than at its top.
+    // set_active above already triggered on_tab_switch -> canvas_->set_view,
+    // which fired the observer with the incoming tab's stored page;
+    // scroll_into_view's fire reflects the search-jump target.
+    //
+    // The explicit change_current_page(h.page) that used to sit here is gone:
+    // it left scroll_into_view finding the page already correct, which before
+    // this task meant the Hit was never installed -- the defect spec 3.4 names.
+    // change_current_page installs no anchor of its own; set_pending_anchor is
+    // the only installer.
     canvas_->set_current_hit(sh);
     canvas_->scroll_into_view(sh);
     kick_render(v->current_page());

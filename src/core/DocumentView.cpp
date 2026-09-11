@@ -46,11 +46,12 @@ struct DocumentView::Impl {
     std::unique_ptr<RenderEngine> engine;
 
     int                    current_page = 0;
-    // PR-A1 ships FitPage so the default view still shows a whole page: with
-    // the paint path now drawing at natural size, FitWidth overflows the
-    // viewport vertically and this PR has no wheel scrolling to navigate it.
-    // PR-A2 restores FitWidth when ScrollMath lands.
-    DocumentView::ZoomMode zm           = DocumentView::ZoomMode::FitPage;
+    // FitWidth: page width fills the canvas, and the overflow below the fold is
+    // reached with the wheel (PR-A2) or the arrow keys. PR-A1 shipped FitPage
+    // as an interim default precisely because it had no wheel scrolling, which
+    // left the lower two thirds of an A4 page unreachable; PR-A2's ScrollMath
+    // is what makes FitWidth navigable again.
+    DocumentView::ZoomMode zm           = DocumentView::ZoomMode::FitWidth;
     float                  pct          = 1.0f;   // was: scale (a render scale)
     float                  vp_w         = 0.0f;   // device pixels
     float                  vp_h         = 0.0f;   // device pixels
