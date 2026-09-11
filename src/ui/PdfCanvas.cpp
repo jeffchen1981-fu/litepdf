@@ -908,19 +908,29 @@ LRESULT PdfCanvas::on_wheel_scroll(int delta) {
     // The same reasoning, for a page change the wheel did NOT drive. PgDn,
     // PgUp, Home, End, an outline click, a thumbnail click and a tab switch all
     // move current_page (or the epoch) and submit WITHOUT setting
-    // wheel_flip_seq, and navigate_to_page's single-page branch leaves both
-    // current_bitmap and pan_y describing the OUTGOING page. A notch arriving
-    // in that window would measure the old page's geometry, find itself at the
-    // edge -- which is exactly where the reader was when they pressed PgDn --
-    // and flip again, skipping the page they just asked for.
+    // wheel_flip_seq, and NEITHER navigate_to_page's single-page branch NOR
+    // MainWindow::kick_render's spread branch drops current_bitmap (the latter
+    // is residual 9) -- so the bitmap and pan_y still describe the OUTGOING
+    // page or spread. A notch arriving in that window would measure the old
+    // geometry, find itself at the edge -- which is exactly where the reader
+    // was standing when they pressed PgDn -- and flip again, skipping the page
+    // they just asked for.
     //
     // bitmap_epoch/bitmap_page are what make that detectable; scroll_into_view
-    // runs the same test for the same reason (Task 6). Spread mode does not
-    // need it: navigate_to_page's dual branch drops BOTH bitmaps, so
-    // content_extent below reports nothing and the notch is dropped there.
-    if (!impl_->dual_page && impl_->current_bitmap
+    // runs the same test for the same reason (Task 6). Compare against the
+    // CANONICAL left, exactly as accept_completion does: bitmap_page is written
+    // only by the LEFT slot, so in spread mode it holds the pair's left page.
+    // Deriving that here rather than trusting current_page to be left-aligned
+    // keeps the guard independent of an invariant maintained four call sites
+    // away -- the same reasoning as the flip guard further down.
+    const int wheel_total = impl_->view->page_count();
+    const int wheel_canon =
+        impl_->dual_page
+            ? dual_page_compute_left(impl_->view->current_page(), wheel_total)
+            : impl_->view->current_page();
+    if (impl_->current_bitmap
         && (impl_->bitmap_epoch != impl_->view_epoch
-            || impl_->bitmap_page != impl_->view->current_page())) {
+            || impl_->bitmap_page != wheel_canon)) {
         impl_->wheel_residual = 0;
         return 0;
     }
