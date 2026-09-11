@@ -905,6 +905,26 @@ LRESULT PdfCanvas::on_wheel_scroll(int delta) {
         return 0;
     }
 
+    // The same reasoning, for a page change the wheel did NOT drive. PgDn,
+    // PgUp, Home, End, an outline click, a thumbnail click and a tab switch all
+    // move current_page (or the epoch) and submit WITHOUT setting
+    // wheel_flip_seq, and navigate_to_page's single-page branch leaves both
+    // current_bitmap and pan_y describing the OUTGOING page. A notch arriving
+    // in that window would measure the old page's geometry, find itself at the
+    // edge -- which is exactly where the reader was when they pressed PgDn --
+    // and flip again, skipping the page they just asked for.
+    //
+    // bitmap_epoch/bitmap_page are what make that detectable; scroll_into_view
+    // runs the same test for the same reason (Task 6). Spread mode does not
+    // need it: navigate_to_page's dual branch drops BOTH bitmaps, so
+    // content_extent below reports nothing and the notch is dropped there.
+    if (!impl_->dual_page && impl_->current_bitmap
+        && (impl_->bitmap_epoch != impl_->view_epoch
+            || impl_->bitmap_page != impl_->view->current_page())) {
+        impl_->wheel_residual = 0;
+        return 0;
+    }
+
     const int notches = consume_notches(delta, impl_->wheel_residual);
     if (notches == 0) return 0;   // a fractional notch is never a page flip
 
