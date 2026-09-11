@@ -5,8 +5,8 @@
 // Before this PR the completion handler zeroed the pan unconditionally
 // (PdfCanvas.cpp, WM_USER_RENDER_DONE). That is right for a page turn and
 // wrong for everything else: pan to the bottom of a page and press Zoom In and
-// the view snaps back to the top; switch tabs and MainWindow's restored
-// per-tab pan (MainWindow.cpp:602) is destroyed by the very next completion.
+// the view snaps back to the top; switch tabs and the per-tab pan that
+// MainWindow::on_tab_switch restores is destroyed by the very next completion.
 //
 // An anchor names the intent instead:
 //

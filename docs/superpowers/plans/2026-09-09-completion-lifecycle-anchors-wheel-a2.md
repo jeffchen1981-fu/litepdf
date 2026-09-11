@@ -90,9 +90,16 @@ Changing `>` to `>=` is not available to us: it would turn
 not fixed here**.
 
 So the fix goes in the predicate instead. **`accept_completion` takes `meta_seq` and
-the newest seq already accepted, and rejects anything older** (Task 1). Two in-flight
+the newest seq already SUBMITTED, and rejects anything older** (Task 1). Two in-flight
 P0s for the same page then cost wasted work rather than a wrong picture: whichever
 lands second wins only if it is the newer submission.
+
+(Corrected at the PR-merge gate, 2026-09-11: this paragraph read "the newest seq
+already accepted" until then. That contradicted this plan's own Definition of Done,
+which treats finding a `newest_accepted_seq` anywhere in the tree as proof that a task
+was implemented from a stale copy of this plan — and it contradicted the shipped
+predicate, which takes `next_seq`, the newest seq SUBMITTED, into a parameter named
+`newest_submitted_seq`.)
 
 An earlier draft of this plan claimed the mere *existence* of `seq` in `RenderMeta`
 made the duplicate P0s harmless. That was wrong — `seq` reached only the anchor slot,

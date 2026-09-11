@@ -176,11 +176,11 @@ struct PdfCanvas::Impl {
     // zoom, a resize) releases it even when no completion ever arrives.
     std::uint64_t                 wheel_flip_seq = 0;   // 0 = nothing pending
     // The view_epoch that current_bitmap was created under. set_view does NOT
-    // drop current_bitmap on a non-null swap -- only on the null one
-    // (PdfCanvas.cpp:177-184) -- so after a tab switch the canvas is still
-    // holding, and still painting, the OUTGOING document's page until the
-    // incoming render lands. Anything that MEASURES that bitmap has to know it
-    // belongs to a different document; see scroll_into_view (Task 6).
+    // drop current_bitmap on a non-null swap -- only on the null one (see
+    // set_view's null-view branch) -- so after a tab switch the canvas is
+    // still holding, and still painting, the OUTGOING document's page until
+    // the incoming render lands. Anything that MEASURES that bitmap has to
+    // know it belongs to a different document; see scroll_into_view (Task 6).
     std::uint64_t                 bitmap_epoch = 0;
     // ...and which PAGE it shows. navigate_to_page's single-page branch does not
     // drop current_bitmap either, so between a page turn and its completion the
