@@ -387,6 +387,16 @@ void MainWindow::on_layout() {
     const int h = rc.bottom - rc.top;
     const UINT dpi = GetDpiForWindow(hwnd_);
 
+    // PR-B: the status bar owns the bottom strip. Everything laid out below
+    // measures against `layout_h`, not the raw client height. THREE call sites
+    // depend on this, not one -- see (b) and the splitter drag clamp.
+    const int status_h = status_bar_ ? status_bar_->height_px() : 0;
+    const int layout_h = std::max(0, h - status_h);
+    if (status_bar_ && status_bar_->hwnd()) {
+        RECT sb = { 0, layout_h, w, h };
+        status_bar_->set_bounds(sb);
+    }
+
     // Tab strip: only when there's at least one tab.
     const int tab_h = (tabs_ && tabs_->count() > 0)
         ? tabs_->strip_height(dpi) : 0;
@@ -409,7 +419,7 @@ void MainWindow::on_layout() {
                          ? results_panel_height_px_ : 0;
     const int splitter_h = (panel_h > 0)
                            ? MulDiv(4, static_cast<int>(dpi), 96) : 0;
-    const int canvas_bottom = h - panel_h - splitter_h;
+    const int canvas_bottom = layout_h - panel_h - splitter_h;
     const int row_h = std::max(0, canvas_bottom - row_y);
 
     // Phase 7 Task 8: left dock — at most one of outline / thumb pane
@@ -472,7 +482,7 @@ void MainWindow::on_layout() {
         }
     }
     if (results_panel_ && panel_h > 0) {
-        RECT pr = { 0, canvas_bottom + splitter_h, w, h };
+        RECT pr = { 0, canvas_bottom + splitter_h, w, layout_h };
         results_panel_->set_bounds(pr);
     }
 
@@ -1066,12 +1076,20 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 // the canvas entirely — leave at least ~100 px of canvas
                 // visible and refuse a panel shorter than ~80 px (below
                 // which the ListView has no room for even a single row).
+                // PR-B: the status bar's strip is not draggable space either,
+                // so it comes off the budget before the 100 px canvas floor.
                 RECT client; GetClientRect(hwnd_, &client);
+                const int status_h = status_bar_ ? status_bar_->height_px() : 0;
                 const int max_h = std::max(80,
-                    static_cast<int>(client.bottom) - 100);
+                    static_cast<int>(client.bottom) - status_h - 100);
                 results_panel_height_px_ = std::clamp(new_h, 80, max_h);
                 on_layout();
             });
+
+            // PR-B: bottom status bar. Created before the first on_layout so
+            // height_px() is already measured when the layout reserves for it.
+            status_bar_ = std::make_unique<StatusBar>(cs->hInstance, hwnd);
+
             // Observer chains: CrossTabSearch's own aggregator runs on a
             // worker thread when any tab's SearchSession finishes a page
             // scan. Marshal to UI thread so ResultsPanel's
@@ -1228,6 +1246,8 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     }
                 }
             }
+            // PR-B: the status bar's font and natural height are DPI-derived.
+            if (status_bar_) status_bar_->update_dpi(HIWORD(w));
             // The user's left_pane_width_px_ is in physical px at the
             // OLD DPI. The on_layout clamp will keep it inside [120
             // dip, client - 100 px] at the NEW DPI; a too-narrow stored
@@ -2069,7 +2089,8 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
                     bool offer_restore) {
     INITCOMMONCONTROLSEX icc = { sizeof(icc),
         ICC_STANDARD_CLASSES | ICC_TAB_CLASSES |
-        ICC_TREEVIEW_CLASSES | ICC_LISTVIEW_CLASSES };
+        ICC_TREEVIEW_CLASSES | ICC_LISTVIEW_CLASSES |
+        ICC_BAR_CLASSES };   // PR-B: msctls_statusbar32
     InitCommonControlsEx(&icc);
 
     WNDCLASSEXW wc = {};
