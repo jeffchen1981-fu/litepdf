@@ -945,7 +945,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Consumes: `litepdf::ui::StatusBar` from Task 2.
 - Produces: `MainWindow::status_bar_` (a live, visible, empty bar) and a client area that no longer overlaps it.
 
-**This is the task the spec singles out as the one that gets botched.** Three separate places subtract the bar's height, not one. Missing the second puts the results panel's last row under the bar; missing the third lets a splitter drag push the panel under it.
+**This is the task the spec singles out as the one that gets botched.** Three separate places subtract the bar's height, not one. Missing the second puts the results panel's last row under the bar. The third is not a "keeps the panel out from under the bar" site — with (b) in place, the panel's bottom is pinned at `layout_h` on every layout pass regardless of `results_panel_height_px_`, so no drag can put it under the bar. The third site exists because `Splitter` derives the dragged height from the parent's *raw* client rect (`GetClientRect(hwnd_, ...)` in `Splitter.cpp`, which does not shrink for the status bar), while the panel is laid out inside `layout_h` — so the drag callback must subtract `status_h` to convert `Splitter`'s raw-space height into `layout_h`-space before storing it, or every drag ends up offset upward by the bar's height (confirmed regression: PR-B review, 2026-09-13 — the panel's top landed at `mouse_y - status_h` instead of `mouse_y`).
 
 - [ ] **Step 1: Declare the member**
 
@@ -1018,7 +1018,7 @@ and
     }
 ```
 
-**(c)** In the `splitter_->set_on_drag` lambda in `WM_CREATE`, the clamp must leave room for the bar as well as for the canvas:
+**(c)** In the `splitter_->set_on_drag` lambda in `WM_CREATE` — **not** because a drag could otherwise push the panel under the bar (it can't: (b) pins the panel's bottom at `layout_h` regardless of `results_panel_height_px_`), but because `Splitter` computes the dragged height against the parent's *raw* client rect (`GetClientRect(hwnd_, ...)` inside `Splitter.cpp`, unaffected by the bar), while the panel is laid out inside `layout_h`. Composing the two without converting between them offsets every drag upward by `status_h`: the panel's top lands at `mouse_y - status_h` instead of `mouse_y`. Subtract `status_h` from `new_h` before it becomes `results_panel_height_px_`:
 
 ```cpp
             splitter_->set_on_drag([this](int new_h) {
@@ -1026,13 +1026,30 @@ and
                 // the canvas entirely — leave at least ~100 px of canvas
                 // visible and refuse a panel shorter than ~80 px (below
                 // which the ListView has no room for even a single row).
-                // PR-B: the status bar's strip is not draggable space either,
-                // so it comes off the budget before the 100 px canvas floor.
+                // PR-B: `new_h` is computed by Splitter (Splitter.cpp) against
+                // the PARENT'S RAW client rect -- GetClientRect(hwnd_, ...)
+                // there is NOT reduced for the status bar's strip, so new_h
+                // is "raw_client_h - mouse_y" in raw-client space. The
+                // results panel, however, is laid out inside layout_h
+                // (on_layout pins its bottom there, not at the raw client
+                // height). Converting raw-space -> layout_h-space means
+                // subtracting status_h; skip it and every drag ends up
+                // offset upward by status_h px (the panel's top lands at
+                // mouse_y - status_h instead of tracking the cursor at
+                // mouse_y).
+                // max_h below is this same outer bound, expressed in
+                // layout_h space so it stays dimensionally consistent with
+                // the clamped value -- but it rarely binds in practice:
+                // Splitter's own internal clamp on new_h (max(100 px,
+                // raw_client_h - 200 px), in Splitter.cpp) is tighter than
+                // this one at any status-bar height under 100 px, i.e.
+                // always. This bound is an outer safety net, not the one
+                // doing the real work.
                 RECT client; GetClientRect(hwnd_, &client);
                 const int status_h = status_bar_ ? status_bar_->height_px() : 0;
                 const int max_h = std::max(80,
                     static_cast<int>(client.bottom) - status_h - 100);
-                results_panel_height_px_ = std::clamp(new_h, 80, max_h);
+                results_panel_height_px_ = std::clamp(new_h - status_h, 80, max_h);
                 on_layout();
             });
 ```

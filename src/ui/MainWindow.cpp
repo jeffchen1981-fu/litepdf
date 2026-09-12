@@ -1076,13 +1076,30 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 // the canvas entirely — leave at least ~100 px of canvas
                 // visible and refuse a panel shorter than ~80 px (below
                 // which the ListView has no room for even a single row).
-                // PR-B: the status bar's strip is not draggable space either,
-                // so it comes off the budget before the 100 px canvas floor.
+                // PR-B: `new_h` is computed by Splitter (Splitter.cpp) against
+                // the PARENT'S RAW client rect -- GetClientRect(hwnd_, ...)
+                // there is NOT reduced for the status bar's strip, so new_h
+                // is "raw_client_h - mouse_y" in raw-client space. The
+                // results panel, however, is laid out inside layout_h
+                // (on_layout pins its bottom there, not at the raw client
+                // height). Converting raw-space -> layout_h-space means
+                // subtracting status_h; skip it and every drag ends up
+                // offset upward by status_h px (the panel's top lands at
+                // mouse_y - status_h instead of tracking the cursor at
+                // mouse_y).
+                // max_h below is this same outer bound, expressed in
+                // layout_h space so it stays dimensionally consistent with
+                // the clamped value -- but it rarely binds in practice:
+                // Splitter's own internal clamp on new_h (max(100 px,
+                // raw_client_h - 200 px), in Splitter.cpp) is tighter than
+                // this one at any status-bar height under 100 px, i.e.
+                // always. This bound is an outer safety net, not the one
+                // doing the real work.
                 RECT client; GetClientRect(hwnd_, &client);
                 const int status_h = status_bar_ ? status_bar_->height_px() : 0;
                 const int max_h = std::max(80,
                     static_cast<int>(client.bottom) - status_h - 100);
-                results_panel_height_px_ = std::clamp(new_h, 80, max_h);
+                results_panel_height_px_ = std::clamp(new_h - status_h, 80, max_h);
                 on_layout();
             });
 
