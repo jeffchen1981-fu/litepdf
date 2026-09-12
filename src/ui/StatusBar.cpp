@@ -205,11 +205,21 @@ LRESULT CALLBACK status_bar_subclass(HWND hwnd, UINT msg, WPARAM w,
         case WM_CTLCOLORSTATIC: {
             auto hdc = reinterpret_cast<HDC>(w);
             auto ctl = reinterpret_cast<HWND>(l);
+            // Neither branch below falls through to DefSubclassProc -- both
+            // return their brush directly -- so this is the only place that
+            // will ever set the DC's text colour. Leaving it unset defaults to
+            // black, which is invisible against a black High Contrast bar
+            // background. System colours (not a custom palette) are correct
+            // here because this is a system control that must track High
+            // Contrast automatically; FindBar's palette machinery exists only
+            // because that bar is custom-drawn.
             if (impl && ctl == impl->edit) {
                 // Disabled page box: the standard disabled-field look.
+                SetTextColor(hdc, GetSysColor(COLOR_GRAYTEXT));
                 SetBkColor(hdc, GetSysColor(COLOR_3DFACE));
                 return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_3DFACE));
             }
+            SetTextColor(hdc, GetSysColor(COLOR_BTNTEXT));
             SetBkMode(hdc, TRANSPARENT);
             return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
         }
@@ -350,7 +360,10 @@ StatusBar::StatusBar(HINSTANCE hInstance, HWND parent)
 }
 
 StatusBar::~StatusBar() {
-    if (impl_ && impl_->hwnd) DestroyWindow(impl_->hwnd);
+    if (impl_ && impl_->hwnd) {
+        DestroyWindow(impl_->hwnd);
+        impl_->hwnd = nullptr;
+    }
 }
 
 HWND StatusBar::hwnd() const { return impl_ ? impl_->hwnd : nullptr; }
@@ -368,8 +381,14 @@ void StatusBar::set_bounds(const RECT& bounds) {
 
 void StatusBar::update_dpi(UINT dpi) {
     if (!impl_ || !impl_->hwnd) return;
-    impl_->dpi  = dpi;
-    impl_->font = make_unique_hfont(create_status_font(dpi));
+    impl_->dpi = dpi;
+    // Keep the old font alive until every WM_SETFONT below has landed.
+    // Reassigning impl_->font directly would run the old HFONT's deleter
+    // during the assignment, leaving all three windows pointing at a freed
+    // GDI handle for the duration of the sends. old_font dies at the end of
+    // this function, after nobody references it any more.
+    auto old_font = std::move(impl_->font);
+    impl_->font    = make_unique_hfont(create_status_font(dpi));
     const WPARAM f = reinterpret_cast<WPARAM>(impl_->font.get());
     SendMessageW(impl_->hwnd, WM_SETFONT, f, MAKELPARAM(TRUE, 0));
     if (impl_->edit)  SendMessageW(impl_->edit,  WM_SETFONT, f, MAKELPARAM(TRUE, 0));
@@ -380,11 +399,19 @@ void StatusBar::update_dpi(UINT dpi) {
 
 void StatusBar::set_page(int page_index, int page_count) {
     if (!impl_) return;
+    // Route the empty case through set_empty() rather than duplicating its
+    // focus-handback guard here: EnableWindow on a focused window leaves focus
+    // NULL, and MainWindow has no WM_KEYDOWN handler of its own to recover
+    // from that. set_empty() already hands focus back before disabling.
+    if (page_count <= 0) {
+        set_empty();
+        return;
+    }
     impl_->cur_page   = page_index;
     impl_->page_count = page_count;
 
     if (impl_->edit) {
-        EnableWindow(impl_->edit, page_count > 0);
+        EnableWindow(impl_->edit, TRUE);
         const bool focused = (GetFocus() == impl_->edit);
         if (detail::should_overwrite_page_box(focused, impl_->edit_text(),
                                               impl_->last_written)) {
@@ -392,9 +419,7 @@ void StatusBar::set_page(int page_index, int page_count) {
         }
     }
     if (impl_->label) {
-        const std::wstring text = (page_count > 0)
-            ? (L"/ " + std::to_wstring(page_count))
-            : std::wstring();
+        const std::wstring text = L"/ " + std::to_wstring(page_count);
         SetWindowTextW(impl_->label, text.c_str());
     }
     impl_->repaint();
