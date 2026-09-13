@@ -1329,6 +1329,17 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             break;
         }
         case WM_SETTINGCHANGE: {
+            // PR-B: WM_SETTINGCHANGE is broadcast to top-level windows only,
+            // so the status bar (a child HWND) never sees it directly even
+            // though it has its own arm that re-detects dark mode and High
+            // Contrast together and repaints. Forward unconditionally rather
+            // than gating on the "ImmersiveColorSet" name below: a High
+            // Contrast toggle does not necessarily carry that section name,
+            // and the bar's own arm already no-ops when neither state
+            // changed. Keep the tabs_ forwarding exactly as it was.
+            if (status_bar_ && status_bar_->hwnd()) {
+                SendMessageW(status_bar_->hwnd(), WM_SETTINGCHANGE, w, l);
+            }
             if (w == 0 && l != 0) {
                 auto* name = reinterpret_cast<const wchar_t*>(l);
                 if (wcscmp(name, L"ImmersiveColorSet") == 0) {

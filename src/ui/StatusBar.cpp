@@ -174,6 +174,14 @@ struct StatusBar::Impl {
     void apply_bar_bkcolor() {
         if (!hwnd) return;
         if (high_contrast) {
+            // Undo the L"", L"" theme-suppression from the non-HC branch
+            // below (nullptr, nullptr restores default visual-style
+            // processing) so a light/dark -> High Contrast transition
+            // lands the bar back on the OS's own contrast theme instead of
+            // staying unthemed. Previously unreachable because nothing
+            // delivered WM_SETTINGCHANGE to this control; now that
+            // MainWindow forwards it, this path is live.
+            SetWindowTheme(hwnd, nullptr, nullptr);
             SendMessageW(hwnd, SB_SETBKCOLOR, 0,
                         static_cast<LPARAM>(CLR_DEFAULT));
             return;
