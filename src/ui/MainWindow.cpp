@@ -1281,9 +1281,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // lets the next paint rebuild at the new DPI. Also re-seed the
             // active tab's zoom scale for the new DPI. Inactive tabs re-seed
             // their own zoom on switch, so a single active-tab kick suffices.
-            if (auto* view = active_view(); view && canvas_) {
-                kick_render(view->current_page());
-            }
+            // The kick itself is deferred past on_layout() below -- see there.
             // Phase 7 T8 #2 follow-up: forward new DPI to ALL tabs' thumb
             // panes, not just the active one. Multi-monitor drag between
             // mismatched-DPI displays must update inactive panes' cached
@@ -1309,6 +1307,18 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // snap down. Re-anchoring to 250 dip would lose the user's
             // drag — accept the clamp's slight imperfection instead.
             on_layout();
+            // Kick the active view's render only now that on_layout() has
+            // resized the canvas HWND to its final post-DPI bounds. The
+            // status bar's height (set by update_dpi() just above) changes
+            // the canvas height that on_layout() computes, and kick_render's
+            // apply_viewport() reads the canvas's CURRENT client rect
+            // synchronously (GetClientRect), which feeds a FitPage view's
+            // fit_percentage(). Rendering before on_layout() would size the
+            // bitmap against the pre-DPI-change canvas height, leaving a
+            // stale render until the next navigation or resize.
+            if (auto* view = active_view(); view && canvas_) {
+                kick_render(view->current_page());
+            }
             return 0;
         }
         case WM_DRAWITEM: {
