@@ -2,7 +2,7 @@
 
 A lightweight PDF / ePub / CBZ / XPS reader for Windows 11, optimized for mechanical hard drives. Single self-contained executable, no runtime dependencies.
 
-- **Status:** released — latest [`v1.2.0`](https://github.com/jeffchen1981-fu/litepdf/releases/latest)
+- **Status:** released — latest [`v1.3.0`](https://github.com/jeffchen1981-fu/litepdf/releases/latest)
 - **License:** [AGPL-3.0](LICENSE)
 - **Design:** [`docs/plans/2026-04-15-litepdf-design.md`](docs/plans/2026-04-15-litepdf-design.md)
 - **Roadmap:** [`docs/plans/2026-04-15-litepdf-roadmap.md`](docs/plans/2026-04-15-litepdf-roadmap.md)
@@ -28,7 +28,7 @@ Download the latest release from
 > The binary is the one built by the [release workflow](.github/workflows/release.yml)
 > from the tagged source.
 
-## Features (v1.2.0)
+## Features (v1.3.0)
 
 Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab independent state. Cold-start budget under 1 s on SSD; tuned for HDD-friendly I/O patterns.
 
@@ -40,6 +40,9 @@ Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab i
 - **Two-page spread** — book-style side-by-side layout with cover-page rule (Ctrl+Shift+D, Phase 8)
 - **Print** — standard `PrintDlgEx` with page range, copies, scale modes (fit / actual / custom %), auto-rotate, and mid-job cancel (Ctrl+P, Phase 8.5)
 - **CJK rendering** — Chinese / Japanese / Korean text renders from your installed Windows fonts (no bundled CJK font), keeping `litepdf.exe` ~7 MB (v1.2.0)
+- **Zoom** — Zoom In / Out / Reset actually change what you see, at the right resolution on high-DPI displays (Ctrl+= / Ctrl+- / Ctrl+0, v1.3.0)
+- **Mouse-wheel scrolling** — scrolls within a page and turns the page at the edge, honouring your system's lines-per-notch setting; Ctrl+wheel zooms (v1.3.0)
+- **Page indicator** — status bar showing the current page and page count, with a box you can type a page into (v1.3.0)
 - **MRU** — recent files in File menu, persisted across runs
 
 ## Keyboard shortcuts
@@ -88,7 +91,7 @@ The produced `build/Release/litepdf.exe` is a single self-contained binary.
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-230 tests at `v1.2.0`. The CI workflow (`.github/workflows/ci.yml`) runs configure + build + version-sync gate + ctest on `windows-2022` (pinned for the VS 2022 / v143 toolset) for every push and pull request.
+303 tests at `v1.3.0`. The CI workflow (`.github/workflows/ci.yml`) runs configure + build + version-sync gate + ctest on `windows-2022` (pinned for the VS 2022 / v143 toolset) for every push and pull request.
 
 The PowerShell smoke harness exercises the full app via launch-and-poll:
 

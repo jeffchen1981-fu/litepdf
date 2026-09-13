@@ -172,8 +172,17 @@ jobs:
         run: |
           $v = "${{ steps.ver.outputs.version }}"
           $cl = Get-Content CHANGELOG.md -Raw
-          # Grab the block from "## [<v>-..." up to the next "## [" heading (or EOF).
-          $m = [regex]::Match($cl, "(?ms)^## \[$([regex]::Escape($v))-.*?(?=^## \[|\z)")
+          # Grab the block from the "## [<v>]" (or legacy "## [<v>-phaseN]") heading
+          # up to the next "## [" heading (or EOF).
+          #
+          # The character class is load-bearing. This pattern used to require a
+          # literal hyphen after the version, matching only the old
+          # "## [1.0.0-phase12]" tag convention. Releases since 1.1.0 head their
+          # section "## [1.1.0] - date - title" with no suffix, so the match failed
+          # and the else-branch below published the bare "LitePDF <v>" fallback.
+          # v1.1.0 and v1.2.0 both shipped with their entire changelog missing from
+          # the release body before anyone noticed.
+          $m = [regex]::Match($cl, "(?ms)^## \[$([regex]::Escape($v))[\]-].*?(?=^## \[|\z)")
           if ($m.Success) { $m.Value.Trim() | Out-File -Encoding utf8 notes.md }
           else { "LitePDF $v" | Out-File -Encoding utf8 notes.md }
 
