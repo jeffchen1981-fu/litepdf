@@ -1111,6 +1111,28 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // height_px() is already measured when the layout reserves for it.
             status_bar_ = std::make_unique<StatusBar>(cs->hInstance, hwnd);
 
+            // PR-B: go-to-page. navigate_click is the same entry point the
+            // outline and thumbnail panes use -- it canonicalises to the
+            // spread's left page, computes view_moves BEFORE the page changes,
+            // installs a Top anchor only when the view actually moves, and
+            // kicks the render. change_current_page takes ONE argument and
+            // installs no anchor of its own; do not call it directly here.
+            status_bar_->set_on_goto([this](int page_index) {
+                navigate_click(page_index);
+            });
+            // Enter and Esc both hand the keyboard back to the canvas, so the
+            // next PgDn or wheel notch goes where the reader expects.
+            status_bar_->set_on_focus_out([this] {
+                if (canvas_ && canvas_->hwnd()) SetFocus(canvas_->hwnd());
+            });
+            // WM_MOUSEWHEEL goes to the FOCUSED window: with the caret in the
+            // page box the canvas would never see a notch.
+            status_bar_->set_on_wheel([this](WPARAM w, LPARAM l) {
+                if (canvas_ && canvas_->hwnd()) {
+                    SendMessageW(canvas_->hwnd(), WM_MOUSEWHEEL, w, l);
+                }
+            });
+
             // Observer chains: CrossTabSearch's own aggregator runs on a
             // worker thread when any tab's SearchSession finishes a page
             // scan. Marshal to UI thread so ResultsPanel's
@@ -1560,12 +1582,26 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     on_find_prev();
                     return 0;
                 case IDM_FIND_CLOSE:
-                    // Scope ESC: only claim it when the find bar is the
-                    // active UI. Otherwise fall through to DefWindowProc
-                    // so other consumers (future modal dialogs, etc.) can
-                    // see ESC as well.
+                    // Scope ESC: claim it for whichever UI is active.
+                    //
+                    // NOTE: the comment that used to sit here said the
+                    // non-find-bar path would "fall through to DefWindowProc
+                    // so other consumers can see ESC as well". It never did --
+                    // the arm returns 0 on every branch, and ESC is a bare
+                    // accelerator, so no child window has ever received it.
+                    // Corrected rather than preserved: PR-B's page box is the
+                    // second consumer to be surprised by it.
                     if (find_bar_ && find_bar_->visible()) {
                         on_find_close();
+                        return 0;
+                    }
+                    // PR-B: ESC is a bare accelerator, so it is intercepted
+                    // here before any child sees it. This is the ONLY site
+                    // that can hand it to the page box. Moving the focus is
+                    // the whole action -- the box discards uncommitted text on
+                    // WM_KILLFOCUS, which is its single revert point.
+                    if (status_bar_ && status_bar_->page_box_has_focus()) {
+                        if (canvas_ && canvas_->hwnd()) SetFocus(canvas_->hwnd());
                         return 0;
                     }
                     return 0;
