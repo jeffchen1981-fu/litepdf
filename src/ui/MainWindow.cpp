@@ -636,6 +636,10 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
         canvas_->set_view(incoming ? incoming->view.get() : nullptr);
         if (incoming) canvas_->set_pan(incoming->pan_x, incoming->pan_y);
         else          canvas_->set_pan(0.0f, 0.0f);
+        // PR-B: set_view's null branch returns before firing the page-change
+        // observer, so the indicator would otherwise keep showing the closed
+        // document's page. This is the only path to the empty state.
+        if (!incoming && status_bar_) status_bar_->set_empty();
         // (Phase 8 D9) Carry the incoming tab's Invert Colors polarity
         // onto the canvas chrome so a switch lands on a chrome that
         // matches the tab's page bitmap. Empty-tabs case clears it.
@@ -1166,6 +1170,17 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                         // then change_current_page fires again) does
                         // not cause a flash.
                         tp->set_current_page(page);
+                    }
+                }
+                // PR-B: the page indicator. This observer covers every page
+                // transition after PR-A2 -- PgDn/PgUp/Home/End, outline and
+                // thumbnail clicks, search navigation, wheel flips, dual-page
+                // snaps, session restore, and tab switches (set_view fires it
+                // for a non-null view). The one case it does NOT cover is the
+                // null view, handled in on_tab_switch's empty branch.
+                if (status_bar_) {
+                    if (auto* v = active_view()) {
+                        status_bar_->set_page(page, v->page_count());
                     }
                 }
                 schedule_session_save();  // Phase 12: persist new page (debounced)
