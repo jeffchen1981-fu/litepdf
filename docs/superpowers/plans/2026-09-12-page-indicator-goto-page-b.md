@@ -1238,30 +1238,47 @@ In `WM_CREATE`, immediately after `status_bar_ = std::make_unique<StatusBar>(...
 
 That is why Task 2's edit subclass has no `VK_ESCAPE` case, and why the `WM_GETDLGCODE` → `DLGC_WANTALLKEYS` line copied from FindBar does nothing for ESC here: `DLGC_*` only matters to `IsDialogMessage`, which this pump never calls.
 
-In `WM_COMMAND`, extend the `IDM_FIND_CLOSE` arm:
+In `WM_COMMAND`, extend the `IDM_FIND_CLOSE` arm. **The page box is checked
+FIRST, before the find bar**: ESC belongs to whichever control holds the
+keyboard, and with the find bar open and the caret in the page box, checking
+the find bar first would run `on_find_close()` — which calls
+`v->search().clear()`, discarding the whole search session and every
+highlight — when the reader's ESC was aimed at cancelling a page entry
+instead. This reorder is safe rather than merely convenient:
+`page_box_has_focus()` can only be true in a state that did not exist before
+this PR, so the find bar's claim on ESC is untouched for every situation that
+shipped before PR-B — when the find bar is visible and the box is not
+focused, the find-bar branch is reached exactly as before.
 
 ```cpp
                 case IDM_FIND_CLOSE:
-                    // Scope ESC: claim it for whichever UI is active.
+                    // ESC belongs to whichever control holds the keyboard, so
+                    // the page box is asked first. That reorder is safe rather
+                    // than merely convenient: page_box_has_focus() can only be
+                    // true in a state that did not exist before PR-B, so the
+                    // find bar's claim on ESC is untouched for every situation
+                    // that shipped. Checking the find bar first would have let
+                    // ESC discard a whole search session -- on_find_close()
+                    // calls search().clear() -- when the reader only meant to
+                    // cancel a page entry.
+                    //
+                    // Moving the focus is the whole action here: the box
+                    // discards uncommitted text on WM_KILLFOCUS, its single
+                    // revert point.
+                    if (status_bar_ && status_bar_->page_box_has_focus()) {
+                        if (canvas_ && canvas_->hwnd()) SetFocus(canvas_->hwnd());
+                        return 0;
+                    }
+                    // Scope ESC: claim it for the find bar when that is the
+                    // active UI.
                     //
                     // NOTE: the comment that used to sit here said the
                     // non-find-bar path would "fall through to DefWindowProc
                     // so other consumers can see ESC as well". It never did --
                     // the arm returns 0 on every branch, and ESC is a bare
                     // accelerator, so no child window has ever received it.
-                    // Corrected rather than preserved: PR-B's page box is the
-                    // second consumer to be surprised by it.
                     if (find_bar_ && find_bar_->visible()) {
                         on_find_close();
-                        return 0;
-                    }
-                    // PR-B: ESC is a bare accelerator, so it is intercepted
-                    // here before any child sees it. This is the ONLY site
-                    // that can hand it to the page box. Moving the focus is
-                    // the whole action -- the box discards uncommitted text on
-                    // WM_KILLFOCUS, which is its single revert point.
-                    if (status_bar_ && status_bar_->page_box_has_focus()) {
-                        if (canvas_ && canvas_->hwnd()) SetFocus(canvas_->hwnd());
                         return 0;
                     }
                     return 0;

@@ -1582,26 +1582,33 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     on_find_prev();
                     return 0;
                 case IDM_FIND_CLOSE:
-                    // Scope ESC: claim it for whichever UI is active.
+                    // ESC belongs to whichever control holds the keyboard, so
+                    // the page box is asked first. That reorder is safe rather
+                    // than merely convenient: page_box_has_focus() can only be
+                    // true in a state that did not exist before PR-B, so the
+                    // find bar's claim on ESC is untouched for every situation
+                    // that shipped. Checking the find bar first would have let
+                    // ESC discard a whole search session -- on_find_close()
+                    // calls search().clear() -- when the reader only meant to
+                    // cancel a page entry.
+                    //
+                    // Moving the focus is the whole action here: the box
+                    // discards uncommitted text on WM_KILLFOCUS, its single
+                    // revert point.
+                    if (status_bar_ && status_bar_->page_box_has_focus()) {
+                        if (canvas_ && canvas_->hwnd()) SetFocus(canvas_->hwnd());
+                        return 0;
+                    }
+                    // Scope ESC: claim it for the find bar when that is the
+                    // active UI.
                     //
                     // NOTE: the comment that used to sit here said the
                     // non-find-bar path would "fall through to DefWindowProc
                     // so other consumers can see ESC as well". It never did --
                     // the arm returns 0 on every branch, and ESC is a bare
                     // accelerator, so no child window has ever received it.
-                    // Corrected rather than preserved: PR-B's page box is the
-                    // second consumer to be surprised by it.
                     if (find_bar_ && find_bar_->visible()) {
                         on_find_close();
-                        return 0;
-                    }
-                    // PR-B: ESC is a bare accelerator, so it is intercepted
-                    // here before any child sees it. This is the ONLY site
-                    // that can hand it to the page box. Moving the focus is
-                    // the whole action -- the box discards uncommitted text on
-                    // WM_KILLFOCUS, which is its single revert point.
-                    if (status_bar_ && status_bar_->page_box_has_focus()) {
-                        if (canvas_ && canvas_->hwnd()) SetFocus(canvas_->hwnd());
                         return 0;
                     }
                     return 0;
