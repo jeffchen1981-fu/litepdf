@@ -4,12 +4,16 @@
 #include "ui/detail/StatusBarMath.hpp"
 
 #include <commctrl.h>
+#include <dwmapi.h>
+#include <uxtheme.h>
 
 #include <string>
 #include <type_traits>
 #include <utility>
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "uxtheme.lib")
 
 namespace litepdf::ui {
 
@@ -20,6 +24,75 @@ using unique_hfont = std::unique_ptr<std::remove_pointer_t<HFONT>,
 
 unique_hfont make_unique_hfont(HFONT h) {
     return unique_hfont(h, &DeleteObject);
+}
+
+// -----------------------------------------------------------------------------
+// Palette — local copy, same deferred-refactor rationale as FindBar's and
+// ResultsPanel's ("Kept file-local... TODO(phase-6.x): consolidate into
+// ui/Theme.hpp"). Used ONLY when the OS is not in High Contrast mode: HC
+// keeps the original GetSysColor path in status_bar_subclass untouched,
+// because a system control must track HC automatically (see the comment
+// there) -- a custom RGB palette would silence that.
+// -----------------------------------------------------------------------------
+struct Palette {
+    COLORREF bar_bg;
+    COLORREF edit_bg;
+    COLORREF edit_fg;
+    COLORREF label_fg;
+    COLORREF disabled_bg;
+    COLORREF disabled_fg;
+};
+
+Palette make_palette(bool dark) {
+    if (dark) {
+        return {
+            /*bar_bg*/      RGB(0x2B, 0x2B, 0x2B),
+            /*edit_bg*/     RGB(0x1E, 0x1E, 0x1E),
+            /*edit_fg*/     RGB(0xF2, 0xF2, 0xF2),
+            /*label_fg*/    RGB(0xB0, 0xB0, 0xB0),
+            /*disabled_bg*/ RGB(0x2B, 0x2B, 0x2B),
+            /*disabled_fg*/ RGB(0x70, 0x70, 0x70),
+        };
+    }
+    return {
+        /*bar_bg*/      RGB(0xEC, 0xEC, 0xEC),
+        /*edit_bg*/     RGB(0xFF, 0xFF, 0xFF),
+        /*edit_fg*/     RGB(0x1C, 0x1C, 0x1C),
+        /*label_fg*/    RGB(0x60, 0x60, 0x60),
+        /*disabled_bg*/ RGB(0xEC, 0xEC, 0xEC),
+        /*disabled_fg*/ RGB(0x8C, 0x8C, 0x8C),
+    };
+}
+
+bool detect_dark_mode(HWND hwnd) {
+    BOOL dark = FALSE;
+    if (SUCCEEDED(DwmGetWindowAttribute(hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark)))) {
+        if (dark) return true;
+    }
+    HKEY hk = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+            0, KEY_READ, &hk) == ERROR_SUCCESS) {
+        DWORD val = 1, cb = sizeof(val);
+        LONG r = RegQueryValueExW(hk, L"AppsUseLightTheme", nullptr, nullptr,
+                                  reinterpret_cast<LPBYTE>(&val), &cb);
+        RegCloseKey(hk);
+        if (r == ERROR_SUCCESS) return val == 0;
+    }
+    return false;
+}
+
+// True while the OS is running under a High Contrast theme. Checked
+// independently of dark/light so a HC user's own theme is never overridden by
+// this control's custom palette (see the Palette comment above).
+bool is_high_contrast_active() {
+    HIGHCONTRASTW hc = {};
+    hc.cbSize = sizeof(hc);
+    if (SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0)) {
+        return (hc.dwFlags & HCF_HIGHCONTRASTON) != 0;
+    }
+    return false;
 }
 
 HFONT create_status_font(UINT dpi, int pt_size = 9) {
@@ -75,6 +148,40 @@ struct StatusBar::Impl {
     std::wstring last_written;
 
     unique_hfont font { nullptr, &DeleteObject };
+
+    // Dark-mode / High-Contrast state (mirrors ResultsPanel/Splitter's
+    // detect_dark_mode + Palette + WM_SETTINGCHANGE hot-swap convention).
+    // `high_contrast` gates `palette` off entirely -- see the Palette comment
+    // in the anonymous namespace above.
+    bool    dark_mode     = false;
+    bool    high_contrast = false;
+    Palette palette       = make_palette(false);
+
+    // Lazily built background brushes for WM_CTLCOLOREDIT (enabled box) and
+    // the disabled WM_CTLCOLORSTATIC branch. Deleted + nulled on a theme
+    // swap and rebuilt on the next colour query -- same lifetime pattern as
+    // FindBar's / ResultsPanel's edit_brush.
+    HBRUSH edit_brush     = nullptr;
+    HBRUSH disabled_brush = nullptr;
+
+    // Give the bar control a custom background colour. Visual styles
+    // otherwise ignore SB_SETBKCOLOR (a well-known comctl32 v6 gotcha, the
+    // same reason ResultsPanel's ListView colours would be at risk), so the
+    // control's own themed paint is switched off first -- the standard way
+    // to make a status bar's background colour actually stick. Skipped
+    // entirely under High Contrast so the OS's own contrast theme keeps
+    // drawing the bar untouched.
+    void apply_bar_bkcolor() {
+        if (!hwnd) return;
+        if (high_contrast) {
+            SendMessageW(hwnd, SB_SETBKCOLOR, 0,
+                        static_cast<LPARAM>(CLR_DEFAULT));
+            return;
+        }
+        SetWindowTheme(hwnd, L"", L"");
+        SendMessageW(hwnd, SB_SETBKCOLOR, 0,
+                    static_cast<LPARAM>(palette.bar_bg));
+    }
 
     StatusBar::OnGoto     on_goto;
     StatusBar::OnFocusOut on_focus_out;
@@ -202,6 +309,26 @@ LRESULT CALLBACK status_bar_subclass(HWND hwnd, UINT msg, WPARAM w,
     auto* impl = reinterpret_cast<StatusBar::Impl*>(ref_data);
 
     switch (msg) {
+        case WM_CTLCOLOREDIT: {
+            // The ENABLED page box. A disabled one is routed to
+            // WM_CTLCOLORSTATIC below, not here -- see that case.
+            auto hdc = reinterpret_cast<HDC>(w);
+            auto ctl = reinterpret_cast<HWND>(l);
+            if (!(impl && ctl == impl->edit)) break;
+            if (impl->high_contrast) {
+                // System colours track High Contrast automatically; see the
+                // WM_CTLCOLORSTATIC comment below for the full rationale.
+                SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT));
+                SetBkColor(hdc, GetSysColor(COLOR_WINDOW));
+                return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+            }
+            SetTextColor(hdc, impl->palette.edit_fg);
+            SetBkColor(hdc, impl->palette.edit_bg);
+            if (!impl->edit_brush) {
+                impl->edit_brush = CreateSolidBrush(impl->palette.edit_bg);
+            }
+            return reinterpret_cast<LRESULT>(impl->edit_brush);
+        }
         case WM_CTLCOLORSTATIC: {
             auto hdc = reinterpret_cast<HDC>(w);
             auto ctl = reinterpret_cast<HWND>(l);
@@ -209,21 +336,78 @@ LRESULT CALLBACK status_bar_subclass(HWND hwnd, UINT msg, WPARAM w,
             // return their brush directly -- so this is the only place that
             // will ever set the DC's text colour. Leaving it unset defaults to
             // black, which is invisible against a black High Contrast bar
-            // background. System colours (not a custom palette) are correct
-            // here because this is a system control that must track High
-            // Contrast automatically; FindBar's palette machinery exists only
-            // because that bar is custom-drawn.
+            // background. Under High Contrast we keep using system colours
+            // (not the custom Palette below) because this is a system control
+            // that must track HC automatically; FindBar's palette machinery
+            // gets away with a fixed RGB set only because that bar is
+            // custom-drawn and never has to answer to HC.
             if (impl && ctl == impl->edit) {
                 // Disabled page box: the standard disabled-field look.
-                SetTextColor(hdc, GetSysColor(COLOR_GRAYTEXT));
-                SetBkColor(hdc, GetSysColor(COLOR_3DFACE));
-                return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_3DFACE));
+                if (impl->high_contrast) {
+                    SetTextColor(hdc, GetSysColor(COLOR_GRAYTEXT));
+                    SetBkColor(hdc, GetSysColor(COLOR_3DFACE));
+                    return reinterpret_cast<LRESULT>(
+                        GetSysColorBrush(COLOR_3DFACE));
+                }
+                SetTextColor(hdc, impl->palette.disabled_fg);
+                SetBkColor(hdc, impl->palette.disabled_bg);
+                if (!impl->disabled_brush) {
+                    impl->disabled_brush =
+                        CreateSolidBrush(impl->palette.disabled_bg);
+                }
+                return reinterpret_cast<LRESULT>(impl->disabled_brush);
             }
-            SetTextColor(hdc, GetSysColor(COLOR_BTNTEXT));
+            if (impl && impl->high_contrast) {
+                SetTextColor(hdc, GetSysColor(COLOR_BTNTEXT));
+            } else if (impl) {
+                SetTextColor(hdc, impl->palette.label_fg);
+            } else {
+                SetTextColor(hdc, GetSysColor(COLOR_BTNTEXT));
+            }
             SetBkMode(hdc, TRANSPARENT);
             return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
         }
+        case WM_SETTINGCHANGE: {
+            // Light theme hot-swap (consistent with FindBar/ResultsPanel/
+            // Splitter). Re-derives both dark-mode and High-Contrast state
+            // together since either one changes what status_bar_subclass
+            // should paint above.
+            if (impl) {
+                HWND parent = GetParent(hwnd);
+                const bool new_dark = detect_dark_mode(parent ? parent : hwnd);
+                const bool new_hc   = is_high_contrast_active();
+                if (new_dark != impl->dark_mode ||
+                    new_hc   != impl->high_contrast) {
+                    impl->dark_mode     = new_dark;
+                    impl->high_contrast = new_hc;
+                    impl->palette       = make_palette(new_dark);
+                    if (impl->edit_brush) {
+                        DeleteObject(impl->edit_brush);
+                        impl->edit_brush = nullptr;
+                    }
+                    if (impl->disabled_brush) {
+                        DeleteObject(impl->disabled_brush);
+                        impl->disabled_brush = nullptr;
+                    }
+                    impl->apply_bar_bkcolor();
+                    InvalidateRect(hwnd, nullptr, TRUE);
+                    if (impl->edit)  InvalidateRect(impl->edit, nullptr, TRUE);
+                    if (impl->label) InvalidateRect(impl->label, nullptr, FALSE);
+                }
+            }
+            break;
+        }
         case WM_NCDESTROY:
+            if (impl) {
+                if (impl->edit_brush) {
+                    DeleteObject(impl->edit_brush);
+                    impl->edit_brush = nullptr;
+                }
+                if (impl->disabled_brush) {
+                    DeleteObject(impl->disabled_brush);
+                    impl->disabled_brush = nullptr;
+                }
+            }
             RemoveWindowSubclass(hwnd, status_bar_subclass, kBarSubclassId);
             break;
     }
@@ -313,6 +497,10 @@ StatusBar::StatusBar(HINSTANCE hInstance, HWND parent)
     // would lay the bar out zero-tall.
     if (impl_->dpi == 0) impl_->dpi = 96;
 
+    impl_->dark_mode     = detect_dark_mode(parent);
+    impl_->high_contrast = is_high_contrast_active();
+    impl_->palette       = make_palette(impl_->dark_mode);
+
     // No WS_CLIPCHILDREN: the bar must be able to erase the strip under the
     // label, which paints transparently (see status_bar_subclass).
     impl_->hwnd = CreateWindowExW(
@@ -327,6 +515,8 @@ StatusBar::StatusBar(HINSTANCE hInstance, HWND parent)
     // fine: impl_->edit is null until then and no colour query can name it.
     SetWindowSubclass(impl_->hwnd, status_bar_subclass, kBarSubclassId,
                       reinterpret_cast<DWORD_PTR>(impl_.get()));
+
+    impl_->apply_bar_bkcolor();
 
     impl_->font = make_unique_hfont(create_status_font(impl_->dpi));
     SendMessageW(impl_->hwnd, WM_SETFONT,
