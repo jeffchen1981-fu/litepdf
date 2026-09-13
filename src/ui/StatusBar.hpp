@@ -7,11 +7,20 @@
 // positioning: it asks for height_px() in on_layout, reserves that much at the
 // bottom of the client area, and calls set_bounds().
 //
-// The control is sent WM_SIZE in exactly two places -- construction and
-// update_dpi -- and only to make it compute its own themed natural height for
-// the current font, which is then read back and handed to MainWindow. Every
-// other position change goes through set_bounds(), so the control never
-// self-docks behind the layout's back.
+// WM_SIZE is sent EXPLICITLY in two places -- construction and update_dpi --
+// only to make the control compute its own themed natural height for the
+// current font, which is then read back and handed to MainWindow.
+//
+// It also arrives implicitly from every SetWindowPos in set_bounds, and
+// msctls_statusbar32 re-docks itself to the parent's bottom when it gets one.
+// That is harmless rather than a race, and the reason is worth stating because
+// it is not obvious: the control re-docks to
+// (0, parent_h - internal_h, parent_w, internal_h), and `internal_h` is exactly
+// what measure() read into height_px, which is what on_layout subtracts. The
+// two can only disagree if internal_h changes without measure() following, and
+// internal_h changes only on WM_SETFONT -- which happens in the constructor and
+// in update_dpi, each immediately followed by measure(). So the control's own
+// idea of where it belongs and the layout's are the same rect by construction.
 
 #include <functional>
 #include <memory>
