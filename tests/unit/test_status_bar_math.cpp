@@ -74,11 +74,21 @@ TEST_CASE("StatusBarMath status_bar_child_rects centers children and lays them l
 
 TEST_CASE("StatusBarMath status_bar_child_rects degrades safely on a tiny bar",
           "[statusbar]") {
-    // A bar shorter than twice the padding must not produce a negative height.
+    // A bar shorter than twice the padding (bar_h=4 <= 2*pad_px=8) falls back
+    // to the `else` branch of both clamps: ctrl_h = bar_h (not bar_h - 2*pad)
+    // and y = 0 (not a negative offset). Pin every field so a rewrite that
+    // silently returns e.g. edit_h == 0 for an ordinary 24 px bar -- or drops
+    // the fallback entirely -- cannot still pass this test.
     const auto r = status_bar_child_rects(/*bar_h=*/4, /*pad_px=*/4,
                                           /*edit_w_px=*/48, /*label_w_px=*/72);
-    REQUIRE(r.edit_h >= 0);
-    REQUIRE(r.edit_y >= 0);
+    REQUIRE(r.edit_x   == 4);
+    REQUIRE(r.edit_y   == 0);
+    REQUIRE(r.edit_w   == 48);
+    REQUIRE(r.edit_h   == 4);
+    REQUIRE(r.label_x  == 56);
+    REQUIRE(r.label_y  == 0);
+    REQUIRE(r.label_w  == 72);
+    REQUIRE(r.label_h  == 4);
 }
 
 TEST_CASE("StatusBarMath should_overwrite_page_box allows overwrite when unfocused",
