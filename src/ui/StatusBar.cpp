@@ -178,9 +178,14 @@ struct StatusBar::Impl {
             // below (nullptr, nullptr restores default visual-style
             // processing) so a light/dark -> High Contrast transition
             // lands the bar back on the OS's own contrast theme instead of
-            // staying unthemed. Previously unreachable because nothing
-            // delivered WM_SETTINGCHANGE to this control; now that
-            // MainWindow forwards it, this path is live.
+            // staying unthemed.
+            //
+            // This BRANCH was always reachable -- launching under High
+            // Contrast enters it from the constructor, where the restore is
+            // a no-op because nothing had suppressed the theme yet. What was
+            // unreachable until MainWindow began forwarding WM_SETTINGCHANGE
+            // is the TRANSITION into it from the non-HC branch, which is the
+            // only case where there is a suppression to undo.
             SetWindowTheme(hwnd, nullptr, nullptr);
             SendMessageW(hwnd, SB_SETBKCOLOR, 0,
                         static_cast<LPARAM>(CLR_DEFAULT));
