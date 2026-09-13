@@ -387,6 +387,16 @@ void MainWindow::on_layout() {
     const int h = rc.bottom - rc.top;
     const UINT dpi = GetDpiForWindow(hwnd_);
 
+    // PR-B: the status bar owns the bottom strip. Everything laid out below
+    // measures against `layout_h`, not the raw client height. THREE call sites
+    // depend on this, not one -- see (b) and the splitter drag clamp.
+    const int status_h = status_bar_ ? status_bar_->height_px() : 0;
+    const int layout_h = std::max(0, h - status_h);
+    if (status_bar_ && status_bar_->hwnd()) {
+        RECT sb = { 0, layout_h, w, h };
+        status_bar_->set_bounds(sb);
+    }
+
     // Tab strip: only when there's at least one tab.
     const int tab_h = (tabs_ && tabs_->count() > 0)
         ? tabs_->strip_height(dpi) : 0;
@@ -409,7 +419,7 @@ void MainWindow::on_layout() {
                          ? results_panel_height_px_ : 0;
     const int splitter_h = (panel_h > 0)
                            ? MulDiv(4, static_cast<int>(dpi), 96) : 0;
-    const int canvas_bottom = h - panel_h - splitter_h;
+    const int canvas_bottom = layout_h - panel_h - splitter_h;
     const int row_h = std::max(0, canvas_bottom - row_y);
 
     // Phase 7 Task 8: left dock — at most one of outline / thumb pane
@@ -472,7 +482,7 @@ void MainWindow::on_layout() {
         }
     }
     if (results_panel_ && panel_h > 0) {
-        RECT pr = { 0, canvas_bottom + splitter_h, w, h };
+        RECT pr = { 0, canvas_bottom + splitter_h, w, layout_h };
         results_panel_->set_bounds(pr);
     }
 
@@ -626,6 +636,10 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
         canvas_->set_view(incoming ? incoming->view.get() : nullptr);
         if (incoming) canvas_->set_pan(incoming->pan_x, incoming->pan_y);
         else          canvas_->set_pan(0.0f, 0.0f);
+        // PR-B: set_view's null branch returns before firing the page-change
+        // observer, so the indicator would otherwise keep showing the closed
+        // document's page. This is the only path to the empty state.
+        if (!incoming && status_bar_) status_bar_->set_empty();
         // (Phase 8 D9) Carry the incoming tab's Invert Colors polarity
         // onto the canvas chrome so a switch lands on a chrome that
         // matches the tab's page bitmap. Empty-tabs case clears it.
@@ -1066,12 +1080,59 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 // the canvas entirely — leave at least ~100 px of canvas
                 // visible and refuse a panel shorter than ~80 px (below
                 // which the ListView has no room for even a single row).
+                // PR-B: `new_h` is computed by Splitter (Splitter.cpp) against
+                // the PARENT'S RAW client rect -- GetClientRect(hwnd_, ...)
+                // there is NOT reduced for the status bar's strip, so new_h
+                // is "raw_client_h - mouse_y" in raw-client space. The
+                // results panel, however, is laid out inside layout_h
+                // (on_layout pins its bottom there, not at the raw client
+                // height). Converting raw-space -> layout_h-space means
+                // subtracting status_h; skip it and every drag ends up
+                // offset upward by status_h px (the panel's top lands at
+                // mouse_y - status_h instead of tracking the cursor at
+                // mouse_y).
+                // max_h below is this same outer bound, expressed in
+                // layout_h space so it stays dimensionally consistent with
+                // the clamped value -- but it rarely binds in practice:
+                // Splitter's own internal clamp on new_h (max(100 px,
+                // raw_client_h - 200 px), in Splitter.cpp) is tighter than
+                // this one at any status-bar height under 100 px, i.e.
+                // always. This bound is an outer safety net, not the one
+                // doing the real work.
                 RECT client; GetClientRect(hwnd_, &client);
+                const int status_h = status_bar_ ? status_bar_->height_px() : 0;
                 const int max_h = std::max(80,
-                    static_cast<int>(client.bottom) - 100);
-                results_panel_height_px_ = std::clamp(new_h, 80, max_h);
+                    static_cast<int>(client.bottom) - status_h - 100);
+                results_panel_height_px_ = std::clamp(new_h - status_h, 80, max_h);
                 on_layout();
             });
+
+            // PR-B: bottom status bar. Created before the first on_layout so
+            // height_px() is already measured when the layout reserves for it.
+            status_bar_ = std::make_unique<StatusBar>(cs->hInstance, hwnd);
+
+            // PR-B: go-to-page. navigate_click is the same entry point the
+            // outline and thumbnail panes use -- it canonicalises to the
+            // spread's left page, computes view_moves BEFORE the page changes,
+            // installs a Top anchor only when the view actually moves, and
+            // kicks the render. change_current_page takes ONE argument and
+            // installs no anchor of its own; do not call it directly here.
+            status_bar_->set_on_goto([this](int page_index) {
+                navigate_click(page_index);
+            });
+            // Enter and Esc both hand the keyboard back to the canvas, so the
+            // next PgDn or wheel notch goes where the reader expects.
+            status_bar_->set_on_focus_out([this] {
+                if (canvas_ && canvas_->hwnd()) SetFocus(canvas_->hwnd());
+            });
+            // WM_MOUSEWHEEL goes to the FOCUSED window: with the caret in the
+            // page box the canvas would never see a notch.
+            status_bar_->set_on_wheel([this](WPARAM w, LPARAM l) {
+                if (canvas_ && canvas_->hwnd()) {
+                    SendMessageW(canvas_->hwnd(), WM_MOUSEWHEEL, w, l);
+                }
+            });
+
             // Observer chains: CrossTabSearch's own aggregator runs on a
             // worker thread when any tab's SearchSession finishes a page
             // scan. Marshal to UI thread so ResultsPanel's
@@ -1131,6 +1192,17 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                         // then change_current_page fires again) does
                         // not cause a flash.
                         tp->set_current_page(page);
+                    }
+                }
+                // PR-B: the page indicator. This observer covers every page
+                // transition after PR-A2 -- PgDn/PgUp/Home/End, outline and
+                // thumbnail clicks, search navigation, wheel flips, dual-page
+                // snaps, session restore, and tab switches (set_view fires it
+                // for a non-null view). The one case it does NOT cover is the
+                // null view, handled in on_tab_switch's empty branch.
+                if (status_bar_) {
+                    if (auto* v = active_view()) {
+                        status_bar_->set_page(page, v->page_count());
                     }
                 }
                 schedule_session_save();  // Phase 12: persist new page (debounced)
@@ -1209,9 +1281,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // lets the next paint rebuild at the new DPI. Also re-seed the
             // active tab's zoom scale for the new DPI. Inactive tabs re-seed
             // their own zoom on switch, so a single active-tab kick suffices.
-            if (auto* view = active_view(); view && canvas_) {
-                kick_render(view->current_page());
-            }
+            // The kick itself is deferred past on_layout() below -- see there.
             // Phase 7 T8 #2 follow-up: forward new DPI to ALL tabs' thumb
             // panes, not just the active one. Multi-monitor drag between
             // mismatched-DPI displays must update inactive panes' cached
@@ -1228,6 +1298,8 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     }
                 }
             }
+            // PR-B: the status bar's font and natural height are DPI-derived.
+            if (status_bar_) status_bar_->update_dpi(HIWORD(w));
             // The user's left_pane_width_px_ is in physical px at the
             // OLD DPI. The on_layout clamp will keep it inside [120
             // dip, client - 100 px] at the NEW DPI; a too-narrow stored
@@ -1235,6 +1307,18 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // snap down. Re-anchoring to 250 dip would lose the user's
             // drag — accept the clamp's slight imperfection instead.
             on_layout();
+            // Kick the active view's render only now that on_layout() has
+            // resized the canvas HWND to its final post-DPI bounds. The
+            // status bar's height (set by update_dpi() just above) changes
+            // the canvas height that on_layout() computes, and kick_render's
+            // apply_viewport() reads the canvas's CURRENT client rect
+            // synchronously (GetClientRect), which feeds a FitPage view's
+            // fit_percentage(). Rendering before on_layout() would size the
+            // bitmap against the pre-DPI-change canvas height, leaving a
+            // stale render until the next navigation or resize.
+            if (auto* view = active_view(); view && canvas_) {
+                kick_render(view->current_page());
+            }
             return 0;
         }
         case WM_DRAWITEM: {
@@ -1245,6 +1329,17 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             break;
         }
         case WM_SETTINGCHANGE: {
+            // PR-B: WM_SETTINGCHANGE is broadcast to top-level windows only,
+            // so the status bar (a child HWND) never sees it directly even
+            // though it has its own arm that re-detects dark mode and High
+            // Contrast together and repaints. Forward unconditionally rather
+            // than gating on the "ImmersiveColorSet" name below: a High
+            // Contrast toggle does not necessarily carry that section name,
+            // and the bar's own arm already no-ops when neither state
+            // changed. Keep the tabs_ forwarding exactly as it was.
+            if (status_bar_ && status_bar_->hwnd()) {
+                SendMessageW(status_bar_->hwnd(), WM_SETTINGCHANGE, w, l);
+            }
             if (w == 0 && l != 0) {
                 auto* name = reinterpret_cast<const wchar_t*>(l);
                 if (wcscmp(name, L"ImmersiveColorSet") == 0) {
@@ -1508,10 +1603,31 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     on_find_prev();
                     return 0;
                 case IDM_FIND_CLOSE:
-                    // Scope ESC: only claim it when the find bar is the
-                    // active UI. Otherwise fall through to DefWindowProc
-                    // so other consumers (future modal dialogs, etc.) can
-                    // see ESC as well.
+                    // ESC belongs to whichever control holds the keyboard, so
+                    // the page box is asked first. That reorder is safe rather
+                    // than merely convenient: page_box_has_focus() can only be
+                    // true in a state that did not exist before PR-B, so the
+                    // find bar's claim on ESC is untouched for every situation
+                    // that shipped. Checking the find bar first would have let
+                    // ESC discard a whole search session -- on_find_close()
+                    // calls search().clear() -- when the reader only meant to
+                    // cancel a page entry.
+                    //
+                    // Moving the focus is the whole action here: the box
+                    // discards uncommitted text on WM_KILLFOCUS, its single
+                    // revert point.
+                    if (status_bar_ && status_bar_->page_box_has_focus()) {
+                        if (canvas_ && canvas_->hwnd()) SetFocus(canvas_->hwnd());
+                        return 0;
+                    }
+                    // Scope ESC: claim it for the find bar when that is the
+                    // active UI.
+                    //
+                    // NOTE: the comment that used to sit here said the
+                    // non-find-bar path would "fall through to DefWindowProc
+                    // so other consumers can see ESC as well". It never did --
+                    // the arm returns 0 on every branch, and ESC is a bare
+                    // accelerator, so no child window has ever received it.
                     if (find_bar_ && find_bar_->visible()) {
                         on_find_close();
                         return 0;
@@ -2069,7 +2185,8 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
                     bool offer_restore) {
     INITCOMMONCONTROLSEX icc = { sizeof(icc),
         ICC_STANDARD_CLASSES | ICC_TAB_CLASSES |
-        ICC_TREEVIEW_CLASSES | ICC_LISTVIEW_CLASSES };
+        ICC_TREEVIEW_CLASSES | ICC_LISTVIEW_CLASSES |
+        ICC_BAR_CLASSES };   // PR-B: msctls_statusbar32
     InitCommonControlsEx(&icc);
 
     WNDCLASSEXW wc = {};

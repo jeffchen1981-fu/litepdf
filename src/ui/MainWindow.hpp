@@ -17,6 +17,7 @@
 #include "ui/PdfCanvas.hpp"
 #include "ui/ResultsPanel.hpp"
 #include "ui/Splitter.hpp"
+#include "ui/StatusBar.hpp"
 #include "ui/TabManager.hpp"
 #include "ui/VerticalSplitter.hpp"
 
@@ -161,6 +162,9 @@ private:
     // try to reach cross_tab_ / tabs_ via on_results_* helpers.
     std::unique_ptr<ResultsPanel> results_panel_;
     std::unique_ptr<Splitter>     splitter_;
+    // PR-B: bottom status bar (page indicator + go-to-page). Owns its own
+    // height; on_layout reserves status_bar_->height_px() at the bottom.
+    std::unique_ptr<StatusBar>    status_bar_;
     // Phase 7 Task 8: one VerticalSplitter for the left dock (shared by
     // OutlinePane + per-tab ThumbnailPane). Visible only when one of the
     // two left panes is. set_on_drag updates left_pane_width_px_ and

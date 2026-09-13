@@ -102,6 +102,7 @@ add_executable(litepdf WIN32
     src/ui/PdfCanvas.cpp
     src/ui/ResultsPanel.cpp      # Phase 6 Task 13
     src/ui/Splitter.cpp          # Phase 6 Task 12
+    src/ui/StatusBar.cpp         # PR-B Task 2
     src/ui/TabManager.cpp
     src/ui/VerticalSplitter.cpp  # Phase 7 Task 4b
     # Version resource generated from resources/litepdf.rc.in by the

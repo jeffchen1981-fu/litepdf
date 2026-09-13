@@ -16,6 +16,11 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
   content. Honours the system "lines per notch" setting, including "one screen at
   a time", and accumulates sub-notch deltas from high-resolution wheels and
   precision touchpads. In two-page spread mode the flip steps by spread.
+- A status bar with a page indicator and a go-to-page box. The box shows the
+  current page and the document's page count, tracks every way of moving through
+  the document, and jumps to a page typed into it. A page outside the document
+  is refused and the box reverts — no dialog. Escape reverts and returns to the
+  page; the mouse wheel keeps working while the box has focus.
 
 ### Changed
 
