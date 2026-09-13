@@ -8,6 +8,8 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-09-13 — Zoom, wheel scrolling, and the page indicator
+
 ### Added
 
 - Mouse-wheel scrolling. The wheel scrolls within a page and turns the page when
@@ -27,7 +29,8 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 - Zoom now changes what you see. Zoom In / Zoom Out were previously inert: the
   zoom level was compared against a table in different units, and the paint path
   re-fitted every page to the window regardless. Pages also rendered at twice the
-  needed resolution on 200% displays.
+  needed resolution on 200% displays. The ladder now runs 25% to 800%
+  (25 / 50 / 75 / 100 / 125 / 150 / 200 / 300 / 400 / 600 / 800).
 - A zoom level you set by hand is reset to Fit Width when `session.json` is upgraded
   to version 2. Version 1 counted that number in device pixels per PDF point; version
   2 counts it in device-independent pixels, so on a high-DPI display the same number
@@ -54,6 +57,20 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 - The thumbnail highlight tracks the current page in spread mode, after a session
   restore, and after End in spread mode. Four navigation paths bypassed the
   page-change notification.
+
+### Known limitations
+
+- If saving the session is refused on exit, LitePDF offers to restore your tabs on
+  the next launch even though you closed normally. Earlier versions always marked
+  the exit clean; now the mark depends on the save succeeding, because clearing it
+  after a refused save would mean the next launch silently discarded the older
+  session file that is still on disk. A transient lock (antivirus, a backup agent)
+  costs you one extra prompt. If `session.v1.bak` is permanently locked, every save
+  is refused and the prompt returns on every launch until that clears.
+- The status bar has no hide toggle. It occupies a strip at the bottom of the
+  window whenever a document is open.
+- The page box is reachable by mouse only. There is no Ctrl+G, and Tab does not
+  move focus into it.
 
 ### Note
 
@@ -426,7 +443,7 @@ and Phase 12 (release hardening: crash-safe session restore).
 
 [Compare initial commit…0.0.1-phase0](https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.1-phase0)
 
-[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.12-phase10...HEAD
+[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.3.0...HEAD
 [0.0.12-phase10]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.12-phase10
 [0.0.11-phase9]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.11-phase9
 [0.0.10-phase8.5]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.10-phase8.5
