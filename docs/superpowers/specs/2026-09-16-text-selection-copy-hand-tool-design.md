@@ -217,7 +217,8 @@ public:
         // Returns false for a page with no text.
         [[nodiscard]] bool full_range(SelPoint& first, SelPoint& last) const;
 
-        // UTF-8, CRLF line endings. Allocates, so it takes doc_mutex.
+        // UTF-8, CRLF line endings. Lock-free as well, despite allocating —
+        // see §3.2: it runs on the handle's own escrow context.
         [[nodiscard]] std::string copy(SelPoint a, SelPoint b) const;
 
     private:
@@ -289,8 +290,22 @@ declares `fz_warn_context warn;` as a **by-value member** (`context.h:872`), so
 each clone has its own, and a drop on the escrow touches nothing shared. The font
 object itself is refcounted under the installed lock table.
 
-**What still takes `doc_mutex`:** acquiring a handle (which may build the stext),
-and `copy()` (which allocates). Nothing else.
+**What still takes `doc_mutex`: acquiring a handle, and nothing else.** Building
+the stext loads a page from the `Document`'s `fz_document`, which must be
+serialised with every other user of that document.
+
+`copy()` does **not** take it, even though it allocates. An earlier draft said it
+did, reasoning from the pre-escrow design in which `copy()` ran on the
+`Document`'s own context. On the escrow it no longer does, and the claim was both
+unnecessary and unimplementable:
+
+- *Unnecessary.* `doc_mutex` exists to serialise the shared context's
+  `fz_try` / `fz_catch` error stack (`Document.cpp:62-79`). `fz_context` declares
+  `fz_error_context error;` as a **by-value member** (`context.h:871`), so the
+  escrow has its own stack. Its allocations go through the allocator callbacks
+  under `FZ_LOCK_ALLOC`, which the shared lock table already makes thread-safe.
+- *Unimplementable.* The handle holds no reference to the `Document`, and is
+  deliberately designed to outlive it — there is no `doc_mutex` it could reach.
 
 This matters because the alternative was measurably worse: `SearchSession::set_query`
 submits one `page_hits` task per page to a 2-worker pool
@@ -358,6 +373,31 @@ use-after-free, just one indirection further out than the original defect.
 
 **So `Document::Impl::locks` becomes a `std::shared_ptr<MuPDFLocks>`, and every
 escrow holds a copy.** The table then outlives the last clone by construction.
+
+**Holding all three is not enough — they must be released in one order.**
+Dropping the stext page takes `FZ_LOCK_ALLOC` and frees through the escrow's
+allocator callbacks; dropping the escrow context takes the same lock. So:
+
+1. `fz_drop_stext_page(escrow, page)` — needs a live context *and* live locks
+2. `fz_drop_context(escrow)` — needs live locks
+3. release the `shared_ptr<MuPDFLocks>` — last, because both steps above call into it
+
+Releasing the lock table first, or dropping the context before the page, reads
+freed memory on exactly the post-`Document` path this handle exists to make safe.
+`TextPage::Impl` writes the first two steps in an **explicit destructor body**, and
+declares its members in the order `locks`, `escrow`, `page`, so that C++'s
+reverse-declaration member destruction releases `locks` after the body has run.
+Both halves are required and both get a comment saying why: an explicit body alone
+is fragile to a later reordering of the members, and member order alone is
+invisible to a reader.
+
+Two things this design was checked for and found to hold, recorded so they are
+not re-litigated: MuPDF keeps the master `fz_context` alive as a husk until its
+last clone is dropped (`context.c:167-226`), and `fz_drop_pool` stores no
+master-context pointer — it only walks its nodes calling `fz_free(ctx, node)`
+(`pool.c:116-130`) — so freeing a page's pool through the escrow after the master
+is gone is sound. `Document` creates its context with `fz_new_context(nullptr, …)`,
+i.e. the default allocator, which is process-global.
 
 Two consequences to record rather than discover later:
 
@@ -504,27 +544,31 @@ a search-path fix carried by a selection PR.
 
 ### 4.2 Drag lifecycle
 
-State lives in `PdfCanvas::Impl`: `dragging`, `moved_past_threshold`, the
-`TextPage` handle, and the click-count tracker.
+State lives in `PdfCanvas::Impl`: `Gesture gesture` (`None` / `Selecting` /
+`Panning`), `moved_past_threshold`, the `TextPage` handle, and the click-count
+tracker. **There is no separate `dragging` boolean** — `gesture` is the single
+source of truth for whether a gesture is live, and every row below reads and
+writes it. (An earlier draft kept both, which is how capture loss during a *pan*
+came to be unhandled: see the `WM_CAPTURECHANGED` row.)
 
 **Message ordering is load-bearing.** `ReleaseCapture()` delivers
 `WM_CAPTURECHANGED` to the releasing window **synchronously, inside the call**.
 So the button-up arm must finish reading and committing its state *before* it
-releases, exactly as `Splitter.cpp:151-169` already does (it clears `dragging`
-first, then calls `ReleaseCapture`). Releasing first would let the
+releases, exactly as `Splitter.cpp:151-169` already does (it clears its
+`dragging` flag first, then calls `ReleaseCapture`). Releasing first would let the
 `WM_CAPTURECHANGED` arm tear the drag down and release the handle, after which the
-commit step would find `dragging` already false — a drag that highlights while the
+commit step would find `gesture` already `None` — a drag that highlights while the
 button is held and then vanishes on release, copying nothing.
 
 | Message | Action |
 |---|---|
-| `WM_LBUTTONDOWN` | `SetFocus`. Stop if `dual_page` is set (§1), if there is no page bitmap, or if `text_page()` returns an empty handle. Otherwise: clear any existing selection, store the clamped point as `anchor`, set `mode` from the click count, clear `moved_past_threshold`, `SetCapture`, enter `dragging`. |
+| `WM_LBUTTONDOWN` | `SetFocus`. Stop if `gesture != None`, if `dual_page` is set (§1), if there is no page bitmap, or if `text_page()` returns an empty handle. Otherwise: clear any existing selection, store the clamped point as `anchor`, set `mode` from the click count, clear `moved_past_threshold`, `SetCapture`, `gesture = Selecting`. |
 | `WM_LBUTTONDBLCLK` | Same as `WM_LBUTTONDOWN` with `mode = Words`, and immediately commit a word selection (see below). A triple click is detected here and commits `mode = Lines`. |
-| `WM_MOUSEMOVE` (dragging) | Store the clamped point as `extent`; set `moved_past_threshold` once the displacement from `anchor` exceeds `SM_CXDRAG` / `SM_CYDRAG`; snap copies; `highlight()`; `InvalidateRect`. |
-| `WM_LBUTTONUP` | **First**: decide and commit. If `mode == Chars` and `!moved_past_threshold`, this was a click — clear the selection (1b's "next click clears"). Otherwise materialise `quads` + `text_utf8`. Clear `dragging`. **Then**: `if (GetCapture() == hwnd_) ReleaseCapture();` and release the handle. |
-| `WM_CAPTURECHANGED` | If still `dragging`, leave it and release the handle without committing. (After a normal mouse-up this arm finds `dragging` already false and does nothing.) |
-| `WM_MBUTTONDOWN` / `WM_RBUTTONDOWN` while `dragging` | Abort the selection drag: leave `dragging`, release the handle, keep whatever was already committed, and do **not** start panning from this press. |
-| `set_view` | Same teardown: a drag cannot survive a view swap. |
+| `WM_MOUSEMOVE` (`gesture == Selecting`) | Store the clamped point as `extent`; set `moved_past_threshold` once the displacement from `anchor` exceeds `SM_CXDRAG` / `SM_CYDRAG`; snap copies; `highlight()`; `InvalidateRect`. |
+| `WM_LBUTTONUP` | **First**: decide and commit. If `mode == Chars` and `!moved_past_threshold`, this was a click — clear the selection (1b's "next click clears"). Otherwise materialise `quads` + `text_utf8`. `gesture = None`. **Then**: `if (GetCapture() == hwnd_) ReleaseCapture();` and release the handle. |
+| `WM_CAPTURECHANGED` | **Whatever `gesture` is, set it to `None`**, releasing the handle without committing if it was `Selecting`. This must cover `Panning` as well as `Selecting`: capture taken by another window mid-pan would otherwise leave `gesture == Panning` forever, and since every button-down refuses to start while `gesture != None`, the canvas would accept no mouse gesture again for the rest of the session. (After a normal button-up this arm finds `gesture` already `None` and does nothing.) |
+| `WM_MBUTTONDOWN` / `WM_RBUTTONDOWN` while `gesture == Selecting` | Abort the selection drag: `gesture = None`, release the handle, keep whatever was already committed, and do **not** start panning from this press. |
+| `set_view` | Same teardown, and **first**: before `impl_->view` is reassigned (`PdfCanvas.cpp:239`). The teardown must not dereference `impl_->view` at all — it sets `gesture = None`, releases capture if held, and resets the handle, none of which needs the view. Placing it after the reassignment would run it against the incoming view; placing a view dereference inside it would, on the tab-close path, touch the outgoing view after `TabList::remove` has destroyed it (§3.3). |
 
 **Only one gesture may be live at a time, and the state machine has to say so.**
 Without the row above, pressing the middle button during a left-drag starts
@@ -858,12 +902,30 @@ finding the double-click defect. Codex `gpt-5.6-terra` at `high` then reviewed t
 post-fix version and returned four more, including the lock-table flaw that
 invalidated the first attempt at the escrow fix.
 
-**Lens 3 is half-complete: `gpt-5.6-luna` at `max` did NOT run.** It consumed
-560k tokens and then hit a short-window usage limit without emitting a report or a
-COVERAGE section, which makes the run void rather than clean — it must be re-run
-against this version, and nothing here may be recorded as having converged across
-both Codex models until it has. The weekly band was 41% at the time, so this was
-a rate window, not an exhausted pool.
+**Lens 3 is complete, but `gpt-5.6-luna` needed three attempts and ran with a
+narrowed scope. Read its result with that in mind.**
+
+- *Attempt 1* consumed 560k tokens and hit a short-window usage limit without
+  emitting a report — void. The weekly band was 41%, so a rate window, not an
+  exhausted pool.
+- *Attempt 2* ran 59 minutes against the same 22-file brief: 241 tool calls, two
+  context compactions, the spec re-read at least five times, and no report
+  begun. Terminated deliberately — void.
+- *Attempt 3* succeeded in 19.5 minutes with 19 tool calls and no compaction, on a
+  **narrowed brief**: the spec plus a pre-extracted 653-line evidence bundle, a cap
+  of three additional full files, and scope restricted to the `TextPage` lifetime
+  (§3.1-3.3) and the drag state machine (§4.2). It therefore did **not** cover
+  §1, §2, §4.1, §4.3-4.8, §5 or §6 — those rest on the Claude lenses and terra.
+  It returned two findings and two questions, both questions settled into
+  corrections, none discarded.
+
+Attempt 3 ran **concurrently with another project's Codex session**, which the
+review protocol normally forbids because parallel sessions cross-attribute spend.
+That was a deliberate choice over waiting without bound behind a process this
+review did not control. The findings are unaffected; the per-run credit figures
+for this window are not a clean measurement and should not be used as one.
+
+Totals across all five lenses: twenty-six findings, none discarded.
 
 The findings that changed this design, in the order they appear above: the in-out
 snap destroying the anchor (§2); the page box origin missing from the coordinate
@@ -885,5 +947,8 @@ outliving its `Document` on tab close (§3.3); the unlocked `fz_warn` on the dro
 path (§3.2); `ReleaseCapture` delivering `WM_CAPTURECHANGED` synchronously (§4.2);
 the click-clears rule destroying double-click selections (§4.2); dual-page mode
 being ungated at mouse-down (§1, §4.2); the clipboard's missing failure paths
-(§4.6); the sticking space latch (§5); the dead Ctrl+C focus states (§4.7); and the
-positional `GetSubMenu` breakage (§4.8).
+(§4.6); the sticking space latch (§5); the dead Ctrl+C focus states (§4.7); the
+positional `GetSubMenu` breakage (§4.8); the unspecified release order inside the
+handle (§3.3); capture loss during a *pan* leaving the canvas permanently refusing
+gestures (§4.2); and `copy()`'s stale, unimplementable claim to take `doc_mutex`
+(§3.2).
