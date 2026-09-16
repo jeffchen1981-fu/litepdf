@@ -593,9 +593,10 @@ an HWND, following `SplitterMath.hpp` / `ViewportMath.hpp`.
   geometry. `change_current_page` is the single funnel, so the cancel lives there.
 - *Entering two-page spread mode cancels a live drag* (`set_dual_page`). Refusing
   to *start* a drag in spread mode is not enough: toggling the layout mid-drag
-  would otherwise commit a selection the spread cannot paint but Ctrl+C copies, and
-  the page snap that follows the toggle does not reach `change_current_page` when
-  the page is already a spread's left page. Found at the plan gate.
+  would otherwise commit a selection the spread cannot paint but Ctrl+C copies. The
+  page snap that follows the toggle always calls `change_current_page`, but that
+  function cancels only when the page actually changes — and a page that is already
+  a spread's left page does not. Found at the plan gate.
 - *A gesture that captures no text commits nothing* — it clears, rather than
   leaving an empty selection that would enable Copy for nothing.
 - *`fz_snap_selection` never writes the far end when it lies past the page's last

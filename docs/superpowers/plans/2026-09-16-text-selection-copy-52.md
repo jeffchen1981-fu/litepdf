@@ -52,6 +52,14 @@ Full tier, high-stakes (architecture-changing: MuPDF context and lock-table owne
 - **The encrypted-document test passed vacuously** (Minor, verified: `encrypted.pdf` extracts `''`). Renamed and rewritten to assert only what the fixture can show — no handle before `authenticate`, a valid one after — and to say plainly that no query runs on decrypted text.
 - Questions folded in: `EscrowContext::clone_from`'s real precondition is that the lock table is alive, not merely the source pointer; `at_text_end`'s accepted false positive is "glyphs narrower than 1 pt" (`same_point` truncates to `int`), not "zero-extent"; the commit trailer is the implementing session's own; and a bare `cmake` in Git Bash resolves a MinGW build here, so the constraint now names the BuildTools copy explicitly.
 
+**Round 2** (Fable + Sonnet, scoped to the fix delta `3a59dce..1ef692d`) — Sonnet zero; Fable one Important and two Minor, all introduced by the round-1 fix itself:
+
+- **The new `set_dual_page` comment, and the spec bullet beside it, named the wrong gate** (Important, verified against `MainWindow`'s `IDM_VIEW_DUAL_PAGE` arm). They said MainWindow skips `change_current_page` on a spread's left page; it always calls it, and it is the cancel *inside* it that is skipped because the page does not change. The header line above had it right; the text that would have landed in `src/` did not. Both corrected.
+- **Two enumerations of cancel triggers omitted the one the fix added** — Task 11's re-entrancy question and Task 10's commit message. Both now include the layout switch, as does `GestureState::abort`'s comment.
+- **GUI check 9b could pass without testing anything**: its only signal was "sentinel intact", which a refused press (render still in flight) also produces. It now runs a positive control first.
+
+**Codex `terra@high`** (post-fix baseline `1ef692d`) — PASS, zero findings; read the plan, the spec, the evidence bundle and three full source files, and answered each least-certain claim. **It ran concurrently with three other projects' Codex sessions**, so its credit figures are not a clean measurement; the finding count is unaffected.
+
 ---
 
 ## Global Constraints
@@ -2368,8 +2376,8 @@ public:
         return ReleaseAction::CommitSelection;
     }
 
-    // Capture lost, a second button pressed, the page changed, or the view torn
-    // down. Ends WHATEVER is live without committing -- Panning included, or a
+    // Capture lost, a second button pressed, the page or layout changed, or the
+    // view torn down. Ends WHATEVER is live without committing -- Panning included, or a
     // pan interrupted by another window would leave the canvas refusing every
     // later press. Returns what was live (None if nothing was).
     Gesture abort() noexcept {
@@ -3227,8 +3235,10 @@ In `set_dual_page`, immediately after its first line `if (!impl_ || impl_->dual_
     // It would keep extending with single-page geometry while the canvas paints
     // the spread, and commit a selection nothing draws but Ctrl+C still copies
     // -- the state on_left_button_down refuses to create (spec §1). The page
-    // snap that follows in MainWindow does not reliably cancel it: it calls
-    // change_current_page only when the page is not already a spread's left.
+    // snap that follows in MainWindow does not reliably cancel it: MainWindow
+    // always calls change_current_page, but that function cancels only when
+    // the page actually changes, and a page that is already a spread's left
+    // page does not.
     cancel_gesture();
 ```
 
@@ -3587,7 +3597,7 @@ GUI checks, with that driver, `LITEPDF_NO_RESTORE=1`, `session.json` backed up f
 7. **A second button cancels, and the canvas recovers.** DOWN at `left of alpha`, MOVE to `right of gamma`, `WM_MBUTTONDOWN`, `WM_MBUTTONUP`, `WM_LBUTTONUP`, copy → sentinel intact. Then repeat check 4 → `alpha beta gamma`. **Fails if** the second drag copies nothing (a gesture left latched).
 8. **Tab close mid-drag.** Open `search.pdf` in the same instance (a second tab), DOWN + MOVE on it, post `IDM_TAB_CLOSE` (40030) while the button is "held". Expected: no crash; on the remaining tab, check 4 still passes.
 9. **Spread mode refuses.** Post `IDM_VIEW_DUAL_PAGE`, then drag as in check 4, copy. Expected: sentinel intact.
-   **9b. Entering spread mode mid-drag cancels the drag.** Back in single-page mode (post `IDM_VIEW_DUAL_PAGE` again), sentinel set: DOWN at `left of alpha`, MOVE 5 steps toward `right of gamma`, post `IDM_VIEW_DUAL_PAGE`, MOVE to `right of gamma`, UP, copy. Expected: sentinel intact. **Fails if** the clipboard holds `alpha beta gamma` — a selection committed in a layout that cannot display it.
+   **9b. Entering spread mode mid-drag cancels the drag.** Back in single-page mode (post `IDM_VIEW_DUAL_PAGE` again), wait 1 s for the single-page render to land. **Positive control first:** repeat check 4 and require `alpha beta gamma` — this proves the canvas is on page index 3 with its own bitmap and will start a gesture, so a sentinel below cannot come from a press that was refused (`own_bitmap()` false while a render is still in flight) or from landing on the wrong page. Then, sentinel set: DOWN at `left of alpha`, MOVE 5 steps toward `right of gamma`, post `IDM_VIEW_DUAL_PAGE`, MOVE to `right of gamma`, UP, copy. Expected: sentinel intact. **Fails if** the clipboard holds `alpha beta gamma` — a selection committed in a layout that cannot display it — or if the positive control did not copy `alpha beta gamma`, in which case the result proves nothing and the check must be re-run.
 10. **Cursor.** Bring litepdf to the foreground (`AppActivate`), `ClientToScreen` the `beta` point on the canvas, `SetCursorPos` there, wait 100 ms, `GetCursorInfo`: `hCursor == LoadCursorW(NULL, IDC_IBEAM)` (32513). Negative control: FitWidth leaves no grey surround beside the page, so post `IDM_ZOOM_OUT` (40011) twice, wait for the render, and move the cursor to canvas client `(width - 5, 20)`, which is now outside the page: `IDC_ARROW` (32512). **Fails if** the I-beam never appears, or appears over the surround.
 
 Restore `session.json`, close with `WM_CLOSE`.
@@ -3602,7 +3612,8 @@ The canvas keeps a live selection while a gesture is in progress and
 commits it to the view on release -- deciding before ReleaseCapture, whose
 synchronous WM_CAPTURECHANGED would otherwise cancel the drag first. A
 double or triple click commits at press time. A second button, a page
-change, a view swap or a lost capture cancels without committing.
+change, a switch to spread layout, a view swap or a lost capture cancels
+without committing.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
@@ -3662,6 +3673,6 @@ Invoke the `risk-tiered-review` skill (never drop the Codex lens). Name these le
 
 1. **C5's premise** — that `TranslateAcceleratorW` consumes the keystroke of a grayed item without sending `WM_COMMAND`. Step 9 check 5 of Task 9 is the live evidence; is there a focus state (a list view, the tab strip, a modeless print progress dialog) where the Edit arm's enable state and the `WM_COMMAND` dispatch disagree?
 2. **C4's restore** — can `at_text_end` report true for a raw point that is *not* at the end of the text, beyond the one accepted case (a trailing run of glyphs narrower than 1 pt, which MuPDF's `same_point` skips), so that `snap` extends a selection visibly?
-3. **Re-entrancy** — `cancel_gesture` runs from `set_view`, `change_current_page`, `WM_CAPTURECHANGED` and the second-button arm. Is there a path where it runs inside `on_left_button_down` or `on_left_button_up` between `begin_select` / `release` and the capture call, leaving the capture held with no gesture, or a gesture with no capture?
+3. **Re-entrancy** — `cancel_gesture` runs from `set_view`, `set_dual_page`, `change_current_page`, `WM_CAPTURECHANGED` and the second-button arm. Is there a path where it runs inside `on_left_button_down` or `on_left_button_up` between `begin_select` / `release` and the capture call, leaving the capture held with no gesture, or a gesture with no capture?
 
 Push, open the PR titled `feat: text selection and copy`, body with the counts, exe size, the discrimination results from Task 6 Step 9, the GUI check results, a note that the overlay's bitmap-identity guard is a search-path fix carried by this PR, and `Closes #52`.
