@@ -2,7 +2,7 @@
 
 Date: 2026-09-16
 Base: `main` @ `88513f22116992de652c3900e023089bc3f1a494` (v1.3.0)
-Issues: [#52](https://github.com/jeffchen1981/litepdf/issues/52), [#58](https://github.com/jeffchen1981/litepdf/issues/58)
+Issues: [#52](https://github.com/jeffchen1981-fu/litepdf/issues/52), [#58](https://github.com/jeffchen1981-fu/litepdf/issues/58)
 
 LitePDF can find text but cannot hand it to the user: there is no selection model
 and no clipboard path. This design adds both, and — because the two features
@@ -889,7 +889,7 @@ design.
 | R4 | Acquiring a `TextPage` (mouse-down, Select All) contends with `page_hits` on `doc_mutex` during an active search scan. Bounded: once per gesture, the query path is lock-free, and `page_hits` honours an abort flag. |
 | R5 | Marquee selection deferred to its own issue. `fz_copy_rectangle` is no longer needed by this design at all (§3.4). |
 | R6 | `popup_owns` would false-positive if any popup gained a nested submenu (§4.8). |
-| R7 | The **existing** per-render clone-escrow does not keep the MuPDF lock table alive and has the same latent use-after-free this design fixes for `TextPage` (§3.3). Pre-existing, not caused here; its own issue. |
+| R7 | The **existing** per-render clone-escrow does not keep the MuPDF lock table alive and has the same latent use-after-free this design fixes for `TextPage` (§3.3). Pre-existing, not caused here; tracked as [#61](https://github.com/jeffchen1981-fu/litepdf/issues/61). |
 
 ### 6.3 Review record
 
