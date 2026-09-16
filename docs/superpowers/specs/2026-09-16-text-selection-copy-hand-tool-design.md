@@ -74,7 +74,7 @@ struct TextSelection {
 
     // RAW, UN-SNAPPED mouse positions. See the warning below.
     // Select All is NOT a separate kind: it is an ordinary Range whose two
-    // points are the first and last character origins on the page (§3.4).
+    // points bracket the page's first and last characters (§3.4).
     SelPoint   anchor{};
     SelPoint   extent{};
     SelectMode mode = SelectMode::Chars;
@@ -90,10 +90,10 @@ struct TextSelection {
 ```
 
 **Units.** Every coordinate in this struct — and everything crossing the
-`TextPage` API in §3.1 — is **page-box-relative**: the origin is the page box's
-top-left corner, matching the rendered bitmap's pixel (0,0). This is *not*
-absolute PDF user space when a page's box origin is non-zero. §3.1 does the
-translation; §4.1 explains why it must exist at all.
+`TextPage` API in §3.1 — is **MuPDF page space**, which is page-box-relative: the
+origin is the page box's top-left corner, matching the rendered bitmap's pixel
+(0,0). MuPDF establishes that itself for every format LitePDF opens, so no
+translation exists anywhere in the selection path (§4.1, corrected at plan time).
 
 ### The anchor must stay un-snapped
 
@@ -179,18 +179,16 @@ class Document {
 public:
     // A reference to one page's extracted text.
     //
-    // The handle owns THREE things, and all three are required for its
-    // lifetime to be independent of the Document that produced it (§3.3):
-    // a ref on the fz_stext_page, its own fz_clone_context escrow, and a
-    // shared_ptr to the MuPDF lock table. The third is the one that is easy
-    // to miss — see the warning in §3.3.
+    // The handle owns a ref on the fz_stext_page and its own core::EscrowContext
+    // — a cloned context that ALSO keeps the MuPDF lock table alive. Both are
+    // required for the handle's lifetime to be independent of the Document that
+    // produced it (§3.3). EscrowContext lands first, in its own PR, as the fix
+    // for #61.
     //
-    // All coordinates crossing this API are PAGE-BOX-RELATIVE (§2 "Units").
-    // The implementation adds/subtracts the page box origin when talking to
-    // MuPDF, so no caller ever sees absolute PDF user space.
+    // Coordinates are MuPDF page space, already page-box-relative (§2 "Units").
     class TextPage {
     public:
-        TextPage() = default;               // empty
+        TextPage() noexcept;                 // empty
         ~TextPage();
         TextPage(TextPage&&) noexcept;
         TextPage& operator=(TextPage&&) noexcept;
@@ -204,18 +202,22 @@ public:
         // references: an in-out signature is precisely the shape that lets a
         // caller write the reordered result back over the raw anchor and
         // produce the walking-selection defect described in §2.
+        // Chars mode returns its inputs unchanged, as MuPDF's own viewer does.
+        // Words/Lines also restore the far end fz_snap_selection leaves unwritten
+        // when it lies past the page's last character (§4.2).
         struct Snapped { SelPoint a, b; };
-        [[nodiscard]] Snapped snap(SelPoint a, SelPoint b, SelectMode m) const;
+        [[nodiscard]] Snapped snap(SelPoint a, SelPoint b, SelectMode m) const noexcept;
 
         // Merged per-line highlight quads. Lock-free.
         [[nodiscard]] std::vector<Quad> highlight(SelPoint a, SelPoint b) const;
 
-        // The origins of the page's first and last characters in reading
-        // order. Feeding these to highlight() / copy() selects the whole page
-        // through the ordinary path — see §3.4 for why Select All is expressed
-        // this way rather than as the page's bounding corners.
+        // The leading edge of the page's first character and the trailing edge
+        // of its last, each at mid-height. Feeding these to highlight() / copy()
+        // selects the whole page through the ordinary path — see §3.4 for why
+        // Select All is expressed this way rather than as the page's bounding
+        // corners, and why edges rather than origins.
         // Returns false for a page with no text.
-        [[nodiscard]] bool full_range(SelPoint& first, SelPoint& last) const;
+        [[nodiscard]] bool full_range(SelPoint& first, SelPoint& last) const noexcept;
 
         // UTF-8, CRLF line endings. Lock-free as well, despite allocating —
         // see §3.2: it runs on the handle's own escrow context.
@@ -223,14 +225,14 @@ public:
 
     private:
         struct Impl;
-        // fz_stext_page* + escrow fz_context* + shared_ptr<MuPDFLocks>
+        // EscrowContext + fz_stext_page*
         std::unique_ptr<Impl> impl_;
     };
 
-    // Empty handle if the document is not open, `page` is out of range, or the
-    // context clone fails (OOM). Callers MUST tolerate an empty handle — a drag
-    // that cannot acquire one simply does not start.
-    [[nodiscard]] TextPage text_page(std::size_t page) const;
+    // Empty handle if the document is not open, `page` is out of range, or
+    // extraction or the context clone fails. Callers MUST tolerate an empty
+    // handle — a drag that cannot acquire one simply does not start.
+    [[nodiscard]] TextPage text_page(std::size_t page) const noexcept;
 };
 ```
 
@@ -384,12 +386,17 @@ allocator callbacks; dropping the escrow context takes the same lock. So:
 
 Releasing the lock table first, or dropping the context before the page, reads
 freed memory on exactly the post-`Document` path this handle exists to make safe.
-`TextPage::Impl` writes the first two steps in an **explicit destructor body**, and
-declares its members in the order `locks`, `escrow`, `page`, so that C++'s
-reverse-declaration member destruction releases `locks` after the body has run.
-Both halves are required and both get a comment saying why: an explicit body alone
-is fragile to a later reordering of the members, and member order alone is
-invisible to a reader.
+
+**Plan-time refinement: steps 2 and 3 live in one class.** `core::EscrowContext`
+(move-only; `clone_from(fz_context*)`, `get()`) holds the cloned context and the
+type-erased lock-table reference, and its destructor drops the context before
+releasing the table. The table is recovered from the source context itself —
+`ctx->locks.user`, trusted only after `ctx->locks.lock` is confirmed to be
+litepdf's own callback — so a caller cannot forget to thread it through. It lands
+first, as the fix for #61, whose render escrow needs exactly the same thing.
+`TextPage::Impl` is then `{ EscrowContext escrow; fz_stext_page* stext; }`, and its
+destructor body performs step 1 through the escrow, which C++ keeps alive until
+after the body has run.
 
 Two things this design was checked for and found to hold, recorded so they are
 not re-litigated: MuPDF keeps the master `fz_context` alive as a husk until its
@@ -404,9 +411,9 @@ Two consequences to record rather than discover later:
 - The **existing per-render escrow has the same latent flaw** — it clones a
   context and drops it on the UI thread, with nothing keeping the lock table
   alive. It is not reachable often (the message must be processed after the
-  `Document` dies), and fixing it means threading the `shared_ptr` through
-  `post_render_done`. That is outside #52 and gets its own issue; what #52 must
-  not do is add a *second* instance of the defect.
+  `Document` dies). Tracked as #61 and fixed first, in its own PR, by moving
+  `RenderMeta` onto `EscrowContext`; #52 then builds on that class rather than
+  adding a *second* instance of the defect.
 - A process-wide singleton lock table was considered and rejected: it would fix
   both for free, but all `Document`s would then share one mutex array, which
   serialises cross-tab work on the allocator lock — a measurable change to the
@@ -448,12 +455,20 @@ But the failure is specifically about points that lie **outside every line**.
 A point that lands *on* a character resolves exactly. So Select All does not need
 a separate mechanism at all — it needs better points:
 
-**`full_range()` returns the origin of the page's first character and the origin
-of its last, in reading order**, found by a trivial walk of
-`page->first_block` → lines → chars with no merging and no heuristic. Feeding
-those two points to the ordinary `highlight()` and `copy()` resolves `start` to
-index 0 and `end` to the last index, and `fz_enumerate_selection` then walks every
-character in index order.
+**`full_range()` returns the leading-edge midpoint of the page's first character
+and the trailing-edge midpoint of its last, in reading order**, found by a trivial
+walk of `page->first_block` → lines → chars with no merging and no heuristic.
+Feeding those two points to the ordinary `highlight()` and `copy()` resolves
+`start` to index 0 and `end` to the index *after* the last character, and
+`fz_enumerate_selection` then walks every character in index order.
+
+**Edges, not origins — corrected at plan time.** An earlier version of this section
+used the two characters' *origins*. `find_closest_in_line` resolves a point to the
+nearest character **boundary** (each character contributes one at its `ll` edge and
+one at its `lr` edge), and a selection is the half-open range `[start, end)` —
+`fz_enumerate_selection` returns on `++idx == end`. An origin sits on a character's
+leading edge, so the last character's origin resolves to the boundary *before* it
+and Select All silently dropped the page's final character.
 
 This is strictly better than the alternatives and removes work rather than adding
 it:
@@ -478,34 +493,14 @@ no-op that leaves any existing selection alone.
 
 ## 4. Interaction layer (PR-1)
 
-### 4.1 Coordinate mapping, both directions — including the page box origin
+### 4.1 Coordinate mapping, both directions
 
 The existing forward map is pinned to `zoom_pct`, not `render_scale`
-(`ViewportMath.hpp:78`, `PdfCanvas.cpp:1351-1390`) and is otherwise correct, but
-it **omits the page box origin**, which is latent-and-cosmetic for a search
-highlight and functional for a selection (it copies the wrong text).
-
-The rendered bitmap's pixel (0,0) corresponds to the page's *bounds* origin, not
-to page-space (0,0): the pixmap bbox is derived from the transformed page bounds —
+(`ViewportMath.hpp`, the overlay block in `PdfCanvas::on_paint`), and is correct.
+The reverse map is its inverse:
 
 ```cpp
-// src/core/RenderEngine.cpp:200-202
-                    fz_irect bbox = fz_round_rect(
-                        fz_transform_rect(fz_bound_display_list(ctx, dlist), m));
-                    pix = fz_new_pixmap_with_bbox(ctx, fz_device_bgr(ctx), bbox,
-```
-
-— while `fz_stext_page` char quads are in absolute page space. For any PDF whose
-CropBox/MediaBox origin is non-zero (cropped scans, imposed documents) the two
-differ by `bounds.x0/y0`.
-
-**This design contains the problem inside `TextPage`** (§3.1 "Units"): the handle
-adds `bounds.x0/y0` to points going into MuPDF and subtracts it from quads coming
-out, so every coordinate outside the engine layer is page-box-relative and the
-canvas's maps stay origin-free:
-
-```cpp
-// Render-target DIPs -> page-box-relative points. Inverse of pdf_point_to_dip.
+// Render-target DIPs -> page points. Inverse of pdf_point_to_dip.
 inline float dip_to_pdf_point(float dip, float zoom_pct) noexcept {
     if (!(zoom_pct > 0.0f)) return 0.0f;   // also rejects NaN
     return dip / zoom_pct;
@@ -514,33 +509,24 @@ inline float dip_to_pdf_point(float dip, float zoom_pct) noexcept {
 
 A mouse position becomes a point by subtracting the page origin that
 `place_bitmap` produced for this paint, then dividing by `zoom_pct`. The result is
-clamped to `[0, width_pt] × [0, height_pt]` — well-defined precisely because the
-coordinates are page-box-relative.
+clamped to `[0, width_pt] × [0, height_pt]`.
 
 `WM_MOUSEMOVE` coordinates are client **pixels**; the canvas works in DIPs.
 Conversion uses the same `px * 96 / dpi` factor as `bitmap_px_to_dip`.
 
-**The search feature has the same origin omission in two places, not one**, and
-fixing only the overlay would be worse than fixing neither. Besides the paint
-block, the *scroll anchoring* consumes raw quad coordinates:
-
-```cpp
-// src/ui/PdfCanvas.cpp:1019-1022 (pan_y_for_hit); :436-439 is the same shape
-    const float q_min_y_pt = std::min({ h.geom.ul_y, h.geom.ur_y,
-                                        h.geom.ll_y, h.geom.lr_y });
-    const float q_max_y_pt = std::max({ h.geom.ul_y, h.geom.ur_y,
-                                        h.geom.ll_y, h.geom.lr_y });
-    const float q_center = pdf_point_to_dip((q_min_y_pt + q_max_y_pt) * 0.5f, pct);
-```
-
-Correcting the overlay alone would leave F3 and cross-tab navigation centring the
-viewport `bounds.y0` away from the hit it is drawing a box around — overlay and
-navigation disagreeing about the same quad, which is exactly the defect class
-issue #50 is already open on. So the normalisation is applied where the hit
-geometry is *produced* (`Document::page_hits`), not at each consumer, and all
-three sites — overlay, `pan_y_for_hit`, and the `scroll_into_view` visibility test
-— then read the same page-box-relative frame. Called out in the PR description as
-a search-path fix carried by a selection PR.
+**There is no page-box-origin offset to correct — corrected at plan time.** An
+earlier version of this section claimed the rendered bitmap's pixel (0,0) and
+stext quads differ by `bounds.x0/y0` for any PDF whose CropBox/MediaBox origin is
+non-zero, and prescribed a translation inside `TextPage` plus a normalisation in
+`Document::page_hits`. The premise is false. `pdf_page_obj_transform_box`
+(`source/pdf/pdf-page.c`) ends by concatenating
+`fz_translate(-cropbox.x0, -cropbox.y0)` onto the page CTM: MuPDF itself moves the
+CropBox origin to (0,0), so `fz_bound_page`, the render bbox and every stext quad
+already share an origin-free frame. Every other format LitePDF opens hard-codes a
+zero origin in its `bound_page` (`xps`, `svg`, `epub`, `htdoc` for FB2, `cbz`,
+`img`). So neither the translation nor the search-path change exists. The
+CropBox-offset fixture page remains (§6.1), now as a test that **pins** this MuPDF
+behaviour, so an upgrade that changed it fails loudly.
 
 ### 4.2 Drag lifecycle
 
@@ -594,6 +580,27 @@ extending it in that mode.
 Every exit path releases both the capture and the handle. The transitions are pure
 logic and live in `ui/detail/SelectionDrag.hpp` so they can be unit-tested without
 an HWND, following `SplitterMath.hpp` / `ViewportMath.hpp`.
+
+**Plan-time refinements.**
+
+- *Live versus committed.* While a gesture is live the canvas paints a **live**
+  selection held in `PdfCanvas::Impl`, and writes to `DocumentView` only when the
+  gesture commits (at button-up, or at press time for a double or triple click).
+  Cancelling therefore just discards the live copy, which is what "keep whatever
+  was already committed" in the table above needs.
+- *A page change cancels a live drag.* A selection is bound to one page (§1); a
+  drag that outlived its page would extend the old page's text with the new page's
+  geometry. `change_current_page` is the single funnel, so the cancel lives there.
+- *A gesture that captures no text commits nothing* — it clears, rather than
+  leaving an empty selection that would enable Copy for nothing.
+- *`fz_snap_selection` never writes the far end when it lies past the page's last
+  character.* Its end branch runs only for a character at `idx >= end`; when `end`
+  is the index after the last character there is none, and the caller's raw
+  **second** point stays in place. On a backward word or line drag that point is
+  the *earlier* one, and the selection collapses to part of a word. Reachable by
+  double-clicking the blank space below the last line and dragging up.
+  `TextPage::snap` detects that either raw point resolves to the end of the text
+  and restores the far end to the trailing edge from §3.4.
 
 ### 4.3 Click count to mode
 
@@ -782,8 +789,24 @@ popup's own top level.
 Placing Edit after Help to dodge the bug was rejected: it would leave a
 non-conventional menu order standing in for a fix.
 
-The Edit arm grays both items when no document is open, and additionally grays
-Copy when there is no selection.
+**The Edit arm's enable state must follow the focus — corrected at plan time.** An
+earlier version grayed both items when no document is open and Copy whenever there
+is no selection. But `TranslateAcceleratorW` sends `WM_INITMENUPOPUP` before acting
+on an accelerator, and an accelerator whose item is grayed is disabled: the
+keystroke is consumed and no `WM_COMMAND` follows. Live-verified on Windows 11
+build 26200 with a scratch window (grayed item: `WM_INITMENUPOPUP`, `TranslateAcceleratorW`
+returns 1, no `WM_COMMAND`; the same item re-enabled inside that handler: the
+`WM_COMMAND` arrives). Graying as first written would have killed Ctrl+C and Ctrl+A
+inside the find box whenever the page had no selection. So:
+
+- Copy is enabled when an edit control holds the focus, or the active view has a
+  selection.
+- Select All is enabled when an edit control holds the focus, or a document is
+  open **and** the view is in single-page mode (in spread mode it can do nothing,
+  §1).
+
+"An edit control holds the focus" is the same class-name test §4.7's `WM_COMMAND`
+arms dispatch on, so the enable state and the dispatch cannot disagree.
 
 ---
 
@@ -836,39 +859,44 @@ keep every `TEST_CASE` name ASCII and subsystem-prefixed, because
 `catch_discover_tests` mangles non-ASCII names on Windows and `-R` matches the
 name, not the tag.
 
-**Both new test files must be added to `tests/CMakeLists.txt`'s `target_sources`.**
+**Every new test file must be added to `tests/CMakeLists.txt`'s `target_sources`.**
 A test file that is never compiled is a check that can only pass.
 
 | File | Covers |
 |---|---|
+| `test_escrow_context.cpp` (new, #61 PR) | the lock table outliving the `Document` while an `EscrowContext` holds it, counted |
 | `test_viewport_math.cpp` (extend) | `dip_to_pdf_point` round-trip against `pdf_point_to_dip`; zero / negative / NaN zoom |
-| `test_selection_math.cpp` (new) | drag state transitions including the `WM_CAPTURECHANGED` abort, the commit-before-release ordering, and **`Gesture` exclusivity under interleaved buttons**; click-count → `SelectMode`; **a stationary double click commits a word**; page-box clamping |
-| `test_document_selection.cpp` (new) | against fixtures: `search.pdf` (known text), `simple.pdf`, `cjk-zh-hant.pdf` (multi-byte round-trip), `encrypted.pdf` (selection after `authenticate`), `sample.epub`, and a **new fixture with a non-zero MediaBox origin** |
+| `test_selection_drag.cpp` (new) | drag state transitions including the `WM_CAPTURECHANGED` abort, the commit-before-release ordering, and **`Gesture` exclusivity under interleaved buttons**; click-count → `SelectMode`; **a stationary double click commits a word**; page clamping |
+| `test_document_selection.cpp` (new) | against fixtures: `search.pdf`, `simple.pdf`, `cjk-zh-hant.pdf` (multi-byte round-trip), `encrypted.pdf` (selection after `authenticate`), `sample.epub`, and a **new `selection.pdf`** whose pages each pin one behaviour below |
 
-Four regressions matter more than the rest, because each is invisible in the
+The regressions that matter more than the rest, because each is invisible in the
 obvious manual test:
 
 1. **Backward drag keeps its anchor** (§2). Snap a pair whose extent precedes its
-   anchor and assert the stored anchor is unchanged. A forward drag never shows it.
+   anchor and assert the result matches the forward drag. A forward drag never shows
+   it.
 2. **A stationary double click selects a word** (§4.2). Nothing about a
    click-and-drag exercises it.
-3. **Non-zero page box origin** (§4.1). Every existing fixture has MediaBox origin
-   `0 0` — verified across all ten — so no current test can catch an offset. The
-   new fixture should use something like `MediaBox [36 36 648 828]`, which makes
-   the failure manifest as a 36 pt displacement.
+3. **Page coordinates stay origin-free on an offset page box** (§4.1). Every
+   pre-existing fixture has a zero MediaBox origin, so no current test would notice
+   MuPDF ceasing to translate it. `selection.pdf` carries a page with
+   `CropBox [36 36 576 756]` and asserts a word's quad lands 72 pt from the crop
+   box's corner, not 108.
 4. **Select All on a multi-column page and on a page with wide intra-line gaps**
-   (§3.4). Assert the copied text length equals `page_text()`'s, and that a line
-   containing two runs separated by more than `0.5 em` yields more than one quad.
-   The first catches the corner-point failure; the second catches the
-   one-quad-per-line failure. A single-column fixture passes both while broken.
-5. **`snap` round-trip idempotence in `Chars` mode.** MuPDF's own viewer snaps only
-   for `WORDS` / `LINES` and passes raw points through in `CHARS`
-   (`gl-main.c:1584-1601`), whereas §4.2 snaps on every move. `fz_snap_selection`
-   writes `*a = ch->origin` (a baseline origin) which `fz_highlight_selection` then
-   re-resolves through `find_closest_in_page`; whether that round-trip is
-   idempotent or drifts by one character per move was not settled by reading. Test
-   it directly: snap the same pair twice and assert the second call is a no-op. If
-   it is not, `Chars` mode must pass raw points through as the gl viewer does.
+   (§3.4). Assert the copied text equals `page_text()`'s with whitespace removed,
+   that it ends with the page's final character, and that a line containing two runs
+   separated by more than **0.8 em** yields more than one quad. (0.8 em is
+   `SPACE_MAX_DIST` in `stext-device.c`; between 0.15 and 0.8 em MuPDF inserts a
+   synthetic space whose quad bridges the gap, so an earlier "0.5 em" fixture could
+   not have split.) The first catches the corner-point failure, the second the
+   origins failure, the third the one-quad-per-line failure. A single-column fixture
+   passes all three while broken.
+5. **A word drag from below the text keeps its far end** (§4.2 refinements). Nothing
+   about a drag that starts on text exercises it.
+
+The earlier item 5 — `snap` round-trip idempotence in `Chars` mode — is moot:
+`snap` passes `Chars` points through unchanged, as MuPDF's own viewer does
+(`platform/gl/gl-main.c`), so nothing is snapped and nothing can drift.
 
 Empty-page behaviour is asserted directly — both points resolve to index 0
 (`stext-search.c:242`), `fz_enumerate_selection` returns early on `start == end`
@@ -889,7 +917,10 @@ design.
 | R4 | Acquiring a `TextPage` (mouse-down, Select All) contends with `page_hits` on `doc_mutex` during an active search scan. Bounded: once per gesture, the query path is lock-free, and `page_hits` honours an abort flag. |
 | R5 | Marquee selection deferred to its own issue. `fz_copy_rectangle` is no longer needed by this design at all (§3.4). |
 | R6 | `popup_owns` would false-positive if any popup gained a nested submenu (§4.8). |
-| R7 | The **existing** per-render clone-escrow does not keep the MuPDF lock table alive and has the same latent use-after-free this design fixes for `TextPage` (§3.3). Pre-existing, not caused here; tracked as [#61](https://github.com/jeffchen1981-fu/litepdf/issues/61). |
+| R7 | The **existing** per-render clone-escrow did not keep the MuPDF lock table alive — the same latent use-after-free this design avoids for `TextPage` (§3.3). Pre-existing; tracked as [#61](https://github.com/jeffchen1981-fu/litepdf/issues/61) and fixed in its own PR, before #52, by `EscrowContext`. |
+| R8 | Right-to-left text: `full_range` uses the left/right quad edges MuPDF uses for left-to-right characters. Untested — no RTL fixture exists. |
+| R9 | A double click in the blank space below the last line selects the page's last word: MuPDF resolves the point to the end of the text and word snapping extends back to the word's start. Chrome selects nothing there. |
+| R10 | The I-beam cursor shows over the whole page box, including images and margins. |
 
 ### 6.3 Review record
 
@@ -928,27 +959,48 @@ for this window are not a clean measurement and should not be used as one.
 Totals across all five lenses: twenty-six findings, none discarded.
 
 The findings that changed this design, in the order they appear above: the in-out
-snap destroying the anchor (§2); the page box origin missing from the coordinate
-maps *and* from search's scroll anchoring (§4.1, §3.1 "Units"); Select All by
-corner points, then by per-line union, before landing on first/last character
-origins (§3.4); the handle outliving its `Document` on tab close, and then the
-cloned context still outliving the lock table (§3.3); the unlocked `fz_warn` on
-the drop path (§3.2); `ReleaseCapture` delivering `WM_CAPTURECHANGED`
-synchronously (§4.2); the click-clears rule destroying double-click selections
-(§4.2); two gestures owning one capture (§4.2, §5); dual-page mode being ungated
-at mouse-down (§1, §4.2); the clipboard's missing failure paths (§4.6); the
-sticking space latch (§5); the dead Ctrl+C focus states (§4.7); and the positional
+snap destroying the anchor (§2); a page-box-origin offset in the coordinate maps and
+search's scroll anchoring (§4.1 — later found not to exist, see below); Select All
+by corner points, then by per-line union, before landing on first/last character
+positions (§3.4); the absent whole-page quad API (§3.4); the handle outliving its
+`Document` on tab close, and then the cloned context still outliving the lock table
+(§3.3); the unspecified release order inside the handle (§3.3); the unlocked
+`fz_warn` on the drop path (§3.2); `copy()`'s stale, unimplementable claim to take
+`doc_mutex` (§3.2); `ReleaseCapture` delivering `WM_CAPTURECHANGED` synchronously
+(§4.2); the click-clears rule destroying double-click selections (§4.2); two
+gestures owning one capture (§4.2, §5); capture loss during a *pan* leaving the
+canvas permanently refusing gestures (§4.2); dual-page mode being ungated at
+mouse-down (§1, §4.2); the clipboard's missing failure paths (§4.6); the sticking
+space latch (§5); the dead Ctrl+C focus states (§4.7); and the positional
 `GetSubMenu` breakage (§4.8).
 
-The findings that changed this design, in the order they appear above: the in-out
-snap destroying the anchor (§2); the page box origin missing from both coordinate
-maps (§4.1, §3.1 "Units"); the absent whole-page quad API (§3.4); the handle
-outliving its `Document` on tab close (§3.3); the unlocked `fz_warn` on the drop
-path (§3.2); `ReleaseCapture` delivering `WM_CAPTURECHANGED` synchronously (§4.2);
-the click-clears rule destroying double-click selections (§4.2); dual-page mode
-being ungated at mouse-down (§1, §4.2); the clipboard's missing failure paths
-(§4.6); the sticking space latch (§5); the dead Ctrl+C focus states (§4.7); the
-positional `GetSubMenu` breakage (§4.8); the unspecified release order inside the
-handle (§3.3); capture loss during a *pan* leaving the canvas permanently refusing
-gestures (§4.2); and `copy()`'s stale, unimplementable claim to take `doc_mutex`
-(§3.2).
+#### Plan-time corrections (2026-09-16)
+
+Writing the implementation plan
+(`docs/superpowers/plans/2026-09-16-text-selection-copy-52.md`) re-verified every
+claim above against the vendored MuPDF source and `main` @ `88513f2`, and found five
+things the five review lenses had not. Each is patched in place above and marked
+"corrected at plan time":
+
+1. **Select All by character origins drops the page's final character** (§3.4) —
+   now leading and trailing edges.
+2. **The page-box-origin offset does not exist** (§4.1). MuPDF translates the
+   CropBox origin to (0,0) itself, and every other supported format has a zero
+   origin. The translation in `TextPage` and the `page_hits` normalisation are
+   dropped; the offset fixture page stays, as a pin.
+3. **`fz_snap_selection` leaves the far end unwritten past the last character**
+   (§4.2), collapsing a backward word or line drag. `snap` restores it.
+4. **Graying Edit > Copy with no selection would kill Ctrl+C in the find box**
+   (§4.8), because a grayed item disables its accelerator. Live-verified; the enable
+   state now follows the focus.
+5. **A 0.5 em gap cannot split a line's highlight** (§6.1) — the threshold is
+   0.8 em.
+
+Items 1, 3 and 5 are behaviour of MuPDF code that the spec *quoted* but whose
+boundary arithmetic no lens executed. Item 2 reversed a finding the review had
+accepted: a claim about what MuPDF does to coordinates had been checked against the
+render path and the stext path, but never against the page-transform code that feeds
+both.
+
+The same pass moved the lock-table fix into its own class and PR (#61, §3.3) and
+made `Chars`-mode `snap` a pass-through, retiring the former §6.1 item 5.
