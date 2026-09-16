@@ -18,21 +18,39 @@
 
 Every claim in the spec was re-verified against the vendored MuPDF source and `main` @ `88513f2` while writing this plan. Seven corrections. **The spec file has been patched in the same commit as this plan**, so a reviewer comparing the two sees them agree; this section records *why*, so nobody "fixes" the plan back toward the old text.
 
-**C1 — Select All by character ORIGINS drops the page's last character.** Spec §3.4 fed `full_range()` the first and last characters' origins. MuPDF resolves a point to the nearest character *boundary* (`find_closest_in_line`, `stext-search.c`: each character contributes a boundary at `idx` from its `ll` edge and one at `idx + 1` from its `lr` edge), and a selection is the half-open range `[start, end)` (`fz_enumerate_selection` returns on `++idx == end`). A character's origin sits on its *leading* edge, so the last character's origin resolves to the boundary **before** it and the range stops one short. `full_range()` therefore returns the **leading-edge midpoint of the first character** (`mid(ll, ul)`) and the **trailing-edge midpoint of the last** (`mid(lr, ur)`). Task B1 tests the final character explicitly.
+**C1 — Select All by character ORIGINS drops the page's last character.** Spec §3.4 fed `full_range()` the first and last characters' origins. MuPDF resolves a point to the nearest character *boundary* (`find_closest_in_line`, `stext-search.c`: each character contributes a boundary at `idx` from its `ll` edge and one at `idx + 1` from its `lr` edge), and a selection is the half-open range `[start, end)` (`fz_enumerate_selection` returns on `++idx == end`). A character's origin sits on its *leading* edge, so the last character's origin resolves to the boundary **before** it and the range stops one short. `full_range()` therefore returns the **leading-edge midpoint of the first character** (`mid(ll, ul)`) and the **trailing-edge midpoint of the last** (`mid(lr, ur)`). Task 6 tests the final character explicitly.
 
 **C2 — the page-box-origin problem in spec §4.1 does not exist.** `pdf_page_obj_transform_box` (`source/pdf/pdf-page.c`) ends with `*page_ctm = fz_concat(*page_ctm, fz_translate(-cropbox.x0, -cropbox.y0))` — MuPDF already moves the CropBox origin to `(0,0)` in page space, so `fz_bound_page`, the render bbox and stext quads all share an origin-free frame. Every other format LitePDF opens hard-codes a zero origin (`xps_bound_page`, `svg_bound_page`, `epub_bound_page`, `htdoc_bound_page` for FB2, `cbz_bound_page`, `img_bound_page`). Consequences: **no translation code in `TextPage`, and `Document::page_hits` is not touched.** The spec's non-zero-origin fixture is kept — as a CropBox-offset page that *pins* this MuPDF behaviour, so an upgrade that changed it fails a test instead of silently misplacing highlights.
 
 **C3 — `snap()` passes points through unchanged in `Chars` mode.** MuPDF's own viewer snaps only for words and lines (`platform/gl/gl-main.c`, the `fz_snap_selection` calls under `GLUT_ACTIVE_CTRL`). This makes spec §6.1 item 5 (Chars round-trip idempotence) moot: nothing is snapped, so nothing can drift.
 
-**C4 — `fz_snap_selection` never writes the far end when it lies past the page's last character.** Its end branch runs only for a character at `idx >= end`; when `end` is the index after the last character there is none, and the caller's raw **second** point is left in place. On a backward word or line drag that point is the *earlier* one, collapsing the selection to part of a word. Reachable: double-click in the blank space below the last line, then drag up. `TextPage::snap` detects "either raw point resolves to the end of the text" and restores the far end to the trailing edge from C1. Tested in Task B1.
+**C4 — `fz_snap_selection` never writes the far end when it lies past the page's last character.** Its end branch runs only for a character at `idx >= end`; when `end` is the index after the last character there is none, and the caller's raw **second** point is left in place. On a backward word or line drag that point is the *earlier* one, collapsing the selection to part of a word. Reachable: double-click in the blank space below the last line, then drag up. `TextPage::snap` detects "either raw point resolves to the end of the text" and restores the far end to the trailing edge from C1. Tested in Task 6.
 
-**C5 — the Edit menu's enable state must follow the focus.** Spec §4.8 grays Copy when there is no document selection. But `TranslateAcceleratorW` sends `WM_INITMENUPOPUP` before acting on an accelerator, and **an accelerator whose menu item is grayed is disabled — the keystroke is consumed and no `WM_COMMAND` is sent.** Live-verified while writing this plan (Windows 11 build 26200, a scratch Win32 window with a menu and an accelerator table): with the item grayed, `WM_INITMENUPOPUP` arrived with `HIWORD(lParam) == 0`, `TranslateAcceleratorW` returned 1, and no `WM_COMMAND` followed; re-enabling the item inside that `WM_INITMENUPOPUP` handler made the `WM_COMMAND` arrive. Graying as specified would therefore kill Ctrl+C and Ctrl+A inside the find box whenever the page has no selection. The Edit arm enables both items whenever an edit control holds the focus — the same test `WM_COMMAND` dispatches on. Select All is also grayed in two-page spread mode, where it cannot do anything (spec §1). Task B4 re-checks this in the real app with real keystrokes.
+**C5 — the Edit menu's enable state must follow the focus.** Spec §4.8 grays Copy when there is no document selection. But `TranslateAcceleratorW` sends `WM_INITMENUPOPUP` before acting on an accelerator, and **an accelerator whose menu item is grayed is disabled — the keystroke is consumed and no `WM_COMMAND` is sent.** Live-verified while writing this plan (Windows 11 build 26200, a scratch Win32 window with a menu and an accelerator table): with the item grayed, `WM_INITMENUPOPUP` arrived with `HIWORD(lParam) == 0`, `TranslateAcceleratorW` returned 1, and no `WM_COMMAND` followed; re-enabling the item inside that `WM_INITMENUPOPUP` handler made the `WM_COMMAND` arrive. Graying as specified would therefore kill Ctrl+C and Ctrl+A inside the find box whenever the page has no selection. The Edit arm enables both items whenever an edit control holds the focus — the same test `WM_COMMAND` dispatches on. Select All is also grayed in two-page spread mode, where it cannot do anything (spec §1). Task 9 re-checks this in the real app with real keystrokes.
 
 **C6 — spec §6.1 item 4's "more than 0.5 em" gap is wrong; the threshold is 0.8 em.** In `stext-device.c`, forward motion between `SPACE_DIST` (0.15 em) and `SPACE_MAX_DIST` (0.8 em) inserts a **synthetic space** whose quad spans the gap — `fz_highlight_selection` then merges both runs into one quad. Only motion past 0.8 em starts a new stext line. The fixture's gap is ~22 em.
 
 **C7 — #61 lands first, and the three-member release order collapses into `EscrowContext`.** Spec §3.3 put `locks`, `escrow` and `page` in `TextPage::Impl` with a hand-ordered destructor. PR-0 moves "drop the context, then release the lock table" into `EscrowContext`, so `TextPage::Impl` is `{EscrowContext escrow; fz_stext_page* stext;}` with a destructor body that drops `stext` through the escrow. The same class fixes #61's render escrow, which is why it is one abstraction and not two.
 
-Smaller refinements, not contradictions: the canvas paints a **live** selection while a gesture is in progress and commits to `DocumentView` only at the end (so cancelling a drag leaves a double click's committed word intact); a page change cancels a live drag; a gesture that captures no text commits nothing; the pure-logic test file is `test_selection_drag.cpp`, named after its header `SelectionDrag.hpp`, not the spec's `test_selection_math.cpp`; the spec's §6.3 duplicated closing paragraph is removed.
+Smaller refinements, not contradictions: entering two-page spread mode cancels a live drag; the canvas paints a **live** selection while a gesture is in progress and commits to `DocumentView` only at the end (so cancelling a drag leaves a double click's committed word intact); a page change cancels a live drag; a gesture that captures no text commits nothing; the pure-logic test file is `test_selection_drag.cpp`, named after its header `SelectionDrag.hpp`, not the spec's `test_selection_math.cpp`; the spec's §6.3 duplicated closing paragraph is removed.
+
+---
+
+## Plan-gate findings, folded in
+
+Full tier, high-stakes (architecture-changing: MuPDF context and lock-table ownership, the canvas's mouse-capture lifecycle). Round 1 ran Fable (slot 1, mechanical) and Sonnet (slot 2, consistency) in parallel against `3a59dce`. Everything below is resolved in the text.
+
+**Sonnet** — one Critical, one Important:
+
+- **The task headings could not be extracted.** They were `Task A0` … `Task B6`, and `superpowers:subagent-driven-development`'s `scripts/task-brief` only recognises `Task <digits>` (`/^#+[ \t]+Task[ \t]+[0-9]+/`); it exited 3 for every task. Confirmed by running it. Tasks are now numbered 1-11 (Part A = 1-4, Part B = 5-11), and `task-brief` extracts each.
+- **The GUI driver lived in an appendix no task brief contains.** It is now written out in full inside Task 9 (to the git-ignored `build/gui/selection-drive.ps1`) and repeated in Task 10, and the known-limitations table moved into this header.
+- Noted below its bar and fixed anyway: Task 7 quoted a column-aligned source line with single spaces.
+
+**Fable** — no Critical or Important; two Minor and four questions. It drove every Task 6 fixture expectation through MuPDF 1.27.2 itself (PyMuPDF 1.27.2.2 wraps the vendored version) and all 17 reproduced, as did both Task 6 Step 9 discriminations.
+
+- **Entering spread mode mid-drag did not cancel the drag** (Minor, verified: `DocumentView::set_current_page` returns false for the page it is already on, so the page snap after `IDM_VIEW_DUAL_PAGE` does not always reach `change_current_page`'s cancel). `set_dual_page` now cancels; Task 10 GUI check 9b tests it.
+- **The encrypted-document test passed vacuously** (Minor, verified: `encrypted.pdf` extracts `''`). Renamed and rewritten to assert only what the fixture can show — no handle before `authenticate`, a valid one after — and to say plainly that no query runs on decrypted text.
+- Questions folded in: `EscrowContext::clone_from`'s real precondition is that the lock table is alive, not merely the source pointer; `at_text_end`'s accepted false positive is "glyphs narrower than 1 pt" (`same_point` truncates to `int`), not "zero-extent"; the commit trailer is the implementing session's own; and a bare `cmake` in Git Bash resolves a MinGW build here, so the constraint now names the BuildTools copy explicitly.
 
 ---
 
@@ -40,14 +58,14 @@ Smaller refinements, not contradictions: the canvas paints a **live** selection 
 
 - **Catch2 `TEST_CASE` names are ASCII and start with their subsystem** (`EscrowContext …`, `DocumentSelection …`, `DocumentView …`, `SelectionDrag …`, `ClipboardText …`, `ViewportMath …`). `catch_discover_tests` mangles non-ASCII names on Windows, and `ctest -R` matches the **name**, never the tag. Confirm every new filter with `ctest --test-dir build -C Release -N -R <filter>` and check the count before trusting a green run from it.
 - **Tests build Release, never Debug** (MuPDF is `MT_StaticRelease`; Debug fails with `LNK2038`). Verify through `ctest --test-dir build -C Release`, not only by running the test exe.
-- `cmake` and `ctest` are **not on PATH**. Full paths: `"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"` and `ctest.exe` beside it. This plan writes `cmake` / `ctest` for brevity.
+- **Use the VS 2022 BuildTools `cmake` and `ctest`**, which configured `build/`: `"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"` and `ctest.exe` beside it. This plan writes `cmake` / `ctest` for brevity. **Do not trust a bare `cmake` on PATH:** in Git Bash on this machine `which cmake` resolves a MinGW WinLibs build (`…\WinGet\Packages\BrechtSanders.WinLibs…\mingw64\bin\cmake`), which is not the generator that configured `build/`.
 - **Run tests from the repo root** — fixtures resolve relative to it.
 - **`VERSION` is not bumped** (stays `1.3.0`); the About-dialog literal in `MainWindow.cpp` stays untouched. Bumps happen at phase boundaries only.
 - **Binary size:** `build/Release/litepdf.exe` must stay under **19,000,000 bytes**. v1.3.0 shipped at 7,276,544 bytes. Record the baseline and the final size.
 - **PIMPL discipline:** `Document.hpp`, `DocumentView.hpp`, `EscrowContext.hpp`, `TextSelection.hpp` and `PdfCanvas.hpp` stay free of `<mupdf/fitz.h>`. `MuPDFLocks.hpp` includes it and is included only from `.cpp` files in `litepdf_core`.
 - **Cite symbols, not line numbers**, in code comments and commit messages — line numbers go stale (PR #43 paid for that twice).
 - **Never use `large.pdf` page 0 to judge rendering or hit geometry** — it overlaps its own text by design.
-- **All artifacts in English.** Commit messages end with `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`.
+- **All artifacts in English.** Commit messages end with the implementing session's own `Co-Authored-By:` attribution trailer. The trailers written into this plan's commit examples are Opus 5's; a session running a different model substitutes its own.
 - **CHANGELOG** entries go under `## [Unreleased]`; no version heading.
 
 ---
@@ -100,7 +118,7 @@ Part B depends on Part A's `EscrowContext`. Do not start Part B until PR-0 is me
 | `tests/unit/test_selection_drag.cpp` | create | State machine, click counting, clamping. |
 | `tests/unit/test_clipboard_text.cpp` | create | Conversion. |
 | `src/ui/Clipboard.hpp` / `.cpp` | create | `set_clipboard_text` with the full failure-path discipline. |
-| `src/ui/PdfCanvas.hpp` / `.cpp` | modify | Overlay guard + selection painting, `select_all`, `copy_selection_to_clipboard` (B4); gestures, cursor, teardown (B5). |
+| `src/ui/PdfCanvas.hpp` / `.cpp` | modify | Overlay guard + selection painting, `select_all`, `copy_selection_to_clipboard` (Task 9); gestures, cursor, teardown (Task 10). |
 | `src/ui/MainWindow.cpp` | modify | Accelerators, Edit `WM_COMMAND` arms, ownership-based `WM_INITMENUPOPUP`. |
 | `src/ui/MainWindow.hpp` | modify | The `tabs_` / `canvas_` declaration-order comment. |
 | `resources/MainMenu.rc.h` | modify | `IDM_EDIT_COPY`, `IDM_EDIT_SELECT_ALL`. |
@@ -111,9 +129,25 @@ Part B depends on Part A's `EscrowContext`. Do not start Part B until PR-0 is me
 
 ---
 
+## Known limitations (recorded, not fixed)
+
+| | |
+|---|---|
+| R1 | No selection in two-page spread mode — neither painted nor startable (spec §1). |
+| R2 | No cross-page selection; revisit with continuous scroll (#55). |
+| R3 | Rotated text highlights as an axis-aligned box, as search hits already do. |
+| R4 | Acquiring a `TextPage` (every left press on a page, and Select All) builds the page's stext on the UI thread under `doc_mutex`, contending with a running search scan. Bounded: once per gesture; the query path is lock-free. |
+| R5 | Marquee selection and the right-click context menu are their own issues. |
+| R6 | `popup_owns` would false-positive if a popup gained a nested submenu. |
+| R7 | Right-to-left text: `full_range` uses the left/right quad edges MuPDF uses for left-to-right characters. Untested — no RTL fixture exists. |
+| R8 | A double click in blank space below the last line selects the page's last word — MuPDF resolves the point to the end of the text, and word snapping extends back to the word start. Chrome selects nothing there. |
+| R9 | The I-beam cursor shows over any page area, including images and blank margins inside the page box. |
+
+---
+
 # Part A — PR-0: escrow lock-table lifetime (#61)
 
-## Task A0: Branch and baseline
+## Task 1: Branch and baseline
 
 **Files:** none.
 
@@ -138,7 +172,7 @@ Record the passing count (v1.3.0 shipped with 303/303 — re-measure, do not quo
 
 ---
 
-## Task A1: `MuPDFLocks` and `EscrowContext`
+## Task 2: `MuPDFLocks` and `EscrowContext`
 
 **Files:**
 - Create: `src/core/MuPDFLocks.hpp`, `src/core/MuPDFLocks.cpp`, `src/core/EscrowContext.hpp`, `src/core/EscrowContext.cpp`
@@ -305,7 +339,9 @@ struct MuPDFLocks : std::enable_shared_from_this<MuPDFLocks> {
 
     // The table `ctx` locks through, or empty if `ctx` is null or does not lock
     // through a litepdf table (a context created by the CLI, a test, or MuPDF
-    // itself). `ctx` must be alive for the duration of the call.
+    // itself). PRECONDITION: that table must still be alive -- this reads
+    // `ctx->locks.user` before taking any reference. See
+    // EscrowContext::clone_from.
     static std::shared_ptr<MuPDFLocks> of(fz_context* ctx) noexcept;
 };
 
@@ -406,10 +442,17 @@ public:
     EscrowContext(const EscrowContext&)            = delete;
     EscrowContext& operator=(const EscrowContext&) = delete;
 
-    // Clone `source`, which must be a Document's context or a clone of one and
-    // must be alive for the duration of this call. Empty on a null source, a
-    // context that does not lock through a litepdf lock table, or a failed clone
-    // (out of memory). Thread-safe.
+    // Clone `source`, a Document's context or a clone of one. PRECONDITION: the
+    // lock table `source` locks through must still be alive for the duration of
+    // this call -- i.e. its Document, or some EscrowContext of the same family,
+    // is alive. `source` merely being a live pointer is NOT enough: recovering
+    // the table reads `source`'s lock-callback `user` pointer before any
+    // reference is taken, so cloning from a bare clone whose Document has died
+    // is exactly the #61 use-after-free, one call earlier. Every caller today
+    // runs while the Document is alive (Document::text_page under doc_mutex; the
+    // render callback on a RenderEngine worker, which the Document outlives).
+    // Empty on a null source, a context that does not lock through a litepdf
+    // lock table, or a failed clone (out of memory). Thread-safe.
     [[nodiscard]] static EscrowContext clone_from(fz_context* source) noexcept;
 
     [[nodiscard]] bool        valid() const noexcept { return ctx_ != nullptr; }
@@ -583,13 +626,13 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ---
 
-## Task A2: Move the render escrow onto `EscrowContext`
+## Task 3: Move the render escrow onto `EscrowContext`
 
 **Files:**
 - Modify: `src/ui/PdfCanvas.cpp`, `src/ui/PdfCanvas.hpp`
 
 **Interfaces:**
-- Consumes: `core::EscrowContext::clone_from`, `valid()`, `get()` (Task A1).
+- Consumes: `core::EscrowContext::clone_from`, `valid()`, `get()` (Task 2).
 - Produces: no new interface. `post_render_done` / `post_render_done_right` keep their signatures and refcount contract.
 
 - [ ] **Step 1: Includes and forward declarations**
@@ -747,9 +790,9 @@ cmake --build build --config Release
 ctest --test-dir build -C Release
 ```
 
-Expected: build clean, same count as after Task A1, all passing.
+Expected: build clean, same count as after Task 2, all passing.
 
-Smoke (a smoke, **not** proof — the race cannot be forced from outside; Task A1's test is the proof): with `LITEPDF_NO_RESTORE=1`, open `tests/fixtures/large.pdf` and `tests/fixtures/search.pdf` in one instance, hold PgDn on one tab while pressing Ctrl+W, reopen, repeat five times. Expected: no crash, the remaining tab keeps rendering.
+Smoke (a smoke, **not** proof — the race cannot be forced from outside; Task 2's test is the proof): with `LITEPDF_NO_RESTORE=1`, open `tests/fixtures/large.pdf` and `tests/fixtures/search.pdf` in one instance, hold PgDn on one tab while pressing Ctrl+W, reopen, repeat five times. Expected: no crash, the remaining tab keeps rendering.
 
 - [ ] **Step 7: Commit**
 
@@ -767,7 +810,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ---
 
-## Task A3: CHANGELOG, PR, merge gate
+## Task 4: CHANGELOG, PR, merge gate
 
 **Files:**
 - Modify: `CHANGELOG.md`
@@ -805,13 +848,13 @@ Record the passing count and the exact `litepdf.exe` byte size.
 
 Invoke the `risk-tiered-review` skill to classify the tier and run the lenses (never drop the Codex lens). Name this adversarial question for it: *is there any other path where a context cloned from a Document outlives it — `DocumentView`'s `ui_ctx` / `cache_ctx`, `RenderEngine`'s worker contexts, `ThumbnailRenderer` — and does anything posted across a thread still carry a bare clone?*
 
-Then push and open the PR: title `fix: keep the MuPDF lock table alive for escrowed contexts`, body with the test counts, exe size, the Step 9 discrimination result from Task A1, and `Closes #61`. Merge when `build-windows` is green.
+Then push and open the PR: title `fix: keep the MuPDF lock table alive for escrowed contexts`, body with the test counts, exe size, the Step 9 discrimination result from Task 2, and `Closes #61`. Merge when `build-windows` is green.
 
 ---
 
 # Part B — PR-1: text selection + copy (#52)
 
-## Task B0: Rebase and baseline
+## Task 5: Rebase and baseline
 
 **Files:** none.
 
@@ -837,7 +880,7 @@ Record the passing count and `litepdf.exe` size.
 
 ---
 
-## Task B1: The engine layer — `TextSelection` and `Document::TextPage`
+## Task 6: The engine layer — `TextSelection` and `Document::TextPage`
 
 **Files:**
 - Create: `src/core/TextSelection.hpp`
@@ -1323,15 +1366,25 @@ TEST_CASE("DocumentSelection CJK text round trips through copy",
     require_select_all_matches_page_text(doc, 0);
 }
 
-TEST_CASE("DocumentSelection works on an authenticated encrypted document",
+TEST_CASE("DocumentSelection a text page is available only after authenticate",
           "[core][selection]") {
+    // What this proves, and what it does not. encrypted.pdf's only page has NO
+    // text (MuPDF 1.27.2 extracts ''), so no selection query runs on decrypted
+    // content here -- the fixture cannot exercise that, and the test does not
+    // pretend to. It pins the acquisition contract only: no handle before
+    // authenticate (is_open() is false), a valid handle after it, and an empty
+    // range that agrees with page_text.
     Document doc;
     const auto err = doc.open("tests/fixtures/encrypted.pdf");
     REQUIRE(err.has_value());
     REQUIRE(*err == Document::OpenError::NeedsPassword);
     REQUIRE_FALSE(doc.text_page(0).valid());   // not open until authenticated
     REQUIRE(doc.authenticate("test"));
-    require_select_all_matches_page_text(doc, 0);
+    const auto text = doc.text_page(0);
+    REQUIRE(text.valid());
+    SelPoint first, last;
+    REQUIRE_FALSE(text.full_range(first, last));        // the fixture has no text
+    REQUIRE(without_whitespace(doc.page_text(0)).empty());
 }
 
 TEST_CASE("DocumentSelection works on a reflowable epub page",
@@ -1349,7 +1402,7 @@ TEST_CASE("DocumentSelection works on a reflowable epub page",
 Register in `tests/CMakeLists.txt`, after the `test_escrow_context.cpp` line:
 
 ```cmake
-    unit/test_document_selection.cpp   # #52 Task B1
+    unit/test_document_selection.cpp   # #52 Task 6
 ```
 
 - [ ] **Step 4: Run to verify it fails**
@@ -1529,9 +1582,12 @@ fz_point midpoint(fz_point a, fz_point b) noexcept {
 }
 
 // True when `p` resolves to the end of the page's text: nothing lies between it
-// and the trailing edge of the last character. (A trailing run of zero-extent
-// characters also reads as "at the end"; highlighting skips them, and treating
-// them as the end extends a selection by nothing visible.)
+// and the trailing edge of the last character. One false positive, accepted: a
+// trailing run of characters that on_highlight_char skips as "zero-extent" also
+// reads as the end. That test is MuPDF's same_point, which truncates to int
+// before comparing with 0.1 -- so it skips glyphs narrower than 1 pt, not only
+// zero-width ones. Treating such a run as the end extends a copy by characters
+// too small to see; it never moves the visible highlight.
 bool at_text_end(fz_context* ctx, fz_stext_page* stext, SelPoint p,
                  SelPoint text_end) noexcept {
     fz_quad probe;
@@ -1760,14 +1816,14 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ---
 
-## Task B2: One selection per tab in `DocumentView`
+## Task 7: One selection per tab in `DocumentView`
 
 **Files:**
 - Modify: `src/core/DocumentView.hpp`, `src/core/DocumentView.cpp`
 - Modify: `tests/unit/test_document_view.cpp`
 
 **Interfaces:**
-- Consumes: `core::TextSelection` (B1).
+- Consumes: `core::TextSelection` (Task 6).
 - Produces: `const std::optional<TextSelection>& DocumentView::selection() const noexcept`, `void DocumentView::set_selection(TextSelection selection)`, `void DocumentView::clear_selection() noexcept`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1849,7 +1905,13 @@ Immediately before the `// Bulk cancel on rapid nav (Phase 3 Task 11 wiring).` c
 
 - [ ] **Step 4: Implement it**
 
-In `src/core/DocumentView.cpp`, in `struct DocumentView::Impl`, after the line `bool dual_page = false;  // Phase 8 D10`, add:
+In `src/core/DocumentView.cpp`, in `struct DocumentView::Impl`, after this line (column-aligned in the file, quoted exactly):
+
+```cpp
+    bool                   dual_page     = false;  // Phase 8 D10
+```
+
+add:
 
 ```cpp
     std::optional<TextSelection> selection;       // #52; pure data, order-free
@@ -1892,7 +1954,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ---
 
-## Task B3: Pure UI logic — mappings, gesture state machine, UTF-16 conversion
+## Task 8: Pure UI logic — mappings, gesture state machine, UTF-16 conversion
 
 **Files:**
 - Modify: `src/ui/detail/ViewportMath.hpp`, `tests/unit/test_viewport_math.cpp`
@@ -1901,7 +1963,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Modify: `tests/CMakeLists.txt`
 
 **Interfaces:**
-- Consumes: `core::SelPoint`, `core::SelectMode` (B1); `ui::Placement`, `ui::bitmap_px_to_dip` (existing).
+- Consumes: `core::SelPoint`, `core::SelectMode` (Task 6); `ui::Placement`, `ui::bitmap_px_to_dip` (existing).
 - Produces:
   - `float ui::client_px_to_dip(float px, float dpi) noexcept`; `float ui::dip_to_pdf_point(float dip, float zoom_pct) noexcept`.
   - `enum class ui::Gesture { None, Selecting, Panning }`; `enum class ui::MouseButton { Left, Middle }`; `struct ui::PointerMetrics { int drag_cx, drag_cy, dblclk_cx, dblclk_cy; std::uint32_t dblclk_ms; }`.
@@ -2132,8 +2194,8 @@ TEST_CASE("ClipboardText utf8 to utf16 of empty text is empty", "[ui][clipboard]
 Register both in `tests/CMakeLists.txt`, after `test_document_selection.cpp`:
 
 ```cmake
-    unit/test_selection_drag.cpp       # #52 Task B3
-    unit/test_clipboard_text.cpp       # #52 Task B3
+    unit/test_selection_drag.cpp       # #52 Task 8
+    unit/test_clipboard_text.cpp       # #52 Task 8
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -2397,7 +2459,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ---
 
-## Task B4: Paint, Select All, Copy, and the Edit menu
+## Task 9: Paint, Select All, Copy, and the Edit menu
 
 **Files:**
 - Create: `src/ui/Clipboard.hpp`, `src/ui/Clipboard.cpp`
@@ -2407,14 +2469,14 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Modify: `CMakeLists.txt`
 
 **Interfaces:**
-- Consumes: `Document::text_page`, `TextPage::full_range/highlight/copy` (B1); `DocumentView::selection/set_selection` (B2); `utf8_to_utf16` (B3).
+- Consumes: `Document::text_page`, `TextPage::full_range/highlight/copy` (Task 6); `DocumentView::selection/set_selection` (Task 7); `utf8_to_utf16` (Task 8).
 - Produces:
   - `bool ui::set_clipboard_text(HWND owner, std::string_view utf8)`.
   - `void PdfCanvas::select_all()`, `void PdfCanvas::copy_selection_to_clipboard() const`.
   - Private: `bool PdfCanvas::own_bitmap() const noexcept`, `bool PdfCanvas::single_page_placement(Placement& out) const`, `const core::TextSelection* PdfCanvas::painted_selection() const noexcept`.
   - `IDM_EDIT_COPY = 40071`, `IDM_EDIT_SELECT_ALL = 40072`.
 
-This task has no unit test: every line is Win32 or Direct2D glue in the `litepdf` executable, which the test target does not link. Its logic is in B1-B3. Verification is the build, the unchanged suite, and the GUI checks in Step 9 — each of which names what would make it fail.
+This task has no unit test: every line is Win32 or Direct2D glue in the `litepdf` executable, which the test target does not link. Its logic is in Tasks 6-8. Verification is the build, the unchanged suite, and the GUI checks in Step 9 — each of which names what would make it fail.
 
 - [ ] **Step 1: The clipboard**
 
@@ -2910,11 +2972,104 @@ cmake --build build --config Release
 ctest --test-dir build -C Release
 ```
 
-Expected: build clean; same count as after B3, all passing. Record `litepdf.exe` size (must be < 19,000,000).
+Expected: build clean; same count as after Task 8, all passing. Record `litepdf.exe` size (must be < 19,000,000).
 
 - [ ] **Step 9: GUI checks**
 
-Use the scratch driver in **Appendix — GUI driver** (not committed). Set `$env:LITEPDF_NO_RESTORE = '1'` and back up `%LOCALAPPDATA%\LitePDF\session.json` **before the first launch**. Confirm the exe you run is `build\Release\litepdf.exe` from this branch.
+**First, write the GUI driver.** Save the script below as `build/gui/selection-drive.ps1` (create `build/gui/`). `build/` is git-ignored, so the driver is never committed and survives into Task 10, which uses it again. It is Windows PowerShell 5.1 syntax only (no `?.`, `??`, ternary); dot-source it from the repo root.
+
+```powershell
+# selection-drive.ps1 -- scratch driver for the #52 GUI checks. Not committed.
+# Dot-source from the repo root:  . .\build\gui\selection-drive.ps1
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName Microsoft.VisualBasic
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class U {
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+  public static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string cls, IntPtr title);
+  [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern IntPtr SendMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern IntPtr GetMenu(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetSubMenu(IntPtr m, int pos);
+  [DllImport("user32.dll")] public static extern uint GetMenuState(IntPtr m, uint id, uint flags);
+  [DllImport("user32.dll")] public static extern bool GetCursorInfo(ref CURSORINFO ci);
+  [DllImport("user32.dll")] public static extern IntPtr LoadCursorW(IntPtr inst, IntPtr id);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  [StructLayout(LayoutKind.Sequential)] public struct CURSORINFO { public int cbSize; public int flags; public IntPtr hCursor; public POINT pt; }
+}
+"@
+[void][U]::SetProcessDPIAware()
+
+$WM_COMMAND = 0x0111; $WM_KEYDOWN = 0x0100; $WM_INITMENUPOPUP = 0x0117; $WM_CLOSE = 0x0010
+$WM_MOUSEMOVE = 0x0200; $WM_LBUTTONDOWN = 0x0201; $WM_LBUTTONUP = 0x0202; $WM_LBUTTONDBLCLK = 0x0203
+$WM_MBUTTONDOWN = 0x0207; $WM_MBUTTONUP = 0x0208
+$MK_LBUTTON = 1; $MK_MBUTTON = 0x10; $VK_NEXT = 0x22
+
+function Start-LitePdf([string[]]$files) {
+  $env:LITEPDF_NO_RESTORE = '1'
+  $p = Start-Process -PassThru (Resolve-Path .\build\Release\litepdf.exe) -ArgumentList $files
+  for ($i = 0; $i -lt 50 -and [int64]$p.MainWindowHandle -eq 0; $i++) { Start-Sleep -Milliseconds 100; $p.Refresh() }
+  $script:Proc   = $p
+  $script:Main   = [IntPtr]$p.MainWindowHandle
+  $script:Canvas = [U]::FindWindowExW($script:Main, [IntPtr]::Zero, 'LitePDFPdfCanvas', [IntPtr]::Zero)
+  if ([int64]$script:Canvas -eq 0) { throw 'canvas HWND not found' }
+  Start-Sleep -Milliseconds 800
+}
+
+function Send-Command([int]$id) { [void][U]::PostMessageW($script:Main, $WM_COMMAND, [IntPtr]$id, [IntPtr]::Zero); Start-Sleep -Milliseconds 300 }
+function Page-Down([int]$n) { for ($i = 0; $i -lt $n; $i++) { [void][U]::PostMessageW($script:Canvas, $WM_KEYDOWN, [IntPtr]$VK_NEXT, [IntPtr]::Zero); Start-Sleep -Milliseconds 400 } }
+
+# FitWidth at the top of an overflowing page: client px = page pt * canvas width / page width.
+function To-Client([double]$xPt, [double]$yPt, [double]$pageWidthPt = 612) {
+  $r = New-Object U+RECT; [void][U]::GetClientRect($script:Canvas, [ref]$r)
+  $s = ($r.Right - $r.Left) / $pageWidthPt
+  return @([int][math]::Round($xPt * $s), [int][math]::Round($yPt * $s))
+}
+
+function Post-Mouse([int]$msg, [int]$x, [int]$y, [int]$keys) {
+  $l = [IntPtr](($y -shl 16) -bor ($x -band 0xFFFF))
+  [void][U]::PostMessageW($script:Canvas, $msg, [IntPtr]$keys, $l)
+  Start-Sleep -Milliseconds 40
+}
+
+function Drag([int[]]$from, [int[]]$to, [int]$steps = 10) {
+  Post-Mouse $WM_LBUTTONDOWN $from[0] $from[1] $MK_LBUTTON
+  for ($i = 1; $i -le $steps; $i++) {
+    $x = [int]($from[0] + ($to[0] - $from[0]) * $i / $steps)
+    $y = [int]($from[1] + ($to[1] - $from[1]) * $i / $steps)
+    Post-Mouse $WM_MOUSEMOVE $x $y $MK_LBUTTON
+  }
+  Post-Mouse $WM_LBUTTONUP $to[0] $to[1] 0
+}
+
+function Double-Click([int[]]$at) {
+  Post-Mouse $WM_LBUTTONDOWN $at[0] $at[1] $MK_LBUTTON; Post-Mouse $WM_LBUTTONUP $at[0] $at[1] 0
+  Post-Mouse $WM_LBUTTONDBLCLK $at[0] $at[1] $MK_LBUTTON; Post-Mouse $WM_LBUTTONUP $at[0] $at[1] 0
+}
+
+function Set-Sentinel { Set-Clipboard -Value 'SENTINEL-52' }
+function Get-Clip { Start-Sleep -Milliseconds 200; return (Get-Clipboard -Raw) }
+
+function Keys([string]$keys) {
+  [Microsoft.VisualBasic.Interaction]::AppActivate($script:Proc.Id)
+  Start-Sleep -Milliseconds 300
+  [System.Windows.Forms.SendKeys]::SendWait($keys)
+  Start-Sleep -Milliseconds 300
+}
+
+function Close-LitePdf { [void][U]::PostMessageW($script:Main, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero) }
+```
+
+Example — `. .\build\gui\selection-drive.ps1; Set-Sentinel; Start-LitePdf @('tests\fixtures\selection.pdf'); Page-Down 3; Send-Command 40072; Send-Command 40071; Get-Clip`.
+
+Set `$env:LITEPDF_NO_RESTORE = '1'` and back up `%LOCALAPPDATA%\LitePDF\session.json` **before the first launch**. Confirm the exe you run is `build\Release\litepdf.exe` from this branch.
 
 Each check sets the clipboard to a sentinel first, so "nothing happened" is visible.
 
@@ -2949,17 +3104,17 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ---
 
-## Task B5: Mouse gestures, cursor and teardown
+## Task 10: Mouse gestures, cursor and teardown
 
 **Files:**
 - Modify: `src/ui/PdfCanvas.hpp`, `src/ui/PdfCanvas.cpp`
 - Modify: `src/ui/MainWindow.hpp`
 
 **Interfaces:**
-- Consumes: `GestureState`, `ClickCounter`, `PointerMetrics`, `MouseButton`, `ReleaseAction`, `canvas_dip_to_page_point`, `client_px_to_dip` (B3); `TextPage::snap/highlight/copy` (B1); `own_bitmap`, `single_page_placement`, `painted_selection` (B4).
+- Consumes: `GestureState`, `ClickCounter`, `PointerMetrics`, `MouseButton`, `ReleaseAction`, `canvas_dip_to_page_point`, `client_px_to_dip` (Task 8); `TextPage::snap/highlight/copy` (Task 6); `own_bitmap`, `single_page_placement`, `painted_selection` (Task 9).
 - Produces: no public interface. Private: `on_left_button_down`, `on_mouse_move`, `on_left_button_up`, `cancel_gesture`, `refresh_live_selection`, `commit_live_selection`, `page_point_at`, `update_cursor`.
 
-No unit test, for the reason given in B4; the state machine is B3's. GUI checks in Step 8.
+No unit test, for the reason given in Task 9; the state machine is Task 8's. GUI checks in Step 8.
 
 - [ ] **Step 1: `PdfCanvas.hpp` declarations**
 
@@ -3063,7 +3218,19 @@ In `select_all`, change the first line to:
     if (impl_->gesture.gesture() != Gesture::None) return;   // a drag owns the selection
 ```
 
-- [ ] **Step 4: Teardown on view swap and page change**
+- [ ] **Step 4: Teardown on view swap, layout change and page change**
+
+In `set_dual_page`, immediately after its first line `if (!impl_ || impl_->dual_page == on) return;`, add:
+
+```cpp
+    // #52: a live selection drag cannot survive a switch to the spread layout.
+    // It would keep extending with single-page geometry while the canvas paints
+    // the spread, and commit a selection nothing draws but Ctrl+C still copies
+    // -- the state on_left_button_down refuses to create (spec §1). The page
+    // snap that follows in MainWindow does not reliably cancel it: it calls
+    // change_current_page only when the page is not already a spread's left.
+    cancel_gesture();
+```
 
 At the very top of `set_view`, before the existing comment block, add:
 
@@ -3307,129 +3474,13 @@ cmake --build build --config Release
 ctest --test-dir build -C Release
 ```
 
-Expected: build clean, all passing, same count as B4.
+Expected: build clean, all passing, same count as Task 9.
 
-GUI checks, driver in the Appendix, `LITEPDF_NO_RESTORE=1`, `session.json` backed up first, sentinel set before each. Open `tests/fixtures/selection.pdf`, PgDn ×3 to `alpha beta gamma`. Page-space targets (points, top-left origin) — convert with the driver's `To-Client`:
-
-| name | x | y |
-|---|---|---|
-| left of `alpha` | 60 | 68 |
-| `beta` centre | 116 | 68 |
-| right of `gamma` | 200 | 68 |
-| below all text | 300 | 400 |
-
-1. **Stationary double click selects a word.** At `beta`: DOWN, UP, DBLCLK, UP; post `IDM_EDIT_COPY`. Expected: `beta`. **Fails if** the sentinel remains (the click-clears rule ate the word).
-2. **A single click clears.** After check 1, DOWN+UP at `below all text`, copy. Expected: sentinel intact.
-3. **Triple click selects the line.** DOWN, UP, DBLCLK, UP, DOWN, UP at `beta` (all within 500 ms), copy. Expected: `alpha beta gamma`.
-4. **Forward drag.** DOWN at `left of alpha`, MOVE in 10 steps to `right of gamma`, UP, copy. Expected: `alpha beta gamma`.
-5. **Backward drag keeps its anchor.** DOWN at `right of gamma`, MOVE in 10 steps to `left of alpha`, UP, copy. Expected: `alpha beta gamma`. **Fails if** the text is shorter — the walking-anchor defect needs several moves to show, which is why 10.
-6. **Word drag from below the text** (plan correction C4). DOWN, UP, DBLCLK at `below all text`, MOVE to `beta`, UP, copy. Expected: `beta gamma` CRLF `delta epsilon`.
-7. **A second button cancels, and the canvas recovers.** DOWN at `left of alpha`, MOVE to `right of gamma`, `WM_MBUTTONDOWN`, `WM_MBUTTONUP`, `WM_LBUTTONUP`, copy → sentinel intact. Then repeat check 4 → `alpha beta gamma`. **Fails if** the second drag copies nothing (a gesture left latched).
-8. **Tab close mid-drag.** Open `search.pdf` in the same instance (a second tab), DOWN + MOVE on it, post `IDM_TAB_CLOSE` (40030) while the button is "held". Expected: no crash; on the remaining tab, check 4 still passes.
-9. **Spread mode refuses.** Post `IDM_VIEW_DUAL_PAGE`, then drag as in check 4, copy. Expected: sentinel intact.
-10. **Cursor.** Bring litepdf to the foreground (`AppActivate`), `ClientToScreen` the `beta` point on the canvas, `SetCursorPos` there, wait 100 ms, `GetCursorInfo`: `hCursor == LoadCursorW(NULL, IDC_IBEAM)` (32513). Negative control: FitWidth leaves no grey surround beside the page, so post `IDM_ZOOM_OUT` (40011) twice, wait for the render, and move the cursor to canvas client `(width - 5, 20)`, which is now outside the page: `IDC_ARROW` (32512). **Fails if** the I-beam never appears, or appears over the surround.
-
-Restore `session.json`, close with `WM_CLOSE`.
-
-- [ ] **Step 9: Commit**
-
-```bash
-git add src/ui/PdfCanvas.hpp src/ui/PdfCanvas.cpp src/ui/MainWindow.hpp
-git commit -m "feat(canvas): select text by drag, double click and triple click
-
-The canvas keeps a live selection while a gesture is in progress and
-commits it to the view on release -- deciding before ReleaseCapture, whose
-synchronous WM_CAPTURECHANGED would otherwise cancel the drag first. A
-double or triple click commits at press time. A second button, a page
-change, a view swap or a lost capture cancels without committing.
-
-Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
-```
-
----
-
-## Task B6: CHANGELOG, final verification, merge gate
-
-**Files:**
-- Modify: `CHANGELOG.md`
-
-- [ ] **Step 1: CHANGELOG**
-
-Under `## [Unreleased]`, add an `### Added` section **above** the `### Fixed` section PR-0 created (Keep a Changelog order), and one bullet to `### Fixed`:
-
-```markdown
-### Added
-
-- Text selection and copy. Drag across a page to select text, double-click to
-  select a word, triple-click to select a line; Ctrl+C copies the selection and
-  Ctrl+A selects the whole page. A new Edit menu carries both. A selection stays
-  when you turn the page and is cleared by the next click. Selection works in
-  single-page mode and does not cross pages.
-```
-
-```markdown
-- Search highlights are no longer drawn over the previous page, or the previous
-  tab's page, in the moment before the new one finishes rendering.
-```
-
-- [ ] **Step 2: Verify the claims against the artifact**
-
-Run `build/Release/litepdf.exe tests/fixtures/selection.pdf` and read each bullet next to the running window — drag, double-click, triple-click, Ctrl+C, Ctrl+A, the Edit menu, a page turn. PR #43 shipped a CHANGELOG bullet that was false; this step is why.
-
-- [ ] **Step 3: Full verification**
-
-```bash
-python scripts/generate-selection-fixture.py --check
-cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
-```
-
-Expected: `--check` exits 0; all tests pass. Record the exact passing count (B0 baseline + 17 + 2 + 2 + 2 + 9 = baseline + 32) and the `litepdf.exe` byte size.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add CHANGELOG.md
-git commit -m "docs(changelog): record text selection and copy
-
-Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
-```
-
-- [ ] **Step 5: Merge gate, then PR**
-
-Invoke the `risk-tiered-review` skill (never drop the Codex lens). Name these least-certain claims for the adversarial lens:
-
-1. **C5's premise** — that `TranslateAcceleratorW` consumes the keystroke of a grayed item without sending `WM_COMMAND`. Step 9 check 5 of Task B4 is the live evidence; is there a focus state (a list view, the tab strip, a modeless print progress dialog) where the Edit arm's enable state and the `WM_COMMAND` dispatch disagree?
-2. **C4's restore** — can `at_text_end` report true for a raw point that is *not* at the end of the text (a page whose final characters are all zero-extent, a page ending in a synthetic space), so that `snap` extends a selection it should not?
-3. **Re-entrancy** — `cancel_gesture` runs from `set_view`, `change_current_page`, `WM_CAPTURECHANGED` and the second-button arm. Is there a path where it runs inside `on_left_button_down` or `on_left_button_up` between `begin_select` / `release` and the capture call, leaving the capture held with no gesture, or a gesture with no capture?
-
-Push, open the PR titled `feat: text selection and copy`, body with the counts, exe size, the discrimination results from Task B1 Step 9, the GUI check results, a note that the overlay's bitmap-identity guard is a search-path fix carried by this PR, and `Closes #52`.
-
----
-
-## Known limitations (recorded, not fixed)
-
-| | |
-|---|---|
-| R1 | No selection in two-page spread mode — neither painted nor startable (spec §1). |
-| R2 | No cross-page selection; revisit with continuous scroll (#55). |
-| R3 | Rotated text highlights as an axis-aligned box, as search hits already do. |
-| R4 | Acquiring a `TextPage` (every left press on a page, and Select All) builds the page's stext on the UI thread under `doc_mutex`, contending with a running search scan. Bounded: once per gesture; the query path is lock-free. |
-| R5 | Marquee selection and the right-click context menu are their own issues. |
-| R6 | `popup_owns` would false-positive if a popup gained a nested submenu. |
-| R7 | Right-to-left text: `full_range` uses the left/right quad edges MuPDF uses for left-to-right characters. Untested — no RTL fixture exists. |
-| R8 | A double click in blank space below the last line selects the page's last word — MuPDF resolves the point to the end of the text, and word snapping extends back to the word start. Chrome selects nothing there. |
-| R9 | The I-beam cursor shows over any page area, including images and blank margins inside the page box. |
-
----
-
-## Appendix — GUI driver (scratch, NOT committed)
-
-Save as `selection-drive.ps1` in the session scratchpad and dot-source it from Windows PowerShell 5.1 at the repo root. PowerShell 5.1 syntax only (no `?.`, `??`, ternary).
+**The driver.** Task 9 wrote `build/gui/selection-drive.ps1`. If it is missing (a fresh clone, a cleaned build tree), recreate it with exactly this content:
 
 ```powershell
 # selection-drive.ps1 -- scratch driver for the #52 GUI checks. Not committed.
-# Dot-source:  . $scratch\selection-drive.ps1
+# Dot-source from the repo root:  . .\build\gui\selection-drive.ps1
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName Microsoft.VisualBasic
 Add-Type @"
@@ -3516,13 +3567,101 @@ function Keys([string]$keys) {
 function Close-LitePdf { [void][U]::PostMessageW($script:Main, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero) }
 ```
 
-Example (Task B5 check 1):
+Example (check 1 below) — `. .\build\gui\selection-drive.ps1; Set-Sentinel; Start-LitePdf @('tests\fixtures\selection.pdf'); Page-Down 3; Double-Click (To-Client 116 68); Send-Command 40071; Get-Clip` → `beta`.
 
-```powershell
-Set-Sentinel
-Start-LitePdf @('tests\fixtures\selection.pdf'); Page-Down 3
-Double-Click (To-Client 116 68)
-Send-Command 40071
-Get-Clip    # expect: beta
-Close-LitePdf
+GUI checks, with that driver, `LITEPDF_NO_RESTORE=1`, `session.json` backed up first, sentinel set before each. Open `tests/fixtures/selection.pdf`, PgDn ×3 to `alpha beta gamma`. Page-space targets (points, top-left origin) — convert with the driver's `To-Client`:
+
+| name | x | y |
+|---|---|---|
+| left of `alpha` | 60 | 68 |
+| `beta` centre | 116 | 68 |
+| right of `gamma` | 200 | 68 |
+| below all text | 300 | 400 |
+
+1. **Stationary double click selects a word.** At `beta`: DOWN, UP, DBLCLK, UP; post `IDM_EDIT_COPY`. Expected: `beta`. **Fails if** the sentinel remains (the click-clears rule ate the word).
+2. **A single click clears.** After check 1, DOWN+UP at `below all text`, copy. Expected: sentinel intact.
+3. **Triple click selects the line.** DOWN, UP, DBLCLK, UP, DOWN, UP at `beta` (all within 500 ms), copy. Expected: `alpha beta gamma`.
+4. **Forward drag.** DOWN at `left of alpha`, MOVE in 10 steps to `right of gamma`, UP, copy. Expected: `alpha beta gamma`.
+5. **Backward drag keeps its anchor.** DOWN at `right of gamma`, MOVE in 10 steps to `left of alpha`, UP, copy. Expected: `alpha beta gamma`. **Fails if** the text is shorter — the walking-anchor defect needs several moves to show, which is why 10.
+6. **Word drag from below the text** (plan correction C4). DOWN, UP, DBLCLK at `below all text`, MOVE to `beta`, UP, copy. Expected: `beta gamma` CRLF `delta epsilon`.
+7. **A second button cancels, and the canvas recovers.** DOWN at `left of alpha`, MOVE to `right of gamma`, `WM_MBUTTONDOWN`, `WM_MBUTTONUP`, `WM_LBUTTONUP`, copy → sentinel intact. Then repeat check 4 → `alpha beta gamma`. **Fails if** the second drag copies nothing (a gesture left latched).
+8. **Tab close mid-drag.** Open `search.pdf` in the same instance (a second tab), DOWN + MOVE on it, post `IDM_TAB_CLOSE` (40030) while the button is "held". Expected: no crash; on the remaining tab, check 4 still passes.
+9. **Spread mode refuses.** Post `IDM_VIEW_DUAL_PAGE`, then drag as in check 4, copy. Expected: sentinel intact.
+   **9b. Entering spread mode mid-drag cancels the drag.** Back in single-page mode (post `IDM_VIEW_DUAL_PAGE` again), sentinel set: DOWN at `left of alpha`, MOVE 5 steps toward `right of gamma`, post `IDM_VIEW_DUAL_PAGE`, MOVE to `right of gamma`, UP, copy. Expected: sentinel intact. **Fails if** the clipboard holds `alpha beta gamma` — a selection committed in a layout that cannot display it.
+10. **Cursor.** Bring litepdf to the foreground (`AppActivate`), `ClientToScreen` the `beta` point on the canvas, `SetCursorPos` there, wait 100 ms, `GetCursorInfo`: `hCursor == LoadCursorW(NULL, IDC_IBEAM)` (32513). Negative control: FitWidth leaves no grey surround beside the page, so post `IDM_ZOOM_OUT` (40011) twice, wait for the render, and move the cursor to canvas client `(width - 5, 20)`, which is now outside the page: `IDC_ARROW` (32512). **Fails if** the I-beam never appears, or appears over the surround.
+
+Restore `session.json`, close with `WM_CLOSE`.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/ui/PdfCanvas.hpp src/ui/PdfCanvas.cpp src/ui/MainWindow.hpp
+git commit -m "feat(canvas): select text by drag, double click and triple click
+
+The canvas keeps a live selection while a gesture is in progress and
+commits it to the view on release -- deciding before ReleaseCapture, whose
+synchronous WM_CAPTURECHANGED would otherwise cancel the drag first. A
+double or triple click commits at press time. A second button, a page
+change, a view swap or a lost capture cancels without committing.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
+
+---
+
+## Task 11: CHANGELOG, final verification, merge gate
+
+**Files:**
+- Modify: `CHANGELOG.md`
+
+- [ ] **Step 1: CHANGELOG**
+
+Under `## [Unreleased]`, add an `### Added` section **above** the `### Fixed` section PR-0 created (Keep a Changelog order), and one bullet to `### Fixed`:
+
+```markdown
+### Added
+
+- Text selection and copy. Drag across a page to select text, double-click to
+  select a word, triple-click to select a line; Ctrl+C copies the selection and
+  Ctrl+A selects the whole page. A new Edit menu carries both. A selection stays
+  when you turn the page and is cleared by the next click. Selection works in
+  single-page mode and does not cross pages.
+```
+
+```markdown
+- Search highlights are no longer drawn over the previous page, or the previous
+  tab's page, in the moment before the new one finishes rendering.
+```
+
+- [ ] **Step 2: Verify the claims against the artifact**
+
+Run `build/Release/litepdf.exe tests/fixtures/selection.pdf` and read each bullet next to the running window — drag, double-click, triple-click, Ctrl+C, Ctrl+A, the Edit menu, a page turn. PR #43 shipped a CHANGELOG bullet that was false; this step is why.
+
+- [ ] **Step 3: Full verification**
+
+```bash
+python scripts/generate-selection-fixture.py --check
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
+```
+
+Expected: `--check` exits 0; all tests pass. Record the exact passing count (Task 5 baseline + 17 + 2 + 2 + 2 + 9 = baseline + 32) and the `litepdf.exe` byte size.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add CHANGELOG.md
+git commit -m "docs(changelog): record text selection and copy
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+```
+
+- [ ] **Step 5: Merge gate, then PR**
+
+Invoke the `risk-tiered-review` skill (never drop the Codex lens). Name these least-certain claims for the adversarial lens:
+
+1. **C5's premise** — that `TranslateAcceleratorW` consumes the keystroke of a grayed item without sending `WM_COMMAND`. Step 9 check 5 of Task 9 is the live evidence; is there a focus state (a list view, the tab strip, a modeless print progress dialog) where the Edit arm's enable state and the `WM_COMMAND` dispatch disagree?
+2. **C4's restore** — can `at_text_end` report true for a raw point that is *not* at the end of the text, beyond the one accepted case (a trailing run of glyphs narrower than 1 pt, which MuPDF's `same_point` skips), so that `snap` extends a selection visibly?
+3. **Re-entrancy** — `cancel_gesture` runs from `set_view`, `change_current_page`, `WM_CAPTURECHANGED` and the second-button arm. Is there a path where it runs inside `on_left_button_down` or `on_left_button_up` between `begin_select` / `release` and the capture call, leaving the capture held with no gesture, or a gesture with no capture?
+
+Push, open the PR titled `feat: text selection and copy`, body with the counts, exe size, the discrimination results from Task 6 Step 9, the GUI check results, a note that the overlay's bitmap-identity guard is a search-path fix carried by this PR, and `Closes #52`.

@@ -591,6 +591,11 @@ an HWND, following `SplitterMath.hpp` / `ViewportMath.hpp`.
 - *A page change cancels a live drag.* A selection is bound to one page (§1); a
   drag that outlived its page would extend the old page's text with the new page's
   geometry. `change_current_page` is the single funnel, so the cancel lives there.
+- *Entering two-page spread mode cancels a live drag* (`set_dual_page`). Refusing
+  to *start* a drag in spread mode is not enough: toggling the layout mid-drag
+  would otherwise commit a selection the spread cannot paint but Ctrl+C copies, and
+  the page snap that follows the toggle does not reach `change_current_page` when
+  the page is already a spread's left page. Found at the plan gate.
 - *A gesture that captures no text commits nothing* — it clears, rather than
   leaving an empty selection that would enable Copy for nothing.
 - *`fz_snap_selection` never writes the far end when it lies past the page's last
@@ -867,7 +872,7 @@ A test file that is never compiled is a check that can only pass.
 | `test_escrow_context.cpp` (new, #61 PR) | the lock table outliving the `Document` while an `EscrowContext` holds it, counted |
 | `test_viewport_math.cpp` (extend) | `dip_to_pdf_point` round-trip against `pdf_point_to_dip`; zero / negative / NaN zoom |
 | `test_selection_drag.cpp` (new) | drag state transitions including the `WM_CAPTURECHANGED` abort, the commit-before-release ordering, and **`Gesture` exclusivity under interleaved buttons**; click-count → `SelectMode`; **a stationary double click commits a word**; page clamping |
-| `test_document_selection.cpp` (new) | against fixtures: `search.pdf`, `simple.pdf`, `cjk-zh-hant.pdf` (multi-byte round-trip), `encrypted.pdf` (selection after `authenticate`), `sample.epub`, and a **new `selection.pdf`** whose pages each pin one behaviour below |
+| `test_document_selection.cpp` (new) | against fixtures: `search.pdf`, `simple.pdf`, `cjk-zh-hant.pdf` (multi-byte round-trip), `encrypted.pdf` (a handle only after `authenticate` — its page has no text, so no query runs on decrypted content), `sample.epub`, and a **new `selection.pdf`** whose pages each pin one behaviour below |
 
 The regressions that matter more than the rest, because each is invisible in the
 obvious manual test:
