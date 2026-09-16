@@ -60,6 +60,18 @@ Full tier, high-stakes (architecture-changing: MuPDF context and lock-table owne
 
 **Codex `terra@high`** (post-fix baseline `1ef692d`) — PASS, zero findings; read the plan, the spec, the evidence bundle and three full source files, and answered each least-certain claim. **It ran concurrently with three other projects' Codex sessions**, so its credit figures are not a clean measurement; the finding count is unaffected.
 
+**Codex `luna@max`** (baseline `ca4d03d`). Attempt 1 is **VOID**: after 462k tokens — spent largely on reading 1,400-2,300-line source files in full, because the sandbox blocks `Select-String` — it hit the ChatGPT short-window usage limit (four projects' Codex sessions were running) and wrote no report. Attempt 2 ran after the window reset on a **narrowed brief** that allowed exactly three reads (this plan, the spec, a 2,370-line verbatim evidence bundle) and ranked scope/verification/drift defects first; it read only those three files. Five Important, six Minor, four questions. Every anchor was checked; the outcome:
+
+- **Fixed — GUI check 2 was not executable** (Important). It asked for "a DPI-aware capture … blue boxes over both lines" with no command and no threshold, so a missing overlay could pass. The driver now has `Count-SelectionBlue`, and the check has numeric thresholds with a negative control before the selection and another on the next page.
+- **Fixed — a gesture could latch when the capture did not take** (Important, downgraded: a real click makes the window foreground first, so it is hard to reach). A live gesture found at the next press without this window holding the capture is now cancelled instead of refusing every later press.
+- **Fixed — four overbroad or wrong comments** (Minor): `copy()`'s "never an error into a window procedure" (a C++ `bad_alloc` from `assign` still propagates; the claim now covers MuPDF errors only); "the canvas is destroyed FIRST" (members declared after `canvas_` go earlier — it is destroyed *before `tabs_`*); `focused_edit_control`'s "an edit control added later needs no change" (true only of a standard EDIT, not a RichEdit); and the quad-buffer cap, now documented as truncating the highlight, not the copy. Known limitations gained R10 (zoom-to-render misalignment, pre-existing for search) and R11 (the cap).
+- **Refuted — "Ctrl+C stays swallowed after the selection or focus changes"** (Important). The live probe's second run shows `TranslateAcceleratorW` sends `WM_INITMENUPOPUP` on every accelerator press and honours a state changed inside that handler, so the enable state is recomputed each time. (Documented exception: no such message while a mouse capture is held — i.e. mid-drag, where Ctrl+C has nothing committed to copy.)
+- **By design — "a selection on another page can be copied"** (Important). Decision D2 (spec §2): a selection persists across page changes, and Ctrl+C copies it, as Chrome and Acrobat do.
+- **Disputed documentation, kept — "the drag threshold treats a width as a radius"** (Important). `GetSystemMetrics` defines `SM_CXDRAG` as pixels "on either side" of the press point; `DragDetect`'s page calls it a rectangle width. The plan follows the metric's own definition and now says so in the comment.
+- **Not this plan's — "the null-pixmap post path returns true even when `PostMessageW` fails"** (Minor). Pre-existing in `post_render_done_impl`, untouched by Task 3.
+- **Discarded — "the two driver copies and their numeric IDs can drift"** (Minor). The duplication is what makes each task brief self-contained; the driver is scratch, plan-lifetime, and its IDs were checked against `MainMenu.rc.h` at the gate.
+- Questions answered: `DocumentView::set_current_page` has exactly one caller, `PdfCanvas::change_current_page` (the other `set_current_page` hits are ThumbnailPane's own method); render completions still queued when the canvas HWND is destroyed are discarded with their payloads — a pre-existing exit-time leak, unchanged here.
+
 ---
 
 ## Global Constraints
@@ -150,6 +162,8 @@ Part B depends on Part A's `EscrowContext`. Do not start Part B until PR-0 is me
 | R7 | Right-to-left text: `full_range` uses the left/right quad edges MuPDF uses for left-to-right characters. Untested — no RTL fixture exists. |
 | R8 | A double click in blank space below the last line selects the page's last word — MuPDF resolves the point to the end of the text, and word snapping extends back to the word start. Chrome selects nothing there. |
 | R9 | The I-beam cursor shows over any page area, including images and blank margins inside the page box. |
+| R10 | Between a zoom change and the arrival of its render, the canvas still shows the old-scale bitmap of the same page, so `own_bitmap()` is true while `zoom_pct` is already new: selection highlights, search highlights and a press's pointer-to-page mapping are briefly misaligned. Pre-existing for search hits; the window is one render. |
+| R11 | A selection needing more than 65,536 separate highlight quads on one page paints only the first 65,536; the copied text is complete. |
 
 ---
 
@@ -1580,6 +1594,9 @@ struct Document::TextPage::Impl {
 namespace {
 
 constexpr int kSelectionQuadsInitial = 256;
+// A memory bound, not a correctness limit: past it the HIGHLIGHT is truncated
+// (copy() is unaffected). 65,536 disjoint quads on one page is far beyond real
+// documents; recorded as a known limitation.
 constexpr int kSelectionQuadsMax     = 1 << 16;
 
 fz_point to_fz(SelPoint p) noexcept { return fz_make_point(p.x, p.y); }
@@ -1710,7 +1727,7 @@ std::string Document::TextPage::copy(SelPoint a, SelPoint b) const {
     }
     fz_catch(ctx) {
         fz_report_error(ctx);
-        return out;   // allocation failure: an empty copy, never an error into a window procedure
+        return out;   // a MuPDF allocation failure becomes an empty copy, not a MuPDF error
     }
     if (!text) return out;
     try {
@@ -2348,8 +2365,13 @@ public:
     }
 
     // Pointer motion while a gesture is live. The threshold is sticky: once
-    // crossed, returning to the press point is still a drag. SM_CXDRAG counts
-    // pixels on EITHER side of the press point, so crossing means exceeding it.
+    // crossed, returning to the press point is still a drag. GetSystemMetrics
+    // documents SM_CXDRAG as "the number of pixels on either side of a
+    // mouse-down point that the mouse pointer can move before a drag operation
+    // begins", so crossing means exceeding it. (DragDetect's page instead calls
+    // it the width of the drag rectangle; the two Win32 pages disagree, and this
+    // follows the metric's own definition. The cost of the other reading is a
+    // 2-pixel difference in how far a click may wander before it becomes a drag.)
     void move(int x_px, int y_px, const PointerMetrics& m) noexcept {
         if (gesture_ == Gesture::None || moved_) return;
         if (std::abs(x_px - origin_x_) > m.drag_cx
@@ -2848,10 +2870,12 @@ with
 
 // #52. Accelerators pre-empt every child window (see IDM_FIND_CLOSE), so a
 // Ctrl+C or Ctrl+A meant for an edit control reaches MainWindow as WM_COMMAND
-// and must be handed back. Keyed on the window CLASS, so an edit control added
-// later needs no change here. A standard EDIT reports exactly L"Edit";
-// _wcsicmp makes the L"EDIT" creation spelling irrelevant; a subclassed edit
-// (the status bar's page box) keeps its class name.
+// and must be handed back. Keyed on the window CLASS, so another standard EDIT
+// control added later needs no change here -- but a different edit class (a
+// RichEdit, a custom control) does, and would otherwise be treated as the
+// canvas. Every edit control in the app today is a standard EDIT, which reports
+// exactly L"Edit"; _wcsicmp makes the L"EDIT" creation spelling irrelevant; a
+// subclassed edit (the status bar's page box) keeps its class name.
 HWND focused_edit_control() {
     HWND focus = GetFocus();
     if (!focus) return nullptr;
@@ -2990,6 +3014,7 @@ Expected: build clean; same count as after Task 8, all passing. Record `litepdf.
 # selection-drive.ps1 -- scratch driver for the #52 GUI checks. Not committed.
 # Dot-source from the repo root:  . .\build\gui\selection-drive.ps1
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName Microsoft.VisualBasic
 Add-Type @"
 using System;
@@ -3072,6 +3097,31 @@ function Keys([string]$keys) {
   Start-Sleep -Milliseconds 300
 }
 
+# Count pixels of the selection fill (Windows blue at 35% over a white page) in a
+# page-space rectangle, from a DPI-aware screen capture of the canvas. The canvas
+# must be unobscured, so this brings litepdf to the foreground first.
+function Count-SelectionBlue([double]$x0Pt, [double]$y0Pt, [double]$x1Pt, [double]$y1Pt) {
+  [Microsoft.VisualBasic.Interaction]::AppActivate($script:Proc.Id)
+  Start-Sleep -Milliseconds 400
+  $a = To-Client $x0Pt $y0Pt; $b = To-Client $x1Pt $y1Pt
+  $w = $b[0] - $a[0]; $h = $b[1] - $a[1]
+  $pt = New-Object U+POINT
+  $pt.X = $a[0]; $pt.Y = $a[1]
+  [void][U]::ClientToScreen($script:Canvas, [ref]$pt)
+  $bmp = New-Object System.Drawing.Bitmap $w, $h
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.CopyFromScreen($pt.X, $pt.Y, 0, 0, (New-Object System.Drawing.Size $w, $h))
+  $n = 0
+  for ($y = 0; $y -lt $h; $y++) {
+    for ($x = 0; $x -lt $w; $x++) {
+      $c = $bmp.GetPixel($x, $y)
+      if ([math]::Abs($c.R - 166) -le 20 -and [math]::Abs($c.G - 208) -le 20 -and [math]::Abs($c.B - 241) -le 20) { $n++ }
+    }
+  }
+  $g.Dispose(); $bmp.Dispose()
+  return $n
+}
+
 function Close-LitePdf { [void][U]::PostMessageW($script:Main, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero) }
 ```
 
@@ -3082,7 +3132,7 @@ Set `$env:LITEPDF_NO_RESTORE = '1'` and back up `%LOCALAPPDATA%\LitePDF\session.
 Each check sets the clipboard to a sentinel first, so "nothing happened" is visible.
 
 1. **Select All + Copy, final character included.** Open `tests/fixtures/selection.pdf`, PgDn ×3 (page 4, `alpha beta gamma`), post `IDM_EDIT_SELECT_ALL` then `IDM_EDIT_COPY`. Expected clipboard, exactly: `alpha beta gamma` CRLF `delta epsilon`. **Fails if:** the sentinel remains, or the text ends `epsilo`.
-2. **The highlight is drawn, and only on its page.** DPI-aware capture of the canvas (see `reference_litepdf_scripted_gui_smoke`; assert the capture size equals the canvas client size): blue boxes over both lines. PgDn: none on page 5. PgUp: back. Post `IDM_EDIT_COPY` again with the sentinel set — the same text (the selection persisted). **Fails if:** blue boxes on page 5, or the second copy yields the sentinel.
+2. **The highlight is drawn, and only on its page.** Measure with the driver's `Count-SelectionBlue 60 55 260 100` — the page-space box around both text lines — which counts pixels of the selection fill in a DPI-aware capture. Run it at four points, waiting for each render to land: (a) on page index 3 **before** check 1's Select All — expect **< 20** (negative control); (b) right after check 1 — expect **> 300** (the two lines are roughly 100 × 12 pt of fill each, several thousand pixels at FitWidth); (c) after PgDn to page index 4 — expect **< 20**; (d) after PgUp back — expect **> 300**. Then set the sentinel and post `IDM_EDIT_COPY` again: the same text as check 1 (the selection persisted). **Fails if:** (a) ≥ 20 — the capture is mis-framed or occluded, so fix the measurement before believing (b)-(d); (b) or (d) ≤ 300 — the selection is not painted; (c) ≥ 20 — it is painted on the wrong page; or the second copy yields the sentinel.
 3. **Copy with no selection does not touch the clipboard.** Fresh launch, same page, post `IDM_EDIT_COPY` only. Expected: sentinel intact.
 4. **Spread mode.** Post `IDM_VIEW_DUAL_PAGE` (40062), then `IDM_EDIT_SELECT_ALL`, then `IDM_EDIT_COPY`. Expected: no *new* selection — the clipboard holds whatever check 1 put there if you continued that session, or the sentinel on a fresh launch.
 5. **Real Ctrl+C / Ctrl+A in the find box, with NO document selection** (plan correction C5 — this needs real keystrokes, because a posted `WM_COMMAND` skips `TranslateAcceleratorW`). Fresh launch, bring litepdf to the foreground, `SendKeys` `^f`, type `alpha`, `SendKeys` `^a`, then `^c`. Expected clipboard: `alpha`. **Fails if** the sentinel remains — that is the grayed-accelerator swallow. Negative control, same session: click the canvas, `SendKeys` `^c`: sentinel (re-set it first) intact.
@@ -3330,6 +3380,14 @@ void PdfCanvas::on_left_button_down(bool is_double_click_message, int x_px, int 
         is_double_click_message, static_cast<std::uint32_t>(GetMessageTime()),
         x_px, y_px, pointer_metrics());
 
+    // A gesture that is live while this window does NOT hold the capture is
+    // stale: SetCapture did not take (the capture belongs to the foreground
+    // thread), so the matching button-up went elsewhere and no
+    // WM_CAPTURECHANGED will ever arrive to end it. Refusing this press would
+    // leave the canvas ignoring every press for the rest of the session.
+    if (impl_->gesture.gesture() != Gesture::None && GetCapture() != hwnd_) {
+        cancel_gesture();
+    }
     if (impl_->gesture.gesture() != Gesture::None) return;
     // Refuse spread mode HERE, not only in paint: current_bitmap holds the LEFT
     // slot in that mode, so a drag would compute points with single-page
@@ -3471,7 +3529,7 @@ In `src/ui/MainWindow.hpp`, immediately above `std::unique_ptr<TabManager>   tab
 
 ```cpp
     // DECLARATION ORDER IS LOAD-BEARING (#52): tabs_ before canvas_, so the
-    // canvas is destroyed FIRST at exit. The canvas holds a raw DocumentView*
+    // canvas is destroyed BEFORE tabs_ at exit. The canvas holds a raw DocumentView*
     // that must never be read after tabs_ has destroyed the views. (Its
     // mid-gesture Document::TextPage is escrow-backed and would survive either
     // order; the raw view pointer would not.)
@@ -3492,6 +3550,7 @@ Expected: build clean, all passing, same count as Task 9.
 # selection-drive.ps1 -- scratch driver for the #52 GUI checks. Not committed.
 # Dot-source from the repo root:  . .\build\gui\selection-drive.ps1
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName Microsoft.VisualBasic
 Add-Type @"
 using System;
@@ -3572,6 +3631,31 @@ function Keys([string]$keys) {
   Start-Sleep -Milliseconds 300
   [System.Windows.Forms.SendKeys]::SendWait($keys)
   Start-Sleep -Milliseconds 300
+}
+
+# Count pixels of the selection fill (Windows blue at 35% over a white page) in a
+# page-space rectangle, from a DPI-aware screen capture of the canvas. The canvas
+# must be unobscured, so this brings litepdf to the foreground first.
+function Count-SelectionBlue([double]$x0Pt, [double]$y0Pt, [double]$x1Pt, [double]$y1Pt) {
+  [Microsoft.VisualBasic.Interaction]::AppActivate($script:Proc.Id)
+  Start-Sleep -Milliseconds 400
+  $a = To-Client $x0Pt $y0Pt; $b = To-Client $x1Pt $y1Pt
+  $w = $b[0] - $a[0]; $h = $b[1] - $a[1]
+  $pt = New-Object U+POINT
+  $pt.X = $a[0]; $pt.Y = $a[1]
+  [void][U]::ClientToScreen($script:Canvas, [ref]$pt)
+  $bmp = New-Object System.Drawing.Bitmap $w, $h
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.CopyFromScreen($pt.X, $pt.Y, 0, 0, (New-Object System.Drawing.Size $w, $h))
+  $n = 0
+  for ($y = 0; $y -lt $h; $y++) {
+    for ($x = 0; $x -lt $w; $x++) {
+      $c = $bmp.GetPixel($x, $y)
+      if ([math]::Abs($c.R - 166) -le 20 -and [math]::Abs($c.G - 208) -le 20 -and [math]::Abs($c.B - 241) -le 20) { $n++ }
+    }
+  }
+  $g.Dispose(); $bmp.Dispose()
+  return $n
 }
 
 function Close-LitePdf { [void][U]::PostMessageW($script:Main, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero) }

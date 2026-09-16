@@ -597,6 +597,10 @@ an HWND, following `SplitterMath.hpp` / `ViewportMath.hpp`.
   page snap that follows the toggle always calls `change_current_page`, but that
   function cancels only when the page actually changes — and a page that is already
   a spread's left page does not. Found at the plan gate.
+- *A live gesture without the capture is stale.* If `SetCapture` did not take, the
+  button-up goes elsewhere and no `WM_CAPTURECHANGED` arrives, so the next press
+  cancels such a gesture instead of refusing — otherwise every later press would be
+  refused for the rest of the session. Found at the plan gate.
 - *A gesture that captures no text commits nothing* — it clears, rather than
   leaving an empty selection that would enable Copy for nothing.
 - *`fz_snap_selection` never writes the far end when it lies past the page's last
@@ -927,6 +931,8 @@ design.
 | R8 | Right-to-left text: `full_range` uses the left/right quad edges MuPDF uses for left-to-right characters. Untested — no RTL fixture exists. |
 | R9 | A double click in the blank space below the last line selects the page's last word: MuPDF resolves the point to the end of the text and word snapping extends back to the word's start. Chrome selects nothing there. |
 | R10 | The I-beam cursor shows over the whole page box, including images and margins. |
+| R11 | Between a zoom change and the arrival of its render the canvas still shows the old-scale bitmap of the same page, so highlights and a press's pointer mapping are briefly misaligned. Pre-existing for search hits; the window is one render. |
+| R12 | A selection needing more than 65,536 separate highlight quads on one page paints only the first 65,536 (a memory bound); the copied text is complete. |
 
 ### 6.3 Review record
 
