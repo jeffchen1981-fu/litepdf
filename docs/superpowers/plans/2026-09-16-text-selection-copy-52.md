@@ -72,6 +72,12 @@ Full tier, high-stakes (architecture-changing: MuPDF context and lock-table owne
 - **Discarded — "the two driver copies and their numeric IDs can drift"** (Minor). The duplication is what makes each task brief self-contained; the driver is scratch, plan-lifetime, and its IDs were checked against `MainMenu.rc.h` at the gate.
 - Questions answered: `DocumentView::set_current_page` has exactly one caller, `PdfCanvas::change_current_page` (the other `set_current_page` hits are ThumbnailPane's own method); render completions still queued when the canvas HWND is destroyed are discarded with their payloads — a pre-existing exit-time leak, unchanged here.
 
+**PR-0 merge gate** (PR #62, merged as `8e1dc2f`). Part A landed as Tasks 2-4 specify, plus one round-1 fix commit that Part B's tasks must not undo:
+
+- `EscrowContext::clone_from`'s comment no longer names `Document::text_page` — it did not exist on `main`. **Task 6 Step 7 adds it back** now that it does.
+- `tests/CMakeLists.txt` calls `catch_discover_tests(litepdf_unit_tests WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" PROPERTIES TIMEOUT 120)` (a lifetime regression deadlocks instead of failing; the slowest test on CI takes 2.58 s). New tests inherit the timeout.
+- `Document.cpp` no longer includes `<array>`.
+
 ---
 
 ## Global Constraints
@@ -126,6 +132,7 @@ Part B depends on Part A's `EscrowContext`. Do not start Part B until PR-0 is me
 |---|---|---|
 | `src/core/TextSelection.hpp` | create | Pure data: `SelPoint`, `SelectMode`, `Quad`, `TextSelection`. |
 | `src/core/Document.hpp` / `.cpp` | modify | `Document::TextPage` and `Document::text_page`. |
+| `src/core/EscrowContext.hpp` | modify | `clone_from`'s comment lists `Document::text_page` among its callers. |
 | `scripts/generate-selection-fixture.py` | create | Deterministic generator for `selection.pdf`, with `--check`. |
 | `tests/fixtures/selection.pdf` | create | Generated; six pages, each pinning one behaviour. |
 | `tests/unit/test_document_selection.cpp` | create | Engine-layer tests. |
@@ -906,7 +913,7 @@ Record the passing count and `litepdf.exe` size.
 
 **Files:**
 - Create: `src/core/TextSelection.hpp`
-- Modify: `src/core/Document.hpp`, `src/core/Document.cpp`
+- Modify: `src/core/Document.hpp`, `src/core/Document.cpp`, `src/core/EscrowContext.hpp`
 - Create: `scripts/generate-selection-fixture.py`, `tests/fixtures/selection.pdf` (generated)
 - Create: `tests/unit/test_document_selection.cpp`
 - Modify: `tests/CMakeLists.txt`
@@ -1567,6 +1574,22 @@ Immediately before the `private:` line of `class Document`, add:
 
 Add `#include "core/EscrowContext.hpp"` after `#include "core/MuPDFLocks.hpp"`, and `#include <climits>` among the standard includes.
 
+In `src/core/EscrowContext.hpp`, `clone_from`'s comment lists its current callers, and `text_page` is about to become one. Replace
+
+```cpp
+    // is exactly the #61 use-after-free, one call earlier. Every caller today
+    // runs while the Document is alive: the render callback on a RenderEngine
+    // worker, which the Document outlives.
+```
+
+with
+
+```cpp
+    // is exactly the #61 use-after-free, one call earlier. Every caller today
+    // runs while the Document is alive: Document::text_page under doc_mutex, and
+    // the render callback on a RenderEngine worker, which the Document outlives.
+```
+
 Append, immediately before the file's final `} // namespace litepdf::core`:
 
 ```cpp
@@ -1821,7 +1844,7 @@ ctest --test-dir build -C Release
 ```
 
 ```bash
-git add src/core/TextSelection.hpp src/core/Document.hpp src/core/Document.cpp scripts/generate-selection-fixture.py tests/fixtures/selection.pdf tests/unit/test_document_selection.cpp tests/CMakeLists.txt
+git add src/core/TextSelection.hpp src/core/Document.hpp src/core/Document.cpp src/core/EscrowContext.hpp scripts/generate-selection-fixture.py tests/fixtures/selection.pdf tests/unit/test_document_selection.cpp tests/CMakeLists.txt
 git commit -m "feat(core): text selection engine layer (Document::TextPage)
 
 A handle on one page's stext, held on its own EscrowContext so it survives
