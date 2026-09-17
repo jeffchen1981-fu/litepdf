@@ -1,5 +1,6 @@
 #include "core/Document.hpp"
 
+#include "core/MuPDFLocks.hpp"
 #include "core/SearchQuery.hpp"
 #include "core/SystemFonts.hpp"
 
@@ -24,35 +25,12 @@
 
 namespace litepdf::core {
 
-namespace {
-
-// MuPDF requires a lock table (FZ_LOCK_MAX entries) to be supplied at
-// fz_new_context time when we want fz_clone_context to succeed. Without
-// locks, MuPDF refuses to clone because cloned contexts share the same
-// underlying store / font cache and must serialize access to them.
-//
-// The lock table itself is heap-owned per fz_context (MuPDF keeps the
-// fz_locks_context pointer, so the pointed-to storage must outlive the
-// context). We stash it in the Impl.
-struct MuPDFLocks {
-    std::array<std::mutex, FZ_LOCK_MAX> mutexes;
-    fz_locks_context fz;
-};
-
-void litepdf_lock(void* user, int lock) {
-    auto* locks = static_cast<MuPDFLocks*>(user);
-    locks->mutexes[static_cast<std::size_t>(lock)].lock();
-}
-
-void litepdf_unlock(void* user, int lock) {
-    auto* locks = static_cast<MuPDFLocks*>(user);
-    locks->mutexes[static_cast<std::size_t>(lock)].unlock();
-}
-
-} // namespace
-
 struct Document::Impl {
-    std::unique_ptr<MuPDFLocks> locks;
+    // Shared, not unique: every core::EscrowContext cloned from this Document's
+    // family holds a copy, so the table outlives the last escrow even when this
+    // Document is destroyed first (#61). Declared FIRST so it is destroyed LAST,
+    // after ~Impl has dropped the document and the context through it.
+    std::shared_ptr<detail::MuPDFLocks> locks;
     fz_context* ctx = nullptr;
     fz_document* doc = nullptr;
     bool needs_password = false;
@@ -78,10 +56,7 @@ struct Document::Impl {
     // tab-level parallelism which §5.4 actually promises.
     mutable std::mutex doc_mutex;
 
-    Impl() : locks(std::make_unique<MuPDFLocks>()) {
-        locks->fz.user = locks.get();
-        locks->fz.lock = &litepdf_lock;
-        locks->fz.unlock = &litepdf_unlock;
+    Impl() : locks(detail::MuPDFLocks::create()) {
         ctx = fz_new_context(nullptr, &locks->fz, FZ_STORE_DEFAULT);
         if (!ctx) throw std::bad_alloc();
         fz_register_document_handlers(ctx);
