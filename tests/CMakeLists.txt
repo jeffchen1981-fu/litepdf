@@ -95,4 +95,9 @@ target_link_libraries(litepdf_unit_tests PRIVATE
 )
 
 include(Catch)
-catch_discover_tests(litepdf_unit_tests WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+# Per-test TIMEOUT: a lifetime regression can deadlock instead of failing (a
+# failed REQUIRE unwinds through a lock table that is already freed, see
+# test_escrow_context.cpp), and ctest's default of 1500 s would stall CI.
+catch_discover_tests(litepdf_unit_tests
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    PROPERTIES TIMEOUT 120)

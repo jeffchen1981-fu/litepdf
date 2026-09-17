@@ -7,7 +7,6 @@
 #include <mupdf/fitz.h>
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <cassert>
 #include <cctype>
