@@ -78,6 +78,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_page_anchor.cpp          # PR-A2 Task 2
     unit/test_scroll_math.cpp          # PR-A2 Task 7
     unit/test_status_bar_math.cpp      # PR-B Task 1
+    unit/test_escrow_context.cpp       # #61 escrow lock-table lifetime
     # The CLI helpers under test are compiled straight into the test binary
     # (they are not part of litepdf_core). Both are MuPDF-header-free and
     # resolve their fz_* calls through the litepdf::mupdf dependency that
@@ -94,4 +95,9 @@ target_link_libraries(litepdf_unit_tests PRIVATE
 )
 
 include(Catch)
-catch_discover_tests(litepdf_unit_tests WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+# Per-test TIMEOUT: a lifetime regression can deadlock instead of failing (a
+# failed REQUIRE unwinds through a lock table that is already freed, see
+# test_escrow_context.cpp), and ctest's default of 1500 s would stall CI.
+catch_discover_tests(litepdf_unit_tests
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    PROPERTIES TIMEOUT 120)

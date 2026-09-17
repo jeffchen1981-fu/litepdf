@@ -162,6 +162,11 @@ public:
     // Caller owns the returned pointer and MUST release it with
     // fz_drop_context() when done.
     //
+    // A bare clone must NOT outlive this Document: its lock callbacks point into
+    // the Document's lock table. A context that has to survive the Document --
+    // anything posted across a thread or held across a tab close -- must be a
+    // core::EscrowContext (core/EscrowContext.hpp), which keeps the table alive.
+    //
     // Thread-safety: safe to call from multiple threads simultaneously.
     // fz_clone_context internally acquires FZ_LOCK_ALLOC when bumping
     // shared-context refcounts, and the lock table installed by the
