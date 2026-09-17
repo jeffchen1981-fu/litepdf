@@ -8,6 +8,13 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 
 ## [Unreleased]
 
+### Fixed
+
+- A page render that finished just after its tab was closed could free its image
+  through memory the closed document had already released. The window was narrow
+  and no crash has been observed; the lock table that drop depends on now lives as
+  long as the last thing that uses it (#61).
+
 ## [1.3.0] — 2026-09-13 — Zoom, wheel scrolling, and the page indicator
 
 ### Added
