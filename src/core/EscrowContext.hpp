@@ -46,8 +46,8 @@ public:
     // root reads `source`'s lock-callback `user` pointer before any reference is
     // taken, so cloning from a bare clone whose Document has died is exactly the
     // #61 use-after-free, one call earlier. Every caller today runs while the
-    // Document is alive: the render callback on a RenderEngine worker, which the
-    // Document outlives.
+    // Document is alive: Document::text_page under doc_mutex, and the render
+    // callback on a RenderEngine worker, which the Document outlives.
     // Empty on a null source, a context that does not lock through a litepdf
     // lock table, or a failed clone (out of memory). Thread-safe.
     [[nodiscard]] static EscrowContext clone_from(fz_context* source) noexcept;
