@@ -3,6 +3,7 @@
 
 #include "MainMenu.rc.h"
 #include "core/DocumentView.hpp"
+#include "core/EscrowContext.hpp"
 #include "ui/ColdStartTimer.hpp"
 #include "ui/PdfCanvasLayout.hpp"
 #include "ui/detail/ViewportMath.hpp"
@@ -15,6 +16,7 @@
 #include <mutex>
 #include <new>
 #include <stdexcept>
+#include <utility>
 #pragma comment(lib, "d2d1.lib")
 
 // Forward-decl MuPDF APIs we need on the UI thread so we don't have to
@@ -26,8 +28,6 @@ extern "C" {
     int  fz_pixmap_stride(fz_context*, fz_pixmap*);
     unsigned char* fz_pixmap_samples(fz_context*, fz_pixmap*);
     void fz_drop_pixmap(fz_context*, fz_pixmap*);
-    fz_context* fz_clone_context(fz_context*);
-    void        fz_drop_context(fz_context*);
 }
 
 using Microsoft::WRL::ComPtr;
@@ -68,11 +68,11 @@ namespace litepdf::ui {
 //        this completion consume the pending page anchor?
 namespace {
 struct RenderMeta {
-    fz_context*   escrow;
-    std::uint64_t epoch;
-    int           page;
-    litepdf::ui::Slot slot;
-    std::uint64_t seq;
+    litepdf::core::EscrowContext escrow;
+    std::uint64_t     epoch = 0;
+    int               page  = 0;
+    litepdf::ui::Slot slot  = litepdf::ui::Slot::Left;
+    std::uint64_t     seq   = 0;
 };
 
 // Internal helper: shared escrow + Post logic for both the LEFT/single
@@ -88,22 +88,30 @@ bool post_render_done_impl(HWND target, UINT msg, litepdf::ui::Slot slot,
                      static_cast<LPARAM>(0));
         return true;
     }
-    fz_context* escrow = fz_clone_context(worker_ctx);
-    if (!escrow) {
+    // The escrow keeps the Document's lock table alive as well as cloning the
+    // context, so the UI thread can drop this pixmap even if the tab closes
+    // before the message is handled (#61).
+    litepdf::core::EscrowContext escrow =
+        litepdf::core::EscrowContext::clone_from(worker_ctx);
+    if (!escrow.valid()) {
         fz_drop_pixmap(worker_ctx, pix);
         return false;
     }
-    auto* meta = new (std::nothrow) RenderMeta{escrow, epoch, page, slot, seq};
+    // Allocate BEFORE moving the escrow in, so the failure path still owns it.
+    auto* meta = new (std::nothrow) RenderMeta{};
     if (!meta) {
-        fz_drop_pixmap(escrow, pix);
-        fz_drop_context(escrow);
-        return false;
+        fz_drop_pixmap(escrow.get(), pix);
+        return false;   // `escrow` drops its context, then the table
     }
+    meta->escrow = std::move(escrow);
+    meta->epoch  = epoch;
+    meta->page   = page;
+    meta->slot   = slot;
+    meta->seq    = seq;
     if (!PostMessageW(target, msg,
                       reinterpret_cast<WPARAM>(pix),
                       reinterpret_cast<LPARAM>(meta))) {
-        fz_drop_pixmap(escrow, pix);
-        fz_drop_context(escrow);
+        fz_drop_pixmap(meta->escrow.get(), pix);
         delete meta;
         return false;
     }
@@ -619,16 +627,20 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 // post_render_done helper. Don't drop on a guessed ctx.
                 return 0;
             }
-            fz_context* escrow = meta->escrow;
+            // Adopt the escrow before freeing the meta. It must outlive every
+            // fz_drop_pixmap below; it is destroyed when this block exits, which
+            // drops its context and only then the lock table (#61).
+            litepdf::core::EscrowContext escrow = std::move(meta->escrow);
             const std::uint64_t epoch = meta->epoch;
             const int           page  = meta->page;
             const Slot          slot  = meta->slot;
             const std::uint64_t seq   = meta->seq;
             delete meta;
-            if (!escrow) {
+            if (!escrow.valid()) {
                 // Defensive: meta without escrow — nothing safe to drop.
                 return 0;
             }
+            fz_context* const ectx = escrow.get();
 
             // Is this pixmap still wanted? Four ways it may not be: the view
             // was swapped (issue #35 — a render for the previous tab landing
@@ -654,20 +666,18 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                                    seq, impl_->next_seq,
                                    page, slot,
                                    cur_page, impl_->dual_page, total)) {
-                fz_drop_pixmap(escrow, pix);
-                fz_drop_context(escrow);
+                fz_drop_pixmap(ectx, pix);
                 return 0;
             }
 
-            const int w_px   = fz_pixmap_width(escrow, pix);
-            const int h_px   = fz_pixmap_height(escrow, pix);
-            const int stride = fz_pixmap_stride(escrow, pix);
-            unsigned char* samples = fz_pixmap_samples(escrow, pix);
+            const int w_px   = fz_pixmap_width(ectx, pix);
+            const int h_px   = fz_pixmap_height(ectx, pix);
+            const int stride = fz_pixmap_stride(ectx, pix);
+            unsigned char* samples = fz_pixmap_samples(ectx, pix);
 
             create_render_target();
             if (!impl_->rt) {
-                fz_drop_pixmap(escrow, pix);
-                fz_drop_context(escrow);
+                fz_drop_pixmap(ectx, pix);
                 return 0;
             }
 
@@ -680,8 +690,7 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                             static_cast<UINT32>(h_px)),
                 samples, static_cast<UINT32>(stride), &props, &bmp);
 
-            fz_drop_pixmap(escrow, pix);
-            fz_drop_context(escrow);
+            fz_drop_pixmap(ectx, pix);
 
             if (hr == D2DERR_RECREATE_TARGET) {
                 discard_render_target();

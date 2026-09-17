@@ -26,11 +26,13 @@ namespace litepdf::core { class DocumentView; }
 namespace litepdf::ui {
 
 // Posted by render-done callback. WPARAM = fz_pixmap* (kept by worker),
-// LPARAM = a heap RenderMeta* { fz_context* escrow clone; the render's
+// LPARAM = a heap RenderMeta* { core::EscrowContext escrow; the render's
 // {epoch, page, slot, seq} identity }.
-// On cancel/fail both are null. Canvas drops the pixmap through escrow,
-// then drops escrow — staying on the pixmap's own MuPDF root even if the
-// producing DocumentView has been swapped or destroyed. The identity is
+// On cancel/fail both are null. Canvas drops the pixmap through the escrow,
+// then lets the escrow go — staying on the pixmap's own MuPDF root even if the
+// producing DocumentView has been swapped or destroyed. The escrow also keeps
+// the Document's lock table alive; without that, the drop would call through
+// freed memory once the tab had closed (#61). The identity is
 // captured at submit time and decides whether the completion is still
 // wanted: accept_completion (ui/detail/CompletionMath.hpp) drops a result
 // from a superseded view (issue #35), from a submission a newer batch has
@@ -92,9 +94,9 @@ public:
     Pan  pan() const;
     void set_pan(float x, float y);
 
-    // Post WM_USER_RENDER_DONE to `target` for the (pixmap, ctx) pair,
-    // where `ctx` is a clone-escrow made from `worker_ctx` so the UI
-    // thread can drop the pixmap with the correct MuPDF root — even if
+    // Post WM_USER_RENDER_DONE to `target` for the pixmap, together with a
+    // core::EscrowContext cloned from `worker_ctx` so the UI thread can drop
+    // the pixmap with the correct MuPDF root and a live lock table — even if
     // the producing DocumentView is torn down before the message lands.
     //
     // Called from the worker thread inside the render callback, which
@@ -103,7 +105,7 @@ public:
     // UI thread inherits that one ref and drops it through the escrow.
     // On any failure (clone OOM, meta allocation, post FALSE) this helper
     // drops the pixmap itself — on worker_ctx if the clone failed, on the
-    // escrow otherwise — and then drops the escrow ctx. Either way the
+    // escrow otherwise — and then releases the escrow. Either way the
     // caller must never drop the pixmap again. Returns true iff the
     // message was successfully posted.
     //
