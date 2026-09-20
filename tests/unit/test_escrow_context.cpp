@@ -66,12 +66,12 @@ TEST_CASE("EscrowContext keeps the lock table alive after its Document is destro
     REQUIRE(live_mupdf_roots() == before);
 }
 
-// What this case CANNOT catch: a DOUBLE drop of the root context. Both counters
-// below are driven from ~MuPDFRoot, and family_context_count reads bookkeeping
-// that a second free leaves untouched, so a root freed twice can still satisfy
-// every assertion here. Reproducing that fault class deterministically needs a
-// poisoning allocator -- running the suite under a debugger enables the NT debug
-// heap, which is how the original crash was made 15/15 reproducible.
+// What this case CANNOT catch: a second drop of the root that happens AFTER the
+// family count is read below -- two drops inside ~MuPDFRoot, say. A second drop
+// before that point lands in the count, the same observable the ownership
+// mutation trips. Reproducing a double free deterministically needs a poisoning
+// allocator -- running the suite under a debugger enables the NT debug heap,
+// which is how the original crash was made 15/15 reproducible.
 TEST_CASE("EscrowContext keeps the root context alive until the last escrow dies",
           "[core][escrow]") {
     const std::size_t before_roots = live_mupdf_roots();

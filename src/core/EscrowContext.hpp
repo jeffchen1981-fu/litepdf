@@ -8,8 +8,10 @@
 // clone's own fz_drop_context -- locks through it. It also shares the colorspace
 // context, which MuPDF tears down in whichever context of the family dies last:
 // that teardown frees the ICC profiles through the context that created them,
-// the root the Document cloned from. MuPDF keeps its master context alive until
-// the last clone dies, but it knows nothing about either of ours (#61).
+// the root the Document cloned from. MuPDF does keep the master as a husk until
+// the last clone dies -- but fz_drop_context frees that husk (its `free_master`
+// branch) BEFORE it runs fz_drop_colorspace_context, so the husk does not save
+// the ICC teardown, and MuPDF knows nothing about our lock table either (#61).
 // An EscrowContext holds a strong reference to the lock table AND the root
 // context for its whole life, and releases them LAST, after it has dropped its
 // own context.
