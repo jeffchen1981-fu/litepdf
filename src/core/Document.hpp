@@ -240,6 +240,12 @@ public:
     // doc_mutex. Every method below is lock-free: it reads an immutable
     // structure the handle holds a ref to, and copy() allocates on the handle's
     // own escrow, whose error stack is its own (spec §3.2).
+    //
+    // A handle is single-threaded, though: full_range() memoises the page's
+    // first and last edges into the handle (warmed at acquisition, so a drag
+    // never pays for the walk), which two threads calling it on the same handle
+    // would race on. Everything that touches a handle today runs on the UI
+    // thread.
     class TextPage {
     public:
         TextPage() noexcept;
