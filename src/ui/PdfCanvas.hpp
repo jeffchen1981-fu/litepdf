@@ -326,7 +326,7 @@ private:
     // spec §4.2 has the message ordering these depend on.
     void on_left_button_down(bool is_double_click_message, int x_px, int y_px);
     void on_mouse_move(int x_px, int y_px);
-    void on_left_button_up();
+    void on_left_button_up(int x_px, int y_px);
 
     // End any live gesture WITHOUT committing, drop its text handle and release
     // the capture. Never dereferences impl_->view: set_view calls it before

@@ -689,7 +689,15 @@ void PdfCanvas::on_mouse_move(int x_px, int y_px) {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
-void PdfCanvas::on_left_button_up() {
+void PdfCanvas::on_left_button_up(int x_px, int y_px) {
+    // WM_LBUTTONUP carries the pointer position at the moment of release, and
+    // it is not always preceded by a WM_MOUSEMOVE for that same position --
+    // injected input delivers a press and a release with nothing in between.
+    // Feeding it through the state machine first means the release is decided
+    // against where the pointer actually ended, so a drag cannot be mistaken
+    // for a click that clears the selection.
+    on_mouse_move(x_px, y_px);
+
     // Decide and commit FIRST, release SECOND. ReleaseCapture delivers
     // WM_CAPTURECHANGED synchronously; had it run first, that arm would cancel
     // the drag before this one read it, and the selection highlighted under the
@@ -817,7 +825,7 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             on_mouse_move(GET_X_LPARAM(l), GET_Y_LPARAM(l));
             return 0;
         case WM_LBUTTONUP:
-            on_left_button_up();
+            on_left_button_up(GET_X_LPARAM(l), GET_Y_LPARAM(l));
             return 0;
         case WM_MBUTTONDOWN:
         case WM_RBUTTONDOWN:
