@@ -14,6 +14,10 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
   through memory the closed document had already released. The window was narrow
   and no crash has been observed; the lock table that drop depends on now lives as
   long as the last thing that uses it (#61).
+- A page render that outlived its document could still crash while being freed.
+  Keeping the document's lock table alive was not enough: MuPDF frees a
+  document's colour profiles through the context that created them, so that
+  context now lives as long as the last render that came from it (#61).
 
 ## [1.3.0] — 2026-09-13 — Zoom, wheel scrolling, and the page indicator
 

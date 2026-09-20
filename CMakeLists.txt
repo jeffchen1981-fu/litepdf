@@ -42,7 +42,7 @@ include(ImportMuPDF)  # defines litepdf::mupdf INTERFACE target
 add_library(litepdf_core STATIC
     src/core/Document.cpp
     src/core/EscrowContext.cpp     # #61
-    src/core/MuPDFLocks.cpp        # #61
+    src/core/MuPDFRoot.cpp         # #61
     src/core/DocumentView.cpp
     src/core/MruList.cpp
     src/core/PageCache.cpp
