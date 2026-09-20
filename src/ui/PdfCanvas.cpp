@@ -63,13 +63,19 @@ using litepdf::ui::MouseButton;
 using litepdf::ui::PointerMetrics;
 using litepdf::ui::ReleaseAction;
 
-PointerMetrics pointer_metrics() {
+// Per-monitor, not system: the process is PerMonitorV2 (resources/manifest.xml),
+// so a window on a second display reports mouse positions in THAT monitor's
+// pixels while GetSystemMetrics keeps answering in the primary's. Comparing the
+// two turns hand wander into a drag, or degrades a triple click to a double, by
+// the ratio of the two scale factors.
+PointerMetrics pointer_metrics(HWND hwnd) {
+    const UINT dpi = GetDpiForWindow(hwnd);
     PointerMetrics m;
-    m.drag_cx   = GetSystemMetrics(SM_CXDRAG);
-    m.drag_cy   = GetSystemMetrics(SM_CYDRAG);
-    m.dblclk_cx = GetSystemMetrics(SM_CXDOUBLECLK);
-    m.dblclk_cy = GetSystemMetrics(SM_CYDOUBLECLK);
-    m.dblclk_ms = GetDoubleClickTime();
+    m.drag_cx   = GetSystemMetricsForDpi(SM_CXDRAG, dpi);
+    m.drag_cy   = GetSystemMetricsForDpi(SM_CYDRAG, dpi);
+    m.dblclk_cx = GetSystemMetricsForDpi(SM_CXDOUBLECLK, dpi);
+    m.dblclk_cy = GetSystemMetricsForDpi(SM_CYDOUBLECLK, dpi);
+    m.dblclk_ms = GetDoubleClickTime();   // a time, not a distance: DPI-free
     return m;
 }
 
@@ -631,7 +637,7 @@ void PdfCanvas::on_left_button_down(bool is_double_click_message, int x_px, int 
     // the double click that really preceded it.
     const litepdf::core::SelectMode mode = impl_->clicks.press(
         is_double_click_message, static_cast<std::uint32_t>(GetMessageTime()),
-        x_px, y_px, pointer_metrics());
+        x_px, y_px, pointer_metrics(hwnd_));
 
     // A gesture that is live while this window does NOT hold the capture is
     // stale: SetCapture did not take (the capture belongs to the foreground
@@ -680,7 +686,7 @@ void PdfCanvas::on_left_button_down(bool is_double_click_message, int x_px, int 
 
 void PdfCanvas::on_mouse_move(int x_px, int y_px) {
     if (impl_->gesture.gesture() != Gesture::Selecting || !impl_->live_selection) return;
-    impl_->gesture.move(x_px, y_px, pointer_metrics());
+    impl_->gesture.move(x_px, y_px, pointer_metrics(hwnd_));
     Placement pl;
     if (!own_bitmap() || !single_page_placement(pl)) return;
     // RAW: the pointer position, never a snapped one (spec §2).

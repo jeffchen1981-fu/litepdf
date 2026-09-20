@@ -598,6 +598,13 @@ struct Document::TextPage::Impl {
     EscrowContext  escrow;
     fz_stext_page* stext = nullptr;
     int            page  = -1;
+    // The page's first and last character edges. Invariant for the handle's
+    // life -- the stext page never changes -- so it is computed once at
+    // acquisition instead of per WM_MOUSEMOVE: snap() consults it on every
+    // word or line drag move, and the walk is over every character on the page.
+    bool           has_range  = false;
+    SelPoint       range_first{};
+    SelPoint       range_last{};
 
     Impl() = default;
     ~Impl() {
@@ -652,6 +659,11 @@ int Document::TextPage::page() const noexcept {
 
 bool Document::TextPage::full_range(SelPoint& first, SelPoint& last) const noexcept {
     if (!valid()) return false;
+    if (impl_->has_range) {
+        first = impl_->range_first;
+        last  = impl_->range_last;
+        return true;
+    }
     const fz_stext_char* head = nullptr;
     const fz_stext_char* tail = nullptr;
     // Top-level text blocks only, in list order: exactly the walk
@@ -674,6 +686,9 @@ bool Document::TextPage::full_range(SelPoint& first, SelPoint& last) const noexc
     // trailing edge resolves to the boundary after it.
     first = from_fz(midpoint(head->quad.ll, head->quad.ul));
     last  = from_fz(midpoint(tail->quad.lr, tail->quad.ur));
+    impl_->range_first = first;
+    impl_->range_last  = last;
+    impl_->has_range   = true;
     return true;
 }
 
@@ -805,6 +820,10 @@ Document::TextPage Document::text_page(std::size_t index) const noexcept {
     handle->stext = stext;
     handle->page  = static_cast<int>(index);
     result.impl_  = std::move(handle);
+    // Warm the cached range on the acquisition that already costs a page walk,
+    // so no drag move pays for it.
+    SelPoint warm_first, warm_last;
+    (void)result.full_range(warm_first, warm_last);
     return result;
 }
 
