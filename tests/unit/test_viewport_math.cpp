@@ -1,6 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
+#include <limits>
+
 #include "ui/detail/ViewportMath.hpp"
 
 using litepdf::ui::bitmap_px_to_dip;
@@ -92,4 +94,24 @@ TEST_CASE("ViewportMath pdf point to dip mapping is dpi invariant", "[ui][viewpo
     // hidden dpi term of its own.
     REQUIRE(pdf_point_to_dip(72.0f, 2.0f)
             == Catch::Approx(2.0f * pdf_point_to_dip(72.0f, 1.0f)));
+}
+
+TEST_CASE("ViewportMath dip to pdf point inverts pdf point to dip", "[ui][viewport]") {
+    using litepdf::ui::dip_to_pdf_point;
+    using litepdf::ui::pdf_point_to_dip;
+    for (float pct : { 0.25f, 1.0f, 1.5f, 8.0f }) {
+        REQUIRE(dip_to_pdf_point(pdf_point_to_dip(123.5f, pct), pct)
+                == Catch::Approx(123.5f));
+    }
+    // Degenerate zoom must not divide by zero or propagate NaN.
+    REQUIRE(dip_to_pdf_point(100.0f,  0.0f) == 0.0f);
+    REQUIRE(dip_to_pdf_point(100.0f, -1.0f) == 0.0f);
+    REQUIRE(dip_to_pdf_point(100.0f, std::numeric_limits<float>::quiet_NaN()) == 0.0f);
+}
+
+TEST_CASE("ViewportMath client px to dip uses the render target dpi ratio", "[ui][viewport]") {
+    using litepdf::ui::client_px_to_dip;
+    REQUIRE(client_px_to_dip(300.0f,  96.0f) == Catch::Approx(300.0f));
+    REQUIRE(client_px_to_dip(300.0f, 144.0f) == Catch::Approx(200.0f));
+    REQUIRE(client_px_to_dip(300.0f,   0.0f) == Catch::Approx(300.0f));
 }

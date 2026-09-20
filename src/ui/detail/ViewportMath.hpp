@@ -79,4 +79,18 @@ inline float pdf_point_to_dip(float pt, float zoom_pct) noexcept {
     return pt * zoom_pct;
 }
 
+// Client-area pixels (mouse message coordinates) -> render-target DIPs. The same
+// factor as bitmap_px_to_dip; a separate name so each call site says which kind
+// of pixel it holds.
+inline float client_px_to_dip(float px, float dpi) noexcept {
+    return bitmap_px_to_dip(px, dpi);
+}
+
+// Render-target DIPs -> PDF points. The inverse of pdf_point_to_dip, and pinned
+// to zoom_pct for the same reason.
+inline float dip_to_pdf_point(float dip, float zoom_pct) noexcept {
+    if (!(zoom_pct > 0.0f)) return 0.0f;   // also rejects NaN
+    return dip / zoom_pct;
+}
+
 }  // namespace litepdf::ui
