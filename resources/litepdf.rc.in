@@ -61,6 +61,11 @@ IDM_MAIN_MENU MENU
         // entry — keeps the empty-MRU layout as Open / Print / SEP / Exit.
         MENUITEM "E&xit",            IDM_FILE_EXIT
     }
+    POPUP "&Edit"
+    {
+        MENUITEM "&Copy\tCtrl+C",       IDM_EDIT_COPY
+        MENUITEM "Select &All\tCtrl+A", IDM_EDIT_SELECT_ALL
+    }
     POPUP "&View"
     {
         MENUITEM "Toggle &Outline\tF5", IDM_VIEW_OUTLINE

@@ -1,6 +1,7 @@
 #include "core/Document.hpp"
 
 #include "core/MuPDFRoot.hpp"
+#include "core/EscrowContext.hpp"
 #include "core/SearchQuery.hpp"
 #include "core/SystemFonts.hpp"
 
@@ -10,6 +11,7 @@
 #include <atomic>
 #include <cassert>
 #include <cctype>
+#include <climits>
 #include <cstdio>
 #include <fstream>
 #include <mutex>
@@ -581,6 +583,247 @@ std::vector<Document::OutlineEntry> Document::outline() const {
         flatten_outline(impl_->ctx, root, 0, result);
         fz_drop_outline(impl_->ctx, root);
     }
+    return result;
+}
+
+// ----------------------------------------------------------------------
+// Text selection (#52)
+// ----------------------------------------------------------------------
+
+struct Document::TextPage::Impl {
+    // The destructor body drops `stext` THROUGH `escrow`. Members are destroyed
+    // only after the body has run, so the escrow is alive for that drop; the
+    // escrow itself then drops its context before releasing the lock table.
+    // Net order: stext page -> escrow context -> lock table (spec §3.3).
+    EscrowContext  escrow;
+    fz_stext_page* stext = nullptr;
+    int            page  = -1;
+    // The page's first and last character edges. Invariant for the handle's
+    // life -- the stext page never changes -- so it is computed once at
+    // acquisition instead of per WM_MOUSEMOVE: snap() consults it on every
+    // word or line drag move, and the walk is over every character on the page.
+    bool           has_range  = false;
+    SelPoint       range_first{};
+    SelPoint       range_last{};
+
+    Impl() = default;
+    ~Impl() {
+        if (stext) fz_drop_stext_page(escrow.get(), stext);
+    }
+    Impl(const Impl&)            = delete;
+    Impl& operator=(const Impl&) = delete;
+};
+
+namespace {
+
+constexpr int kSelectionQuadsInitial = 256;
+// A memory bound, not a correctness limit: past it the HIGHLIGHT is truncated
+// (copy() is unaffected). 65,536 disjoint quads on one page is far beyond real
+// documents; recorded as a known limitation.
+constexpr int kSelectionQuadsMax     = 1 << 16;
+
+fz_point to_fz(SelPoint p) noexcept { return fz_make_point(p.x, p.y); }
+SelPoint from_fz(fz_point p) noexcept { return SelPoint{ p.x, p.y }; }
+
+fz_point midpoint(fz_point a, fz_point b) noexcept {
+    return fz_make_point((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+}
+
+// True when `p` resolves to the end of the page's text: nothing lies between it
+// and the trailing edge of the last character. One false positive, accepted: a
+// trailing run of characters that on_highlight_char skips as "zero-extent" also
+// reads as the end. That test is MuPDF's same_point, which truncates to int
+// before comparing with 0.1 -- so it skips glyphs narrower than 1 pt, not only
+// zero-width ones. Treating such a run as the end extends a copy by characters
+// too small to see; it never moves the visible highlight.
+bool at_text_end(fz_context* ctx, fz_stext_page* stext, SelPoint p,
+                 SelPoint text_end) noexcept {
+    fz_quad probe;
+    return fz_highlight_selection(ctx, stext, to_fz(p), to_fz(text_end), &probe, 1) == 0;
+}
+
+}  // namespace
+
+Document::TextPage::TextPage() noexcept = default;
+Document::TextPage::~TextPage() = default;
+Document::TextPage::TextPage(TextPage&&) noexcept = default;
+Document::TextPage& Document::TextPage::operator=(TextPage&&) noexcept = default;
+
+bool Document::TextPage::valid() const noexcept {
+    return impl_ && impl_->stext;
+}
+
+int Document::TextPage::page() const noexcept {
+    return valid() ? impl_->page : -1;
+}
+
+bool Document::TextPage::full_range(SelPoint& first, SelPoint& last) const noexcept {
+    if (!valid()) return false;
+    if (impl_->has_range) {
+        first = impl_->range_first;
+        last  = impl_->range_last;
+        return true;
+    }
+    const fz_stext_char* head = nullptr;
+    const fz_stext_char* tail = nullptr;
+    // Top-level text blocks only, in list order: exactly the walk
+    // fz_enumerate_selection makes, so "first" and "last" name the same
+    // characters to it.
+    for (fz_stext_block* block = impl_->stext->first_block; block; block = block->next) {
+        if (block->type != FZ_STEXT_BLOCK_TEXT) continue;
+        for (fz_stext_line* line = block->u.t.first_line; line; line = line->next) {
+            for (fz_stext_char* ch = line->first_char; ch; ch = ch->next) {
+                if (!head) head = ch;
+                tail = ch;
+            }
+        }
+    }
+    if (!head) return false;
+    // Edges, NOT origins. MuPDF resolves a point to the nearest character
+    // BOUNDARY and selects the half-open range [start, end). A character's
+    // origin sits on its leading edge, so the last character's origin resolves
+    // to the boundary BEFORE it and would drop the page's final character. The
+    // trailing edge resolves to the boundary after it.
+    first = from_fz(midpoint(head->quad.ll, head->quad.ul));
+    last  = from_fz(midpoint(tail->quad.lr, tail->quad.ur));
+    impl_->range_first = first;
+    impl_->range_last  = last;
+    impl_->has_range   = true;
+    return true;
+}
+
+Document::TextPage::Snapped Document::TextPage::snap(SelPoint a, SelPoint b,
+                                                     SelectMode mode) const noexcept {
+    if (!valid() || mode == SelectMode::Chars) return Snapped{ a, b };
+
+    fz_context* ctx = impl_->escrow.get();
+    fz_point pa = to_fz(a);
+    fz_point pb = to_fz(b);
+    // Cannot throw: walks the page, never allocates.
+    fz_snap_selection(ctx, impl_->stext, &pa, &pb,
+                      mode == SelectMode::Words ? FZ_SELECT_WORDS : FZ_SELECT_LINES);
+
+    // fz_snap_selection writes the far end only when it finds a character at or
+    // after it. When the later point lies past the page's last character there is
+    // none, so the caller's raw SECOND point is left in place -- and on a
+    // backward drag that is the EARLIER point, collapsing the selection to part
+    // of one word. Put the end back.
+    SelPoint text_start, text_end;
+    if (full_range(text_start, text_end)
+        && (at_text_end(ctx, impl_->stext, a, text_end)
+            || at_text_end(ctx, impl_->stext, b, text_end))) {
+        pb = to_fz(text_end);
+    }
+    return Snapped{ from_fz(pa), from_fz(pb) };
+}
+
+std::vector<Quad> Document::TextPage::highlight(SelPoint a, SelPoint b) const {
+    std::vector<Quad> out;
+    if (!valid()) return out;
+
+    // fz_highlight_selection fills a caller-owned buffer and silently drops what
+    // does not fit. It merges into the last quad BEFORE its capacity test and
+    // drops only at len == cap, so "returned count == capacity" is an exact
+    // signal to grow and retry (spec §3.1).
+    std::vector<fz_quad> buf(static_cast<std::size_t>(kSelectionQuadsInitial));
+    int n = 0;
+    for (;;) {
+        n = fz_highlight_selection(impl_->escrow.get(), impl_->stext, to_fz(a), to_fz(b),
+                                   buf.data(), static_cast<int>(buf.size()));
+        if (n < static_cast<int>(buf.size())
+            || buf.size() >= static_cast<std::size_t>(kSelectionQuadsMax)) {
+            break;
+        }
+        buf.resize(buf.size() * 2);
+    }
+
+    out.reserve(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        const fz_quad& q = buf[static_cast<std::size_t>(i)];
+        out.push_back(Quad{ q.ul.x, q.ul.y, q.ur.x, q.ur.y,
+                            q.ll.x, q.ll.y, q.lr.x, q.lr.y });
+    }
+    return out;
+}
+
+std::string Document::TextPage::copy(SelPoint a, SelPoint b) const {
+    std::string out;
+    if (!valid()) return out;
+
+    fz_context* ctx = impl_->escrow.get();
+    char* text = nullptr;
+    fz_var(text);
+    fz_try(ctx) {
+        text = fz_copy_selection(ctx, impl_->stext, to_fz(a), to_fz(b), /*crlf*/ 1);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        return out;   // a MuPDF allocation failure becomes an empty copy, not a MuPDF error
+    }
+    if (!text) return out;
+    try {
+        out.assign(text);
+    } catch (...) {
+        fz_free(ctx, text);
+        throw;
+    }
+    fz_free(ctx, text);
+    return out;
+}
+
+Document::TextPage Document::text_page(std::size_t index) const noexcept {
+    TextPage result;
+    if (!is_open() || index >= static_cast<std::size_t>(INT_MAX)) return result;
+
+    std::unique_ptr<TextPage::Impl> handle;
+    try {
+        handle = std::make_unique<TextPage::Impl>();
+    } catch (...) {
+        return result;
+    }
+
+    // Only ACQUISITION serialises with the other users of this Document's
+    // context: building the stext page loads a page from impl_->doc. Everything
+    // afterwards runs on the handle's escrow, lock-free (spec §3.2).
+    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
+
+    handle->escrow = EscrowContext::clone_from(impl_->ctx);
+    if (!handle->escrow.valid()) return result;
+
+    fz_context*    ctx   = impl_->ctx;
+    fz_page*       page  = nullptr;
+    fz_stext_page* stext = nullptr;
+    fz_var(page);
+    fz_var(stext);
+    fz_try(ctx) {
+        if (static_cast<int>(index) < fz_count_pages(ctx, impl_->doc)) {
+            page = fz_load_page(ctx, impl_->doc, static_cast<int>(index));
+            // Pinned to default options, the same as page_text. Two flags must
+            // NOT be added (spec §3.1): FZ_STEXT_COLLECT_STRUCTURE nests text
+            // under struct blocks the selection walkers skip, and
+            // FZ_STEXT_DEHYPHENATE (page_hits) changes line joining so a copy
+            // would disagree with page_text.
+            fz_stext_options opts = {};
+            stext = fz_new_stext_page_from_page(ctx, page, &opts);
+        }
+    }
+    fz_always(ctx) {
+        if (page) fz_drop_page(ctx, page);
+    }
+    fz_catch(ctx) {
+        // fz_new_stext_page_from_page drops its partial page before rethrowing.
+        fz_report_error(ctx);
+        return result;
+    }
+    if (!stext) return result;
+
+    handle->stext = stext;
+    handle->page  = static_cast<int>(index);
+    result.impl_  = std::move(handle);
+    // Warm the cached range on the acquisition that already costs a page walk,
+    // so no drag move pays for it.
+    SelPoint warm_first, warm_last;
+    (void)result.full_range(warm_first, warm_last);
     return result;
 }
 

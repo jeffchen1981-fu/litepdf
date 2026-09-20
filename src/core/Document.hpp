@@ -15,6 +15,8 @@
 #include <string_view>
 #include <vector>
 
+#include "core/TextSelection.hpp"
+
 // Forward-declare fz_context so this header can expose clone_context() without
 // pulling in <mupdf/fitz.h>. The PIMPL stays MuPDF-free for public consumers.
 // In C++ a bare struct-tag forward declaration is compatible with MuPDF's
@@ -218,6 +220,78 @@ public:
         const std::function<void(int width_px,
                                  int height_px,
                                  const std::uint8_t* bgra_top_down)>& callback) const;
+
+    // ------------------------------------------------------------------
+    // Text selection (#52)
+    // ------------------------------------------------------------------
+    // One page's extracted text, independent of this Document's lifetime.
+    //
+    // The handle owns a ref on the page's fz_stext_page and its OWN
+    // core::EscrowContext -- a cloned context that also keeps the MuPDF lock
+    // table alive. Both are required: closing a tab destroys the Document
+    // before anything tells the canvas (TabList::remove runs before
+    // PdfCanvas::set_view), so a handle bound to the Document's context would
+    // be dropped through a freed context, and a bare clone through a freed lock
+    // table (spec §3.3, #61).
+    //
+    // Coordinates are MuPDF page space; see SelPoint in core/TextSelection.hpp.
+    //
+    // Thread-safety: only acquiring a handle (Document::text_page) takes
+    // doc_mutex. Every method below is lock-free: it reads an immutable
+    // structure the handle holds a ref to, and copy() allocates on the handle's
+    // own escrow, whose error stack is its own (spec §3.2).
+    //
+    // A handle is single-threaded, though: full_range() memoises the page's
+    // first and last edges into the handle (warmed at acquisition, so a drag
+    // never pays for the walk), which two threads calling it on the same handle
+    // would race on. Everything that touches a handle today runs on the UI
+    // thread.
+    class TextPage {
+    public:
+        TextPage() noexcept;
+        ~TextPage();
+        TextPage(TextPage&&) noexcept;
+        TextPage& operator=(TextPage&&) noexcept;
+        TextPage(const TextPage&)            = delete;
+        TextPage& operator=(const TextPage&) = delete;
+
+        [[nodiscard]] bool valid() const noexcept;
+        [[nodiscard]] int  page()  const noexcept;   // -1 when empty
+
+        // Snapped COPIES. Deliberately returns rather than taking in-out
+        // references: fz_snap_selection reorders its in-out points, and writing
+        // that back over a raw anchor walks every backward drag (spec §2).
+        // Words / Lines: the ends come back in reading order (a before b).
+        // Chars: the inputs come back unchanged -- MuPDF's own viewer passes raw
+        // points through in that mode, and nothing is gained by snapping.
+        struct Snapped { SelPoint a, b; };
+        [[nodiscard]] Snapped snap(SelPoint a, SelPoint b, SelectMode mode) const noexcept;
+
+        // Merged per-line highlight quads for the text between a and b.
+        [[nodiscard]] std::vector<Quad> highlight(SelPoint a, SelPoint b) const;
+
+        // Two points bracketing every character on the page, for Select All
+        // through the ordinary highlight()/copy() path (spec §3.4): the LEADING
+        // edge of the first character and the TRAILING edge of the last, each
+        // at mid-height. False on a page with no text, or on an empty handle.
+        [[nodiscard]] bool full_range(SelPoint& first, SelPoint& last) const noexcept;
+
+        // UTF-8 text between a and b, CRLF line endings. Empty on an empty
+        // handle or an allocation failure; never throws a MuPDF error.
+        [[nodiscard]] std::string copy(SelPoint a, SelPoint b) const;
+
+    private:
+        friend class Document;
+        struct Impl;
+        std::unique_ptr<Impl> impl_;
+    };
+
+    // A handle on page `page`'s text. Empty if the document is not open (an
+    // encrypted one counts as not open until authenticate succeeds), `page` is
+    // out of range, or extraction or the context clone fails. Callers MUST
+    // tolerate an empty handle -- a drag that cannot acquire one simply does not
+    // start.
+    [[nodiscard]] TextPage text_page(std::size_t page) const noexcept;
 
 private:
     struct Impl;

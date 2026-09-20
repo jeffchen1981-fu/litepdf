@@ -5,11 +5,14 @@
 #include "core/DocumentView.hpp"
 #include "core/EscrowContext.hpp"
 #include "ui/ColdStartTimer.hpp"
+#include "ui/Clipboard.hpp"
 #include "ui/PdfCanvasLayout.hpp"
 #include "ui/detail/ViewportMath.hpp"
+#include "ui/detail/SelectionDrag.hpp"
 
 #include <d2d1.h>
 #include <d2d1_1.h>
+#include <windowsx.h>
 #include <wrl/client.h>
 #include <algorithm>
 #include <cstdint>
@@ -51,6 +54,44 @@ using litepdf::ui::consume_notches;
 using litepdf::ui::Flip;
 using litepdf::ui::wheel_step_dip;
 using litepdf::ui::WheelResult;
+using litepdf::ui::canvas_dip_to_page_point;
+using litepdf::ui::ClickCounter;
+using litepdf::ui::client_px_to_dip;
+using litepdf::ui::Gesture;
+using litepdf::ui::GestureState;
+using litepdf::ui::MouseButton;
+using litepdf::ui::PointerMetrics;
+using litepdf::ui::ReleaseAction;
+
+// Per-monitor, not system: the process is PerMonitorV2 (resources/manifest.xml),
+// so a window on a second display reports mouse positions in THAT monitor's
+// pixels while GetSystemMetrics keeps answering in the primary's. Comparing the
+// two turns hand wander into a drag, or degrades a triple click to a double, by
+// the ratio of the two scale factors.
+PointerMetrics pointer_metrics(HWND hwnd) {
+    const UINT dpi = GetDpiForWindow(hwnd);
+    PointerMetrics m;
+    m.drag_cx   = GetSystemMetricsForDpi(SM_CXDRAG, dpi);
+    m.drag_cy   = GetSystemMetricsForDpi(SM_CYDRAG, dpi);
+    m.dblclk_cx = GetSystemMetricsForDpi(SM_CXDOUBLECLK, dpi);
+    m.dblclk_cy = GetSystemMetricsForDpi(SM_CYDOUBLECLK, dpi);
+    m.dblclk_ms = GetDoubleClickTime();   // a time, not a distance: DPI-free
+    return m;
+}
+
+// Axis-aligned bounds of a page-space quad, in canvas DIPs. Serves both
+// Document::PageHit and core::Quad, which share their corner field names.
+template <class QuadT>
+D2D1_RECT_F quad_bounds_dip(const QuadT& q, float ox, float oy, float zoom_pct) {
+    const float min_x = std::min({ q.ul_x, q.ur_x, q.ll_x, q.lr_x });
+    const float max_x = std::max({ q.ul_x, q.ur_x, q.ll_x, q.lr_x });
+    const float min_y = std::min({ q.ul_y, q.ur_y, q.ll_y, q.lr_y });
+    const float max_y = std::max({ q.ul_y, q.ur_y, q.ll_y, q.lr_y });
+    return D2D1::RectF(ox + pdf_point_to_dip(min_x, zoom_pct),
+                       oy + pdf_point_to_dip(min_y, zoom_pct),
+                       ox + pdf_point_to_dip(max_x, zoom_pct),
+                       oy + pdf_point_to_dip(max_y, zoom_pct));
+}
 }  // namespace
 
 namespace litepdf::ui {
@@ -212,6 +253,23 @@ struct PdfCanvas::Impl {
     ComPtr<ID2D1SolidColorBrush>  brush_hit_current_fill;
     ComPtr<ID2D1SolidColorBrush>  brush_hit_current_stroke;
 
+    // #52: selection fill. Device-bound like the hit brushes above.
+    ComPtr<ID2D1SolidColorBrush>  brush_selection_fill;
+
+    // #52: the one live mouse gesture. Its gesture() is the single source of
+    // truth for "is a drag in progress" -- there is no separate flag (spec §4.2).
+    GestureState                  gesture;
+    ClickCounter                  clicks;
+    // The page's text, held only while a selection gesture is live.
+    // Escrow-backed, so it stays safe to drop even if closing the tab destroys
+    // its Document mid-drag (spec §3.3).
+    litepdf::core::Document::TextPage drag_text;
+    // The selection being dragged out. Painted INSTEAD of the view's committed
+    // selection while a gesture is live, and simply discarded on cancel --
+    // which is what leaves a double click's committed word intact when a
+    // following drag is cancelled.
+    std::optional<litepdf::core::TextSelection> live_selection;
+
     // Hits source and current-hit marker. hits_fn may be null if the
     // owner hasn't wired search yet — paint loop treats that as "no
     // overlay". current_hit is std::nullopt when no hit is selected.
@@ -241,6 +299,10 @@ struct PdfCanvas::Impl {
 };
 
 void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
+    // #52: end any gesture FIRST, before `view` replaces impl_->view. On the tab
+    // close path the outgoing view has already been destroyed by TabList::remove,
+    // which is why cancel_gesture never touches it.
+    cancel_gesture();
     // Per-render escrow (see PdfCanvas::post_render_done) is now the
     // lifetime mechanism for in-flight pixmaps — a canvas-level
     // orphan_ctx clone is no longer needed. The canvas just repoints
@@ -343,8 +405,13 @@ void PdfCanvas::set_on_zoom_changed(ZoomChangedCb cb) {
 bool PdfCanvas::change_current_page(int idx) {
     if (!impl_ || !impl_->view) return false;
     const bool changed = impl_->view->set_current_page(idx);
-    if (changed && impl_->on_page_changed) {
-        impl_->on_page_changed(impl_->view->current_page());
+    if (changed) {
+        // A selection is bound to one page (spec §1). A drag that outlived its
+        // page would extend the old page's text with the new page's geometry.
+        cancel_gesture();
+        if (impl_->on_page_changed) {
+            impl_->on_page_changed(impl_->view->current_page());
+        }
     }
     return changed;
 }
@@ -386,6 +453,15 @@ void PdfCanvas::set_invert_chrome(bool on) {
 
 void PdfCanvas::set_dual_page(bool on) {
     if (!impl_ || impl_->dual_page == on) return;
+    // #52: a live selection drag cannot survive a switch to the spread layout.
+    // It would keep extending with single-page geometry while the canvas paints
+    // the spread, and commit a selection nothing draws but Ctrl+C still copies
+    // -- the state on_left_button_down refuses to create (spec §1). The page
+    // snap that follows in MainWindow does not reliably cancel it: MainWindow
+    // always calls change_current_page, but that function cancels only when
+    // the page actually changes, and a page that is already a spread's left
+    // page does not.
+    cancel_gesture();
     impl_->dual_page = on;
     // Always discard the right bitmap on toggle: when going dual→single
     // there is no right slot, and when going single→dual the right slot
@@ -417,11 +493,7 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     // Measuring the wanted quad against either can report "already visible" for a
     // hit that is off screen -- and with the conditional install below, that
     // verdict is final: no anchor is left for the completion to correct.
-    const bool own_bitmap = impl_->current_bitmap
-                            && impl_->bitmap_epoch == impl_->view_epoch
-                            && impl_->bitmap_page  == impl_->view->current_page();
-
-    if (page_moved || !own_bitmap || !impl_->rt) {
+    if (page_moved || !own_bitmap() || !impl_->rt) {
         // The hit is on a different page, we have nothing rendered, or what we
         // have belongs to another document. In every case the incoming pixmap is
         // the only thing that can place this hit -- a scroll computed from the
@@ -467,11 +539,217 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
+bool PdfCanvas::own_bitmap() const noexcept {
+    return impl_ && impl_->view && impl_->current_bitmap
+        && impl_->bitmap_epoch == impl_->view_epoch
+        && impl_->bitmap_page  == impl_->view->current_page();
+}
+
+bool PdfCanvas::single_page_placement(Placement& out) const {
+    if (!impl_ || !impl_->rt || !impl_->current_bitmap || !hwnd_) return false;
+    const D2D1_SIZE_F src_px = impl_->current_bitmap->GetSize();  // PIXELS
+    const D2D1_SIZE_F vp     = impl_->rt->GetSize();              // DIPs
+    const float rt_dpi = static_cast<float>(GetDpiForWindow(hwnd_));
+    out = place_bitmap(bitmap_px_to_dip(src_px.width,  rt_dpi),
+                       bitmap_px_to_dip(src_px.height, rt_dpi),
+                       vp.width, vp.height, impl_->pan_x, impl_->pan_y);
+    return true;
+}
+
+const litepdf::core::TextSelection* PdfCanvas::painted_selection() const noexcept {
+    if (!impl_) return nullptr;
+    if (impl_->live_selection) return &*impl_->live_selection;
+    if (!impl_->view) return nullptr;
+    const auto& committed = impl_->view->selection();
+    return committed ? &*committed : nullptr;
+}
+
+void PdfCanvas::select_all() {
+    if (!impl_ || !impl_->view || impl_->dual_page) return;
+    if (impl_->gesture.gesture() != Gesture::None) return;   // a drag owns the selection
+    const int page = impl_->view->current_page();
+    const auto text = impl_->view->document().text_page(static_cast<std::size_t>(page));
+    litepdf::core::SelPoint first, last;
+    if (!text.full_range(first, last)) return;
+
+    litepdf::core::TextSelection sel;
+    sel.page      = page;
+    sel.anchor    = first;
+    sel.extent    = last;
+    sel.mode      = litepdf::core::SelectMode::Chars;
+    sel.quads     = text.highlight(first, last);
+    sel.text_utf8 = text.copy(first, last);
+    impl_->view->set_selection(std::move(sel));
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void PdfCanvas::copy_selection_to_clipboard() const {
+    if (!impl_ || !impl_->view || !hwnd_) return;
+    const auto& sel = impl_->view->selection();
+    if (!sel || sel->text_utf8.empty()) return;
+    set_clipboard_text(hwnd_, sel->text_utf8);
+}
+
+litepdf::core::SelPoint PdfCanvas::page_point_at(int x_px, int y_px,
+                                                 const Placement& page) const {
+    const float dpi = static_cast<float>(GetDpiForWindow(hwnd_));
+    return canvas_dip_to_page_point(client_px_to_dip(static_cast<float>(x_px), dpi),
+                                    client_px_to_dip(static_cast<float>(y_px), dpi),
+                                    page, impl_->view ? impl_->view->zoom_pct() : 1.0f);
+}
+
+void PdfCanvas::cancel_gesture() {
+    if (!impl_) return;
+    // End the gesture BEFORE releasing: ReleaseCapture re-enters this function
+    // through WM_CAPTURECHANGED, which must find nothing left to cancel.
+    if (impl_->gesture.abort() == Gesture::None) return;
+    impl_->live_selection.reset();
+    impl_->drag_text = litepdf::core::Document::TextPage{};
+    if (hwnd_ && GetCapture() == hwnd_) ReleaseCapture();
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void PdfCanvas::refresh_live_selection() {
+    if (!impl_->live_selection || !impl_->drag_text.valid()) return;
+    auto& sel = *impl_->live_selection;
+    // snap() returns COPIES; sel.anchor and sel.extent stay raw (spec §2).
+    const auto snapped = impl_->drag_text.snap(sel.anchor, sel.extent, sel.mode);
+    sel.quads = impl_->drag_text.highlight(snapped.a, snapped.b);
+}
+
+void PdfCanvas::commit_live_selection() {
+    if (!impl_->view || !impl_->live_selection || !impl_->drag_text.valid()) return;
+    litepdf::core::TextSelection sel = *impl_->live_selection;
+    const auto snapped = impl_->drag_text.snap(sel.anchor, sel.extent, sel.mode);
+    sel.quads     = impl_->drag_text.highlight(snapped.a, snapped.b);
+    sel.text_utf8 = impl_->drag_text.copy(snapped.a, snapped.b);
+    if (sel.text_utf8.empty()) {
+        // Nothing under the gesture. Keeping an empty selection would enable
+        // Copy for nothing.
+        impl_->view->clear_selection();
+        return;
+    }
+    impl_->view->set_selection(std::move(sel));
+}
+
+void PdfCanvas::on_left_button_down(bool is_double_click_message, int x_px, int y_px) {
+    // Count every press, refused or not, so a triple click is measured against
+    // the double click that really preceded it.
+    const litepdf::core::SelectMode mode = impl_->clicks.press(
+        is_double_click_message, static_cast<std::uint32_t>(GetMessageTime()),
+        x_px, y_px, pointer_metrics(hwnd_));
+
+    // A gesture that is live while this window does NOT hold the capture is
+    // stale: SetCapture did not take (the capture belongs to the foreground
+    // thread), so the matching button-up went elsewhere and no
+    // WM_CAPTURECHANGED will ever arrive to end it. Refusing this press would
+    // leave the canvas ignoring every press for the rest of the session.
+    if (impl_->gesture.gesture() != Gesture::None && GetCapture() != hwnd_) {
+        cancel_gesture();
+    }
+    if (impl_->gesture.gesture() != Gesture::None) return;
+    // Refuse spread mode HERE, not only in paint: current_bitmap holds the LEFT
+    // slot in that mode, so a drag would compute points with single-page
+    // geometry and build an invisible selection Ctrl+C would still copy (spec §1).
+    if (!impl_->view || impl_->dual_page || !own_bitmap()) return;
+    Placement pl;
+    if (!single_page_placement(pl)) return;
+
+    const int page = impl_->view->current_page();
+    litepdf::core::Document::TextPage text =
+        impl_->view->document().text_page(static_cast<std::size_t>(page));
+    if (!text.valid()) return;
+
+    const litepdf::core::SelPoint pt = page_point_at(x_px, y_px, pl);
+    impl_->view->clear_selection();
+    impl_->gesture.begin_select(mode, x_px, y_px);
+    impl_->drag_text = std::move(text);
+
+    litepdf::core::TextSelection live;
+    live.page   = page;
+    live.anchor = pt;
+    live.extent = pt;
+    live.mode   = mode;
+    impl_->live_selection = std::move(live);
+    SetCapture(hwnd_);
+
+    if (mode != litepdf::core::SelectMode::Chars) {
+        // A double or triple click selects at PRESS time. A stationary click
+        // never crosses the drag threshold, so waiting for the release would
+        // leave nothing to tell "select this word" from "click to clear"
+        // (spec §4.2). A following drag extends it in the same mode.
+        refresh_live_selection();
+        commit_live_selection();
+    }
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void PdfCanvas::on_mouse_move(int x_px, int y_px) {
+    if (impl_->gesture.gesture() != Gesture::Selecting || !impl_->live_selection) return;
+    impl_->gesture.move(x_px, y_px, pointer_metrics(hwnd_));
+    Placement pl;
+    if (!own_bitmap() || !single_page_placement(pl)) return;
+    // RAW: the pointer position, never a snapped one (spec §2).
+    impl_->live_selection->extent = page_point_at(x_px, y_px, pl);
+    refresh_live_selection();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void PdfCanvas::on_left_button_up(int x_px, int y_px) {
+    // WM_LBUTTONUP carries the pointer position at the moment of release, and
+    // it is not always preceded by a WM_MOUSEMOVE for that same position --
+    // injected input delivers a press and a release with nothing in between.
+    // Feeding it through the state machine first means the release is decided
+    // against where the pointer actually ended, so a drag cannot be mistaken
+    // for a click that clears the selection.
+    on_mouse_move(x_px, y_px);
+
+    // Decide and commit FIRST, release SECOND. ReleaseCapture delivers
+    // WM_CAPTURECHANGED synchronously; had it run first, that arm would cancel
+    // the drag before this one read it, and the selection highlighted under the
+    // held button would vanish on release (spec §4.2).
+    switch (impl_->gesture.release(MouseButton::Left)) {
+        case ReleaseAction::None:
+            return;
+        case ReleaseAction::ClearSelection:
+            if (impl_->view) impl_->view->clear_selection();
+            break;
+        case ReleaseAction::CommitSelection:
+            commit_live_selection();
+            break;
+        case ReleaseAction::EndPan:
+            break;   // #58
+    }
+    impl_->live_selection.reset();
+    impl_->drag_text = litepdf::core::Document::TextPage{};
+    if (GetCapture() == hwnd_) ReleaseCapture();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void PdfCanvas::update_cursor() {
+    LPCWSTR shape = IDC_ARROW;
+    Placement pl;
+    if (!impl_->dual_page && own_bitmap() && single_page_placement(pl)) {
+        POINT pt;
+        if (GetCursorPos(&pt) && ScreenToClient(hwnd_, &pt)) {
+            const float dpi = static_cast<float>(GetDpiForWindow(hwnd_));
+            const float x = client_px_to_dip(static_cast<float>(pt.x), dpi);
+            const float y = client_px_to_dip(static_cast<float>(pt.y), dpi);
+            if (x >= pl.x && x < pl.x + pl.w && y >= pl.y && y < pl.y + pl.h) {
+                shape = IDC_IBEAM;
+            }
+        }
+    }
+    SetCursor(LoadCursorW(nullptr, shape));
+}
+
 void PdfCanvas::register_class_once(HINSTANCE hInstance) {
     std::call_once(g_class_registered, [&]() {
         WNDCLASSEXW wc = {};
         wc.cbSize        = sizeof(wc);
-        wc.style         = CS_HREDRAW | CS_VREDRAW;
+        // CS_DBLCLKS: without it WM_LBUTTONDBLCLK is never delivered and a double
+        // click cannot select a word (#52).
+        wc.style         = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
         wc.lpfnWndProc   = PdfCanvas::WndProc;
         wc.hInstance     = hInstance;
         wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
@@ -544,9 +822,35 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             on_paint();
             return 0;
         case WM_LBUTTONDOWN:
+        case WM_LBUTTONDBLCLK:
             // Click-to-focus: ensures keystrokes (PgUp/PgDn/Home/End) reach us.
             SetFocus(hwnd_);
+            on_left_button_down(msg == WM_LBUTTONDBLCLK, GET_X_LPARAM(l), GET_Y_LPARAM(l));
             return 0;
+        case WM_MOUSEMOVE:
+            on_mouse_move(GET_X_LPARAM(l), GET_Y_LPARAM(l));
+            return 0;
+        case WM_LBUTTONUP:
+            on_left_button_up(GET_X_LPARAM(l), GET_Y_LPARAM(l));
+            return 0;
+        case WM_MBUTTONDOWN:
+        case WM_RBUTTONDOWN:
+            // One gesture owns the capture at a time. A second button during a
+            // selection drag cancels it -- keeping anything already committed --
+            // and starts nothing of its own (spec §4.2).
+            if (impl_->gesture.gesture() == Gesture::Selecting) cancel_gesture();
+            break;   // DefWindowProc: right-button WM_CONTEXTMENU generation unchanged
+        case WM_CAPTURECHANGED:
+            // Another window took the capture. After an ordinary button-up the
+            // gesture is already over and this finds nothing to do.
+            cancel_gesture();
+            return 0;
+        case WM_SETCURSOR:
+            if (LOWORD(l) == HTCLIENT) {
+                update_cursor();
+                return TRUE;   // or DefWindowProc resets it to the class cursor
+            }
+            break;
         case WM_KEYDOWN: {
             // Defense-in-depth for tab-navigation shortcuts. Ctrl+Tab /
             // Ctrl+Shift+Tab / Ctrl+W are registered in the main window's
@@ -781,6 +1085,13 @@ void PdfCanvas::create_render_target() {
     impl_->rt->CreateSolidColorBrush(
         D2D1::ColorF(0.8f, 0.467f, 0.0f, 1.0f),
         &impl_->brush_hit_current_stroke);
+
+    // #52: the Windows selection blue, far enough in hue from the yellow and
+    // orange hit fills that the two channels never read as one. Polarity does
+    // not follow Invert Colors, matching the hit brushes.
+    impl_->rt->CreateSolidColorBrush(
+        D2D1::ColorF(0.0f, 0.47f, 0.84f, 0.35f),
+        &impl_->brush_selection_fill);
 }
 
 void PdfCanvas::discard_render_target() {
@@ -788,6 +1099,7 @@ void PdfCanvas::discard_render_target() {
     impl_->brush_hit_other_fill.Reset();
     impl_->brush_hit_current_fill.Reset();
     impl_->brush_hit_current_stroke.Reset();
+    impl_->brush_selection_fill.Reset();
     // BOTH slot bitmaps: an ID2D1Bitmap belongs to the target that made it, so
     // neither may outlive this call. right_bitmap was missing here, while the
     // WM_DPICHANGED_BEFOREPARENT comment claimed it was already handled.
@@ -1344,75 +1656,72 @@ void PdfCanvas::on_paint() {
         return;
     }
 
-    if (impl_->current_bitmap) {
-        const D2D1_SIZE_F src_px = impl_->current_bitmap->GetSize();  // PIXELS
-        const D2D1_SIZE_F vp     = impl_->rt->GetSize();              // DIPs
-        const float rt_dpi = static_cast<float>(GetDpiForWindow(hwnd_));
-        const float src_w  = bitmap_px_to_dip(src_px.width,  rt_dpi);
-        const float src_h  = bitmap_px_to_dip(src_px.height, rt_dpi);
-
+    Placement pl;
+    if (single_page_placement(pl)) {
         // Natural size: no shrink-to-fit. The shipped code scaled the
         // destination to fit the viewport unconditionally, which is why a
         // changed render scale never changed the displayed size.
-        const Placement pl = place_bitmap(src_w, src_h, vp.width, vp.height,
-                                          impl_->pan_x, impl_->pan_y);
         const D2D1_RECT_F dst = D2D1::RectF(pl.x, pl.y, pl.x + pl.w, pl.y + pl.h);
         impl_->rt->DrawBitmap(impl_->current_bitmap.Get(), dst, 1.0f,
                               D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
 
-        // --- Phase 6 Task 9: search hit overlay ---
+        // --- Overlays: search hits (Phase 6 Task 9), then the selection (#52) ---
         // PDF-point -> canvas-DIP mapping:
-        //   canvas_DIP = pdf_point_to_dip(pdf_pt, zoom_pct)
-        //              + (dst.left, dst.top)
-        // where dst is the natural-size placement computed above.
-        // MuPDF 1.24 page coords are top-left origin, Y-down — matching
-        // D2D — so no Y-flip. Quads are drawn as axis-aligned bounding
-        // boxes (v1); rotated-text quads would need a transformed
-        // geometry in a follow-up.
-        if (impl_->hits_fn && impl_->view
-            && impl_->brush_hit_other_fill && impl_->brush_hit_current_fill) {
+        //   canvas_DIP = pdf_point_to_dip(pdf_pt, zoom_pct) + (dst.left, dst.top)
+        // MuPDF page coords are top-left origin, Y-down -- matching D2D -- so no
+        // Y-flip. Quads are drawn as axis-aligned bounding boxes (v1); rotated
+        // text would need transformed geometry.
+        //
+        // Only over THIS view's bitmap of THIS page. After a tab switch or a
+        // page turn the canvas keeps painting the outgoing bitmap until the new
+        // render lands, and the incoming page's quads drawn over it would sit on
+        // the wrong glyphs (spec §4.4).
+        if (own_bitmap()) {
             // One PDF point is exactly zoom_pct DIPs: the pixmap is
             // page_pt * render_scale pixels wide, and dividing that by
             // rt_dpi/96 to reach DIPs cancels the dpi factor back out. Using
-            // render_scale() here instead would double every hit rectangle at
+            // render_scale() here instead would double every rectangle at
             // 200% scaling.
             const float pct = impl_->view->zoom_pct();
             const float ox  = dst.left;
             const float oy  = dst.top;
-            const std::size_t pg = static_cast<std::size_t>(
-                impl_->view->current_page());
+            const int   pg  = impl_->view->current_page();
 
-            const auto hits = impl_->hits_fn(pg);
-            for (const auto& hit : hits) {
-                const auto& q = hit.geom;
-                // Axis-aligned bounding box from the 4 quad corners.
-                const float min_x = std::min({ q.ul_x, q.ur_x, q.ll_x, q.lr_x });
-                const float max_x = std::max({ q.ul_x, q.ur_x, q.ll_x, q.lr_x });
-                const float min_y = std::min({ q.ul_y, q.ur_y, q.ll_y, q.lr_y });
-                const float max_y = std::max({ q.ul_y, q.ur_y, q.ll_y, q.lr_y });
+            if (impl_->hits_fn
+                && impl_->brush_hit_other_fill && impl_->brush_hit_current_fill) {
+                const auto hits = impl_->hits_fn(static_cast<std::size_t>(pg));
+                for (const auto& hit : hits) {
+                    const auto& q = hit.geom;
+                    const D2D1_RECT_F r = quad_bounds_dip(q, ox, oy, pct);
 
-                D2D1_RECT_F r = D2D1::RectF(
-                    ox + pdf_point_to_dip(min_x, pct),
-                    oy + pdf_point_to_dip(min_y, pct),
-                    ox + pdf_point_to_dip(max_x, pct),
-                    oy + pdf_point_to_dip(max_y, pct));
+                    const bool is_current =
+                        impl_->current_hit.has_value()
+                        && impl_->current_hit->page == hit.page
+                        && impl_->current_hit->geom.ul_x == q.ul_x
+                        && impl_->current_hit->geom.ul_y == q.ul_y
+                        && impl_->current_hit->geom.lr_x == q.lr_x
+                        && impl_->current_hit->geom.lr_y == q.lr_y;
 
-                const bool is_current =
-                    impl_->current_hit.has_value()
-                    && impl_->current_hit->page == hit.page
-                    && impl_->current_hit->geom.ul_x == q.ul_x
-                    && impl_->current_hit->geom.ul_y == q.ul_y
-                    && impl_->current_hit->geom.lr_x == q.lr_x
-                    && impl_->current_hit->geom.lr_y == q.lr_y;
-
-                if (is_current) {
-                    impl_->rt->FillRectangle(r, impl_->brush_hit_current_fill.Get());
-                    if (impl_->brush_hit_current_stroke) {
-                        impl_->rt->DrawRectangle(
-                            r, impl_->brush_hit_current_stroke.Get(), 1.0f);
+                    if (is_current) {
+                        impl_->rt->FillRectangle(r, impl_->brush_hit_current_fill.Get());
+                        if (impl_->brush_hit_current_stroke) {
+                            impl_->rt->DrawRectangle(
+                                r, impl_->brush_hit_current_stroke.Get(), 1.0f);
+                        }
+                    } else {
+                        impl_->rt->FillRectangle(r, impl_->brush_hit_other_fill.Get());
                     }
-                } else {
-                    impl_->rt->FillRectangle(r, impl_->brush_hit_other_fill.Get());
+                }
+            }
+
+            // The selection, after the hits so it reads as the active thing.
+            // Painted only on its own page and only in single-page mode (this
+            // branch is unreachable in spread mode -- spec §1).
+            const litepdf::core::TextSelection* sel = painted_selection();
+            if (sel && sel->page == pg && impl_->brush_selection_fill) {
+                for (const auto& q : sel->quads) {
+                    impl_->rt->FillRectangle(quad_bounds_dip(q, ox, oy, pct),
+                                             impl_->brush_selection_fill.Get());
                 }
             }
         }

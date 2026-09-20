@@ -97,6 +97,7 @@ add_executable(litepdf WIN32
     src/main.cpp
     src/app/SingleInstance.cpp
     src/app/CrashHandler.cpp     # Phase 12 Task 7 (exe-only: minidump filter)
+    src/ui/Clipboard.cpp         # #52
     src/ui/ColdStartTimer.cpp
     src/ui/FindBar.cpp           # Phase 6 Task 8
     src/ui/MainWindow.cpp

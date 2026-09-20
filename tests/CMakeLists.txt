@@ -79,6 +79,9 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_scroll_math.cpp          # PR-A2 Task 7
     unit/test_status_bar_math.cpp      # PR-B Task 1
     unit/test_escrow_context.cpp       # #61 escrow lock table + root context
+    unit/test_document_selection.cpp   # #52 Task 6
+    unit/test_selection_drag.cpp       # #52 Task 8
+    unit/test_clipboard_text.cpp       # #52 Task 8
     # The CLI helpers under test are compiled straight into the test binary
     # (they are not part of litepdf_core). Both are MuPDF-header-free and
     # resolve their fz_* calls through the litepdf::mupdf dependency that

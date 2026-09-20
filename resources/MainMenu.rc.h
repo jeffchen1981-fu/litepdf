@@ -68,6 +68,10 @@
 
 // Next free ID: 40064. Reserve 40064-40070 for future Phase 8.x cleanups.
 
+// #52: text selection. A fresh block, leaving the 40064-40070 reservation alone.
+#define IDM_EDIT_COPY        40071   // Ctrl+C
+#define IDM_EDIT_SELECT_ALL  40072   // Ctrl+A
+
 // Phase 9: app and document icon resource IDs.
 // IDM_* (menu commands) live in 40000+; IDI_* (icons) live in 100+.
 // Numeric IDs match the reservation in litepdf.rc.in since Phase 0 bootstrap;

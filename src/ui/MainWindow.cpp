@@ -24,7 +24,9 @@
 #include <algorithm>
 #include <climits>
 #include <cwctype>
+#include <cwchar>
 #include <filesystem>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <thread>
@@ -122,6 +124,30 @@ bool save_session_or_report(const std::filesystem::path& file,
     msg += L" exists and cannot be overwritten, that is the likely sticky cause.\n";
     OutputDebugStringW(msg.c_str());
     return false;
+}
+
+// #52. Accelerators pre-empt every child window (see IDM_FIND_CLOSE), so a
+// Ctrl+C or Ctrl+A meant for an edit control reaches MainWindow as WM_COMMAND
+// and must be handed back. Keyed on the window CLASS, so another standard EDIT
+// control added later needs no change here -- but a different edit class (a
+// RichEdit, a custom control) does, and would otherwise be treated as the
+// canvas. Every edit control in the app today is a standard EDIT, which reports
+// exactly L"Edit"; _wcsicmp makes the L"EDIT" creation spelling irrelevant; a
+// subclassed edit (the status bar's page box) keeps its class name.
+HWND focused_edit_control() {
+    HWND focus = GetFocus();
+    if (!focus) return nullptr;
+    wchar_t cls[16] = {};
+    if (GetClassNameW(focus, cls, static_cast<int>(std::size(cls))) == 0) return nullptr;
+    return _wcsicmp(cls, L"Edit") == 0 ? focus : nullptr;
+}
+
+// A popup identified by a command it OWNS, never by its position in the bar.
+// GetMenuState returns 0xFFFFFFFF for a command the popup does not contain.
+// Caveat: MF_BYCOMMAND also searches nested submenus, so if a popup ever gains
+// one, choose probe IDs from its own top level.
+bool popup_owns(HMENU popup, UINT id) {
+    return GetMenuState(popup, id, MF_BYCOMMAND) != static_cast<UINT>(-1);
 }
 }  // namespace
 
@@ -1366,13 +1392,16 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // Skip window/system menu popups.
             if (HIWORD(l) != 0) return 0;
             auto popup = reinterpret_cast<HMENU>(w);
-            HMENU main = GetMenu(hwnd);
-            if (!main) return 0;
-            // (Phase 8 T3/T4) View popup (index 1): reflect Invert Colors
-            // and Two-Page Spread state on each show. The flags are
-            // per-tab (D9), so the checkmark is read off active_view().
-            // When no tab is open, both default to unchecked.
-            if (popup == GetSubMenu(main, 1)) {
+            // Popups are identified by a command they own, never by position:
+            // inserting the Edit menu (#52) moved View from index 1 to 2, and a
+            // positional test would have run the View arm against Edit, leaving
+            // the View checkmarks silently stale.
+
+            // (Phase 8 T3/T4) View popup: reflect Invert Colors and Two-Page
+            // Spread state on each show. The flags are per-tab (D9), so the
+            // checkmark is read off active_view(). When no tab is open, both
+            // default to unchecked.
+            if (popup_owns(popup, IDM_VIEW_INVERT)) {
                 auto* v = active_view();
                 const bool invert_on = v && v->invert_colors();
                 const bool dual_on   = v && v->dual_page();
@@ -1384,8 +1413,29 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                               | (dual_on ? MF_CHECKED : MF_UNCHECKED));
                 return 0;
             }
-            // Only rebuild MRU when the File popup (index 0) is about to show.
-            if (popup != GetSubMenu(main, 0)) return 0;
+            // #52 Edit popup. TranslateAcceleratorW sends WM_INITMENUPOPUP
+            // before acting on Ctrl+C / Ctrl+A, and an accelerator whose item is
+            // GRAYED is disabled: the keystroke is consumed and no WM_COMMAND is
+            // sent. So this enable state must match the WM_COMMAND dispatch
+            // exactly -- an edit control holding the keyboard always gets both
+            // items, or "no document selection" would kill Ctrl+C in the find
+            // box.
+            if (popup_owns(popup, IDM_EDIT_COPY)) {
+                auto* v = active_view();
+                const bool edit_has_focus = focused_edit_control() != nullptr;
+                const bool has_doc        = v && v->document().is_open();
+                const bool has_selection  = has_doc && v->selection().has_value();
+                const bool can_select_all = has_doc && !v->dual_page();
+                EnableMenuItem(popup, IDM_EDIT_COPY,
+                               MF_BYCOMMAND
+                               | ((edit_has_focus || has_selection) ? MF_ENABLED : MF_GRAYED));
+                EnableMenuItem(popup, IDM_EDIT_SELECT_ALL,
+                               MF_BYCOMMAND
+                               | ((edit_has_focus || can_select_all) ? MF_ENABLED : MF_GRAYED));
+                return 0;
+            }
+            // Only rebuild MRU when the File popup is about to show.
+            if (!popup_owns(popup, IDM_FILE_OPEN)) return 0;
             // Phase 8.5: gray Print menu when no document is open.
             // Spec §1 Non-goals: "Print menu disabled until Document is_ready()".
             {
@@ -1592,6 +1642,26 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     }
                     return 0;
                 }
+                // #52: Ctrl+C / Ctrl+A and the Edit menu. An edit control that
+                // holds the keyboard gets the key back as the message it would
+                // have handled. Anywhere else -- the canvas, the outline, the
+                // thumbnail and results lists -- acts on the document's
+                // selection, so Ctrl+C still works after clicking an outline
+                // entry, which does not return focus to the canvas.
+                case IDM_EDIT_COPY:
+                    if (HWND edit = focused_edit_control()) {
+                        SendMessageW(edit, WM_COPY, 0, 0);
+                        return 0;
+                    }
+                    if (canvas_) canvas_->copy_selection_to_clipboard();
+                    return 0;
+                case IDM_EDIT_SELECT_ALL:
+                    if (HWND edit = focused_edit_control()) {
+                        SendMessageW(edit, EM_SETSEL, 0, -1);
+                        return 0;
+                    }
+                    if (canvas_) canvas_->select_all();
+                    return 0;
                 // Phase 6 Task 10: find bar keyboard entrypoints.
                 case IDM_FIND:
                     on_find_open();
@@ -2224,6 +2294,10 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
     ACCEL accels[] = {
         { FCONTROL | FVIRTKEY, 'O',          IDM_FILE_OPEN     },
         { FCONTROL | FVIRTKEY, 'P',          IDM_FILE_PRINT    },  // Phase 8.5
+        // #52. Bare accelerators like every other entry, dispatched by focus in
+        // the WM_COMMAND arms so an edit control still gets its own copy.
+        { FCONTROL | FVIRTKEY, 'C',          IDM_EDIT_COPY       },
+        { FCONTROL | FVIRTKEY, 'A',          IDM_EDIT_SELECT_ALL },
         { FCONTROL | FVIRTKEY, VK_OEM_PLUS,  IDM_ZOOM_IN       },  // Ctrl+=
         { FCONTROL | FVIRTKEY, VK_OEM_MINUS, IDM_ZOOM_OUT      },  // Ctrl+-
         { FCONTROL | FVIRTKEY, '0',          IDM_ZOOM_RESET    },

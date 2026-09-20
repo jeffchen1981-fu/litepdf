@@ -10,6 +10,8 @@
 #include "ui/detail/CompletionMath.hpp"
 #include "ui/detail/PageAnchor.hpp"
 #include "ui/detail/ScrollMath.hpp"
+#include "core/TextSelection.hpp"
+#include "ui/detail/ViewportMath.hpp"
 
 // Forward-decl so the header stays COM-free. ComPtr in .cpp only.
 struct ID2D1Factory;
@@ -235,6 +237,17 @@ public:
     // anchor to the submission it opens.
     void scroll_into_view(const litepdf::core::SearchSession::Hit& h);
 
+    // --- #52: text selection ---
+
+    // Select every character on the current page (Edit > Select All). No-op in
+    // two-page spread mode (spec §1) or on a page with no text -- which leaves
+    // any existing selection alone.
+    void select_all();
+
+    // Put the active view's selection on the clipboard (Edit > Copy). Touches
+    // the clipboard not at all when there is no selection.
+    void copy_selection_to_clipboard() const;
+
 private:
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
     static void register_class_once(HINSTANCE hInstance);
@@ -295,6 +308,43 @@ private:
     LRESULT on_wheel_scroll(int delta);
 
     bool    content_extent(ContentBox& out) const;
+
+    // True when current_bitmap is THIS view's rendering of THIS page. set_view
+    // and navigate_to_page's single-page branch both keep painting the outgoing
+    // bitmap until the incoming render lands, so anything that measures the
+    // bitmap or draws page-space geometry over it has to ask first.
+    bool own_bitmap() const noexcept;
+
+    // Where on_paint draws the single-page bitmap, in canvas DIPs. False when
+    // there is no bitmap or render target yet.
+    bool single_page_placement(Placement& out) const;
+
+    // The selection on_paint draws, or null.
+    const litepdf::core::TextSelection* painted_selection() const noexcept;
+
+    // #52 selection gestures. The state machine is ui/detail/SelectionDrag.hpp;
+    // spec §4.2 has the message ordering these depend on.
+    void on_left_button_down(bool is_double_click_message, int x_px, int y_px);
+    void on_mouse_move(int x_px, int y_px);
+    void on_left_button_up(int x_px, int y_px);
+
+    // End any live gesture WITHOUT committing, drop its text handle and release
+    // the capture. Never dereferences impl_->view: set_view calls it before
+    // repointing, on the tab-close path where the outgoing view is already
+    // destroyed (spec §3.3). Safe to re-enter from WM_CAPTURECHANGED.
+    void cancel_gesture();
+
+    // Recompute the live selection's highlight from its RAW anchor and extent.
+    void refresh_live_selection();
+
+    // Materialise the live selection -- quads and text -- into the active view.
+    void commit_live_selection();
+
+    // Client pixels -> a clamped point on the page drawn at `page`.
+    litepdf::core::SelPoint page_point_at(int x_px, int y_px, const Placement& page) const;
+
+    // WM_SETCURSOR for the client area.
+    void update_cursor();
 
     HWND hwnd_ = nullptr;
     bool log_timings_ = false;

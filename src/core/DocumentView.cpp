@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <utility>
 
 #include "app/SearchDispatcher.hpp"
 #include "core/PageCache.hpp"
@@ -58,6 +59,7 @@ struct DocumentView::Impl {
     float                  dpi          = 96.0f;
     bool                   invert_colors = false;  // Phase 8 D7/D9
     bool                   dual_page     = false;  // Phase 8 D10
+    std::optional<TextSelection> selection;       // #52; pure data, order-free
 
     // Declared LAST so it destructs FIRST — see order contract above.
     // The SearchSession holds non-owning refs to `doc` and to the
@@ -301,6 +303,18 @@ void DocumentView::set_dual_page(bool on) {
     // so their bitmaps don't land in the wrong slot of the new layout.
     // Caller kicks a fresh dual-page render afterwards.
     impl_->engine->cancel_all_below_priority(0);
+}
+
+const std::optional<TextSelection>& DocumentView::selection() const noexcept {
+    return impl_->selection;
+}
+
+void DocumentView::set_selection(TextSelection selection) {
+    impl_->selection = std::move(selection);
+}
+
+void DocumentView::clear_selection() noexcept {
+    impl_->selection.reset();
 }
 
 void DocumentView::cancel_stale_renders(int keep_priority_threshold) {

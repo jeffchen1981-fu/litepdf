@@ -43,6 +43,7 @@ Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab i
 - **Zoom** — Zoom In / Out / Reset actually change what you see, at the right resolution on high-DPI displays (Ctrl+= / Ctrl+- / Ctrl+0, v1.3.0)
 - **Mouse-wheel scrolling** — scrolls within a page and turns the page at the edge, honouring your system's lines-per-notch setting; Ctrl+wheel zooms (v1.3.0)
 - **Page indicator** — status bar showing the current page and page count, with a box you can type a page into (v1.3.0)
+- **Text selection and copy** — drag to select, double-click for a word, triple-click for a line; Ctrl+C copies and Ctrl+A selects the page (unreleased)
 - **MRU** — recent files in File menu, persisted across runs
 
 ## Keyboard shortcuts
@@ -54,6 +55,8 @@ Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab i
 | Ctrl+W             | Close active tab                    |
 | Ctrl+Tab / Ctrl+Shift+Tab | Cycle tabs                   |
 | Ctrl+1..9          | Jump to tab N                       |
+| Ctrl+C             | Copy the selected text              |
+| Ctrl+A             | Select all text on the page         |
 | Ctrl+F             | Find in document                    |
 | F3 / Shift+F3      | Find next / previous                |
 | Ctrl+Shift+F       | Cross-tab search                    |
