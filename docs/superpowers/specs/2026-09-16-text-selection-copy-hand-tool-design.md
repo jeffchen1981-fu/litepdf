@@ -933,6 +933,7 @@ design.
 | R10 | The I-beam cursor shows over the whole page box, including images and margins. |
 | R11 | Between a zoom change and the arrival of its render the canvas still shows the old-scale bitmap of the same page, so highlights and a press's pointer mapping are briefly misaligned. Pre-existing for search hits; the window is one render. |
 | R12 | A selection needing more than 65,536 separate highlight quads on one page paints only the first 65,536 (a memory bound); the copied text is complete. |
+| R13 | Entering two-page spread mode leaves a selection committed in single-page mode in place: unpainted and not extendable (R1/§1), but still copyable with Ctrl+C. D2's clearers are the next left click in `Chars` mode, a new drag, and `clear_selection()` — a layout toggle is none of them, and clearing there would silently discard user state. The same consequence §2 accepts for page changes. |
 
 ### 6.3 Review record
 
