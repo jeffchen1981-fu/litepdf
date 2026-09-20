@@ -31,8 +31,10 @@ namespace litepdf::ui {
 // On cancel/fail both are null. Canvas drops the pixmap through the escrow,
 // then lets the escrow go — staying on the pixmap's own MuPDF root even if the
 // producing DocumentView has been swapped or destroyed. The escrow also keeps
-// the Document's lock table alive; without that, the drop would call through
-// freed memory once the tab had closed (#61). The identity is
+// the Document's lock table and the root context it was cloned from alive;
+// without both, the drop would call through freed memory once the tab had
+// closed -- the lock table for the drop itself, the root because MuPDF frees
+// the family's colour profiles through it (#61). The identity is
 // captured at submit time and decides whether the completion is still
 // wanted: accept_completion (ui/detail/CompletionMath.hpp) drops a result
 // from a superseded view (issue #35), from a submission a newer batch has
@@ -96,8 +98,9 @@ public:
 
     // Post WM_USER_RENDER_DONE to `target` for the pixmap, together with a
     // core::EscrowContext cloned from `worker_ctx` so the UI thread can drop
-    // the pixmap with the correct MuPDF root and a live lock table — even if
-    // the producing DocumentView is torn down before the message lands.
+    // the pixmap with the correct MuPDF root — keeping that root context and
+    // its lock table alive — even if the producing DocumentView is torn down
+    // before the message lands.
     //
     // Called from the worker thread inside the render callback, which
     // hands its shipping ref on the pixmap over to this helper (see

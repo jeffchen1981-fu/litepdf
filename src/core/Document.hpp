@@ -163,9 +163,12 @@ public:
     // fz_drop_context() when done.
     //
     // A bare clone must NOT outlive this Document: its lock callbacks point into
-    // the Document's lock table. A context that has to survive the Document --
-    // anything posted across a thread or held across a tab close -- must be a
-    // core::EscrowContext (core/EscrowContext.hpp), which keeps the table alive.
+    // the Document's lock table, and freeing it tears down colour profiles that
+    // MuPDF frees through the context this Document was built on. A context that
+    // has to survive the Document -- anything posted across a thread or held
+    // across a tab close -- must be a core::EscrowContext
+    // (core/EscrowContext.hpp), which keeps both the lock table and that root
+    // context alive.
     //
     // Thread-safety: safe to call from multiple threads simultaneously.
     // fz_clone_context internally acquires FZ_LOCK_ALLOC when bumping

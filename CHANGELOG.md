@@ -10,10 +10,13 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 
 ### Fixed
 
-- A page render that finished just after its tab was closed could free its image
-  through memory the closed document had already released. The window was narrow
-  and no crash has been observed; the lock table that drop depends on now lives as
-  long as the last thing that uses it (#61).
+- Closing a tab while one of its pages was still being drawn could crash the
+  application. The finished render was thrown away after the document it came
+  from had gone, and freeing it reached back into memory that document had
+  already released. Whether it crashed depended on how the program happened to be
+  laid out in memory, so the same build could look fine for hundreds of runs. A
+  render that outlives its document now keeps everything it needs to free itself
+  safely, however late it arrives (#61).
 
 ## [1.3.0] — 2026-09-13 — Zoom, wheel scrolling, and the page indicator
 

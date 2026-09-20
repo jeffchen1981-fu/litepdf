@@ -1,6 +1,6 @@
 #include "core/Document.hpp"
 
-#include "core/MuPDFLocks.hpp"
+#include "core/MuPDFRoot.hpp"
 #include "core/SearchQuery.hpp"
 #include "core/SystemFonts.hpp"
 
@@ -26,10 +26,12 @@ namespace litepdf::core {
 
 struct Document::Impl {
     // Shared, not unique: every core::EscrowContext cloned from this Document's
-    // family holds a copy, so the table outlives the last escrow even when this
-    // Document is destroyed first (#61). Declared FIRST so it is destroyed LAST,
-    // after ~Impl has dropped the document and the context through it.
-    std::shared_ptr<detail::MuPDFLocks> locks;
+    // family holds a copy, so the lock table AND the root context outlive the
+    // last escrow even when this Document is destroyed first (#61). Declared
+    // FIRST so it is destroyed LAST, after ~Impl has dropped the document
+    // through it.
+    std::shared_ptr<detail::MuPDFRoot> root;
+    // The root's context, borrowed. Owned by `root`, not by this Impl.
     fz_context* ctx = nullptr;
     fz_document* doc = nullptr;
     bool needs_password = false;
@@ -40,7 +42,7 @@ struct Document::Impl {
     // touches impl_->ctx via fz_try/fz_catch. MuPDF's exception handling
     // uses a per-fz_context setjmp/longjmp error stack that is NOT
     // thread-safe — two threads in fz_try on the same ctx corrupt the
-    // stack and crash. The MuPDFLocks table above covers the allocator /
+    // stack and crash. The MuPDFRoot lock table above covers the allocator /
     // font cache / freetype / glyph cache, but NOT the error stack.
     // SearchSession workers call page_hits() concurrently during eager
     // all-pages scans, and UI thread calls page_count() in set_query at
@@ -55,16 +57,18 @@ struct Document::Impl {
     // tab-level parallelism which §5.4 actually promises.
     mutable std::mutex doc_mutex;
 
-    Impl() : locks(detail::MuPDFLocks::create()) {
-        ctx = fz_new_context(nullptr, &locks->fz, FZ_STORE_DEFAULT);
-        if (!ctx) throw std::bad_alloc();
+    Impl() : root(detail::MuPDFRoot::create()) {
+        ctx = root->ctx;
         fz_register_document_handlers(ctx);
         install_system_cjk_font_loader(ctx);  // cjk-system-font-loader: system CJK
     }
 
+    // Drops only the document. The root context is dropped by ~MuPDFRoot, after
+    // the last EscrowContext holding it has gone: MuPDF frees this family's ICC
+    // profiles through the context that created them, so the root must be the
+    // last context of the family to die (#61).
     ~Impl() {
         if (doc) fz_drop_document(ctx, doc);
-        if (ctx) fz_drop_context(ctx);
     }
 };
 

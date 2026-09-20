@@ -88,9 +88,11 @@ bool post_render_done_impl(HWND target, UINT msg, litepdf::ui::Slot slot,
                      static_cast<LPARAM>(0));
         return true;
     }
-    // The escrow keeps the Document's lock table alive as well as cloning the
-    // context, so the UI thread can drop this pixmap even if the tab closes
-    // before the message is handled (#61).
+    // The escrow keeps the Document's lock table AND the root context its family
+    // was cloned from alive as well as cloning the context, so the UI thread can
+    // drop this pixmap even if the tab closes before the message is handled: the
+    // drop locks through that table, and MuPDF frees the family's colour profiles
+    // through that root (#61).
     litepdf::core::EscrowContext escrow =
         litepdf::core::EscrowContext::clone_from(worker_ctx);
     if (!escrow.valid()) {
@@ -629,7 +631,8 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             }
             // Adopt the escrow before freeing the meta. It must outlive every
             // fz_drop_pixmap below; it is destroyed when this block exits, which
-            // drops its context and only then the lock table (#61).
+            // drops its context and only then the lock table and the root
+            // context the family was cloned from (#61).
             litepdf::core::EscrowContext escrow = std::move(meta->escrow);
             const std::uint64_t epoch = meta->epoch;
             const int           page  = meta->page;
