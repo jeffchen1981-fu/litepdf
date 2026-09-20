@@ -264,23 +264,23 @@ TEST_CASE("DocumentSelection copied text uses CRLF line endings",
 
 TEST_CASE("DocumentSelection a text page outlives its Document",
           "[core][selection]") {
-    const std::size_t tables_before = litepdf::core::detail::live_lock_tables();
+    const std::size_t roots_before = litepdf::core::detail::live_mupdf_roots();
     Document::TextPage text;
     {
         const Document doc = open_selection_fixture();
         text = doc.text_page(kWords);
         REQUIRE(text.valid());
     }
-    // The Document -- and the context the page was extracted on -- is gone.
-    // Closing a tab mid-drag produces exactly this state (spec §3.3).
-    REQUIRE(litepdf::core::detail::live_lock_tables() == tables_before + 1);
+    // The Document is gone. Its root context is NOT: the page's escrow holds it,
+    // which is what keeps this handle -- and MuPDF's own teardown -- safe (#61).
+    REQUIRE(litepdf::core::detail::live_mupdf_roots() == roots_before + 1);
 
     SelPoint first, last;
     REQUIRE(text.full_range(first, last));
     REQUIRE(text.copy(first, last) == "alpha beta gamma\r\ndelta epsilon");
 
     text = Document::TextPage{};
-    REQUIRE(litepdf::core::detail::live_lock_tables() == tables_before);
+    REQUIRE(litepdf::core::detail::live_mupdf_roots() == roots_before);
 }
 
 TEST_CASE("DocumentSelection CJK text round trips through copy",
