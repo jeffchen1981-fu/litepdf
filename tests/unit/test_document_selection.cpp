@@ -233,6 +233,34 @@ TEST_CASE("DocumentSelection a backward word drag selects the same text as a for
     REQUIRE(s.a.x < s.b.x);
 }
 
+TEST_CASE("DocumentSelection a snap at a line boundary belongs to the neighbouring line",
+          "[core][selection]") {
+    // Known limitation R13/R14, pinned so an upgrade that changes MuPDF's
+    // boundary arithmetic fails here instead of silently moving what a double
+    // click selects. A line's trailing boundary carries the same index as the
+    // next line's first character (find_closest_in_line returns idx +
+    // line_length, and idx runs on across lines), and the band that decides
+    // "inside this line" is +/-size/2 around the baseline midline -- narrower
+    // than the glyph boxes. So the flip sits inside the last glyph, not out in
+    // the margin, and the top and bottom slivers of a glyph belong to the
+    // neighbouring line.
+    const Document doc = open_selection_fixture();
+    const auto text = doc.text_page(kWords);
+
+    // Right half of the final "a" of "gamma" (the glyph spans x 164.7-171.4).
+    const SelPoint past_last_glyph{ 168.5f, 67.35f };
+    const SelPoint on_last_glyph{ 167.5f, 67.35f };
+    REQUIRE(copy_snapped(text, past_last_glyph, past_last_glyph, SelectMode::Words) == "delta");
+    REQUIRE(copy_snapped(text, on_last_glyph, on_last_glyph, SelectMode::Words) == "gamma");
+
+    // Inside the glyph boxes of line 1, below and above its band.
+    const SelPoint below_band{ 100.0f, 75.0f };
+    const SelPoint above_band{ 150.0f, 60.0f };
+    REQUIRE(copy_snapped(text, below_band, below_band, SelectMode::Words) == "delta");
+    REQUIRE(copy_snapped(text, above_band, above_band, SelectMode::Words) == "alpha");
+    REQUIRE(copy_snapped(text, above_band, above_band, SelectMode::Lines) == "alpha beta gamma");
+}
+
 TEST_CASE("DocumentSelection a word drag from below the text keeps its far end",
           "[core][selection]") {
     // Plan correction C4. A point below every line resolves to the end of the
