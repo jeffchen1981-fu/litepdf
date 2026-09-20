@@ -146,6 +146,11 @@ private:
     // observer lambda; cross_tab_ is still alive so the lambda's captures
     // (which include weak_sentinel) are safely torn down.
     std::unique_ptr<litepdf::app::CrossTabSearch> cross_tab_;
+    // DECLARATION ORDER IS LOAD-BEARING (#52): tabs_ before canvas_, so the
+    // canvas is destroyed BEFORE tabs_ at exit. The canvas holds a raw DocumentView*
+    // that must never be read after tabs_ has destroyed the views. (Its
+    // mid-gesture Document::TextPage is escrow-backed and would survive either
+    // order; the raw view pointer would not.)
     std::unique_ptr<TabManager>   tabs_;
     std::unique_ptr<PdfCanvas>    canvas_;
     std::unique_ptr<OutlinePane>  outline_;

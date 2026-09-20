@@ -322,6 +322,30 @@ private:
     // The selection on_paint draws, or null.
     const litepdf::core::TextSelection* painted_selection() const noexcept;
 
+    // #52 selection gestures. The state machine is ui/detail/SelectionDrag.hpp;
+    // spec §4.2 has the message ordering these depend on.
+    void on_left_button_down(bool is_double_click_message, int x_px, int y_px);
+    void on_mouse_move(int x_px, int y_px);
+    void on_left_button_up();
+
+    // End any live gesture WITHOUT committing, drop its text handle and release
+    // the capture. Never dereferences impl_->view: set_view calls it before
+    // repointing, on the tab-close path where the outgoing view is already
+    // destroyed (spec §3.3). Safe to re-enter from WM_CAPTURECHANGED.
+    void cancel_gesture();
+
+    // Recompute the live selection's highlight from its RAW anchor and extent.
+    void refresh_live_selection();
+
+    // Materialise the live selection -- quads and text -- into the active view.
+    void commit_live_selection();
+
+    // Client pixels -> a clamped point on the page drawn at `page`.
+    litepdf::core::SelPoint page_point_at(int x_px, int y_px, const Placement& page) const;
+
+    // WM_SETCURSOR for the client area.
+    void update_cursor();
+
     HWND hwnd_ = nullptr;
     bool log_timings_ = false;
     struct Impl;
