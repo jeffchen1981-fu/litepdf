@@ -5,6 +5,7 @@
 #include "core/DocumentView.hpp"
 #include "core/EscrowContext.hpp"
 #include "ui/ColdStartTimer.hpp"
+#include "ui/Clipboard.hpp"
 #include "ui/PdfCanvasLayout.hpp"
 #include "ui/detail/ViewportMath.hpp"
 
@@ -51,6 +52,20 @@ using litepdf::ui::consume_notches;
 using litepdf::ui::Flip;
 using litepdf::ui::wheel_step_dip;
 using litepdf::ui::WheelResult;
+
+// Axis-aligned bounds of a page-space quad, in canvas DIPs. Serves both
+// Document::PageHit and core::Quad, which share their corner field names.
+template <class QuadT>
+D2D1_RECT_F quad_bounds_dip(const QuadT& q, float ox, float oy, float zoom_pct) {
+    const float min_x = std::min({ q.ul_x, q.ur_x, q.ll_x, q.lr_x });
+    const float max_x = std::max({ q.ul_x, q.ur_x, q.ll_x, q.lr_x });
+    const float min_y = std::min({ q.ul_y, q.ur_y, q.ll_y, q.lr_y });
+    const float max_y = std::max({ q.ul_y, q.ur_y, q.ll_y, q.lr_y });
+    return D2D1::RectF(ox + pdf_point_to_dip(min_x, zoom_pct),
+                       oy + pdf_point_to_dip(min_y, zoom_pct),
+                       ox + pdf_point_to_dip(max_x, zoom_pct),
+                       oy + pdf_point_to_dip(max_y, zoom_pct));
+}
 }  // namespace
 
 namespace litepdf::ui {
@@ -211,6 +226,9 @@ struct PdfCanvas::Impl {
     ComPtr<ID2D1SolidColorBrush>  brush_hit_other_fill;
     ComPtr<ID2D1SolidColorBrush>  brush_hit_current_fill;
     ComPtr<ID2D1SolidColorBrush>  brush_hit_current_stroke;
+
+    // #52: selection fill. Device-bound like the hit brushes above.
+    ComPtr<ID2D1SolidColorBrush>  brush_selection_fill;
 
     // Hits source and current-hit marker. hits_fn may be null if the
     // owner hasn't wired search yet — paint loop treats that as "no
@@ -417,11 +435,7 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     // Measuring the wanted quad against either can report "already visible" for a
     // hit that is off screen -- and with the conditional install below, that
     // verdict is final: no anchor is left for the completion to correct.
-    const bool own_bitmap = impl_->current_bitmap
-                            && impl_->bitmap_epoch == impl_->view_epoch
-                            && impl_->bitmap_page  == impl_->view->current_page();
-
-    if (page_moved || !own_bitmap || !impl_->rt) {
+    if (page_moved || !own_bitmap() || !impl_->rt) {
         // The hit is on a different page, we have nothing rendered, or what we
         // have belongs to another document. In every case the incoming pixmap is
         // the only thing that can place this hit -- a scroll computed from the
@@ -465,6 +479,54 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     set_pending_anchor(PageAnchor::hit(h));
     impl_->pan_y = pan_y_for_hit(h);
     InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+bool PdfCanvas::own_bitmap() const noexcept {
+    return impl_ && impl_->view && impl_->current_bitmap
+        && impl_->bitmap_epoch == impl_->view_epoch
+        && impl_->bitmap_page  == impl_->view->current_page();
+}
+
+bool PdfCanvas::single_page_placement(Placement& out) const {
+    if (!impl_ || !impl_->rt || !impl_->current_bitmap || !hwnd_) return false;
+    const D2D1_SIZE_F src_px = impl_->current_bitmap->GetSize();  // PIXELS
+    const D2D1_SIZE_F vp     = impl_->rt->GetSize();              // DIPs
+    const float rt_dpi = static_cast<float>(GetDpiForWindow(hwnd_));
+    out = place_bitmap(bitmap_px_to_dip(src_px.width,  rt_dpi),
+                       bitmap_px_to_dip(src_px.height, rt_dpi),
+                       vp.width, vp.height, impl_->pan_x, impl_->pan_y);
+    return true;
+}
+
+const litepdf::core::TextSelection* PdfCanvas::painted_selection() const noexcept {
+    if (!impl_ || !impl_->view) return nullptr;
+    const auto& committed = impl_->view->selection();
+    return committed ? &*committed : nullptr;
+}
+
+void PdfCanvas::select_all() {
+    if (!impl_ || !impl_->view || impl_->dual_page) return;
+    const int page = impl_->view->current_page();
+    const auto text = impl_->view->document().text_page(static_cast<std::size_t>(page));
+    litepdf::core::SelPoint first, last;
+    if (!text.full_range(first, last)) return;
+
+    litepdf::core::TextSelection sel;
+    sel.page      = page;
+    sel.anchor    = first;
+    sel.extent    = last;
+    sel.mode      = litepdf::core::SelectMode::Chars;
+    sel.quads     = text.highlight(first, last);
+    sel.text_utf8 = text.copy(first, last);
+    impl_->view->set_selection(std::move(sel));
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void PdfCanvas::copy_selection_to_clipboard() const {
+    if (!impl_ || !impl_->view || !hwnd_) return;
+    const auto& sel = impl_->view->selection();
+    if (!sel || sel->text_utf8.empty()) return;
+    set_clipboard_text(hwnd_, sel->text_utf8);
 }
 
 void PdfCanvas::register_class_once(HINSTANCE hInstance) {
@@ -781,6 +843,13 @@ void PdfCanvas::create_render_target() {
     impl_->rt->CreateSolidColorBrush(
         D2D1::ColorF(0.8f, 0.467f, 0.0f, 1.0f),
         &impl_->brush_hit_current_stroke);
+
+    // #52: the Windows selection blue, far enough in hue from the yellow and
+    // orange hit fills that the two channels never read as one. Polarity does
+    // not follow Invert Colors, matching the hit brushes.
+    impl_->rt->CreateSolidColorBrush(
+        D2D1::ColorF(0.0f, 0.47f, 0.84f, 0.35f),
+        &impl_->brush_selection_fill);
 }
 
 void PdfCanvas::discard_render_target() {
@@ -788,6 +857,7 @@ void PdfCanvas::discard_render_target() {
     impl_->brush_hit_other_fill.Reset();
     impl_->brush_hit_current_fill.Reset();
     impl_->brush_hit_current_stroke.Reset();
+    impl_->brush_selection_fill.Reset();
     // BOTH slot bitmaps: an ID2D1Bitmap belongs to the target that made it, so
     // neither may outlive this call. right_bitmap was missing here, while the
     // WM_DPICHANGED_BEFOREPARENT comment claimed it was already handled.
@@ -1344,75 +1414,72 @@ void PdfCanvas::on_paint() {
         return;
     }
 
-    if (impl_->current_bitmap) {
-        const D2D1_SIZE_F src_px = impl_->current_bitmap->GetSize();  // PIXELS
-        const D2D1_SIZE_F vp     = impl_->rt->GetSize();              // DIPs
-        const float rt_dpi = static_cast<float>(GetDpiForWindow(hwnd_));
-        const float src_w  = bitmap_px_to_dip(src_px.width,  rt_dpi);
-        const float src_h  = bitmap_px_to_dip(src_px.height, rt_dpi);
-
+    Placement pl;
+    if (single_page_placement(pl)) {
         // Natural size: no shrink-to-fit. The shipped code scaled the
         // destination to fit the viewport unconditionally, which is why a
         // changed render scale never changed the displayed size.
-        const Placement pl = place_bitmap(src_w, src_h, vp.width, vp.height,
-                                          impl_->pan_x, impl_->pan_y);
         const D2D1_RECT_F dst = D2D1::RectF(pl.x, pl.y, pl.x + pl.w, pl.y + pl.h);
         impl_->rt->DrawBitmap(impl_->current_bitmap.Get(), dst, 1.0f,
                               D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
 
-        // --- Phase 6 Task 9: search hit overlay ---
+        // --- Overlays: search hits (Phase 6 Task 9), then the selection (#52) ---
         // PDF-point -> canvas-DIP mapping:
-        //   canvas_DIP = pdf_point_to_dip(pdf_pt, zoom_pct)
-        //              + (dst.left, dst.top)
-        // where dst is the natural-size placement computed above.
-        // MuPDF 1.24 page coords are top-left origin, Y-down — matching
-        // D2D — so no Y-flip. Quads are drawn as axis-aligned bounding
-        // boxes (v1); rotated-text quads would need a transformed
-        // geometry in a follow-up.
-        if (impl_->hits_fn && impl_->view
-            && impl_->brush_hit_other_fill && impl_->brush_hit_current_fill) {
+        //   canvas_DIP = pdf_point_to_dip(pdf_pt, zoom_pct) + (dst.left, dst.top)
+        // MuPDF page coords are top-left origin, Y-down -- matching D2D -- so no
+        // Y-flip. Quads are drawn as axis-aligned bounding boxes (v1); rotated
+        // text would need transformed geometry.
+        //
+        // Only over THIS view's bitmap of THIS page. After a tab switch or a
+        // page turn the canvas keeps painting the outgoing bitmap until the new
+        // render lands, and the incoming page's quads drawn over it would sit on
+        // the wrong glyphs (spec §4.4).
+        if (own_bitmap()) {
             // One PDF point is exactly zoom_pct DIPs: the pixmap is
             // page_pt * render_scale pixels wide, and dividing that by
             // rt_dpi/96 to reach DIPs cancels the dpi factor back out. Using
-            // render_scale() here instead would double every hit rectangle at
+            // render_scale() here instead would double every rectangle at
             // 200% scaling.
             const float pct = impl_->view->zoom_pct();
             const float ox  = dst.left;
             const float oy  = dst.top;
-            const std::size_t pg = static_cast<std::size_t>(
-                impl_->view->current_page());
+            const int   pg  = impl_->view->current_page();
 
-            const auto hits = impl_->hits_fn(pg);
-            for (const auto& hit : hits) {
-                const auto& q = hit.geom;
-                // Axis-aligned bounding box from the 4 quad corners.
-                const float min_x = std::min({ q.ul_x, q.ur_x, q.ll_x, q.lr_x });
-                const float max_x = std::max({ q.ul_x, q.ur_x, q.ll_x, q.lr_x });
-                const float min_y = std::min({ q.ul_y, q.ur_y, q.ll_y, q.lr_y });
-                const float max_y = std::max({ q.ul_y, q.ur_y, q.ll_y, q.lr_y });
+            if (impl_->hits_fn
+                && impl_->brush_hit_other_fill && impl_->brush_hit_current_fill) {
+                const auto hits = impl_->hits_fn(static_cast<std::size_t>(pg));
+                for (const auto& hit : hits) {
+                    const auto& q = hit.geom;
+                    const D2D1_RECT_F r = quad_bounds_dip(q, ox, oy, pct);
 
-                D2D1_RECT_F r = D2D1::RectF(
-                    ox + pdf_point_to_dip(min_x, pct),
-                    oy + pdf_point_to_dip(min_y, pct),
-                    ox + pdf_point_to_dip(max_x, pct),
-                    oy + pdf_point_to_dip(max_y, pct));
+                    const bool is_current =
+                        impl_->current_hit.has_value()
+                        && impl_->current_hit->page == hit.page
+                        && impl_->current_hit->geom.ul_x == q.ul_x
+                        && impl_->current_hit->geom.ul_y == q.ul_y
+                        && impl_->current_hit->geom.lr_x == q.lr_x
+                        && impl_->current_hit->geom.lr_y == q.lr_y;
 
-                const bool is_current =
-                    impl_->current_hit.has_value()
-                    && impl_->current_hit->page == hit.page
-                    && impl_->current_hit->geom.ul_x == q.ul_x
-                    && impl_->current_hit->geom.ul_y == q.ul_y
-                    && impl_->current_hit->geom.lr_x == q.lr_x
-                    && impl_->current_hit->geom.lr_y == q.lr_y;
-
-                if (is_current) {
-                    impl_->rt->FillRectangle(r, impl_->brush_hit_current_fill.Get());
-                    if (impl_->brush_hit_current_stroke) {
-                        impl_->rt->DrawRectangle(
-                            r, impl_->brush_hit_current_stroke.Get(), 1.0f);
+                    if (is_current) {
+                        impl_->rt->FillRectangle(r, impl_->brush_hit_current_fill.Get());
+                        if (impl_->brush_hit_current_stroke) {
+                            impl_->rt->DrawRectangle(
+                                r, impl_->brush_hit_current_stroke.Get(), 1.0f);
+                        }
+                    } else {
+                        impl_->rt->FillRectangle(r, impl_->brush_hit_other_fill.Get());
                     }
-                } else {
-                    impl_->rt->FillRectangle(r, impl_->brush_hit_other_fill.Get());
+                }
+            }
+
+            // The selection, after the hits so it reads as the active thing.
+            // Painted only on its own page and only in single-page mode (this
+            // branch is unreachable in spread mode -- spec §1).
+            const litepdf::core::TextSelection* sel = painted_selection();
+            if (sel && sel->page == pg && impl_->brush_selection_fill) {
+                for (const auto& q : sel->quads) {
+                    impl_->rt->FillRectangle(quad_bounds_dip(q, ox, oy, pct),
+                                             impl_->brush_selection_fill.Get());
                 }
             }
         }

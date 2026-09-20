@@ -10,6 +10,8 @@
 #include "ui/detail/CompletionMath.hpp"
 #include "ui/detail/PageAnchor.hpp"
 #include "ui/detail/ScrollMath.hpp"
+#include "core/TextSelection.hpp"
+#include "ui/detail/ViewportMath.hpp"
 
 // Forward-decl so the header stays COM-free. ComPtr in .cpp only.
 struct ID2D1Factory;
@@ -235,6 +237,17 @@ public:
     // anchor to the submission it opens.
     void scroll_into_view(const litepdf::core::SearchSession::Hit& h);
 
+    // --- #52: text selection ---
+
+    // Select every character on the current page (Edit > Select All). No-op in
+    // two-page spread mode (spec §1) or on a page with no text -- which leaves
+    // any existing selection alone.
+    void select_all();
+
+    // Put the active view's selection on the clipboard (Edit > Copy). Touches
+    // the clipboard not at all when there is no selection.
+    void copy_selection_to_clipboard() const;
+
 private:
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
     static void register_class_once(HINSTANCE hInstance);
@@ -295,6 +308,19 @@ private:
     LRESULT on_wheel_scroll(int delta);
 
     bool    content_extent(ContentBox& out) const;
+
+    // True when current_bitmap is THIS view's rendering of THIS page. set_view
+    // and navigate_to_page's single-page branch both keep painting the outgoing
+    // bitmap until the incoming render lands, so anything that measures the
+    // bitmap or draws page-space geometry over it has to ask first.
+    bool own_bitmap() const noexcept;
+
+    // Where on_paint draws the single-page bitmap, in canvas DIPs. False when
+    // there is no bitmap or render target yet.
+    bool single_page_placement(Placement& out) const;
+
+    // The selection on_paint draws, or null.
+    const litepdf::core::TextSelection* painted_selection() const noexcept;
 
     HWND hwnd_ = nullptr;
     bool log_timings_ = false;
