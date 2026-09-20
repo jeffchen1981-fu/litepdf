@@ -73,6 +73,13 @@ namespace detail {
 // observability for #61 only -- nothing in the product reads it.
 [[nodiscard]] std::size_t root_contexts_dropped() noexcept;
 
+// Number of fz_contexts alive in the family `ctx` belongs to -- the root plus
+// every clone of it -- read from MuPDF's own master bookkeeping. Test
+// observability for the root-context lifetime only; nothing in the product
+// reads it. The read is unsynchronised, so it is meaningful only while no other
+// thread is cloning or dropping a context of the same family.
+[[nodiscard]] int family_context_count(fz_context* ctx) noexcept;
+
 }  // namespace detail
 
 }  // namespace litepdf::core

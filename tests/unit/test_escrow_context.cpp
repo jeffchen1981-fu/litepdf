@@ -66,6 +66,12 @@ TEST_CASE("EscrowContext keeps the lock table alive after its Document is destro
     REQUIRE(live_mupdf_roots() == before);
 }
 
+// What this case CANNOT catch: a DOUBLE drop of the root context. Both counters
+// below are driven from ~MuPDFRoot, and family_context_count reads bookkeeping
+// that a second free leaves untouched, so a root freed twice can still satisfy
+// every assertion here. Reproducing that fault class deterministically needs a
+// poisoning allocator -- running the suite under a debugger enables the NT debug
+// heap, which is how the original crash was made 15/15 reproducible.
 TEST_CASE("EscrowContext keeps the root context alive until the last escrow dies",
           "[core][escrow]") {
     const std::size_t before_roots = live_mupdf_roots();
@@ -86,7 +92,12 @@ TEST_CASE("EscrowContext keeps the root context alive until the last escrow dies
     // last, and LCMS frees the ICC profiles through the context that created
     // them -- the root. Dropping the root first leaves that pointer dangling.
     REQUIRE(live_mupdf_roots() == before_roots + 1);
-    REQUIRE(root_contexts_dropped() == before_drops);
+
+    // The root context is still alive: MuPDF still counts it in this family
+    // alongside the escrow's clone. A root dropped with its Document -- the
+    // defect this test exists for -- leaves 1 here, and leaves the ICC
+    // teardown pointing at freed memory.
+    REQUIRE(litepdf::core::detail::family_context_count(escrow.get()) == 2);
 
     escrow = EscrowContext{};
     REQUIRE(live_mupdf_roots() == before_roots);

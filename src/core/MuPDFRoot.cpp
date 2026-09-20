@@ -64,4 +64,15 @@ std::size_t root_contexts_dropped() noexcept {
     return g_roots_dropped.load(std::memory_order_relaxed);
 }
 
+int family_context_count(fz_context* ctx) noexcept {
+    // fz_context::master points at the context the family was cloned from, and
+    // only that master's context_count is maintained: fz_drop_context
+    // decrements `ctx->master->context_count` on every drop. A master that has
+    // already been dropped while clones remain is left with a null `master`
+    // (the struct survives only to carry the count), so report 0 rather than
+    // reading through it.
+    if (!ctx || !ctx->master) return 0;
+    return ctx->master->context_count;
+}
+
 }  // namespace litepdf::core::detail
