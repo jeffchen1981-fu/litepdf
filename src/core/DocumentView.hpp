@@ -30,10 +30,12 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 
 #include <windows.h>  // HINSTANCE / HWND — Phase 7 Task 8 ensure_thumb_pane.
 
 #include "core/Document.hpp"
+#include "core/TextSelection.hpp"
 
 // Forward decls — keep this header MuPDF-free. Callers that need to
 // fz_drop_pixmap the ref delivered to a RenderCb will include
@@ -162,6 +164,18 @@ public:
     // not persisted across restarts (D9 scope reuse).
     bool dual_page() const noexcept;
     void set_dual_page(bool on);
+
+    // ------------------------------------------------------------------
+    // (#52) This tab's text selection -- at most one (spec §2, model "1b").
+    //
+    // Document-bound state, so it lives here beside current_page and the zoom,
+    // and a tab switch carries it with no code in MainWindow. It also survives
+    // a page change: it is cleared only by the canvas (the next click, a new
+    // drag) or by clear_selection(). Not persisted to session.json. UI thread
+    // only.
+    const std::optional<TextSelection>& selection() const noexcept;
+    void set_selection(TextSelection selection);
+    void clear_selection() noexcept;
 
     // Bulk cancel on rapid nav (Phase 3 Task 11 wiring).
     void cancel_stale_renders(int keep_priority_threshold);

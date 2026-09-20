@@ -258,3 +258,46 @@ TEST_CASE("DocumentView set_viewport fits the larger page of a spread pair",
     view.set_viewport(slot_px, slot_h_px, 96.0f, /*pair_page=*/99);
     REQUIRE(view.zoom_pct() == Catch::Approx(solo));
 }
+
+TEST_CASE("DocumentView selection persists across a page change until cleared",
+          "[core][view][selection]") {
+    InlineDispatcher disp;
+    Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/search.pdf").has_value());
+    DocumentView view(std::move(doc), disp);
+    REQUIRE_FALSE(view.selection().has_value());
+
+    litepdf::core::TextSelection sel;
+    sel.page      = 0;
+    sel.anchor    = { 10.0f, 20.0f };
+    sel.extent    = { 200.0f, 40.0f };
+    sel.text_utf8 = "Lorem";
+    view.set_selection(sel);
+
+    // Spec §2, model 1b: a page change does not clear it.
+    REQUIRE(view.set_current_page(3));
+    REQUIRE(view.selection().has_value());
+    REQUIRE(view.selection()->page == 0);
+    REQUIRE(view.selection()->text_utf8 == "Lorem");
+
+    view.clear_selection();
+    REQUIRE_FALSE(view.selection().has_value());
+}
+
+TEST_CASE("DocumentView set_selection replaces the previous selection",
+          "[core][view][selection]") {
+    InlineDispatcher disp;
+    DocumentView view(open_simple(), disp);
+
+    litepdf::core::TextSelection first;
+    first.page      = 0;
+    first.text_utf8 = "first";
+    view.set_selection(first);
+
+    litepdf::core::TextSelection second;
+    second.page      = 0;
+    second.text_utf8 = "second";
+    view.set_selection(second);
+
+    REQUIRE(view.selection()->text_utf8 == "second");
+}
