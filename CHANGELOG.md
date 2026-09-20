@@ -8,6 +8,14 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 
 ## [Unreleased]
 
+### Added
+
+- Text selection and copy. Drag across a page to select text, double-click to
+  select a word, triple-click to select a line; Ctrl+C copies the selection and
+  Ctrl+A selects the whole page. A new Edit menu carries both. A selection stays
+  when you turn the page and is cleared by the next click. Selection works in
+  single-page mode and does not cross pages.
+
 ### Fixed
 
 - Closing a tab while one of its pages was still being drawn could crash the
@@ -17,6 +25,8 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
   laid out in memory, so the same build could look fine for hundreds of runs. A
   render that outlives its document now keeps everything it needs to free itself
   safely, however late it arrives (#61).
+- Search highlights are no longer drawn over the previous page, or the previous
+  tab's page, in the moment before the new one finishes rendering.
 
 ## [1.3.0] — 2026-09-13 — Zoom, wheel scrolling, and the page indicator
 
