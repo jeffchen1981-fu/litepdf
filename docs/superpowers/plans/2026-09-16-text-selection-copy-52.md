@@ -171,6 +171,7 @@ Part B depends on Part A's `EscrowContext`. Do not start Part B until PR-0 is me
 | R9 | The I-beam cursor shows over any page area, including images and blank margins inside the page box. |
 | R10 | Between a zoom change and the arrival of its render, the canvas still shows the old-scale bitmap of the same page, so `own_bitmap()` is true while `zoom_pct` is already new: selection highlights, search highlights and a press's pointer-to-page mapping are briefly misaligned. Pre-existing for search hits; the window is one render. |
 | R11 | A selection needing more than 65,536 separate highlight quads on one page paints only the first 65,536; the copied text is complete. |
+| R13 | A word or line snap in the right margin of a line that is not the last one selects the FOLLOWING line's first word (Words) or the whole following line (Lines): MuPDF resolves a line's trailing boundary to the same index as the next line's first character. Verified against MuPDF 1.27.2; `mupdf-gl` behaves the same. Chars mode is unaffected. |
 | R12 | Switching to two-page spread mode does not clear a selection committed in single-page mode: it stops being painted and no new one can start (R1), but Ctrl+C still copies it. Entering spread mode is not one of D2's clearers, and discarding the selection on a layout toggle would be the deviation. Same consequence §2 already accepts for page changes. |
 
 ---
