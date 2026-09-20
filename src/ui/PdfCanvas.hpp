@@ -34,7 +34,7 @@ namespace litepdf::ui {
 // the Document's lock table and the root context it was cloned from alive;
 // without both, the drop would call through freed memory once the tab had
 // closed -- the lock table for the drop itself, the root because MuPDF frees
-// the document's colour profiles through it (#61). The identity is
+// the family's colour profiles through it (#61). The identity is
 // captured at submit time and decides whether the completion is still
 // wanted: accept_completion (ui/detail/CompletionMath.hpp) drops a result
 // from a superseded view (issue #35), from a submission a newer batch has

@@ -68,8 +68,10 @@ TEST_CASE("EscrowContext keeps the lock table alive after its Document is destro
 
 // What this case CANNOT catch: a second drop of the root that happens AFTER the
 // family count is read below -- two drops inside ~MuPDFRoot, say. A second drop
-// before that point lands in the count, the same observable the ownership
-// mutation trips. Reproducing a double free deterministically needs a poisoning
+// before that point never reaches the count either: the first one leaves the
+// root a husk with a null `master` (fz_drop_context's delayed-free branch), so
+// the second faults where fz_drop_context decrements `ctx->master->context_count`.
+// Reproducing a double free deterministically needs a poisoning
 // allocator -- running the suite under a debugger enables the NT debug heap,
 // which is how the original crash was made 15/15 reproducible.
 TEST_CASE("EscrowContext keeps the root context alive until the last escrow dies",
