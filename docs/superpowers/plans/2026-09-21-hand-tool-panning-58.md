@@ -536,7 +536,7 @@ In `on_left_button_down`, replace the stale-gesture block — the comment beginn
     cancel_stale_gesture();
 ```
 
-Then, two lines further down, replace the refusal `if (impl_->gesture.gesture() != Gesture::None) return;` with:
+Then replace the refusal directly under that new `cancel_stale_gesture();` call — the line `if (impl_->gesture.gesture() != Gesture::None) return;` in `on_left_button_down`. (`select_all` has a similar line ending in `// a drag owns the selection`; leave that one alone.) Replace it with:
 
 ```cpp
     if (impl_->gesture.gesture() != Gesture::None) {
