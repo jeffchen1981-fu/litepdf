@@ -208,6 +208,12 @@ LNK2038 (`reference_litepdf_build_test_commands`).
 
 ### 4.2 GUI probe (scripted, no human needed)
 
+The plan (`docs/superpowers/plans/2026-09-21-horizontal-wheel-scroll-56.md`,
+corrections C1-C8) refines the mechanics below. It does not change what any row
+tests. In particular: the probe is reverted with `git checkout`, not run in a
+worktree; a flag-gated render delay opens the race window for rows 10 and 11; and
+row 12 (Ctrl+Shift+wheel still zooms) is added.
+
 A throwaway-worktree probe (`reference_litepdf_scripted_gui_smoke`) appends one
 line per event to a log file:
 - **for every wheel message the canvas handles:** the message id, the wParam key
