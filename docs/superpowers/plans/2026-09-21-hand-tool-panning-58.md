@@ -764,10 +764,11 @@ What it measures, and why that is enough:
 - **"Is there a selection" is read from the Edit menu, not pixels.** `Copy-Enabled` sends `WM_INITMENUPOPUP` for the Edit popup and reads `IDM_EDIT_COPY`'s state. Copy is also enabled whenever an edit control has the focus, so each check that uses it first requires `Copy-Enabled` to be `$false`.
 - **Where the text is depends on the DPI, the window size and the zoom preset**, so no fixed client point is guaranteed to be over text (at 100 % scaling the canvas centre can sit in `simple.pdf`'s top margin). `Find-TextPoint` tries candidate points and returns the first where a 160 px horizontal left-drag makes Copy enabled, then clears the selection. A check that relies on "this drag would have selected text" uses that point — `Find-TextPoint` has already proved it.
 - **The cursor is read with `GetCursorInfo`** and compared against the shared system cursor handles (`IDC_ARROW` 32512, `IDC_IBEAM` 32513, `IDC_SIZEALL` 32646). This needs litepdf in the foreground with the real pointer over the canvas; `Point-At` does both. If `Cursor-Is` throws "cursor not showing", the system is suppressing the pointer (`CURSOR_SUPPRESSED`, after touch or pen input): that check is **BLOCKED, not failed** — report it as blocked for the controller to run with the user.
+- **A powered-off display fakes failures.** With the monitor asleep the Direct2D present is dropped while GDI chrome still composes: every canvas capture is uniform white (so every `Changed` reads 0) and `GetCursorInfo` reports the pointer suppressed. `Wake-Display`, called once right after `Start-LitePdf`, keeps the display on for the script's process and wakes it with a zero-net real mouse move. A positive control that must move (check 1's `Changed >= 0.05`) is what shows the run is valid; WMI's monitor `Availability` is not a usable signal.
 - **Presses are kept apart by `Wait-DoubleClick`**, which sleeps the system double-click time plus a margin — never a fixed number: a user who has lengthened the double-click time would otherwise see a "clearing" click counted as a triple click that selects a line.
 - **Space is a real key event** (`keybd_event`), because the canvas reads it with `GetKeyState` and a posted `WM_KEYDOWN` does not change key state. `With-Space` asserts litepdf is the foreground window first — injected keys go to whatever is foreground — and releases Space in a `finally`, so a failing check cannot leave the machine's Space key logically held.
 
-**Run the whole check sequence as ONE script** — e.g. write it to `build/gui/task-checks.ps1` (dot-sourcing the driver at its top) and run `powershell -NoProfile -ExecutionPolicy Bypass -File build\gui\task-checks.ps1` from the repo root. A PowerShell tool call does not keep variables into the next one, and the checks depend on pan state built up by the checks before them.
+**Run the whole check sequence as ONE script** — e.g. write it to `build/gui/task-checks.ps1` (dot-sourcing the driver at its top) and run `powershell -NoProfile -ExecutionPolicy Bypass -File build\gui\task-checks.ps1` from the repo root. A PowerShell tool call does not keep variables into the next one, and the checks depend on pan state built up by the checks before them. Put `Set-StrictMode -Version 2.0` right after dot-sourcing the driver, so a misspelt or undefined message constant throws instead of silently posting message 0.
 
 ```powershell
 # pan-drive.ps1 -- scratch driver for the #58 GUI checks. Not committed.
@@ -795,6 +796,8 @@ public static class PanU {
   [DllImport("user32.dll")] public static extern IntPtr LoadCursorW(IntPtr inst, IntPtr id);
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
   [DllImport("user32.dll")] public static extern uint GetDoubleClickTime();
+  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
+  [DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint flags);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
   [StructLayout(LayoutKind.Sequential)] public struct CURSORINFO { public int cbSize; public int flags; public IntPtr hCursor; public POINT pt; }
@@ -805,7 +808,7 @@ public static class PanU {
 
 $WM_COMMAND = 0x0111; $WM_KEYDOWN = 0x0100; $WM_INITMENUPOPUP = 0x0117; $WM_CLOSE = 0x0010
 $WM_CAPTURECHANGED = 0x0215
-$WM_MOUSEMOVE = 0x0200; $WM_LBUTTONDOWN = 0x0201; $WM_LBUTTONUP = 0x0202
+$WM_MOUSEMOVE = 0x0200; $WM_LBUTTONDOWN = 0x0201; $WM_LBUTTONUP = 0x0202; $WM_LBUTTONDBLCLK = 0x0203
 $WM_MBUTTONDOWN = 0x0207; $WM_MBUTTONUP = 0x0208; $WM_MBUTTONDBLCLK = 0x0209
 $MK_LBUTTON = 0x01; $MK_MBUTTON = 0x10
 $IDM_ZOOM_IN = 40010; $IDM_ZOOM_OUT = 40011; $IDM_ZOOM_RESET = 40012
@@ -876,6 +879,15 @@ function Left-Click([int[]]$at) { Post-Mouse $WM_LBUTTONDOWN $at $MK_LBUTTON; Po
 function Reset-Pan { $c = Center; Middle-Drag $c (Offset $c 3000 3000) }
 
 function Activate { [Microsoft.VisualBasic.Interaction]::AppActivate($script:Proc.Id); Start-Sleep -Milliseconds 400 }
+
+# A powered-off display makes every canvas capture blank and every cursor read
+# "suppressed" -- a harness failure that reads like a product one. Keep the
+# display on for this process and nudge the real pointer +1/-1 px to wake it.
+function Wake-Display {
+  [void][PanU]::SetThreadExecutionState([uint32]'0x80000002')   # ES_CONTINUOUS | ES_DISPLAY_REQUIRED
+  [PanU]::mouse_event(1, 1, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 100
+  [PanU]::mouse_event(1, -1, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 1500
+}
 
 function Capture-Canvas {
   Activate
@@ -980,7 +992,9 @@ function Close-LitePdf {
 
 ```powershell
 . .\build\gui\pan-drive.ps1
+Set-StrictMode -Version 2.0
 Start-LitePdf @('tests\fixtures\simple.pdf')
+Wake-Display
 Send-Command $IDM_ZOOM_IN 3        # from the FitWidth default: both axes overflow
 Reset-Pan
 $C = Center
@@ -1144,10 +1158,11 @@ What it measures, and why that is enough:
 - **"Is there a selection" is read from the Edit menu, not pixels.** `Copy-Enabled` sends `WM_INITMENUPOPUP` for the Edit popup and reads `IDM_EDIT_COPY`'s state. Copy is also enabled whenever an edit control has the focus, so each check that uses it first requires `Copy-Enabled` to be `$false`.
 - **Where the text is depends on the DPI, the window size and the zoom preset**, so no fixed client point is guaranteed to be over text (at 100 % scaling the canvas centre can sit in `simple.pdf`'s top margin). `Find-TextPoint` tries candidate points and returns the first where a 160 px horizontal left-drag makes Copy enabled, then clears the selection. A check that relies on "this drag would have selected text" uses that point — `Find-TextPoint` has already proved it.
 - **The cursor is read with `GetCursorInfo`** and compared against the shared system cursor handles (`IDC_ARROW` 32512, `IDC_IBEAM` 32513, `IDC_SIZEALL` 32646). This needs litepdf in the foreground with the real pointer over the canvas; `Point-At` does both. If `Cursor-Is` throws "cursor not showing", the system is suppressing the pointer (`CURSOR_SUPPRESSED`, after touch or pen input): that check is **BLOCKED, not failed** — report it as blocked for the controller to run with the user.
+- **A powered-off display fakes failures.** With the monitor asleep the Direct2D present is dropped while GDI chrome still composes: every canvas capture is uniform white (so every `Changed` reads 0) and `GetCursorInfo` reports the pointer suppressed. `Wake-Display`, called once right after `Start-LitePdf`, keeps the display on for the script's process and wakes it with a zero-net real mouse move. A positive control that must move (check 1's `Changed >= 0.05`) is what shows the run is valid; WMI's monitor `Availability` is not a usable signal.
 - **Presses are kept apart by `Wait-DoubleClick`**, which sleeps the system double-click time plus a margin — never a fixed number: a user who has lengthened the double-click time would otherwise see a "clearing" click counted as a triple click that selects a line.
 - **Space is a real key event** (`keybd_event`), because the canvas reads it with `GetKeyState` and a posted `WM_KEYDOWN` does not change key state. `With-Space` asserts litepdf is the foreground window first — injected keys go to whatever is foreground — and releases Space in a `finally`, so a failing check cannot leave the machine's Space key logically held.
 
-**Run the whole check sequence as ONE script** — e.g. write it to `build/gui/task-checks.ps1` (dot-sourcing the driver at its top) and run `powershell -NoProfile -ExecutionPolicy Bypass -File build\gui\task-checks.ps1` from the repo root. A PowerShell tool call does not keep variables into the next one, and the checks depend on pan state built up by the checks before them.
+**Run the whole check sequence as ONE script** — e.g. write it to `build/gui/task-checks.ps1` (dot-sourcing the driver at its top) and run `powershell -NoProfile -ExecutionPolicy Bypass -File build\gui\task-checks.ps1` from the repo root. A PowerShell tool call does not keep variables into the next one, and the checks depend on pan state built up by the checks before them. Put `Set-StrictMode -Version 2.0` right after dot-sourcing the driver, so a misspelt or undefined message constant throws instead of silently posting message 0.
 
 ```powershell
 # pan-drive.ps1 -- scratch driver for the #58 GUI checks. Not committed.
@@ -1175,6 +1190,8 @@ public static class PanU {
   [DllImport("user32.dll")] public static extern IntPtr LoadCursorW(IntPtr inst, IntPtr id);
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
   [DllImport("user32.dll")] public static extern uint GetDoubleClickTime();
+  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
+  [DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint flags);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
   [StructLayout(LayoutKind.Sequential)] public struct CURSORINFO { public int cbSize; public int flags; public IntPtr hCursor; public POINT pt; }
@@ -1185,7 +1202,7 @@ public static class PanU {
 
 $WM_COMMAND = 0x0111; $WM_KEYDOWN = 0x0100; $WM_INITMENUPOPUP = 0x0117; $WM_CLOSE = 0x0010
 $WM_CAPTURECHANGED = 0x0215
-$WM_MOUSEMOVE = 0x0200; $WM_LBUTTONDOWN = 0x0201; $WM_LBUTTONUP = 0x0202
+$WM_MOUSEMOVE = 0x0200; $WM_LBUTTONDOWN = 0x0201; $WM_LBUTTONUP = 0x0202; $WM_LBUTTONDBLCLK = 0x0203
 $WM_MBUTTONDOWN = 0x0207; $WM_MBUTTONUP = 0x0208; $WM_MBUTTONDBLCLK = 0x0209
 $MK_LBUTTON = 0x01; $MK_MBUTTON = 0x10
 $IDM_ZOOM_IN = 40010; $IDM_ZOOM_OUT = 40011; $IDM_ZOOM_RESET = 40012
@@ -1256,6 +1273,15 @@ function Left-Click([int[]]$at) { Post-Mouse $WM_LBUTTONDOWN $at $MK_LBUTTON; Po
 function Reset-Pan { $c = Center; Middle-Drag $c (Offset $c 3000 3000) }
 
 function Activate { [Microsoft.VisualBasic.Interaction]::AppActivate($script:Proc.Id); Start-Sleep -Milliseconds 400 }
+
+# A powered-off display makes every canvas capture blank and every cursor read
+# "suppressed" -- a harness failure that reads like a product one. Keep the
+# display on for this process and nudge the real pointer +1/-1 px to wake it.
+function Wake-Display {
+  [void][PanU]::SetThreadExecutionState([uint32]'0x80000002')   # ES_CONTINUOUS | ES_DISPLAY_REQUIRED
+  [PanU]::mouse_event(1, 1, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 100
+  [PanU]::mouse_event(1, -1, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 1500
+}
 
 function Capture-Canvas {
   Activate
@@ -1360,7 +1386,9 @@ function Close-LitePdf {
 
 ```powershell
 . .\build\gui\pan-drive.ps1
+Set-StrictMode -Version 2.0
 Start-LitePdf @('tests\fixtures\simple.pdf')
+Wake-Display
 Send-Command $IDM_ZOOM_IN 3
 Reset-Pan
 $C = Center
