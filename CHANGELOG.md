@@ -16,10 +16,10 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
   when you turn the page and is cleared by the next click. Selection works in
   single-page mode and does not cross pages.
 - Hand-tool panning. Drag with the middle mouse button, or hold Space and drag
-  with the left button, to move a zoomed-in page. The pointer turns into a move
-  cursor while you pan, and as soon as you hold Space over a page that can
-  move. Works in two-page spread mode too. Dragging with the left button alone
-  still selects text.
+  with the left button, to move a zoomed-in page. While you pan or hold Space,
+  the pointer turns into a move cursor whenever the page is larger than the
+  window. Works in two-page spread mode too. Dragging with the left button
+  alone still selects text.
 
 ### Fixed
 
