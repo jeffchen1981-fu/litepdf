@@ -76,20 +76,39 @@ stacked vertically, and a spread's right page is already inside the content box 
 horizontal pan moves through. `PageAnchor` has only vertical kinds. A horizontal
 page flip would have no analogue anywhere else in the app.
 
-**H7. The horizontal path takes none of the vertical wheel's flip guards.** It
-reads and writes neither `wheel_flip_seq` nor `wheel_residual`, and it does not run
-the bitmap-identity test. Those guards exist to stop a notch from **turning the page
-again** while a flip is in flight (decision #4 in
-`project_zoom_pagenav_spec_shipped`, not to be reversed). A horizontal notch cannot
-flip, so it behaves exactly like `VK_LEFT`/`VK_RIGHT`, which also go straight to
-`pan_by`. A horizontal notch that arrives while a flip is pending is clamped
-against the outgoing bitmap, and `apply_anchor` re-clamps `pan_x` when the new page
-lands (`:1521`).
+**H7. The horizontal path takes the vertical wheel's bitmap-identity guard, but
+not its pending-flip latch.** The vertical wheel has two guards, and both stay
+exactly as they are (decision #4 in `project_zoom_pagenav_spec_shipped`, not to be
+reversed).
 
-`pan_x` is **not** reset by a page flip. `apply_anchor` sets `pan_y` and only
-re-clamps `pan_x`. A reader who has scrolled right to follow a column therefore keeps
-that column when the wheel turns the page. This already happens today with the arrow
-keys; the design relies on it and must not change it.
+- **The bitmap-identity guard applies** (`PdfCanvas.cpp:1387-1397`).
+  - `pan_by` measures against `current_bitmap` and clamps **both** axes
+    (`:1339-1347`). A tab switch keeps painting the outgoing document's bitmap
+    until the incoming render lands: `set_view` resets `current_bitmap` only for a
+    null view (`:330-337`), and `MainWindow` restores the incoming tab's pan right
+    after `set_view` (`MainWindow.cpp:662-663`).
+  - Without the guard, a horizontal notch in that window would clamp the incoming
+    tab's restored `pan_y` to the outgoing document's range. `apply_anchor(None)`
+    only re-clamps, so the reader's vertical position in that tab would be lost.
+  - So the predicate at `:1387-1397` moves, unchanged, into a private helper
+    (`bool bitmap_is_stale() const`) that both wheels call. Unchanged means:
+    `current_bitmap` non-null AND (`bitmap_epoch != view_epoch` OR `bitmap_page` !=
+    the **canonical** current page, using `dual_page_compute_left` in spread mode).
+  - When it is true, the horizontal path zeroes `hwheel_residual` and drops the
+    notch, as the vertical path does.
+  - Use this helper, **not** `own_bitmap()` (`:546-550`). `own_bitmap()` compares
+    against the raw `current_page` and is also false when there is no bitmap, so it
+    is a different predicate.
+- **The `wheel_flip_seq` latch does not apply.** It exists only to stop a notch from
+  **turning the page again** while a flip is in flight. A horizontal notch cannot
+  turn the page. The horizontal path never reads or writes `wheel_flip_seq` or
+  `wheel_residual`.
+
+**Single-page mode only:** `pan_x` is **not** reset by a page flip. `apply_anchor`
+sets `pan_y` and only re-clamps `pan_x` (`:1521`). A reader who has scrolled right to
+follow a column therefore keeps that column when the wheel turns the page. This
+already happens today with the arrow keys. The design relies on it and must not
+change it. Spread mode does not keep it; see R4.
 
 **H8. `WM_MOUSEHWHEEL` returns `TRUE`, always, including when no document is
 open.** The documentation disagrees with itself:
@@ -98,27 +117,43 @@ open.** The documentation disagrees with itself:
   *emulate* the message (IntelliPoint, IntelliType Pro) read the result, and without
   TRUE "the horizontal scroll action may be repeated". Firefox followed that guidance.
 
-Native Windows ignores the value, so TRUE costs nothing and protects against
-emulating drivers. The Shift+wheel arm keeps returning 0, like the rest of the
+Windows' own delivery of `WM_MOUSEHWHEEL` is not documented to act on the value
+(unverified), so TRUE is expected to cost nothing and protects against emulating
+drivers. The Shift+wheel arm keeps returning 0, like the rest of the
 `WM_MOUSEWHEEL` arm.
 
-**H9. The page box forwards `WM_MOUSEHWHEEL` to the canvas too.** The status bar's
-EDIT subclass already forwards `WM_MOUSEWHEEL` (`src/ui/StatusBar.cpp:486-495`),
-because a wheel message goes to the focused window, and with the caret in the page box
-the canvas would never see it. `DefWindowProc` passes an unhandled `WM_MOUSEHWHEEL` up
-the **parent** chain (EDIT → status bar → main window), never to the canvas, which is a
-sibling. So the same forwarding is needed. `StatusBar::OnWheel` gains the message
-id, so one callback carries both messages.
+The rule is enforced in **one place**, the canvas. Any window that forwards the
+message returns whatever the canvas returned (H9). A forwarder that returned its own
+0 would bring back the repeat that H8 exists to prevent, and that forwarder is the
+window an emulating driver talks to.
+
+**H9. The page box forwards `WM_MOUSEHWHEEL` to the canvas too, and returns the
+canvas's result.** The status bar's EDIT subclass already forwards `WM_MOUSEWHEEL`
+(`src/ui/StatusBar.cpp:486-495`). Its reason: when a wheel message is delivered to
+the focused window and the caret is in the page box, the canvas would otherwise never
+see it. (With "Scroll inactive windows when I hover over them" on, Windows may deliver
+to the window under the pointer instead. The forward covers the other case and costs
+nothing in this one.)
+
+`DefWindowProc` passes an unhandled `WM_MOUSEHWHEEL` up the **parent** chain (EDIT →
+status bar → main window), never to the canvas, which is a sibling. So the same
+forwarding is needed. `StatusBar::OnWheel` becomes
+`std::function<LRESULT(UINT msg, WPARAM, LPARAM)>`:
+- it carries the message id, so one callback serves both messages;
+- `MainWindow`'s callback returns its `SendMessageW` result;
+- the EDIT arm returns that result.
+
+For `WM_MOUSEWHEEL` the result is 0 as before.
 
 ## 3. Code changes
 
 | File | Change |
 |---|---|
 | `src/ui/detail/ScrollMath.hpp` | `enum class HWheelSource { Tilt, Shift }`; `rightward_delta(int raw, HWheelSource)` (H4); `wheel_step_dip` parameter rename (H5); header comment extended to the horizontal sign convention |
-| `src/ui/PdfCanvas.hpp` | `LRESULT on_hwheel_scroll(int raw_delta, HWheelSource src);` next to `on_wheel_scroll` |
-| `src/ui/PdfCanvas.cpp` | `Impl::hwheel_residual`; new `case WM_MOUSEHWHEEL` returning TRUE (H8); `MK_SHIFT` branch in the `WM_MOUSEWHEEL` arm, after the `MK_CONTROL` branch (H2); `on_hwheel_scroll` = `rightward_delta` → `consume_notches(hwheel_residual)` → SPI read per source → `wheel_step_dip(…, vp.width)` → `pan_by(-step, 0)` |
-| `src/ui/StatusBar.hpp` / `.cpp` | `OnWheel` = `void(UINT msg, WPARAM, LPARAM)`; the EDIT subclass handles `WM_MOUSEWHEEL` and `WM_MOUSEHWHEEL` together (H9) |
-| `src/ui/MainWindow.cpp` | the `set_on_wheel` callback (`:1154-1160`) sends the message it was given |
+| `src/ui/PdfCanvas.hpp` | `LRESULT on_hwheel_scroll(int raw_delta, HWheelSource src);` next to `on_wheel_scroll`; `bool bitmap_is_stale() const;` (H7) |
+| `src/ui/PdfCanvas.cpp` | `Impl::hwheel_residual`; `bitmap_is_stale()` holding the predicate moved out of `on_wheel_scroll` (`:1387-1397`), which now calls it (behaviour-preserving); new `case WM_MOUSEHWHEEL` returning TRUE (H8); `MK_SHIFT` branch in the `WM_MOUSEWHEEL` arm, after the `MK_CONTROL` branch (H2); `on_hwheel_scroll` = no view → return; `bitmap_is_stale()` → zero `hwheel_residual`, return → `rightward_delta` → `consume_notches(hwheel_residual)` → SPI read per source → `wheel_step_dip(…, vp.width)` → `pan_by(-step, 0)` |
+| `src/ui/StatusBar.hpp` / `.cpp` | `OnWheel` = `LRESULT(UINT msg, WPARAM, LPARAM)`; the EDIT subclass handles `WM_MOUSEWHEEL` and `WM_MOUSEHWHEEL` together and returns the callback's result (H9) |
+| `src/ui/MainWindow.cpp` | the `set_on_wheel` callback (`:1154-1160`) sends the message it was given and returns the `SendMessageW` result (0 when there is no canvas) |
 | `tests/unit/test_scroll_math.cpp` | §4.1 |
 | `CHANGELOG.md` | `[Unreleased]` → `Added`: horizontal wheel scrolling, noting the Shift+wheel behaviour change |
 | `README.md` | the mouse-wheel feature bullet (`:44`) mentions Shift+wheel and the tilt wheel; one shortcut-table row: `Shift+wheel` → "Scroll a zoomed-in page sideways (a tilt wheel or touchpad also works)" |
@@ -134,9 +169,10 @@ Test names are ASCII and start with `ScrollMath`
   the user) → +120; Shift +120 → −120.
 - `rightward_delta` + `consume_notches` on a residual: a Shift sequence and a Tilt
   sequence that describe the same motion produce the same notches.
-- `wheel_step_dip` with the page sentinel and a width-sized extent returns 0.9 ×
-  that extent. This records that the rename is load-bearing and the function is
-  axis-agnostic.
+
+The `wheel_step_dip` rename needs no new test: the existing sentinel test
+(`test_scroll_math.cpp:81-86`) already covers the body, and a rename cannot make it
+fail.
 
 Run with `ctest --test-dir build -C Release`. Release build only; Debug fails with
 LNK2038 (`reference_litepdf_build_test_commands`).
@@ -149,17 +185,23 @@ message (`reference_litepdf_scripted_gui_smoke`). Messages are posted with
 `GetKeyState`, so a posted message exercises it faithfully. Every row names the
 observation that would make it fail.
 
+**Each row starts from its own Setup, not from the previous row's end state.** "Zoomed"
+means single-page mode, one zoom rung above FitWidth (so the page overflows on both
+axes), `pan_x` = `pan_y` = 0, unless the row says otherwise.
+
 | # | Setup | Input | Pass | Fails if |
 |---|---|---|---|---|
-| 1 | zoomed past FitWidth, `pan_x` = 0 | `WM_MOUSEHWHEEL` +120 | `pan_x` = −48.00, `pan_y` unchanged | `pan_x` stays 0, or moves positive |
-| 2 | same | Shift+wheel −120 | `pan_x` −48 further, `pan_y` unchanged | `pan_y` moves (today's behaviour) |
-| 3 | same | repeated notches right | `pan_x` stops at exactly `vp_w − box_w`, and no page change | overshoot, or the page flips |
-| 4 | same | `WM_MOUSEHWHEEL` +40 ×3 | one 48-DIP step, taken on the third message | a step on every message |
+| 1 | zoomed | `WM_MOUSEHWHEEL` +120 | `pan_x` = −48.00, `pan_y` = 0 | `pan_x` stays 0, or moves positive |
+| 2 | zoomed | Shift+wheel −120 | `pan_x` = −48.00, `pan_y` = 0 | `pan_y` moves (today's behaviour) |
+| 3 | zoomed | `WM_MOUSEHWHEEL` +120, repeated past the edge | `pan_x` stops at exactly `vp_w − box_w`; the page does not change | overshoot, or the page flips |
+| 4 | zoomed | `WM_MOUSEHWHEEL` +40 ×3 | `pan_x` 0, 0, then −48.00 | `pan_x` moves on the first or second message |
 | 5 | FitWidth (negative control) | both inputs | `pan_x` = `pan_y` = 0 throughout | anything moves |
-| 6 | positive control | plain wheel −120 | `pan_y` moves, `pan_x` unchanged | nothing moves (driver or probe broken) |
-| 7 | zoomed, `pan_x` < 0 | wheel to the next page | `pan_x` preserved (re-clamped) on the new page | `pan_x` reset to 0 |
-| 8 | caret in page box, zoomed | `WM_MOUSEHWHEEL` posted **to the EDIT** | canvas `pan_x` moves | nothing moves |
-| 9 | any | `WM_MOUSEHWHEEL` | `SendMessage` result = 1 | 0 |
+| 6 | zoomed (positive control) | plain wheel −120 | `pan_y` moves, `pan_x` unchanged | nothing moves (driver or probe broken) |
+| 7 | zoomed, on a document whose pages all share one size; `pan_x` = −48 (via row 1) | plain wheel until the page turns | `pan_x` = −48.00 on the new page | `pan_x` reset to 0 |
+| 8 | zoomed, caret in page box | `WM_MOUSEHWHEEL` +120 **sent to the EDIT** | canvas `pan_x` = −48.00 | nothing moves |
+| 9 | zoomed | `WM_MOUSEHWHEEL` `SendMessage`d to the **canvas** | result = 1 | 0 |
+| 9b | zoomed, caret in page box | `WM_MOUSEHWHEEL` `SendMessage`d to the **EDIT** | result = 1 | 0 (the forwarder swallowed the canvas's TRUE) |
+| 10 | tab A zoomed with `pan_y` < 0; tab B at FitWidth, active; A uses a slow-rendering page (`large.pdf`, high zoom) | `SendMessage` `WM_COMMAND IDM_TAB_NEXT` to the main window, then immediately `SendMessage` `WM_MOUSEHWHEEL` +120 to the canvas | the probe logs the notch as dropped by `bitmap_is_stale()`, and after A's render lands `pan_y` equals A's saved value | `pan_y` differs from the saved value. **VOID, not PASS,** if no drop was logged (the render landed first, so the window was never exercised) |
 
 ### 4.3 Real hardware (user)
 
@@ -175,13 +217,32 @@ edge, and Ctrl+Shift+wheel still zooms.
 - **R2. Emulating drivers (Logitech SetPoint and similar) are untested.** H8 is the
   mitigation. Chromium also carries a workaround for Logitech drivers that follow a
   `WM_MOUSEHWHEEL` with a stray `WM_MOUSEWHEEL` carrying the same message time
-  (`hwnd_message_handler.cc`). That workaround is **not** adopted: without hardware
-  it cannot be tested, and its failure mode is an extra vertical notch, not a lost
-  one. File an issue if a user reports it.
+  (`hwnd_message_handler.cc`). That workaround is **not** adopted, because without
+  hardware it cannot be tested. The failure it prevents is an extra vertical notch,
+  and on a page that fits vertically one notch **turns the page**
+  (`ScrollMath.hpp:81-84`). So the visible failure is an unwanted page turn during a
+  tilt. File an issue if a user reports it.
 - **R3. A wheel notch during a live selection drag moves the page under a stationary
   pointer, and the selection's extent updates on the next mouse move.** This is
   already true of the vertical wheel. It is inherited, not introduced, and not fixed
   here.
+- **R4. In spread mode a page flip can reset `pan_x`.** Spread-mode
+  `navigate_to_page` resets both bitmaps (`PdfCanvas.cpp:1548-1554`). When the left
+  half lands first, `content_extent` measures the left page alone (`:1320-1326`) and
+  `apply_anchor` re-clamps `pan_x` against it (`:1521`). At a zoom where the pair
+  overflows the window but one page does not, that clamp returns 0, and the right
+  half landing later cannot restore it.
+  - This is the existing behaviour with the arrow keys and is outside #56. H7's
+    column-keeping claim is scoped to single-page mode for this reason.
+  - Also in spread mode: a horizontal notch while both bitmaps are reset is consumed
+    and does nothing, because `content_extent` fails. The only cost is the lost notch.
+- **R5. The arrow keys and the hand tool have the tab-switch exposure that H7 closes
+  for the wheel.** They call `pan_by` with no bitmap-identity guard. A keystroke or
+  drag in the window between `set_view` and the incoming render can therefore clamp
+  the restored pan to the outgoing document's range.
+  - This predates #56 and is not fixed here, so that this PR does not change keyboard
+    or drag behaviour.
+  - It is a follow-up, to be filed as its own issue.
 
 ## 6. Out of scope
 
