@@ -4,9 +4,9 @@
 
 **Goal:** Let the reader pan a zoomed-in page with the mouse — middle-drag, or left-drag while holding Space — without taking left-drag away from text selection.
 
-**Architecture:** The pan model already exists (`PdfCanvas::pan_by`, `content_extent`, `clamp_pan`) and the gesture state machine already has an unused `Gesture::Panning` arm (`GestureState::begin_pan`, `ReleaseAction::EndPan`, merged with #52). This plan adds two pure pieces to `ui/detail/SelectionDrag.hpp` — incremental pan steps and a cursor-precedence function — plus `content_overflows` in `ViewportMath.hpp`, then wires them into `PdfCanvas`: a middle-button press/move/release path, a Space branch at the top of the left press, and a cursor that shows the move shape only when there is something to pan.
+**Architecture:** The pan model already exists (`PdfCanvas::pan_by`, `content_extent`, `clamp_pan`) and the gesture state machine already has an unused `Gesture::Panning` arm (`GestureState::begin_pan`, `ReleaseAction::EndPan`, merged with #52). This plan adds three pure pieces to `ui/detail/SelectionDrag.hpp` — incremental pan steps, a cursor-precedence function, and `ClickCounter::forget` so a pan press never pairs into a double click — plus `content_overflows` in `ViewportMath.hpp`, then wires them into `PdfCanvas`: a middle-button press/move/release path, a Space branch at the top of the left press, and a cursor that shows the move shape only when there is something to pan.
 
-**Tech Stack:** C++20, Win32, Direct2D, Catch2 v3.5.4, CMake + MSVC v143.
+**Tech Stack:** C++17 (`cxx_std_17`, `cmake/CompilerFlags.cmake`), Win32, Direct2D, Catch2 v3.5.4, CMake + MSVC v143.
 
 **Source spec:** `docs/superpowers/specs/2026-09-16-text-selection-copy-hand-tool-design.md` §5 (PR-2), with §4.2's message ordering and gesture exclusivity. That spec was approved and gated with #52; this plan re-verified §5 against `main` @ `b4bb162` and patches it in the same commit (see "Plan-time corrections").
 
@@ -31,11 +31,11 @@ One PR, branch `feat/hand-tool-pan` off `main` @ `b4bb162`. The branch already h
 
 ## Plan-time corrections to the spec — read before writing any code
 
-Every claim in spec §5 was re-checked against `main` @ `b4bb162`. `pan_by`, `content_extent`, `clamp_pan`, the arrow-key pans, `Gesture::Panning`, `GestureState::begin_pan` and `ReleaseAction::EndPan` all exist as §5 describes. Nine things the spec does not say, each decided here and patched into §5 in the same commit:
+Every claim in spec §5 was re-checked against `main` @ `b4bb162`. `pan_by`, `content_extent`, `clamp_pan`, the arrow-key pans, `Gesture::Panning`, `GestureState::begin_pan` and `ReleaseAction::EndPan` all exist as §5 describes. Ten things the spec does not say, each decided here and patched into §5 (P10 was found at the plan gate):
 
 **P1 — `WM_MBUTTONDBLCLK` must start a pan too.** #52 added `CS_DBLCLKS` to the canvas class, and that style applies to **every** button: the second of two quick middle presses arrives as `WM_MBUTTONDBLCLK`, never as `WM_MBUTTONDOWN`. Left out, every second quick middle-drag silently does nothing. The right-button arm gets `WM_RBUTTONDBLCLK` for the same reason.
 
-**P2 — the pan cursor must be set when the pan starts.** Windows sends `WM_SETCURSOR` only while the mouse is *not* captured, so the handler #52 added never runs during a pan. Without an explicit `SetCursor` at the press, a middle-drag started over the page keeps the I-beam for its whole length. The release re-evaluates the cursor the same way, because no `WM_SETCURSOR` arrives until the pointer next moves.
+**P2 — the pan cursor must be set when the pan starts.** Windows sends `WM_SETCURSOR` only while the mouse is *not* captured, so the handler #52 added never runs during a pan. Without an explicit `SetCursor` at the press, a middle-drag started over the page keeps the I-beam for its whole length. The release re-evaluates the cursor the same way. (Whether Windows also synthesises a mouse move after `ReleaseCapture`, which would bring a `WM_SETCURSOR` of its own, is not relied on either way: the explicit refresh makes the outcome the same.)
 
 **P3 — the Space branch comes BEFORE the selection refusals.** `on_left_button_down` refuses in spread mode, without its own bitmap, and without a text handle. Those guard *selection*; a pan needs none of them, and `pan_by` already works in spread mode (it measures `content_extent`'s union of both slots).
 
@@ -49,7 +49,9 @@ Every claim in spec §5 was re-checked against `main` @ `b4bb162`. `pan_by`, `co
 
 **P8 — a middle press does not take keyboard focus.** The left press calls `SetFocus` so PgUp/PgDn reach the canvas. Panning changes only the view; a query half-typed into the find box keeps the keyboard.
 
-**P9 — a pan without the capture is stale, and a move cancels it.** #52's stale-gesture rule cancels at the next *press*. For a pan that is too late: its button is up, so every move over the canvas would drag the page under a pointer that is merely passing. `on_mouse_move` cancels a pan whose capture is gone instead of applying the step.
+**P9 — a pan without the capture is stale, and a move cancels it.** #52's stale-gesture rule cancels at the next *press*. For a pan that is too late: its button is up, so every move over the canvas would drag the page under a pointer that is merely passing. `on_mouse_move` cancels a pan whose capture is gone instead of applying the step. **No GUI check can make P9 fire** — a driver cannot leave a pan live without the capture *and* without the `WM_CAPTURECHANGED` that ends it through its own arm — so P9 is covered by review. The GUI checks do catch it *misfiring*: every pan would stop at its first move.
+
+**P10 — a Space press is not a click** (found at the plan gate). `on_left_button_down` feeds every press to `ClickCounter` before it decides anything, and Windows pairs presses into `WM_LBUTTONDBLCLK` on its own. Uncorrected, Space + a click followed quickly by a plain click at the same spot arrives as a double click and selects a word; and a plain click, then Space + a quick second press, then a plain click is counted as a triple click and selects a line. The Space branch calls `ClickCounter::forget()`, after which the next press starts a new sequence — a single click, even when Windows reports it as the second half of a double click.
 
 ## Known limitations (recorded, not fixed)
 
@@ -58,15 +60,15 @@ Every claim in spec §5 was re-checked against `main` @ `b4bb162`. `pan_by`, `co
 | R15 | A page change or a layout toggle during a pan (PgDn, the wheel at an edge, Ctrl+Shift+D) ends the pan; the button must be pressed again. The existing `cancel_gesture` calls in `change_current_page` and `set_dual_page` are gesture-agnostic, and a pan commits nothing, so ending it is safe. |
 | R16 | Holding Space while the find box (or another edit control) has the focus types spaces into it until the left press moves focus to the canvas; the cursor refresh on Space runs only when the canvas has the focus. |
 | R17 | A right-button press during a pan is ignored and the pan continues. §4.2's second-button abort applies to a selection drag, which a stray press would otherwise corrupt; a pan has nothing to corrupt. |
-| R18 | When a pan is *cancelled* (capture lost, tab switched, page changed) the move cursor stays until the pointer next moves. Only a normal release re-evaluates it. |
+| R18 | When a pan is *cancelled* (capture lost, tab switched, page changed) the canvas does not re-evaluate the cursor; the move shape can stay until the next `WM_SETCURSOR`, at the latest the next pointer move. Only a normal release refreshes it explicitly. |
 
 ## File Structure
 
 | File | Change | Responsibility |
 |---|---|---|
-| `src/ui/detail/SelectionDrag.hpp` | modify | `PanStep`, `GestureState::pan_step`, `CanvasCursor`, `canvas_cursor` — pure |
+| `src/ui/detail/SelectionDrag.hpp` | modify | `PanStep`, `GestureState::pan_step`, `CanvasCursor`, `canvas_cursor`, `ClickCounter::forget` — pure |
 | `src/ui/detail/ViewportMath.hpp` | modify | `content_overflows` — pure, next to the `clamp_pan` rule it must agree with |
-| `tests/unit/test_selection_drag.cpp` | modify | pan-step and cursor-precedence cases |
+| `tests/unit/test_selection_drag.cpp` | modify | pan-step, click-sequence and cursor-precedence cases |
 | `tests/unit/test_viewport_math.cpp` | modify | `content_overflows` case |
 | `src/ui/PdfCanvas.hpp` | modify | include `SelectionDrag.hpp`; declare the middle-button handlers, `begin_pan_gesture`, `cancel_stale_gesture`, `can_pan`, `refresh_cursor` |
 | `src/ui/PdfCanvas.cpp` | modify | the handlers, the pan branch of `on_mouse_move`, the cursor, the message arms |
@@ -74,194 +76,9 @@ Every claim in spec §5 was re-checked against `main` @ `b4bb162`. `pan_by`, `co
 
 No new files; `tests/CMakeLists.txt` already compiles both test files.
 
-## GUI driver (shared by Tasks 2 and 3)
+## GUI verification
 
-Tasks 2 and 3 verify the wiring in the running app with this scratch driver. **It is not committed.** Save it as `build/gui/pan-drive.ps1` (`build/` is git-ignored) and dot-source it from the repo root in **Windows PowerShell 5.1**: `. .\build\gui\pan-drive.ps1`.
-
-What it measures, and why that is enough:
-
-- **A pan is observed as a pixel translation of the canvas.** `Measure-Shift $before $after $dx $dy` samples a grid and reports `Match` — the share of samples where `after(x, y) == before(x - dx, y - dy)` — and `Changed` — the share where `after(x, y) != before(x, y)`. A pan by exactly `(dx, dy)` client pixels gives `Match ≥ 0.98` **and** `Changed ≥ 0.05` on `simple.pdf`; the second number is the positive control that there was content under the grid (white matches white under any shift). **No pan** gives `Changed ≤ 0.002`. The Direct2D canvas is capturable on this build (re-tested 2026-09-16), but **only from a DPI-aware process** — the driver calls `SetProcessDPIAware()` first and `Capture-Canvas` prints the captured size; it must equal the canvas client size, or every number below is meaningless.
-- **"Is there a selection" is read from the Edit menu, not pixels.** `Copy-Enabled` sends `WM_INITMENUPOPUP` for the Edit popup and reads `IDM_EDIT_COPY`'s state. Copy is also enabled whenever an edit control has the focus, so each check that uses it first requires `Copy-Enabled` to be `$false` — the precondition that makes a later `$true` mean "a selection exists".
-- **The cursor is read with `GetCursorInfo`** and compared against the shared system cursor handles (`IDC_ARROW` 32512, `IDC_IBEAM` 32513, `IDC_SIZEALL` 32646). This needs litepdf in the foreground with the real pointer over the canvas; `Point-At` does both.
-- **Space is a real key event** (`keybd_event`), because the canvas reads it with `GetKeyState` and a posted `WM_KEYDOWN` does not change key state. `With-Space` asserts litepdf is the foreground window first — injected keys go to whatever is foreground — and releases Space in a `finally`, so a failing check cannot leave the machine's Space key logically held.
-
-```powershell
-# pan-drive.ps1 -- scratch driver for the #58 GUI checks. Not committed.
-# Dot-source from the repo root in Windows PowerShell 5.1:  . .\build\gui\pan-drive.ps1
-Add-Type -AssemblyName System.Drawing
-Add-Type -AssemblyName Microsoft.VisualBasic
-if (-not ('PanU' -as [type])) {
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public static class PanU {
-  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
-  [DllImport("user32.dll", CharSet=CharSet.Unicode)]
-  public static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string cls, IntPtr title);
-  [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
-  [DllImport("user32.dll")] public static extern IntPtr SendMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
-  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
-  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
-  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
-  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-  [DllImport("user32.dll")] public static extern IntPtr GetMenu(IntPtr h);
-  [DllImport("user32.dll")] public static extern IntPtr GetSubMenu(IntPtr m, int pos);
-  [DllImport("user32.dll")] public static extern uint GetMenuState(IntPtr m, uint id, uint flags);
-  [DllImport("user32.dll")] public static extern bool GetCursorInfo(ref CURSORINFO ci);
-  [DllImport("user32.dll")] public static extern IntPtr LoadCursorW(IntPtr inst, IntPtr id);
-  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
-  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
-  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
-  [StructLayout(LayoutKind.Sequential)] public struct CURSORINFO { public int cbSize; public int flags; public IntPtr hCursor; public POINT pt; }
-}
-"@
-}
-[void][PanU]::SetProcessDPIAware()
-
-$WM_COMMAND = 0x0111; $WM_KEYDOWN = 0x0100; $WM_INITMENUPOPUP = 0x0117; $WM_CLOSE = 0x0010
-$WM_CAPTURECHANGED = 0x0215
-$WM_MOUSEMOVE = 0x0200; $WM_LBUTTONDOWN = 0x0201; $WM_LBUTTONUP = 0x0202
-$WM_MBUTTONDOWN = 0x0207; $WM_MBUTTONUP = 0x0208; $WM_MBUTTONDBLCLK = 0x0209
-$MK_LBUTTON = 0x01; $MK_MBUTTON = 0x10
-$IDM_ZOOM_IN = 40010; $IDM_ZOOM_OUT = 40011; $IDM_ZOOM_RESET = 40012
-$IDM_VIEW_DUAL_PAGE = 40062; $IDM_EDIT_COPY = 40071
-$IDC_ARROW = 32512; $IDC_IBEAM = 32513; $IDC_SIZEALL = 32646
-
-function Start-LitePdf([string[]]$files) {
-  $env:LITEPDF_NO_RESTORE = '1'
-  $p = Start-Process -PassThru (Resolve-Path .\build\Release\litepdf.exe) -ArgumentList $files
-  for ($i = 0; $i -lt 50 -and [int64]$p.MainWindowHandle -eq 0; $i++) { Start-Sleep -Milliseconds 100; $p.Refresh() }
-  $script:Proc   = $p
-  $script:Main   = [IntPtr]$p.MainWindowHandle
-  $script:Canvas = [PanU]::FindWindowExW($script:Main, [IntPtr]::Zero, 'LitePDFPdfCanvas', [IntPtr]::Zero)
-  if ([int64]$script:Canvas -eq 0) { throw 'canvas HWND not found' }
-  Start-Sleep -Milliseconds 1000
-}
-
-function Send-Command([int]$id, [int]$times = 1) {
-  for ($i = 0; $i -lt $times; $i++) {
-    [void][PanU]::PostMessageW($script:Main, $WM_COMMAND, [IntPtr]$id, [IntPtr]::Zero)
-    Start-Sleep -Milliseconds 400
-  }
-  Start-Sleep -Milliseconds 800   # let the render land
-}
-
-function Client-Size { $r = New-Object PanU+RECT; [void][PanU]::GetClientRect($script:Canvas, [ref]$r); return @($r.Right, $r.Bottom) }
-function Center { $s = Client-Size; return @([int]($s[0] / 2), [int]($s[1] / 2)) }
-function Offset([int[]]$p, [int]$dx, [int]$dy) { return @(($p[0] + $dx), ($p[1] + $dy)) }
-
-function Post-Mouse([int]$msg, [int[]]$at, [int]$keys) {
-  $l = [IntPtr]((($at[1] -band 0xFFFF) -shl 16) -bor ($at[0] -band 0xFFFF))
-  [void][PanU]::PostMessageW($script:Canvas, $msg, [IntPtr]$keys, $l)
-  Start-Sleep -Milliseconds 40
-}
-
-# Middle-drag from $from to $to. -NoMove posts only the press and the release.
-function Middle-Drag([int[]]$from, [int[]]$to, [int]$steps = 8, [switch]$NoMove) {
-  Post-Mouse $WM_MBUTTONDOWN $from $MK_MBUTTON
-  if (-not $NoMove) {
-    for ($i = 1; $i -le $steps; $i++) {
-      $x = [int]($from[0] + ($to[0] - $from[0]) * $i / $steps)
-      $y = [int]($from[1] + ($to[1] - $from[1]) * $i / $steps)
-      Post-Mouse $WM_MOUSEMOVE @($x, $y) $MK_MBUTTON
-    }
-  }
-  Post-Mouse $WM_MBUTTONUP $to 0
-  Start-Sleep -Milliseconds 300
-}
-
-function Left-Drag([int[]]$from, [int[]]$to, [int]$steps = 8) {
-  Post-Mouse $WM_LBUTTONDOWN $from $MK_LBUTTON
-  for ($i = 1; $i -le $steps; $i++) {
-    $x = [int]($from[0] + ($to[0] - $from[0]) * $i / $steps)
-    $y = [int]($from[1] + ($to[1] - $from[1]) * $i / $steps)
-    Post-Mouse $WM_MOUSEMOVE @($x, $y) $MK_LBUTTON
-  }
-  Post-Mouse $WM_LBUTTONUP $to 0
-  Start-Sleep -Milliseconds 300
-}
-
-function Left-Click([int[]]$at) { Post-Mouse $WM_LBUTTONDOWN $at $MK_LBUTTON; Post-Mouse $WM_LBUTTONUP $at 0; Start-Sleep -Milliseconds 200 }
-
-# Pin the pan to (0, 0): a drag far past the top-left clamp.
-function Reset-Pan { $c = Center; Middle-Drag $c (Offset $c 3000 3000) }
-
-function Activate { [Microsoft.VisualBasic.Interaction]::AppActivate($script:Proc.Id); Start-Sleep -Milliseconds 400 }
-
-function Capture-Canvas {
-  Activate
-  $s = Client-Size
-  $pt = New-Object PanU+POINT
-  [void][PanU]::ClientToScreen($script:Canvas, [ref]$pt)
-  $bmp = New-Object System.Drawing.Bitmap $s[0], $s[1]
-  $g = [System.Drawing.Graphics]::FromImage($bmp)
-  $g.CopyFromScreen($pt.X, $pt.Y, 0, 0, (New-Object System.Drawing.Size $s[0], $s[1]))
-  $g.Dispose()
-  Write-Host "captured $($bmp.Width)x$($bmp.Height) (canvas client $($s[0])x$($s[1]))"
-  return $bmp
-}
-
-function Same-Color($a, $b) {
-  return ([math]::Abs($a.R - $b.R) -le 8) -and ([math]::Abs($a.G - $b.G) -le 8) -and ([math]::Abs($a.B - $b.B) -le 8)
-}
-
-function Measure-Shift($before, $after, [int]$dx, [int]$dy) {
-  if ($before.Width -ne $after.Width -or $before.Height -ne $after.Height) { throw 'capture size changed between captures' }
-  $w = $before.Width; $h = $before.Height
-  $n = 0; $match = 0; $changed = 0
-  for ($y = 24; $y -lt $h - 24; $y += 16) {
-    for ($x = 24; $x -lt $w - 24; $x += 16) {
-      $sx = $x - $dx; $sy = $y - $dy
-      if ($sx -lt 0 -or $sy -lt 0 -or $sx -ge $w -or $sy -ge $h) { continue }
-      $n++
-      $a = $after.GetPixel($x, $y)
-      if (Same-Color $a $before.GetPixel($sx, $sy)) { $match++ }
-      if (-not (Same-Color $a $before.GetPixel($x, $y))) { $changed++ }
-    }
-  }
-  if ($n -lt 500) { throw "only $n samples overlap -- canvas too small or shift too large" }
-  $r = [pscustomobject]@{ Samples = $n; Match = [math]::Round($match / $n, 4); Changed = [math]::Round($changed / $n, 4) }
-  Write-Host "shift ($dx, $dy): $r"
-  return $r
-}
-
-function Copy-Enabled {
-  $edit = [PanU]::GetSubMenu([PanU]::GetMenu($script:Main), 1)   # File | Edit | View | Help
-  [void][PanU]::SendMessageW($script:Main, $WM_INITMENUPOPUP, $edit, [IntPtr]1)
-  return (([PanU]::GetMenuState($edit, $IDM_EDIT_COPY, 0) -band 0x3) -eq 0)   # MF_GRAYED|MF_DISABLED
-}
-
-function Point-At([int[]]$client) {
-  Activate
-  $pt = New-Object PanU+POINT
-  $pt.X = $client[0]; $pt.Y = $client[1]
-  [void][PanU]::ClientToScreen($script:Canvas, [ref]$pt)
-  [void][PanU]::SetCursorPos($pt.X, $pt.Y)
-  Start-Sleep -Milliseconds 150
-}
-
-function Cursor-Is([int]$idc) {
-  Start-Sleep -Milliseconds 150
-  $ci = New-Object PanU+CURSORINFO
-  $ci.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($ci)
-  [void][PanU]::GetCursorInfo([ref]$ci)
-  return ($ci.hCursor -eq [PanU]::LoadCursorW([IntPtr]::Zero, [IntPtr]$idc))
-}
-
-# Run $body with Space held. Space goes to the FOREGROUND window, so assert
-# litepdf is it; always release, even when $body throws.
-function With-Space([scriptblock]$body) {
-  Activate
-  if ([PanU]::GetForegroundWindow() -ne $script:Main) { throw 'litepdf is not the foreground window' }
-  [PanU]::keybd_event(0x20, 0x39, 0, [UIntPtr]::Zero)
-  Start-Sleep -Milliseconds 300   # let litepdf read the key before any posted mouse message
-  try { & $body } finally { [PanU]::keybd_event(0x20, 0x39, 2, [UIntPtr]::Zero); Start-Sleep -Milliseconds 300 }
-}
-
-function Close-LitePdf { [void][PanU]::PostMessageW($script:Main, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero) }
-```
-
-**Hygiene for every GUI run.** Before the first launch, back up the live session — the app auto-saves over it within ~1.5 s: `Copy-Item "$env:LOCALAPPDATA\LitePDF\session.json" "$env:TEMP\litepdf-session-58.bak"`. After the run, `Close-LitePdf` (never `Stop-Process`: a force-kill leaves `running.lock` and the next launch offers a restore) and copy the backup back. Do not touch the mouse or keyboard while a run is in progress. Confirm the binary under test is the one just built: `(Get-Item .\build\Release\litepdf.exe).LastWriteTime` must be newer than your last source edit.
+Tasks 2 and 3 each end with GUI checks run through a scratch PowerShell driver, `build/gui/pan-drive.ps1`. **The driver is written out in full inside each of those two tasks**, not here: each task's brief is extracted on its own (`task-brief` copies nothing above `## Task 1`), so a shared copy in this header would reach neither implementer. The two copies must stay identical.
 
 ---
 
@@ -281,6 +98,7 @@ function Close-LitePdf { [void][PanU]::PostMessageW($script:Main, $WM_CLOSE, [In
   - `enum class litepdf::ui::CanvasCursor { Arrow, IBeam, Move };`
   - `CanvasCursor litepdf::ui::canvas_cursor(Gesture live, bool space_held, bool can_pan, bool over_page) noexcept`
   - `bool litepdf::ui::content_overflows(float content_w, float content_h, float vp_w, float vp_h) noexcept`
+  - `void ClickCounter::forget() noexcept` — the press just counted was not a click; the next press starts a new sequence, even when it arrives as `WM_LBUTTONDBLCLK`.
 
 - [ ] **Step 1: Baseline**
 
@@ -388,6 +206,32 @@ TEST_CASE("SelectionDrag a space pan belongs to the left button and never clears
     REQUIRE(g.release(MouseButton::Left) == ReleaseAction::EndPan);
 }
 
+TEST_CASE("SelectionDrag a press that became a pan starts a new click sequence",
+          "[ui][pan]") {
+    const PointerMetrics m;
+
+    // A real click, then Space + a quick second press, which Windows reports as
+    // a double click and the canvas turns into a pan. A plain click right after
+    // must be a single click, not the third of a triple (a whole line).
+    ClickCounter a;
+    REQUIRE(a.press(false, 1000, 100, 100, m) == SelectMode::Chars);
+    (void)a.press(true, 1050, 100, 100, m);
+    a.forget();
+    REQUIRE(a.press(false, 1100, 100, 100, m) == SelectMode::Chars);
+
+    // Space + a press (a pan), then a quick plain press that Windows reports as
+    // a double click. Its first half was the pan, so it is a single click, not
+    // a word.
+    ClickCounter b;
+    (void)b.press(false, 2000, 50, 50, m);
+    b.forget();
+    REQUIRE(b.press(true, 2100, 50, 50, m) == SelectMode::Chars);
+
+    // Counting is normal again afterwards.
+    REQUIRE(b.press(false, 3000, 50, 50, m) == SelectMode::Chars);
+    REQUIRE(b.press(true, 3050, 50, 50, m) == SelectMode::Words);
+}
+
 TEST_CASE("SelectionDrag cursor precedence for selection and panning", "[ui][cursor]") {
     using C = CanvasCursor;
     //                     live               space  can_pan over_page
@@ -453,7 +297,7 @@ TEST_CASE("ViewportMath content overflows exactly when clamp pan leaves a range"
 cmake --build build --target litepdf_unit_tests --config Release
 ```
 
-Expected: **compile errors** — `'pan_step': is not a member of 'litepdf::ui::GestureState'`, `'canvas_cursor'` / `'CanvasCursor'` / `'PanStep'` / `'content_overflows'` undeclared.
+Expected: **compile errors** — `'pan_step': is not a member of 'litepdf::ui::GestureState'`, `'forget': is not a member of 'litepdf::ui::ClickCounter'`, `'canvas_cursor'` / `'CanvasCursor'` / `'PanStep'` / `'content_overflows'` undeclared.
 
 - [ ] **Step 5: Implement — `SelectionDrag.hpp`**
 
@@ -464,6 +308,44 @@ Update the file's opening comment line 1 from "(and, in #58, panning)" to "and h
 // panning. No Win32, no Direct2D, no MuPDF -- headless-testable, the same
 // pattern as ViewportMath.hpp and SplitterMath.hpp. PdfCanvas feeds it message
 // coordinates and system metrics and acts on what it returns.
+```
+
+In `ClickCounter::press`, replace the counting block — from `int count = 1;` through the closing brace of its `else if` — with this, which adds the `restart_` term and resets it (the `last_count_ = count;` … `last_y_ = y_px;` lines and the `switch` after it are unchanged):
+
+```cpp
+        int count = 1;
+        if (is_double_click_message) {
+            // After forget(), Windows' double click pairs this press with a
+            // press that was not a click, so it starts a new sequence.
+            count = restart_ ? 1 : 2;
+        } else if (last_count_ == 2
+                   // Unsigned subtraction: correct across GetMessageTime's wrap.
+                   && static_cast<std::uint32_t>(time_ms - last_time_ms_) <= m.dblclk_ms
+                   && std::abs(x_px - last_x_) <= m.dblclk_cx / 2
+                   && std::abs(y_px - last_y_) <= m.dblclk_cy / 2) {
+            count = 3;
+        }
+        restart_ = false;
+```
+
+Add this member function after `press()`:
+
+```cpp
+    // The press just counted was not a click: it started a pan (#58). The next
+    // press begins a new sequence -- a single click, even when Windows reports
+    // it as the second half of a double click. Without this, Space + click
+    // followed by a quick plain click selects a word, and a click, Space + a
+    // second press, then a plain click selects a whole line.
+    void forget() noexcept {
+        last_count_ = 0;
+        restart_    = true;
+    }
+```
+
+and add to `ClickCounter`'s private members, after `last_y_`:
+
+```cpp
+    bool          restart_      = false;   // set by forget()
 ```
 
 Above `enum class ReleaseAction`, add:
@@ -561,7 +443,7 @@ ctest --test-dir build -C Release -R "SelectionDrag|ViewportMath" --output-on-fa
 ctest --test-dir build -C Release
 ```
 
-Expected: the `-N` listing includes the six new names; all pass; the full run passes **N0 + 6**. (The "space pan … never clears a selection" case pins behaviour `release()` already has — it passes on first run once the file compiles. It is there because Task 3 now depends on it.)
+Expected: the `-N` listing includes the seven new names; all pass; the full run passes **N0 + 7**. (The "space pan … never clears a selection" case pins behaviour `release()` already has — it passes on first run once the file compiles. It is there because Task 3 now depends on it.)
 
 - [ ] **Step 8: Commit**
 
@@ -573,7 +455,8 @@ GestureState::pan_step reports the pointer motion since the previous step,
 so a pan follows the pointer without drift and without jumping after a
 re-clamp. canvas_cursor settles the I-beam / move / arrow precedence, and
 content_overflows shares clamp_pan's test so the cursor never promises a pan
-that would not happen.
+that would not happen. ClickCounter::forget lets a press that became a pan
+drop out of the click sequence, so it never pairs into a double click.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
@@ -837,11 +720,225 @@ cmake --build build --config Release
 ctest --test-dir build -C Release
 ```
 
-Expected: build clean with no new warnings; **N0 + 6** passing.
+Expected: build clean with no new warnings; **N0 + 7** passing.
 
 - [ ] **Step 10: GUI checks**
 
-Write the driver from the header's "GUI driver" section to `build/gui/pan-drive.ps1` if it is not already there, follow its hygiene notes, then:
+**The driver.** The GUI checks use this scratch driver. **It is not committed.** Save it as `build/gui/pan-drive.ps1` (`build/` is git-ignored) — if a previous task already wrote it, confirm it is identical to the block below and overwrite it if not. It is written out in full in both Task 2 and Task 3 because each task's brief is extracted on its own; keep the two copies identical.
+
+What it measures, and why that is enough:
+
+- **A pan is observed as a pixel translation of the canvas.** `Measure-Shift $before $after $dx $dy` samples a grid and reports `Match` — the share of samples where `after(x, y) == before(x - dx, y - dy)` — and `Changed` — the share where `after(x, y) != before(x, y)`. A pan by exactly `(dx, dy)` client pixels gives `Match ≥ 0.98` **and** `Changed ≥ 0.05` on `simple.pdf`; the second number is the positive control that there was content under the grid (white matches white under any shift). **No pan** gives `Changed ≤ 0.002`. `-MaxX` limits the sampled `after` points to `x < MaxX`, for spread mode, where each page is clipped to its own half of the canvas. The Direct2D canvas is capturable on this build (re-tested 2026-09-16), but **only from a DPI-aware process** — the driver calls `SetProcessDPIAware()` first and `Capture-Canvas` prints the captured size; it must equal the canvas client size, or every number is meaningless.
+- **"Is there a selection" is read from the Edit menu, not pixels.** `Copy-Enabled` sends `WM_INITMENUPOPUP` for the Edit popup and reads `IDM_EDIT_COPY`'s state. Copy is also enabled whenever an edit control has the focus, so each check that uses it first requires `Copy-Enabled` to be `$false`.
+- **Where the text is depends on the DPI, the window size and the zoom preset**, so no fixed client point is guaranteed to be over text (at 100 % scaling the canvas centre can sit in `simple.pdf`'s top margin). `Find-TextPoint` tries candidate points and returns the first where a 160 px horizontal left-drag makes Copy enabled, then clears the selection. A check that relies on "this drag would have selected text" uses that point — `Find-TextPoint` has already proved it.
+- **The cursor is read with `GetCursorInfo`** and compared against the shared system cursor handles (`IDC_ARROW` 32512, `IDC_IBEAM` 32513, `IDC_SIZEALL` 32646). This needs litepdf in the foreground with the real pointer over the canvas; `Point-At` does both. If `Cursor-Is` throws "cursor not showing", the system is suppressing the pointer (`CURSOR_SUPPRESSED`, after touch or pen input): that check is **BLOCKED, not failed** — report it as blocked for the controller to run with the user.
+- **Space is a real key event** (`keybd_event`), because the canvas reads it with `GetKeyState` and a posted `WM_KEYDOWN` does not change key state. `With-Space` asserts litepdf is the foreground window first — injected keys go to whatever is foreground — and releases Space in a `finally`, so a failing check cannot leave the machine's Space key logically held.
+
+**Run the whole check sequence as ONE script** — e.g. write it to `build/gui/task-checks.ps1` (dot-sourcing the driver at its top) and run `powershell -NoProfile -ExecutionPolicy Bypass -File build\gui\task-checks.ps1` from the repo root. A PowerShell tool call does not keep variables into the next one, and the checks depend on pan state built up by the checks before them.
+
+```powershell
+# pan-drive.ps1 -- scratch driver for the #58 GUI checks. Not committed.
+# Dot-source from the repo root in Windows PowerShell 5.1:  . .\build\gui\pan-drive.ps1
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName Microsoft.VisualBasic
+if (-not ('PanU' -as [type])) {
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class PanU {
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+  public static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string cls, IntPtr title);
+  [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern IntPtr SendMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern IntPtr GetMenu(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetSubMenu(IntPtr m, int pos);
+  [DllImport("user32.dll")] public static extern uint GetMenuState(IntPtr m, uint id, uint flags);
+  [DllImport("user32.dll")] public static extern bool GetCursorInfo(ref CURSORINFO ci);
+  [DllImport("user32.dll")] public static extern IntPtr LoadCursorW(IntPtr inst, IntPtr id);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  [StructLayout(LayoutKind.Sequential)] public struct CURSORINFO { public int cbSize; public int flags; public IntPtr hCursor; public POINT pt; }
+}
+"@
+}
+[void][PanU]::SetProcessDPIAware()
+
+$WM_COMMAND = 0x0111; $WM_KEYDOWN = 0x0100; $WM_INITMENUPOPUP = 0x0117; $WM_CLOSE = 0x0010
+$WM_CAPTURECHANGED = 0x0215
+$WM_MOUSEMOVE = 0x0200; $WM_LBUTTONDOWN = 0x0201; $WM_LBUTTONUP = 0x0202
+$WM_MBUTTONDOWN = 0x0207; $WM_MBUTTONUP = 0x0208; $WM_MBUTTONDBLCLK = 0x0209
+$MK_LBUTTON = 0x01; $MK_MBUTTON = 0x10
+$IDM_ZOOM_IN = 40010; $IDM_ZOOM_OUT = 40011; $IDM_ZOOM_RESET = 40012
+$IDM_VIEW_DUAL_PAGE = 40062; $IDM_EDIT_COPY = 40071
+$IDC_ARROW = 32512; $IDC_IBEAM = 32513; $IDC_SIZEALL = 32646
+
+function Start-LitePdf([string[]]$files) {
+  $env:LITEPDF_NO_RESTORE = '1'
+  $p = Start-Process -PassThru (Resolve-Path .\build\Release\litepdf.exe) -ArgumentList $files
+  for ($i = 0; $i -lt 50 -and [int64]$p.MainWindowHandle -eq 0; $i++) { Start-Sleep -Milliseconds 100; $p.Refresh() }
+  $script:Proc   = $p
+  $script:Main   = [IntPtr]$p.MainWindowHandle
+  $script:Canvas = [PanU]::FindWindowExW($script:Main, [IntPtr]::Zero, 'LitePDFPdfCanvas', [IntPtr]::Zero)
+  if ([int64]$script:Canvas -eq 0) { throw 'canvas HWND not found' }
+  Start-Sleep -Milliseconds 1000
+}
+
+function Send-Command([int]$id, [int]$times = 1) {
+  for ($i = 0; $i -lt $times; $i++) {
+    [void][PanU]::PostMessageW($script:Main, $WM_COMMAND, [IntPtr]$id, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 400
+  }
+  Start-Sleep -Milliseconds 800   # let the render land
+}
+
+function Client-Size { $r = New-Object PanU+RECT; [void][PanU]::GetClientRect($script:Canvas, [ref]$r); return @($r.Right, $r.Bottom) }
+function Center { $s = Client-Size; return @([int]($s[0] / 2), [int]($s[1] / 2)) }
+function Offset([int[]]$p, [int]$dx, [int]$dy) { return @(($p[0] + $dx), ($p[1] + $dy)) }
+
+function Post-Mouse([int]$msg, [int[]]$at, [int]$keys) {
+  $l = [IntPtr]((($at[1] -band 0xFFFF) -shl 16) -bor ($at[0] -band 0xFFFF))
+  [void][PanU]::PostMessageW($script:Canvas, $msg, [IntPtr]$keys, $l)
+  Start-Sleep -Milliseconds 40
+}
+
+# Middle-drag from $from to $to. -NoMove posts only the press and the release.
+function Middle-Drag([int[]]$from, [int[]]$to, [int]$steps = 8, [switch]$NoMove) {
+  Post-Mouse $WM_MBUTTONDOWN $from $MK_MBUTTON
+  if (-not $NoMove) {
+    for ($i = 1; $i -le $steps; $i++) {
+      $x = [int]($from[0] + ($to[0] - $from[0]) * $i / $steps)
+      $y = [int]($from[1] + ($to[1] - $from[1]) * $i / $steps)
+      Post-Mouse $WM_MOUSEMOVE @($x, $y) $MK_MBUTTON
+    }
+  }
+  Post-Mouse $WM_MBUTTONUP $to 0
+  Start-Sleep -Milliseconds 300
+}
+
+function Left-Drag([int[]]$from, [int[]]$to, [int]$steps = 8) {
+  Post-Mouse $WM_LBUTTONDOWN $from $MK_LBUTTON
+  for ($i = 1; $i -le $steps; $i++) {
+    $x = [int]($from[0] + ($to[0] - $from[0]) * $i / $steps)
+    $y = [int]($from[1] + ($to[1] - $from[1]) * $i / $steps)
+    Post-Mouse $WM_MOUSEMOVE @($x, $y) $MK_LBUTTON
+  }
+  Post-Mouse $WM_LBUTTONUP $to 0
+  Start-Sleep -Milliseconds 300
+}
+
+function Left-Click([int[]]$at) { Post-Mouse $WM_LBUTTONDOWN $at $MK_LBUTTON; Post-Mouse $WM_LBUTTONUP $at 0; Start-Sleep -Milliseconds 200 }
+
+# Pin the pan to (0, 0): a drag far past the top-left clamp.
+function Reset-Pan { $c = Center; Middle-Drag $c (Offset $c 3000 3000) }
+
+function Activate { [Microsoft.VisualBasic.Interaction]::AppActivate($script:Proc.Id); Start-Sleep -Milliseconds 400 }
+
+function Capture-Canvas {
+  Activate
+  $s = Client-Size
+  $pt = New-Object PanU+POINT
+  [void][PanU]::ClientToScreen($script:Canvas, [ref]$pt)
+  $bmp = New-Object System.Drawing.Bitmap $s[0], $s[1]
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.CopyFromScreen($pt.X, $pt.Y, 0, 0, (New-Object System.Drawing.Size $s[0], $s[1]))
+  $g.Dispose()
+  Write-Host "captured $($bmp.Width)x$($bmp.Height) (canvas client $($s[0])x$($s[1]))"
+  return $bmp
+}
+
+function Same-Color($a, $b) {
+  return ([math]::Abs($a.R - $b.R) -le 8) -and ([math]::Abs($a.G - $b.G) -le 8) -and ([math]::Abs($a.B - $b.B) -le 8)
+}
+
+# -MaxX > 0 samples only after-points with x < MaxX.
+function Measure-Shift($before, $after, [int]$dx, [int]$dy, [int]$MaxX = 0) {
+  if ($before.Width -ne $after.Width -or $before.Height -ne $after.Height) { throw 'capture size changed between captures' }
+  $w = $before.Width; $h = $before.Height
+  $n = 0; $match = 0; $changed = 0
+  for ($y = 24; $y -lt $h - 24; $y += 16) {
+    for ($x = 24; $x -lt $w - 24; $x += 16) {
+      if ($MaxX -gt 0 -and $x -ge $MaxX) { continue }
+      $sx = $x - $dx; $sy = $y - $dy
+      if ($sx -lt 0 -or $sy -lt 0 -or $sx -ge $w -or $sy -ge $h) { continue }
+      $n++
+      $a = $after.GetPixel($x, $y)
+      if (Same-Color $a $before.GetPixel($sx, $sy)) { $match++ }
+      if (-not (Same-Color $a $before.GetPixel($x, $y))) { $changed++ }
+    }
+  }
+  if ($n -lt 500) { throw "only $n samples overlap -- canvas too small or shift too large" }
+  $r = [pscustomobject]@{ Samples = $n; Match = [math]::Round($match / $n, 4); Changed = [math]::Round($changed / $n, 4) }
+  Write-Host "shift ($dx, $dy) maxX=$MaxX : $r"
+  return $r
+}
+
+function Copy-Enabled {
+  $edit = [PanU]::GetSubMenu([PanU]::GetMenu($script:Main), 1)   # File | Edit | View | Help
+  [void][PanU]::SendMessageW($script:Main, $WM_INITMENUPOPUP, $edit, [IntPtr]1)
+  return (([PanU]::GetMenuState($edit, $IDM_EDIT_COPY, 0) -band 0x3) -eq 0)   # MF_GRAYED|MF_DISABLED
+}
+
+# A client point where a 160 px horizontal left-drag selects text at the current
+# zoom and pan. Leaves no selection behind (the closing click clears it).
+function Find-TextPoint {
+  $s = Client-Size
+  foreach ($fy in 0.5, 0.35, 0.65, 0.2, 0.8) {
+    foreach ($fx in 0.3, 0.5) {
+      $p = @([int]($s[0] * $fx), [int]($s[1] * $fy))
+      Left-Drag $p (Offset $p 160 0)
+      $hit = Copy-Enabled
+      Left-Click $p
+      if ($hit) { Write-Host "text point: $p"; return $p }
+    }
+  }
+  throw 'no candidate point selects text -- pan onto the text block and retry'
+}
+
+function Point-At([int[]]$client) {
+  Activate
+  $pt = New-Object PanU+POINT
+  $pt.X = $client[0]; $pt.Y = $client[1]
+  [void][PanU]::ClientToScreen($script:Canvas, [ref]$pt)
+  [void][PanU]::SetCursorPos($pt.X, $pt.Y)
+  Start-Sleep -Milliseconds 150
+}
+
+function Cursor-Is([int]$idc) {
+  Start-Sleep -Milliseconds 150
+  $ci = New-Object PanU+CURSORINFO
+  $ci.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($ci)
+  [void][PanU]::GetCursorInfo([ref]$ci)
+  if ($ci.flags -ne 1) { throw "cursor not showing (flags=$($ci.flags)) -- BLOCKED, not failed" }   # CURSOR_SHOWING
+  return ($ci.hCursor -eq [PanU]::LoadCursorW([IntPtr]::Zero, [IntPtr]$idc))
+}
+
+# Run $body with Space held. Space goes to the FOREGROUND window, so assert
+# litepdf is it; always release, even when $body throws.
+function With-Space([scriptblock]$body) {
+  Activate
+  if ([PanU]::GetForegroundWindow() -ne $script:Main) { throw 'litepdf is not the foreground window' }
+  [PanU]::keybd_event(0x20, 0x39, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 300   # let litepdf read the key before any posted mouse message
+  try { & $body } finally { [PanU]::keybd_event(0x20, 0x39, 2, [UIntPtr]::Zero); Start-Sleep -Milliseconds 300 }
+}
+
+# WM_CLOSE, then WAIT: the app saves session.json on its way out, and a restore
+# copied back before that save lands is overwritten by it.
+function Close-LitePdf {
+  [void][PanU]::PostMessageW($script:Main, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+  if (-not $script:Proc.WaitForExit(10000)) { throw 'litepdf did not exit within 10 s' }
+}
+```
+
+**Hygiene for every GUI run.** Before the first launch, back up the live session — the app auto-saves over it within ~1.5 s: `Copy-Item "$env:LOCALAPPDATA\LitePDF\session.json" "$env:TEMP\litepdf-session-58.bak"`. After the run, `Close-LitePdf` (never `Stop-Process`: a force-kill leaves `running.lock` and the next launch offers a restore) and only then copy the backup back. Do not touch the mouse or keyboard while a run is in progress. Confirm the binary under test is the one just built: `(Get-Item .\build\Release\litepdf.exe).LastWriteTime` must be newer than your last source edit.
+
+**The checks.** At the top of the check script:
 
 ```powershell
 . .\build\gui\pan-drive.ps1
@@ -851,18 +948,47 @@ Reset-Pan
 $C = Center
 ```
 
-Each check states what makes it **fail**. Record every `Measure-Shift` line in the task report.
+Each check states what makes it **fail**. Record every `Measure-Shift` line and every cursor result in the task report. **P9 has no check:** a posted `WM_CAPTURECHANGED` ends the pan through its own arm before any move arrives, and no driver can leave a pan live without the capture and without that message. P9 is covered by review; these checks catch it *misfiring* (every pan would stop at its first move).
 
 1. **Middle-drag pans by exactly the pointer motion.** `$a = Capture-Canvas; Middle-Drag $C (Offset $C -120 -100); $b = Capture-Canvas; Measure-Shift $a $b -120 -100`. Pass: `Match ≥ 0.98` and `Changed ≥ 0.05`. **Fails if** `Changed` is ~0 (no pan) or `Match` is low (panned by the wrong amount — a missing px→DIP conversion shows as exactly twice the shift at 200 % scaling).
 2. **The release position counts** (P5). `$a = Capture-Canvas; Middle-Drag $C (Offset $C -80 -60) -NoMove; $b = Capture-Canvas; Measure-Shift $a $b -80 -60`. Pass as in 1. **Fails if** `Changed` is ~0: the release ignored its own coordinates.
 3. **The pan clamps at the edge, then stops.** The pan is now (-200, -160) client pixels from the top-left clamp. `$a = Capture-Canvas; Middle-Drag $C (Offset $C 400 400); $b = Capture-Canvas; Measure-Shift $a $b 200 160` → pass as in 1 (it moved back exactly to the edge, no further). Then the negative control: `$a = Capture-Canvas; Middle-Drag $C (Offset $C 100 100); $b = Capture-Canvas; (Measure-Shift $a $b 0 0).Changed` ≤ 0.002. **Fails if** the first shift is not (200, 160) or the second moves anything.
-4. **A quick second middle press pans** (P1). `$a = Capture-Canvas; Post-Mouse $WM_MBUTTONDOWN $C $MK_MBUTTON; Post-Mouse $WM_MBUTTONUP $C 0; Post-Mouse $WM_MBUTTONDBLCLK $C $MK_MBUTTON; Post-Mouse $WM_MOUSEMOVE (Offset $C -90 -70) $MK_MBUTTON; Post-Mouse $WM_MBUTTONUP (Offset $C -90 -70) 0; Start-Sleep -Milliseconds 300; $b = Capture-Canvas; Measure-Shift $a $b -90 -70` → pass as in 1. **Fails if** `Changed` is ~0: `WM_MBUTTONDBLCLK` started nothing.
-5. **A left press during a middle pan is refused, and its release does not end the pan.** `Reset-Pan`; require `Copy-Enabled` to be `$false`. `$a = Capture-Canvas; Post-Mouse $WM_MBUTTONDOWN $C $MK_MBUTTON; Post-Mouse $WM_MOUSEMOVE (Offset $C -50 0) $MK_MBUTTON; Post-Mouse $WM_LBUTTONDOWN (Offset $C -50 0) ($MK_MBUTTON -bor $MK_LBUTTON); Post-Mouse $WM_LBUTTONUP (Offset $C -50 0) $MK_MBUTTON; Post-Mouse $WM_MOUSEMOVE (Offset $C -100 -40) $MK_MBUTTON; Post-Mouse $WM_MBUTTONUP (Offset $C -100 -40) 0; Start-Sleep -Milliseconds 300; $b = Capture-Canvas; Measure-Shift $a $b -100 -40` → pass as in 1, and `Copy-Enabled` is still `$false`. **Fails if** the shift stops at (-50, 0) (the left release ended the pan) or Copy became enabled (the left press started a selection).
-6. **A middle press during a selection drag cancels it and pans nothing** (spec §4.2). `Reset-Pan; Left-Click $C`; require `Copy-Enabled` `$false`. `$a = Capture-Canvas; Post-Mouse $WM_LBUTTONDOWN $C $MK_LBUTTON; Post-Mouse $WM_MOUSEMOVE (Offset $C 160 0) $MK_LBUTTON; Post-Mouse $WM_MBUTTONDOWN (Offset $C 160 0) ($MK_LBUTTON -bor $MK_MBUTTON); Post-Mouse $WM_MOUSEMOVE (Offset $C -60 -80) ($MK_LBUTTON -bor $MK_MBUTTON); Post-Mouse $WM_MBUTTONUP (Offset $C -60 -80) $MK_LBUTTON; Post-Mouse $WM_LBUTTONUP (Offset $C -60 -80) 0; Start-Sleep -Milliseconds 300; $b = Capture-Canvas; (Measure-Shift $a $b 0 0).Changed` ≤ 0.002, and `Copy-Enabled` `$false`. Then recovery: `$a = Capture-Canvas; Middle-Drag $C (Offset $C -60 -30); $b = Capture-Canvas; Measure-Shift $a $b -60 -30` → pass as in 1. **Fails if** anything moved or remained highlighted, a selection was committed, or the recovery drag does not pan (a gesture left latched).
+4. **A quick second middle press pans** (P1). This posts `WM_MBUTTONDBLCLK` directly, so it tests the new arm, not Windows' conversion of the press. `$a = Capture-Canvas; Post-Mouse $WM_MBUTTONDOWN $C $MK_MBUTTON; Post-Mouse $WM_MBUTTONUP $C 0; Post-Mouse $WM_MBUTTONDBLCLK $C $MK_MBUTTON; Post-Mouse $WM_MOUSEMOVE (Offset $C -90 -70) $MK_MBUTTON; Post-Mouse $WM_MBUTTONUP (Offset $C -90 -70) 0; Start-Sleep -Milliseconds 300; $b = Capture-Canvas; Measure-Shift $a $b -90 -70` → pass as in 1. **Fails if** `Changed` is ~0: `WM_MBUTTONDBLCLK` started nothing.
+5. **A left press during a middle pan is refused, and its release does not end the pan.** `Reset-Pan; $T = Find-TextPoint`; require `Copy-Enabled` `$false`. Then:
+   ```powershell
+   $a = Capture-Canvas
+   Post-Mouse $WM_MBUTTONDOWN $T                    $MK_MBUTTON
+   Post-Mouse $WM_MOUSEMOVE   (Offset $T -50 0)     $MK_MBUTTON
+   Post-Mouse $WM_LBUTTONDOWN (Offset $T -50 0)     ($MK_MBUTTON -bor $MK_LBUTTON)
+   Post-Mouse $WM_MOUSEMOVE   (Offset $T -100 -40)  ($MK_MBUTTON -bor $MK_LBUTTON)
+   Post-Mouse $WM_LBUTTONUP   (Offset $T -100 -40)  $MK_MBUTTON
+   Post-Mouse $WM_MOUSEMOVE   (Offset $T -150 -40)  $MK_MBUTTON
+   Post-Mouse $WM_MBUTTONUP   (Offset $T -150 -40)  0
+   Start-Sleep -Milliseconds 300
+   $b = Capture-Canvas
+   Measure-Shift $a $b -150 -40
+   ```
+   Pass as in 1, and `Copy-Enabled` still `$false`. **Fails if** the shift stops at (-100, -40) — the left release ended the pan — or Copy became enabled: the left press started a selection (`$T` is a point where a left-drag is known to select text).
+6. **A middle press during a selection drag cancels it and pans nothing** (spec §4.2). `Reset-Pan; $T = Find-TextPoint`; require `Copy-Enabled` `$false`. Then:
+   ```powershell
+   $a = Capture-Canvas
+   Post-Mouse $WM_LBUTTONDOWN $T                    $MK_LBUTTON
+   Post-Mouse $WM_MOUSEMOVE   (Offset $T 160 0)     $MK_LBUTTON
+   Post-Mouse $WM_MBUTTONDOWN (Offset $T 160 0)     ($MK_LBUTTON -bor $MK_MBUTTON)
+   Post-Mouse $WM_MOUSEMOVE   (Offset $T 100 -80)   ($MK_LBUTTON -bor $MK_MBUTTON)
+   Post-Mouse $WM_MBUTTONUP   (Offset $T 100 -80)   $MK_LBUTTON
+   Post-Mouse $WM_MOUSEMOVE   (Offset $T 160 0)     $MK_LBUTTON
+   Post-Mouse $WM_LBUTTONUP   (Offset $T 160 0)     0
+   Start-Sleep -Milliseconds 300
+   $b = Capture-Canvas
+   (Measure-Shift $a $b 0 0).Changed     # expect <= 0.002
+   Copy-Enabled                          # expect $false
+   ```
+   `Find-TextPoint` has already proved that this same left-drag, `$T` to `$T + (160, 0)`, selects text when nothing interrupts it, so a grayed Copy here is the cancel's doing. Then recovery: `$a = Capture-Canvas; Middle-Drag $C (Offset $C -60 -30); $b = Capture-Canvas; Measure-Shift $a $b -60 -30` → pass as in 1. **Fails if** anything moved or stayed highlighted, Copy is enabled (the drag committed), or the recovery drag does not pan (a gesture left latched).
 7. **Losing the capture ends the pan, and the canvas recovers.** `Reset-Pan; $a = Capture-Canvas; Post-Mouse $WM_MBUTTONDOWN $C $MK_MBUTTON; Post-Mouse $WM_MOUSEMOVE (Offset $C -40 0) $MK_MBUTTON; [void][PanU]::PostMessageW($Canvas, $WM_CAPTURECHANGED, [IntPtr]::Zero, [IntPtr]::Zero); Start-Sleep -Milliseconds 100; Post-Mouse $WM_MOUSEMOVE (Offset $C -140 0) $MK_MBUTTON; Post-Mouse $WM_MBUTTONUP (Offset $C -140 0) 0; Start-Sleep -Milliseconds 300; $b = Capture-Canvas; Measure-Shift $a $b -40 0` → pass as in 1. Then `$a = Capture-Canvas; Middle-Drag $C (Offset $C -60 0); $b = Capture-Canvas; Measure-Shift $a $b -60 0` → pass as in 1. **Fails if** the first shift is (-140, 0) (the pan outlived its capture) or the second drag does not pan.
-8. **The cursor during a pan** (P2, P6). `Reset-Pan; Point-At $C`; `Cursor-Is $IDC_IBEAM` must be `$true` (precondition: over the page, nothing live). `Post-Mouse $WM_MBUTTONDOWN $C $MK_MBUTTON; Cursor-Is $IDC_SIZEALL` → `$true`. `Post-Mouse $WM_MBUTTONUP $C 0; Cursor-Is $IDC_IBEAM` → `$true`. Negative control, content that fits: `Send-Command $IDM_ZOOM_OUT 8; Point-At (Center)`; `Cursor-Is $IDC_IBEAM` `$true`; `Post-Mouse $WM_MBUTTONDOWN (Center) $MK_MBUTTON; Cursor-Is $IDC_ARROW` → `$true` (nothing to pan); `Post-Mouse $WM_MBUTTONUP (Center) 0`; and `$a = Capture-Canvas; Middle-Drag (Center) (Offset (Center) -100 -100); $b = Capture-Canvas; (Measure-Shift $a $b 0 0).Changed` ≤ 0.002. **Fails if** the pan keeps the I-beam, or shows the move cursor over content that cannot move.
+8. **The cursor during a pan** (P2, P6). `Reset-Pan; Point-At $C`; `Cursor-Is $IDC_IBEAM` must be `$true` (precondition: over the page, nothing live). `Post-Mouse $WM_MBUTTONDOWN $C $MK_MBUTTON; Cursor-Is $IDC_SIZEALL` → `$true`. `Post-Mouse $WM_MBUTTONUP $C 0; Cursor-Is $IDC_IBEAM` → `$true` (this half checks the outcome: it passes whether the canvas's own `refresh_cursor` or a system-generated post-release mouse move restored the I-beam). Negative control, content that fits: `Send-Command $IDM_ZOOM_OUT 8; Point-At (Center)`; `Cursor-Is $IDC_IBEAM` `$true`; `Post-Mouse $WM_MBUTTONDOWN (Center) $MK_MBUTTON; Cursor-Is $IDC_ARROW` → `$true` (nothing to pan); `Post-Mouse $WM_MBUTTONUP (Center) 0`; and `$a = Capture-Canvas; Middle-Drag (Center) (Offset (Center) -100 -100); $b = Capture-Canvas; (Measure-Shift $a $b 0 0).Changed` ≤ 0.002. **Fails if** the pan keeps the I-beam, or shows the move cursor over content that cannot move.
 
-`Close-LitePdf`; restore `session.json`.
+`Close-LitePdf` (it waits for the process to exit); then restore `session.json`.
 
 - [ ] **Step 11: Commit**
 
@@ -888,7 +1014,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Modify: `src/ui/PdfCanvas.cpp`
 
 **Interfaces:**
-- Consumes (Task 2): `PdfCanvas::begin_pan_gesture(MouseButton, int, int)`, `PdfCanvas::refresh_cursor()`, `update_cursor()`'s `space_held` local; (Task 1) `canvas_cursor`.
+- Consumes (Task 2): `PdfCanvas::begin_pan_gesture(MouseButton, int, int)`, `PdfCanvas::refresh_cursor()`, `update_cursor()`'s `space_held` local; (Task 1) `canvas_cursor`, `ClickCounter::forget()` (`impl_->clicks` is the canvas's `ClickCounter`).
 - Produces: nothing later tasks call.
 
 - [ ] **Step 1: The Space branch of `on_left_button_down`**
@@ -902,6 +1028,9 @@ In `on_left_button_down`, immediately **after** the line `if (impl_->gesture.ges
     // Checked BEFORE the refusals below, which guard SELECTION -- a pan is as
     // valid in spread mode, or before this page's bitmap lands, as anywhere.
     if ((GetKeyState(VK_SPACE) & 0x8000) != 0) {
+        // Not a click: the press counted above must not pair with the next one
+        // into a double or triple click.
+        impl_->clicks.forget();
         begin_pan_gesture(MouseButton::Left, x_px, y_px);
         return;
     }
@@ -950,11 +1079,225 @@ cmake --build build --config Release
 ctest --test-dir build -C Release
 ```
 
-Expected: build clean; **N0 + 6** passing.
+Expected: build clean; **N0 + 7** passing.
 
 - [ ] **Step 5: GUI checks**
 
-Driver and hygiene as in Task 2 (the header's "GUI driver" section). Setup:
+**The driver.** The GUI checks use this scratch driver. **It is not committed.** Save it as `build/gui/pan-drive.ps1` (`build/` is git-ignored) — if a previous task already wrote it, confirm it is identical to the block below and overwrite it if not. It is written out in full in both Task 2 and Task 3 because each task's brief is extracted on its own; keep the two copies identical.
+
+What it measures, and why that is enough:
+
+- **A pan is observed as a pixel translation of the canvas.** `Measure-Shift $before $after $dx $dy` samples a grid and reports `Match` — the share of samples where `after(x, y) == before(x - dx, y - dy)` — and `Changed` — the share where `after(x, y) != before(x, y)`. A pan by exactly `(dx, dy)` client pixels gives `Match ≥ 0.98` **and** `Changed ≥ 0.05` on `simple.pdf`; the second number is the positive control that there was content under the grid (white matches white under any shift). **No pan** gives `Changed ≤ 0.002`. `-MaxX` limits the sampled `after` points to `x < MaxX`, for spread mode, where each page is clipped to its own half of the canvas. The Direct2D canvas is capturable on this build (re-tested 2026-09-16), but **only from a DPI-aware process** — the driver calls `SetProcessDPIAware()` first and `Capture-Canvas` prints the captured size; it must equal the canvas client size, or every number is meaningless.
+- **"Is there a selection" is read from the Edit menu, not pixels.** `Copy-Enabled` sends `WM_INITMENUPOPUP` for the Edit popup and reads `IDM_EDIT_COPY`'s state. Copy is also enabled whenever an edit control has the focus, so each check that uses it first requires `Copy-Enabled` to be `$false`.
+- **Where the text is depends on the DPI, the window size and the zoom preset**, so no fixed client point is guaranteed to be over text (at 100 % scaling the canvas centre can sit in `simple.pdf`'s top margin). `Find-TextPoint` tries candidate points and returns the first where a 160 px horizontal left-drag makes Copy enabled, then clears the selection. A check that relies on "this drag would have selected text" uses that point — `Find-TextPoint` has already proved it.
+- **The cursor is read with `GetCursorInfo`** and compared against the shared system cursor handles (`IDC_ARROW` 32512, `IDC_IBEAM` 32513, `IDC_SIZEALL` 32646). This needs litepdf in the foreground with the real pointer over the canvas; `Point-At` does both. If `Cursor-Is` throws "cursor not showing", the system is suppressing the pointer (`CURSOR_SUPPRESSED`, after touch or pen input): that check is **BLOCKED, not failed** — report it as blocked for the controller to run with the user.
+- **Space is a real key event** (`keybd_event`), because the canvas reads it with `GetKeyState` and a posted `WM_KEYDOWN` does not change key state. `With-Space` asserts litepdf is the foreground window first — injected keys go to whatever is foreground — and releases Space in a `finally`, so a failing check cannot leave the machine's Space key logically held.
+
+**Run the whole check sequence as ONE script** — e.g. write it to `build/gui/task-checks.ps1` (dot-sourcing the driver at its top) and run `powershell -NoProfile -ExecutionPolicy Bypass -File build\gui\task-checks.ps1` from the repo root. A PowerShell tool call does not keep variables into the next one, and the checks depend on pan state built up by the checks before them.
+
+```powershell
+# pan-drive.ps1 -- scratch driver for the #58 GUI checks. Not committed.
+# Dot-source from the repo root in Windows PowerShell 5.1:  . .\build\gui\pan-drive.ps1
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName Microsoft.VisualBasic
+if (-not ('PanU' -as [type])) {
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class PanU {
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+  public static extern IntPtr FindWindowExW(IntPtr parent, IntPtr after, string cls, IntPtr title);
+  [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern IntPtr SendMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern IntPtr GetMenu(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetSubMenu(IntPtr m, int pos);
+  [DllImport("user32.dll")] public static extern uint GetMenuState(IntPtr m, uint id, uint flags);
+  [DllImport("user32.dll")] public static extern bool GetCursorInfo(ref CURSORINFO ci);
+  [DllImport("user32.dll")] public static extern IntPtr LoadCursorW(IntPtr inst, IntPtr id);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  [StructLayout(LayoutKind.Sequential)] public struct CURSORINFO { public int cbSize; public int flags; public IntPtr hCursor; public POINT pt; }
+}
+"@
+}
+[void][PanU]::SetProcessDPIAware()
+
+$WM_COMMAND = 0x0111; $WM_KEYDOWN = 0x0100; $WM_INITMENUPOPUP = 0x0117; $WM_CLOSE = 0x0010
+$WM_CAPTURECHANGED = 0x0215
+$WM_MOUSEMOVE = 0x0200; $WM_LBUTTONDOWN = 0x0201; $WM_LBUTTONUP = 0x0202
+$WM_MBUTTONDOWN = 0x0207; $WM_MBUTTONUP = 0x0208; $WM_MBUTTONDBLCLK = 0x0209
+$MK_LBUTTON = 0x01; $MK_MBUTTON = 0x10
+$IDM_ZOOM_IN = 40010; $IDM_ZOOM_OUT = 40011; $IDM_ZOOM_RESET = 40012
+$IDM_VIEW_DUAL_PAGE = 40062; $IDM_EDIT_COPY = 40071
+$IDC_ARROW = 32512; $IDC_IBEAM = 32513; $IDC_SIZEALL = 32646
+
+function Start-LitePdf([string[]]$files) {
+  $env:LITEPDF_NO_RESTORE = '1'
+  $p = Start-Process -PassThru (Resolve-Path .\build\Release\litepdf.exe) -ArgumentList $files
+  for ($i = 0; $i -lt 50 -and [int64]$p.MainWindowHandle -eq 0; $i++) { Start-Sleep -Milliseconds 100; $p.Refresh() }
+  $script:Proc   = $p
+  $script:Main   = [IntPtr]$p.MainWindowHandle
+  $script:Canvas = [PanU]::FindWindowExW($script:Main, [IntPtr]::Zero, 'LitePDFPdfCanvas', [IntPtr]::Zero)
+  if ([int64]$script:Canvas -eq 0) { throw 'canvas HWND not found' }
+  Start-Sleep -Milliseconds 1000
+}
+
+function Send-Command([int]$id, [int]$times = 1) {
+  for ($i = 0; $i -lt $times; $i++) {
+    [void][PanU]::PostMessageW($script:Main, $WM_COMMAND, [IntPtr]$id, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 400
+  }
+  Start-Sleep -Milliseconds 800   # let the render land
+}
+
+function Client-Size { $r = New-Object PanU+RECT; [void][PanU]::GetClientRect($script:Canvas, [ref]$r); return @($r.Right, $r.Bottom) }
+function Center { $s = Client-Size; return @([int]($s[0] / 2), [int]($s[1] / 2)) }
+function Offset([int[]]$p, [int]$dx, [int]$dy) { return @(($p[0] + $dx), ($p[1] + $dy)) }
+
+function Post-Mouse([int]$msg, [int[]]$at, [int]$keys) {
+  $l = [IntPtr]((($at[1] -band 0xFFFF) -shl 16) -bor ($at[0] -band 0xFFFF))
+  [void][PanU]::PostMessageW($script:Canvas, $msg, [IntPtr]$keys, $l)
+  Start-Sleep -Milliseconds 40
+}
+
+# Middle-drag from $from to $to. -NoMove posts only the press and the release.
+function Middle-Drag([int[]]$from, [int[]]$to, [int]$steps = 8, [switch]$NoMove) {
+  Post-Mouse $WM_MBUTTONDOWN $from $MK_MBUTTON
+  if (-not $NoMove) {
+    for ($i = 1; $i -le $steps; $i++) {
+      $x = [int]($from[0] + ($to[0] - $from[0]) * $i / $steps)
+      $y = [int]($from[1] + ($to[1] - $from[1]) * $i / $steps)
+      Post-Mouse $WM_MOUSEMOVE @($x, $y) $MK_MBUTTON
+    }
+  }
+  Post-Mouse $WM_MBUTTONUP $to 0
+  Start-Sleep -Milliseconds 300
+}
+
+function Left-Drag([int[]]$from, [int[]]$to, [int]$steps = 8) {
+  Post-Mouse $WM_LBUTTONDOWN $from $MK_LBUTTON
+  for ($i = 1; $i -le $steps; $i++) {
+    $x = [int]($from[0] + ($to[0] - $from[0]) * $i / $steps)
+    $y = [int]($from[1] + ($to[1] - $from[1]) * $i / $steps)
+    Post-Mouse $WM_MOUSEMOVE @($x, $y) $MK_LBUTTON
+  }
+  Post-Mouse $WM_LBUTTONUP $to 0
+  Start-Sleep -Milliseconds 300
+}
+
+function Left-Click([int[]]$at) { Post-Mouse $WM_LBUTTONDOWN $at $MK_LBUTTON; Post-Mouse $WM_LBUTTONUP $at 0; Start-Sleep -Milliseconds 200 }
+
+# Pin the pan to (0, 0): a drag far past the top-left clamp.
+function Reset-Pan { $c = Center; Middle-Drag $c (Offset $c 3000 3000) }
+
+function Activate { [Microsoft.VisualBasic.Interaction]::AppActivate($script:Proc.Id); Start-Sleep -Milliseconds 400 }
+
+function Capture-Canvas {
+  Activate
+  $s = Client-Size
+  $pt = New-Object PanU+POINT
+  [void][PanU]::ClientToScreen($script:Canvas, [ref]$pt)
+  $bmp = New-Object System.Drawing.Bitmap $s[0], $s[1]
+  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $g.CopyFromScreen($pt.X, $pt.Y, 0, 0, (New-Object System.Drawing.Size $s[0], $s[1]))
+  $g.Dispose()
+  Write-Host "captured $($bmp.Width)x$($bmp.Height) (canvas client $($s[0])x$($s[1]))"
+  return $bmp
+}
+
+function Same-Color($a, $b) {
+  return ([math]::Abs($a.R - $b.R) -le 8) -and ([math]::Abs($a.G - $b.G) -le 8) -and ([math]::Abs($a.B - $b.B) -le 8)
+}
+
+# -MaxX > 0 samples only after-points with x < MaxX.
+function Measure-Shift($before, $after, [int]$dx, [int]$dy, [int]$MaxX = 0) {
+  if ($before.Width -ne $after.Width -or $before.Height -ne $after.Height) { throw 'capture size changed between captures' }
+  $w = $before.Width; $h = $before.Height
+  $n = 0; $match = 0; $changed = 0
+  for ($y = 24; $y -lt $h - 24; $y += 16) {
+    for ($x = 24; $x -lt $w - 24; $x += 16) {
+      if ($MaxX -gt 0 -and $x -ge $MaxX) { continue }
+      $sx = $x - $dx; $sy = $y - $dy
+      if ($sx -lt 0 -or $sy -lt 0 -or $sx -ge $w -or $sy -ge $h) { continue }
+      $n++
+      $a = $after.GetPixel($x, $y)
+      if (Same-Color $a $before.GetPixel($sx, $sy)) { $match++ }
+      if (-not (Same-Color $a $before.GetPixel($x, $y))) { $changed++ }
+    }
+  }
+  if ($n -lt 500) { throw "only $n samples overlap -- canvas too small or shift too large" }
+  $r = [pscustomobject]@{ Samples = $n; Match = [math]::Round($match / $n, 4); Changed = [math]::Round($changed / $n, 4) }
+  Write-Host "shift ($dx, $dy) maxX=$MaxX : $r"
+  return $r
+}
+
+function Copy-Enabled {
+  $edit = [PanU]::GetSubMenu([PanU]::GetMenu($script:Main), 1)   # File | Edit | View | Help
+  [void][PanU]::SendMessageW($script:Main, $WM_INITMENUPOPUP, $edit, [IntPtr]1)
+  return (([PanU]::GetMenuState($edit, $IDM_EDIT_COPY, 0) -band 0x3) -eq 0)   # MF_GRAYED|MF_DISABLED
+}
+
+# A client point where a 160 px horizontal left-drag selects text at the current
+# zoom and pan. Leaves no selection behind (the closing click clears it).
+function Find-TextPoint {
+  $s = Client-Size
+  foreach ($fy in 0.5, 0.35, 0.65, 0.2, 0.8) {
+    foreach ($fx in 0.3, 0.5) {
+      $p = @([int]($s[0] * $fx), [int]($s[1] * $fy))
+      Left-Drag $p (Offset $p 160 0)
+      $hit = Copy-Enabled
+      Left-Click $p
+      if ($hit) { Write-Host "text point: $p"; return $p }
+    }
+  }
+  throw 'no candidate point selects text -- pan onto the text block and retry'
+}
+
+function Point-At([int[]]$client) {
+  Activate
+  $pt = New-Object PanU+POINT
+  $pt.X = $client[0]; $pt.Y = $client[1]
+  [void][PanU]::ClientToScreen($script:Canvas, [ref]$pt)
+  [void][PanU]::SetCursorPos($pt.X, $pt.Y)
+  Start-Sleep -Milliseconds 150
+}
+
+function Cursor-Is([int]$idc) {
+  Start-Sleep -Milliseconds 150
+  $ci = New-Object PanU+CURSORINFO
+  $ci.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf($ci)
+  [void][PanU]::GetCursorInfo([ref]$ci)
+  if ($ci.flags -ne 1) { throw "cursor not showing (flags=$($ci.flags)) -- BLOCKED, not failed" }   # CURSOR_SHOWING
+  return ($ci.hCursor -eq [PanU]::LoadCursorW([IntPtr]::Zero, [IntPtr]$idc))
+}
+
+# Run $body with Space held. Space goes to the FOREGROUND window, so assert
+# litepdf is it; always release, even when $body throws.
+function With-Space([scriptblock]$body) {
+  Activate
+  if ([PanU]::GetForegroundWindow() -ne $script:Main) { throw 'litepdf is not the foreground window' }
+  [PanU]::keybd_event(0x20, 0x39, 0, [UIntPtr]::Zero)
+  Start-Sleep -Milliseconds 300   # let litepdf read the key before any posted mouse message
+  try { & $body } finally { [PanU]::keybd_event(0x20, 0x39, 2, [UIntPtr]::Zero); Start-Sleep -Milliseconds 300 }
+}
+
+# WM_CLOSE, then WAIT: the app saves session.json on its way out, and a restore
+# copied back before that save lands is overwritten by it.
+function Close-LitePdf {
+  [void][PanU]::PostMessageW($script:Main, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+  if (-not $script:Proc.WaitForExit(10000)) { throw 'litepdf did not exit within 10 s' }
+}
+```
+
+**Hygiene for every GUI run.** Before the first launch, back up the live session — the app auto-saves over it within ~1.5 s: `Copy-Item "$env:LOCALAPPDATA\LitePDF\session.json" "$env:TEMP\litepdf-session-58.bak"`. After the run, `Close-LitePdf` (never `Stop-Process`: a force-kill leaves `running.lock` and the next launch offers a restore) and only then copy the backup back. Do not touch the mouse or keyboard while a run is in progress. Confirm the binary under test is the one just built: `(Get-Item .\build\Release\litepdf.exe).LastWriteTime` must be newer than your last source edit.
+
+**The checks.** At the top of the check script:
 
 ```powershell
 . .\build\gui\pan-drive.ps1
@@ -962,17 +1305,21 @@ Start-LitePdf @('tests\fixtures\simple.pdf')
 Send-Command $IDM_ZOOM_IN 3
 Reset-Pan
 $C = Center
-Left-Click $C                      # canvas focus, no selection
+Middle-Drag $C (Offset $C -200 -200)   # room to pan in every direction
+$T = Find-TextPoint                    # also gives the canvas the focus; leaves no selection
 ```
 
-1. **Space + left-drag pans and selects nothing.** Require `Copy-Enabled` `$false`. `$a = Capture-Canvas; With-Space { Left-Drag $C (Offset $C -150 -90) }; $b = Capture-Canvas; Measure-Shift $a $b -150 -90` → `Match ≥ 0.98`, `Changed ≥ 0.05`; `Copy-Enabled` still `$false`. **Fails if** it did not pan, or a selection was made.
-2. **The same drag without Space selects and does not pan** — the control that makes check 1 discriminating: it proves the posted drag reaches the canvas and would select. `$a = Capture-Canvas; Left-Drag $C (Offset $C -150 -90); $b = Capture-Canvas`; `Copy-Enabled` → `$true`; `(Measure-Shift $a $b -150 -90).Match` < 0.9. **Fails if** Copy stays grayed (then check 1 proved nothing — fix the harness and re-run both).
-3. **A Space click keeps the selection.** With check 2's selection in place (`Copy-Enabled` `$true`): `With-Space { Left-Click (Offset $C 10 10) }`; `Copy-Enabled` → still `$true`. Control: `Left-Click (Offset $C 10 10)`; `Copy-Enabled` → `$false` (a plain click clears — proving the click reached the canvas). **Fails if** the Space click cleared the selection.
-4. **Space + left-drag pans in spread mode** (P3). `Send-Command $IDM_ZOOM_RESET; Send-Command $IDM_VIEW_DUAL_PAGE; Send-Command $IDM_ZOOM_IN 4; Reset-Pan`. `$a = Capture-Canvas; With-Space { Left-Drag $C (Offset $C -100 -80) }; $b = Capture-Canvas; Measure-Shift $a $b -100 -80` → `Match ≥ 0.98`, `Changed ≥ 0.01` (a lower bar: the spread's page can leave part of the canvas as surround). Negative control, no Space: `$a = Capture-Canvas; Left-Drag $C (Offset $C -100 -80); $b = Capture-Canvas; (Measure-Shift $a $b 0 0).Changed` ≤ 0.002 (spread mode refuses a selection and a plain drag does not pan). **Fails if** the Space drag does not pan — the Space branch sits after the spread refusal. If *both* show `Changed` ~0, first confirm the spread overflows (`Middle-Drag` must move it; if it does not, `Send-Command $IDM_ZOOM_IN` once more and repeat). Finish with `Send-Command $IDM_VIEW_DUAL_PAGE; Send-Command $IDM_ZOOM_IN 3; Reset-Pan; Left-Click $C`.
-5. **Space alone changes the hover cursor** (P6, P7). `Point-At $C`; `Cursor-Is $IDC_IBEAM` `$true`. `With-Space { Cursor-Is $IDC_SIZEALL }` → `$true` — the pointer never moved, so only the `WM_KEYDOWN` refresh can have changed it. After `With-Space` returns: `Cursor-Is $IDC_IBEAM` → `$true` (the `WM_KEYUP` refresh). Negative control, content that fits: `Send-Command $IDM_ZOOM_OUT 8; Left-Click (Center); Point-At (Center)`; `Cursor-Is $IDC_IBEAM` `$true`; `With-Space { Cursor-Is $IDC_ARROW }` → `$true`; afterwards `Cursor-Is $IDC_IBEAM` `$true`. **Fails if** Space leaves the I-beam over pannable content, or shows the move cursor over content that fits.
-6. **Space pressed mid-selection keeps the drag a selection.** `Send-Command $IDM_ZOOM_IN 8; Reset-Pan; Left-Click $C`; require `Copy-Enabled` `$false`. `Post-Mouse $WM_LBUTTONDOWN $C $MK_LBUTTON; Post-Mouse $WM_MOUSEMOVE (Offset $C 80 0) $MK_LBUTTON; With-Space { Post-Mouse $WM_MOUSEMOVE (Offset $C 160 40) $MK_LBUTTON; Post-Mouse $WM_LBUTTONUP (Offset $C 160 40) 0 }`; `Copy-Enabled` → `$true`. **Fails if** Copy stays grayed: Space turned a live selection into something else.
+Each check states what makes it **fail**. Record every `Measure-Shift` line and every cursor result in the task report.
 
-`Close-LitePdf`; restore `session.json`.
+1. **A plain left-drag selects and does not pan** — the control that makes check 2 discriminating. Require `Copy-Enabled` `$false`. `$a = Capture-Canvas; Left-Drag $T (Offset $T 160 0)`; `Copy-Enabled` → `$true`. `Start-Sleep -Milliseconds 600; Left-Click $T`; `Copy-Enabled` → `$false`; `$b = Capture-Canvas; (Measure-Shift $a $b 0 0).Changed` ≤ 0.002 (the page did not move). **Fails if** Copy stays grayed after the drag (then check 2 proves nothing — fix the harness first) or the page moved.
+2. **Space + left-drag pans and selects nothing.** `$a = Capture-Canvas; With-Space { Left-Drag $T (Offset $T 160 0) }; $b = Capture-Canvas; Measure-Shift $a $b 160 0` → `Match ≥ 0.98`, `Changed ≥ 0.05`; `Copy-Enabled` still `$false`. **Fails if** it did not pan, or a selection was made.
+3. **A Space click keeps the selection.** Undo check 2's pan so `$T` is over the same text again: `Middle-Drag $C (Offset $C -160 0)`. `Left-Drag $T (Offset $T 160 0)`; `Copy-Enabled` → `$true`. `Start-Sleep -Milliseconds 600; With-Space { Left-Click (Offset $T 10 0) }`; `Copy-Enabled` → still `$true`. Control: `Left-Click (Offset $T 10 0)`; `Copy-Enabled` → `$false` (a plain click clears — proving the click reached the canvas). **Fails if** the Space click cleared the selection.
+4. **A Space press is not a click** (P10). Control first — a real double click at `$T` selects: `Start-Sleep -Milliseconds 600; Left-Click $T; Post-Mouse $WM_LBUTTONDBLCLK $T $MK_LBUTTON; Post-Mouse $WM_LBUTTONUP $T 0`; `Copy-Enabled` → `$true`. `Start-Sleep -Milliseconds 600; Left-Click $T`; `Copy-Enabled` → `$false`. Then the check — the same pair, with the first press made under Space: `Start-Sleep -Milliseconds 600; With-Space { Left-Click $T }; Post-Mouse $WM_LBUTTONDBLCLK $T $MK_LBUTTON; Post-Mouse $WM_LBUTTONUP $T 0`; `Copy-Enabled` → `$false`. **Fails if** Copy is enabled: the pan press paired with the next one into a double click and selected a word. If the control does not select, pick another point (`Find-TextPoint` proves a drag selects, not that a double click at exactly `$T` lands on a word) and re-run.
+5. **Space + left-drag pans in spread mode** (P3). `Send-Command $IDM_ZOOM_RESET; Send-Command $IDM_VIEW_DUAL_PAGE; Send-Command $IDM_ZOOM_IN 4; Reset-Pan; $s = Client-Size; $mx = [int]($s[0] * 0.45) - 100`. The single page is drawn in the left slot and clipped to its half of the canvas (the spread branch of `on_paint` pushes one axis-aligned clip per slot), so after a pan to the left, the right edge of that half shows page where the earlier capture showed surround; `-MaxX $mx` keeps the samples clear of that band. `$a = Capture-Canvas; With-Space { Left-Drag $C (Offset $C -100 -80) }; $b = Capture-Canvas; Measure-Shift $a $b -100 -80 -MaxX $mx` → `Match ≥ 0.98`, `Changed ≥ 0.01`. Negative control, no Space: `$a = Capture-Canvas; Left-Drag $C (Offset $C -100 -80); $b = Capture-Canvas; (Measure-Shift $a $b 0 0).Changed` ≤ 0.002 over the whole canvas (spread mode refuses a selection, and a plain drag does not pan). **Fails if** the Space drag does not pan — the Space branch sits after the spread refusal. If *both* show `Changed` ~0, first confirm the spread overflows (`Middle-Drag` must move it; if it does not, `Send-Command $IDM_ZOOM_IN` once more and repeat). Finish with `Send-Command $IDM_VIEW_DUAL_PAGE; Send-Command $IDM_ZOOM_RESET; Send-Command $IDM_ZOOM_IN 3; Reset-Pan; Left-Click $C`.
+6. **Space alone changes the hover cursor** (P6, P7). `Point-At $C`; `Cursor-Is $IDC_IBEAM` `$true`. `With-Space { Cursor-Is $IDC_SIZEALL }` → `$true` — the pointer never moved, so only the `WM_KEYDOWN` refresh can have changed it. After `With-Space` returns: `Cursor-Is $IDC_IBEAM` → `$true` (the `WM_KEYUP` refresh). Negative control, content that fits: `Send-Command $IDM_ZOOM_OUT 8; Left-Click (Center); Point-At (Center)`; `Cursor-Is $IDC_IBEAM` `$true`; `With-Space { Cursor-Is $IDC_ARROW }` → `$true`; afterwards `Cursor-Is $IDC_IBEAM` `$true`. **Fails if** Space leaves the I-beam over pannable content, or shows the move cursor over content that fits.
+7. **Space pressed mid-selection keeps the drag a selection.** `Send-Command $IDM_ZOOM_RESET; Send-Command $IDM_ZOOM_IN 3; Reset-Pan; Middle-Drag $C (Offset $C -200 -200); $T = Find-TextPoint`; require `Copy-Enabled` `$false`. `$a = Capture-Canvas; Post-Mouse $WM_LBUTTONDOWN $T $MK_LBUTTON; Post-Mouse $WM_MOUSEMOVE (Offset $T 80 0) $MK_LBUTTON; With-Space { Post-Mouse $WM_MOUSEMOVE (Offset $T 160 0) $MK_LBUTTON; Post-Mouse $WM_LBUTTONUP (Offset $T 160 0) 0 }`; `Copy-Enabled` → `$true`. `Start-Sleep -Milliseconds 600; Left-Click $T; $b = Capture-Canvas; (Measure-Shift $a $b 0 0).Changed` ≤ 0.002. **Fails if** Copy stays grayed (Space turned a live selection into something else) or the page moved.
+
+`Close-LitePdf` (it waits for the process to exit); then restore `session.json`.
 
 - [ ] **Step 6: Commit**
 
@@ -1038,7 +1385,7 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Expected: **N0 + 6** passing. Record the count and `(Get-Item build\Release\litepdf.exe).Length`; it must be under 19,000,000 bytes.
+Expected: **N0 + 7** passing. Record the count and `(Get-Item build\Release\litepdf.exe).Length`; it must be under 19,000,000 bytes.
 
 - [ ] **Step 5: Commit**
 
@@ -1056,6 +1403,6 @@ Invoke the `risk-tiered-review` skill (never drop the Codex lens). Name these le
 1. **P2's premise** — that no `WM_SETCURSOR` reaches a window holding the capture, so the cursor must be set at the press. Is there a path where `update_cursor` runs mid-pan and changes the shape wrongly (the `WM_KEYDOWN` refresh during a middle pan, a `WM_SETCURSOR` from a non-client hit-test)?
 2. **P9's stale-pan cancel** — `on_mouse_move` cancels a pan when `GetCapture() != hwnd_`. Is there a legitimate pan during which `GetCapture()` does not return the canvas (a press on a background window, a pan started by a posted message), so the first move ends a pan the user is still dragging?
 3. **Re-entrancy** — `cancel_gesture` can now run from inside `on_mouse_move`, which `on_left_button_up` and `on_middle_button_up` call before `release()`. Walk each: after a cancel there, does `release()` return `None`, and is the capture released exactly once?
-4. **The Space branch's position** — it runs after the click counter and `cancel_stale_gesture`, before the spread / bitmap / text refusals. Can a Space press ever start a selection, or a plain press ever start a pan?
+4. **The Space branch's position** — it runs after the click counter and `cancel_stale_gesture`, before the spread / bitmap / text refusals, and calls `ClickCounter::forget()`. Can a Space press ever start a selection, a plain press ever start a pan, or a pan press still pair into a double or triple click?
 
-Push, open the PR titled `feat: hand-tool panning`, body with the test count, exe size, every GUI check's `Measure-Shift` line and cursor result, the plan-time corrections P1-P9 in one line each, the limitations R15-R18, and `Closes #58`.
+Push, open the PR titled `feat: hand-tool panning`, body with the test count, exe size, every GUI check's `Measure-Shift` line and cursor result, the plan-time corrections P1-P10 in one line each, the limitations R15-R18, and `Closes #58`.

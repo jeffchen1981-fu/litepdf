@@ -842,8 +842,9 @@ clamps whichever axis overflows.
   `WM_LBUTTONDOWN` and in `WM_SETCURSOR`, not latched** across `WM_KEYDOWN` /
   `WM_KEYUP`. A latch would stick: hold space over the canvas, Alt+Tab away,
   release space elsewhere, and the canvas never sees the `WM_KEYUP` — it has no
-  `WM_KILLFOCUS`, `WM_SETFOCUS` or `WM_ACTIVATE` handling to reset it, and neither
-  does `MainWindow`. Querying on demand makes the whole class unreachable and
+  `WM_KILLFOCUS`, `WM_SETFOCUS` or `WM_ACTIVATE` handling to reset it. (`MainWindow`
+  does handle `WM_SETFOCUS`, but only to hand the focus to the canvas — it resets no
+  key state; corrected at the #58 plan gate.) Querying on demand makes the whole class unreachable and
   needs no new key arms at all. (`on_key_down` at `:1135-1197` handles no
   `VK_SPACE`, so nothing conflicts either way.)
 
@@ -862,13 +863,14 @@ one capture-lifecycle implementation.
 **Plan-time refinements (2026-09-21, #58).** Writing the PR-2 plan
 (`docs/superpowers/plans/2026-09-21-hand-tool-panning-58.md`) re-checked this
 section against `main` @ `b4bb162`. Everything above holds; nine things it did not
-say are settled here:
+say are settled here (P10 found at the plan gate):
 
 - **P1** `WM_MBUTTONDBLCLK` must start a pan too. #52 added `CS_DBLCLKS`, which
   applies to every button, so the second of two quick middle presses arrives as
   `WM_MBUTTONDBLCLK`. The right-button arm takes `WM_RBUTTONDBLCLK` likewise.
 - **P2** The pan cursor is set when the pan starts, and re-evaluated at release:
-  Windows sends no `WM_SETCURSOR` to a window that holds the capture.
+  Windows sends no `WM_SETCURSOR` to a window that holds the capture. (Whether it
+  synthesises a mouse move after `ReleaseCapture` is not relied on either way.)
 - **P3** The space branch of the left press runs *before* the spread-mode, bitmap
   and text-handle refusals, which guard selection; a pan needs none of them.
 - **P4** Pan steps are incremental — the pointer motion since the previous move,
@@ -888,6 +890,12 @@ say are settled here:
   view.
 - **P9** A pan whose capture is gone is cancelled by the next move, not at the next
   press: its button is up, and panning would drag the page under a passing pointer.
+  No GUI check can make this fire; it is covered by review.
+- **P10** A space press is not a click. Every press reaches `ClickCounter` first, and
+  Windows pairs presses into `WM_LBUTTONDBLCLK` on its own, so a space click followed
+  by a quick plain click would select a word, and click / space-press / click would
+  select a line. The space branch calls `ClickCounter::forget()`: the next press
+  starts a new sequence even when it arrives as a double click.
 
 ---
 
@@ -970,7 +978,7 @@ design.
 | R15 | A page change or layout toggle during a pan (PgDn, the wheel at an edge, Ctrl+Shift+D) ends the pan; the button must be pressed again. The `cancel_gesture` calls in `change_current_page` and `set_dual_page` are gesture-agnostic, and a pan commits nothing. |
 | R16 | Holding space while the find box has the focus types spaces into it until the left press moves focus to the canvas; the space cursor refresh runs only when the canvas has the focus. |
 | R17 | A right-button press during a pan is ignored and the pan continues; §4.2's second-button abort protects a selection drag, and a pan has nothing to protect. |
-| R18 | A *cancelled* pan (capture lost, tab switched, page changed) leaves the move cursor until the pointer next moves; only a normal release re-evaluates it. |
+| R18 | A *cancelled* pan (capture lost, tab switched, page changed) does not re-evaluate the cursor; the move shape can stay until the next `WM_SETCURSOR`, at the latest the next pointer move. Only a normal release refreshes it explicitly. |
 
 ### 6.3 Review record
 
