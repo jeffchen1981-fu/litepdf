@@ -1441,9 +1441,10 @@ Under `## [Unreleased]` → `### Added`, after the text-selection bullet:
 
 ```markdown
 - Hand-tool panning. Drag with the middle mouse button, or hold Space and drag
-  with the left button, to move a zoomed-in page; the pointer shows a move
-  cursor whenever there is something to move. Works in two-page spread mode
-  too. Dragging with the left button alone still selects text.
+  with the left button, to move a zoomed-in page. The pointer turns into a move
+  cursor while you pan, and as soon as you hold Space over a page that can
+  move. Works in two-page spread mode too. Dragging with the left button alone
+  still selects text.
 ```
 
 - [ ] **Step 2: README**
@@ -1451,7 +1452,7 @@ Under `## [Unreleased]` → `### Added`, after the text-selection bullet:
 In `## Features (v1.3.0)`, after the "Text selection and copy" bullet:
 
 ```markdown
-- **Hand-tool panning** — middle-drag, or hold Space and drag, to move a zoomed-in page; the arrow keys pan too (unreleased)
+- **Hand-tool panning** — middle-drag, or hold Space and drag, to move a zoomed-in page (unreleased)
 ```
 
 In the `## Keyboard shortcuts` table, after the `PgDn / PgUp` row:
