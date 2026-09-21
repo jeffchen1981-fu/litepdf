@@ -484,13 +484,16 @@ LRESULT CALLBACK status_bar_edit_subclass(HWND hwnd, UINT msg, WPARAM w,
             break;  // fall through to the EDIT's own caret teardown
 
         case WM_MOUSEWHEEL:
-            // WM_MOUSEWHEEL is delivered to the FOCUSED window. With the caret
+        case WM_MOUSEHWHEEL:
+            // Wheel input can be delivered to the FOCUSED window. With the caret
             // in this box the canvas would never see a notch, so hand it over.
             // FindBar's and ResultsPanel's edits do not do this -- there the
-            // wheel belongs to their own list.
+            // wheel belongs to their own list. WM_MOUSEHWHEEL too (#56):
+            // DefWindowProc would pass it up the PARENT chain, and the canvas is
+            // a sibling. Return the canvas's result: a forwarder that answered
+            // 0 itself would undo the TRUE the canvas gives emulating drivers.
             if (impl->on_wheel) {
-                impl->on_wheel(w, l);
-                return 0;
+                return impl->on_wheel(msg, w, l);
             }
             break;
 

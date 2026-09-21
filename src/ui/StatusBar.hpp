@@ -37,10 +37,12 @@ public:
     // The box is done with the keyboard: Esc, or any commit (valid or not).
     // The owner returns focus to the canvas.
     using OnFocusOut = std::function<void()>;
-    // WM_MOUSEWHEEL arrived while the box had focus. WM_MOUSEWHEEL goes to the
-    // FOCUSED window, so without forwarding, the wheel would be dead whenever
-    // the reader had clicked into the page box.
-    using OnWheel = std::function<void(WPARAM, LPARAM)>;
+    // A wheel message (WM_MOUSEWHEEL or WM_MOUSEHWHEEL) reached the box. Wheel
+    // input can be delivered to the FOCUSED window, so without forwarding, the
+    // wheel would be dead whenever the reader had clicked into the page box.
+    // The owner returns the canvas's own result, and the box hands that back
+    // to the sender -- so a WM_MOUSEHWHEEL keeps the canvas's TRUE (#56).
+    using OnWheel = std::function<LRESULT(UINT msg, WPARAM, LPARAM)>;
 
     StatusBar(HINSTANCE hInstance, HWND parent);
     ~StatusBar();
