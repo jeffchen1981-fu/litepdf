@@ -31,7 +31,7 @@ One PR, branch `feat/hand-tool-pan` off `main` @ `b4bb162`. The branch already h
 
 ## Plan-time corrections to the spec — read before writing any code
 
-Every claim in spec §5 was re-checked against `main` @ `b4bb162`. `pan_by`, `content_extent`, `clamp_pan`, the arrow-key pans, `Gesture::Panning`, `GestureState::begin_pan` and `ReleaseAction::EndPan` all exist as §5 describes. Ten things the spec does not say, each decided here and patched into §5 (P10 was found at the plan gate):
+Every claim in spec §5 was re-checked against `main` @ `b4bb162`. `pan_by`, `content_extent`, `clamp_pan`, the arrow-key pans, `Gesture::Panning`, `GestureState::begin_pan` and `ReleaseAction::EndPan` all exist as §5 describes. Eleven things the spec does not say, each decided here and patched into §5 (P10 and P11 were found at the plan gate):
 
 **P1 — `WM_MBUTTONDBLCLK` must start a pan too.** #52 added `CS_DBLCLKS` to the canvas class, and that style applies to **every** button: the second of two quick middle presses arrives as `WM_MBUTTONDBLCLK`, never as `WM_MBUTTONDOWN`. Left out, every second quick middle-drag silently does nothing. The right-button arm gets `WM_RBUTTONDBLCLK` for the same reason.
 
@@ -51,7 +51,9 @@ Every claim in spec §5 was re-checked against `main` @ `b4bb162`. `pan_by`, `co
 
 **P9 — a pan without the capture is stale, and a move cancels it.** #52's stale-gesture rule cancels at the next *press*. For a pan that is too late: its button is up, so every move over the canvas would drag the page under a pointer that is merely passing. `on_mouse_move` cancels a pan whose capture is gone instead of applying the step. **No GUI check can make P9 fire** — a driver cannot leave a pan live without the capture *and* without the `WM_CAPTURECHANGED` that ends it through its own arm — so P9 is covered by review. The GUI checks do catch it *misfiring*: every pan would stop at its first move.
 
-**P10 — a Space press is not a click** (found at the plan gate). `on_left_button_down` feeds every press to `ClickCounter` before it decides anything, and Windows pairs presses into `WM_LBUTTONDBLCLK` on its own. Uncorrected, Space + a click followed quickly by a plain click at the same spot arrives as a double click and selects a word; and a plain click, then Space + a quick second press, then a plain click is counted as a triple click and selects a line. The Space branch calls `ClickCounter::forget()`, after which the next press starts a new sequence — a single click, even when Windows reports it as the second half of a double click.
+**P10 — a Space press is not a click** (found at the plan gate). `on_left_button_down` feeds every press to `ClickCounter` before it decides anything, and Windows pairs presses into `WM_LBUTTONDBLCLK` on its own. Uncorrected, Space + a click followed quickly by a plain click at the same spot arrives as a double click and selects a word; and a plain click, then Space + a quick second press, then a plain click is counted as a triple click and selects a line. The Space branch calls `ClickCounter::forget()`, after which the next press starts a new sequence — a single click, even when Windows reports it as the second half of a double click. So does a left press **refused** because a middle-button pan is live (found by Codex luna at the plan gate): during a pan, a left double click followed, after the middle release, by a quick plain click would otherwise select a line.
+
+**P11 — a selection drag sets its cursor at the press** (found at the plan gate). P2's reason applies to the selection drag #52 shipped as well: a drag started in the margin, where the hover cursor is the arrow, kept the arrow for its whole length. `on_left_button_down` calls `update_cursor()` after `SetCapture`.
 
 ## Known limitations (recorded, not fixed)
 
@@ -61,6 +63,7 @@ Every claim in spec §5 was re-checked against `main` @ `b4bb162`. `pan_by`, `co
 | R16 | Holding Space while the find box (or another edit control) has the focus types spaces into it until the left press moves focus to the canvas; the cursor refresh on Space runs only when the canvas has the focus. |
 | R17 | A right-button press during a pan is ignored and the pan continues. §4.2's second-button abort applies to a selection drag, which a stray press would otherwise corrupt; a pan has nothing to corrupt. |
 | R18 | When a pan is *cancelled* (capture lost, tab switched, page changed) the canvas does not re-evaluate the cursor; the move shape can stay until the next `WM_SETCURSOR`, at the latest the next pointer move. Only a normal release refreshes it explicitly. |
+| R19 | More generally, the cursor is re-evaluated on `WM_SETCURSOR`, when a gesture starts or ends normally, and when Space goes down or up — not when a keyboard command changes the layout or zoom under a still pointer (Ctrl+Shift+D, Ctrl+=). The old shape stays until the pointer moves. Pre-existing for the I-beam since #52. |
 
 ## File Structure
 
@@ -111,7 +114,7 @@ ctest --test-dir build -C Release
 
 Expected: build clean, all tests pass. Record the passing count as **N0** (340 at `b4bb162`, but re-measure — do not quote) and `(Get-Item build\Release\litepdf.exe).Length` as the baseline size.
 
-- [ ] **Step 2: Write the failing tests — `test_selection_drag.cpp`**
+- [ ] **Step 2: Write the tests — `test_selection_drag.cpp`** (all but one fail first; the "space pan … never clears a selection" case pins behaviour that already exists, see Step 7)
 
 Add to the `using` block at the top of `tests/unit/test_selection_drag.cpp`:
 
@@ -470,7 +473,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Modify: `src/ui/PdfCanvas.cpp`
 
 **Interfaces:**
-- Consumes (Task 1): `PanStep`, `GestureState::pan_step`, `CanvasCursor`, `canvas_cursor`, `content_overflows`.
+- Consumes (Task 1): `PanStep`, `GestureState::pan_step`, `CanvasCursor`, `canvas_cursor`, `content_overflows`, `ClickCounter::forget()` (`impl_->clicks` is the canvas's `ClickCounter`).
 - Produces (used by Task 3): `void PdfCanvas::begin_pan_gesture(MouseButton button, int x_px, int y_px)`, `void PdfCanvas::refresh_cursor()`, and `update_cursor()` routed through `canvas_cursor` with a `space_held` local that Task 3 turns into a real key read.
 
 - [ ] **Step 1: `PdfCanvas.hpp` — include and declarations**
@@ -533,7 +536,36 @@ In `on_left_button_down`, replace the stale-gesture block — the comment beginn
     cancel_stale_gesture();
 ```
 
-and add the function after `cancel_gesture()`'s definition, carrying the comment:
+Then, two lines further down, replace the refusal `if (impl_->gesture.gesture() != Gesture::None) return;` with:
+
+```cpp
+    if (impl_->gesture.gesture() != Gesture::None) {
+        // Refused: a middle-button pan owns the mouse (no other gesture can be
+        // live while the left button goes down). This press is not a click, so
+        // it must not pair with the next one into a double or triple click.
+        impl_->clicks.forget();
+        return;
+    }
+```
+
+And set the cursor when a selection drag starts — in `on_left_button_down`, replace
+
+```cpp
+    impl_->live_selection = std::move(live);
+    SetCapture(hwnd_);
+```
+
+with
+
+```cpp
+    impl_->live_selection = std::move(live);
+    SetCapture(hwnd_);
+    // No WM_SETCURSOR arrives while this window holds the capture, so a drag
+    // started in the margin would otherwise keep the arrow throughout.
+    update_cursor();
+```
+
+Add `cancel_stale_gesture` after `cancel_gesture()`'s definition, carrying the comment:
 
 ```cpp
 void PdfCanvas::cancel_stale_gesture() {
@@ -975,6 +1007,19 @@ Each check states what makes it **fail**. Record every `Measure-Shift` line and 
    Measure-Shift $a $b -150 -40
    ```
    Pass as in 1, and `Copy-Enabled` still `$false`. **Fails if** the shift stops at (-100, -40) — the left release ended the pan — or Copy became enabled: the left press started a selection (`$T` is a point where a left-drag is known to select text).
+5b. **A left press refused during a pan is not a click** (P10). `Reset-Pan; $T = Find-TextPoint` (check 5 moved the page). Control first — a real triple click at `$T` selects a line: `Wait-DoubleClick; Left-Click $T; Post-Mouse $WM_LBUTTONDBLCLK $T $MK_LBUTTON; Post-Mouse $WM_LBUTTONUP $T 0; Left-Click $T`; `Copy-Enabled` → `$true`; `Wait-DoubleClick; Left-Click $T`; `Copy-Enabled` → `$false`. Then the check — the first two presses land during a middle pan, and are refused:
+   ```powershell
+   Wait-DoubleClick
+   Post-Mouse $WM_MBUTTONDOWN $T $MK_MBUTTON
+   Post-Mouse $WM_LBUTTONDOWN $T ($MK_MBUTTON -bor $MK_LBUTTON)
+   Post-Mouse $WM_LBUTTONUP   $T $MK_MBUTTON
+   Post-Mouse $WM_LBUTTONDBLCLK $T ($MK_MBUTTON -bor $MK_LBUTTON)
+   Post-Mouse $WM_LBUTTONUP   $T $MK_MBUTTON
+   Post-Mouse $WM_MBUTTONUP   $T 0
+   Left-Click $T
+   Copy-Enabled                          # expect $false
+   ```
+   (Every event is at `$T` — the left release feeds its position through the pan path — so nothing pans and `$T` stays over the same text.) **Fails if** Copy is enabled: the refused presses were counted, and the plain click became the third of a triple click that selected a line. If the control does not select, pick another point and re-run.
 6. **A middle press during a selection drag cancels it and pans nothing** (spec §4.2). `Reset-Pan; $T = Find-TextPoint`; require `Copy-Enabled` `$false`. Then:
    ```powershell
    $a = Capture-Canvas
@@ -992,7 +1037,7 @@ Each check states what makes it **fail**. Record every `Measure-Shift` line and 
    ```
    `Find-TextPoint` has already proved that this same left-drag, `$T` to `$T + (160, 0)`, selects text when nothing interrupts it, so a grayed Copy here is the cancel's doing. Then recovery: `$a = Capture-Canvas; Middle-Drag $C (Offset $C -60 -30); $b = Capture-Canvas; Measure-Shift $a $b -60 -30` → pass as in 1. **Fails if** anything moved or stayed highlighted, Copy is enabled (the drag committed), or the recovery drag does not pan (a gesture left latched).
 7. **Losing the capture ends the pan, and the canvas recovers.** `Reset-Pan; $a = Capture-Canvas; Post-Mouse $WM_MBUTTONDOWN $C $MK_MBUTTON; Post-Mouse $WM_MOUSEMOVE (Offset $C -40 0) $MK_MBUTTON; [void][PanU]::PostMessageW($Canvas, $WM_CAPTURECHANGED, [IntPtr]::Zero, [IntPtr]::Zero); Start-Sleep -Milliseconds 100; Post-Mouse $WM_MOUSEMOVE (Offset $C -140 0) $MK_MBUTTON; Post-Mouse $WM_MBUTTONUP (Offset $C -140 0) 0; Start-Sleep -Milliseconds 300; $b = Capture-Canvas; Measure-Shift $a $b -40 0` → pass as in 1. Then `$a = Capture-Canvas; Middle-Drag $C (Offset $C -60 0); $b = Capture-Canvas; Measure-Shift $a $b -60 0` → pass as in 1. **Fails if** the first shift is (-140, 0) (the pan outlived its capture) or the second drag does not pan.
-8. **The cursor during a pan** (P2, P6). `Reset-Pan; Point-At $C`; `Cursor-Is $IDC_IBEAM` must be `$true` (precondition: over the page, nothing live). `Post-Mouse $WM_MBUTTONDOWN $C $MK_MBUTTON; Cursor-Is $IDC_SIZEALL` → `$true`. `Post-Mouse $WM_MBUTTONUP $C 0; Cursor-Is $IDC_IBEAM` → `$true` (this half checks the outcome: it passes whether the canvas's own `refresh_cursor` or a system-generated post-release mouse move restored the I-beam). Negative control, content that fits: `Send-Command $IDM_ZOOM_OUT 8; Point-At (Center)`; `Cursor-Is $IDC_IBEAM` `$true`; `Post-Mouse $WM_MBUTTONDOWN (Center) $MK_MBUTTON; Cursor-Is $IDC_ARROW` → `$true` (nothing to pan); `Post-Mouse $WM_MBUTTONUP (Center) 0`; and `$a = Capture-Canvas; Middle-Drag (Center) (Offset (Center) -100 -100); $b = Capture-Canvas; (Measure-Shift $a $b 0 0).Changed` ≤ 0.002. **Fails if** the pan keeps the I-beam, or shows the move cursor over content that cannot move.
+8. **The cursor during a pan** (P2, P6). `Reset-Pan; Point-At $C`; `Cursor-Is $IDC_IBEAM` must be `$true` (precondition: over the page, nothing live). `Post-Mouse $WM_MBUTTONDOWN $C $MK_MBUTTON; Cursor-Is $IDC_SIZEALL` → `$true`. `Post-Mouse $WM_MBUTTONUP $C 0; Cursor-Is $IDC_IBEAM` → `$true` (this half checks the outcome: it passes whether the canvas's own `refresh_cursor` or a system-generated post-release mouse move restored the I-beam). Negative control, content that fits: `Send-Command $IDM_ZOOM_OUT 8; Point-At (Center)`; `Cursor-Is $IDC_IBEAM` `$true`; `Post-Mouse $WM_MBUTTONDOWN (Center) $MK_MBUTTON; Cursor-Is $IDC_ARROW` → `$true` (nothing to pan); `Post-Mouse $WM_MBUTTONUP (Center) 0`; and `$a = Capture-Canvas; Middle-Drag (Center) (Offset (Center) -100 -100); $b = Capture-Canvas; (Measure-Shift $a $b 0 0).Changed` ≤ 0.002. Then a selection drag started in the margin (P11): the page now sits small in the middle of the canvas, so client `(2, 2)` is margin. `Point-At @(2, 2)`; `Cursor-Is $IDC_ARROW` `$true`. `Post-Mouse $WM_LBUTTONDOWN @(2, 2) $MK_LBUTTON; Cursor-Is $IDC_IBEAM` → `$true`. `Post-Mouse $WM_LBUTTONUP @(2, 2) 0; Cursor-Is $IDC_ARROW` → `$true`. **Fails if** the pan keeps the I-beam, shows the move cursor over content that cannot move, or a selection drag started in the margin keeps the arrow.
 
 `Close-LitePdf` (it waits for the process to exit); then restore `session.json`.
 
@@ -1007,7 +1052,9 @@ pointer motion since the last one, converted from client pixels to DIPs;
 the release decides before ReleaseCapture, as the selection path does.
 WM_MBUTTONDBLCLK starts a pan too, since CS_DBLCLKS covers every button.
 The move cursor is set when the pan starts -- no WM_SETCURSOR arrives while
-the canvas holds the capture -- and only when the content can move.
+the canvas holds the capture -- and only when the content can move; a
+selection drag now sets its I-beam at the press for the same reason. A left
+press refused during a pan drops out of the click sequence.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
@@ -1025,7 +1072,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 - [ ] **Step 1: The Space branch of `on_left_button_down`**
 
-In `on_left_button_down`, immediately **after** the line `if (impl_->gesture.gesture() != Gesture::None) return;` and **before** the spread-mode refusal and its comment ("Refuse spread mode HERE, not only in paint"), insert:
+In `on_left_button_down`, immediately **after** the refusal block Task 2 wrote — `if (impl_->gesture.gesture() != Gesture::None) { … impl_->clicks.forget(); return; }` — and **before** the spread-mode refusal and its comment ("Refuse spread mode HERE, not only in paint"), insert:
 
 ```cpp
     // #58: space held makes this press a pan. Read at the press with
@@ -1417,4 +1464,4 @@ Invoke the `risk-tiered-review` skill (never drop the Codex lens). Name these le
 3. **Re-entrancy** — `cancel_gesture` can now run from inside `on_mouse_move`, which `on_left_button_up` and `on_middle_button_up` call before `release()`. Walk each: after a cancel there, does `release()` return `None`, and is the capture released exactly once?
 4. **The Space branch's position** — it runs after the click counter and `cancel_stale_gesture`, before the spread / bitmap / text refusals, and calls `ClickCounter::forget()`. Can a Space press ever start a selection, a plain press ever start a pan, or a pan press still pair into a double or triple click?
 
-Push, open the PR titled `feat: hand-tool panning`, body with the test count, exe size, every GUI check's `Measure-Shift` line and cursor result, the plan-time corrections P1-P10 in one line each, the limitations R15-R18, and `Closes #58`.
+Push, open the PR titled `feat: hand-tool panning`, body with the test count, exe size, every GUI check's `Measure-Shift` line and cursor result, the plan-time corrections P1-P11 in one line each, the limitations R15-R19, and `Closes #58`.

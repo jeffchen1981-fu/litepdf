@@ -863,7 +863,7 @@ one capture-lifecycle implementation.
 **Plan-time refinements (2026-09-21, #58).** Writing the PR-2 plan
 (`docs/superpowers/plans/2026-09-21-hand-tool-panning-58.md`) re-checked this
 section against `main` @ `b4bb162`. Everything above holds; nine things it did not
-say are settled here (P10 found at the plan gate):
+say are settled here (P10 and P11 found at the plan gate):
 
 - **P1** `WM_MBUTTONDBLCLK` must start a pan too. #52 added `CS_DBLCLKS`, which
   applies to every button, so the second of two quick middle presses arrives as
@@ -895,7 +895,11 @@ say are settled here (P10 found at the plan gate):
   Windows pairs presses into `WM_LBUTTONDBLCLK` on its own, so a space click followed
   by a quick plain click would select a word, and click / space-press / click would
   select a line. The space branch calls `ClickCounter::forget()`: the next press
-  starts a new sequence even when it arrives as a double click.
+  starts a new sequence even when it arrives as a double click. A left press refused
+  because a middle-button pan is live calls it too.
+- **P11** A selection drag sets its cursor at the press, for P2's reason: started in
+  the margin, where the hover cursor is the arrow, it otherwise kept the arrow for its
+  whole length. `on_left_button_down` calls `update_cursor()` after `SetCapture`.
 
 ---
 
@@ -979,6 +983,7 @@ design.
 | R16 | Holding space while the find box has the focus types spaces into it until the left press moves focus to the canvas; the space cursor refresh runs only when the canvas has the focus. |
 | R17 | A right-button press during a pan is ignored and the pan continues; §4.2's second-button abort protects a selection drag, and a pan has nothing to protect. |
 | R18 | A *cancelled* pan (capture lost, tab switched, page changed) does not re-evaluate the cursor; the move shape can stay until the next `WM_SETCURSOR`, at the latest the next pointer move. Only a normal release refreshes it explicitly. |
+| R19 | The cursor is re-evaluated on `WM_SETCURSOR`, when a gesture starts or ends normally, and when space goes down or up — not when a keyboard command changes the layout or zoom under a still pointer. The old shape stays until the pointer moves; pre-existing for the I-beam since #52. |
 
 ### 6.3 Review record
 
