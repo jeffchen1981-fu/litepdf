@@ -33,10 +33,10 @@ TEST_CASE("SelectionDrag a third press too late or too far is a single click",
     late.press(true,  1100, 50, 50, m);
     REQUIRE(late.press(false, 1601, 50, 50, m) == SelectMode::Chars);
 
-    ClickCounter far;
-    far.press(false, 1000, 50, 50, m);
-    far.press(true,  1100, 50, 50, m);
-    REQUIRE(far.press(false, 1200, 53, 50, m) == SelectMode::Chars);   // |dx| 3 > 4/2
+    ClickCounter far_click;
+    far_click.press(false, 1000, 50, 50, m);
+    far_click.press(true,  1100, 50, 50, m);
+    REQUIRE(far_click.press(false, 1200, 53, 50, m) == SelectMode::Chars);   // |dx| 3 > 4/2
 
     ClickCounter plain;   // a single click followed by another is not a triple
     plain.press(false, 1000, 50, 50, m);
