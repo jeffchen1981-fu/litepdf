@@ -125,7 +125,7 @@ ctest --test-dir build -C Release
 ctest --test-dir build -C Release -N -R ScrollMath
 ```
 
-`git status --short` must print nothing, and HEAD must be the plan commit on `feat/horizontal-wheel-scroll`. Record:
+`git status --short` must print nothing, and the current branch must be `feat/horizontal-wheel-scroll`, with this plan committed and no code change yet (`git diff main --stat -- src tests` is empty). Record:
 - the total passing count, **N0** (re-measure it; do not quote an old figure);
 - the `ScrollMath` count (13 at plan time);
 - `(Get-Item build\Release\litepdf.exe).Length` (7,300,608 at plan time).
@@ -876,11 +876,17 @@ function Lines-After([string]$name) {
   if ($i -lt 0) { throw "mark $name not found" }
   return @($all | Select-Object -Skip ($i + 1))
 }
-# True when a render completion is logged after the mark and before the first
-# wheel line: the race window the row needs was never open.
+# True when a render that could have LANDED -- a pixmap (pix=1) for the view
+# that was current when it arrived (epoch == view_epoch) -- is logged after the
+# mark and before the first wheel line: the race window the row needs was never
+# open. Cancellations (pix=0) and stale completions for another view land
+# nothing, so they do not void the row.
 function Render-Landed-First([string]$name) {
   foreach ($l in (Lines-After $name)) {
-    if ($l -like 'render-done *') { return $true }
+    if ($l -like 'render-done *') {
+      $d = Parse-Probe $l
+      if ($d.pix -eq '1' -and $d.epoch -eq $d.view_epoch) { return $true }
+    }
     if ($l -like 'wheel *') { return $false }
   }
   return $false
@@ -1036,6 +1042,12 @@ try {
   Open-SecondTab 'tests\fixtures\search.pdf'
   $b = Wait-Settled
   if ([double]$b.boxw -gt [double]$b.vpw + 0.5) { throw 'row 10 precondition: tab B overflows horizontally, so a clamp against it would not reach 0' }
+  # Leave a 40 residual. Only the stale guard zeroes it. An implementation with
+  # no guard would fold 40 + 120 into one notch and keep 40, even if it then
+  # returned early because the outgoing page fits -- a path on which pan_x
+  # alone would not change.
+  $pre = Send-TiltWheel 40
+  if ($pre.hres -ne '40') { throw "row 10 precondition: residual $($pre.hres), expected 40" }
   Set-Content -Path $SlowFlag -Value ''
   Mark-Log 'row10'
   [void][HwU]::SendMessageW($script:Main, $WM_COMMAND, [IntPtr]$IDM_TAB_GOTO_1, [IntPtr]::Zero)
@@ -1046,7 +1058,7 @@ try {
   if ($landedFirst) {
     Void-Row 'row 10' 'a render landed between the tab switch and the notch'
   } else {
-    Check 'row 10' (($r.branch -eq 'stale-drop') -and (Near ([double]$after.x1) $saved)) "notch=$($r.branch) x0=$($r.x0) after=$($after.x1) saved=$saved"
+    Check 'row 10' (($r.branch -eq 'stale-drop') -and ($r.hres -eq '0') -and (Near ([double]$r.x1) $saved) -and (Near ([double]$after.x1) $saved)) "notch=$($r.branch) hres=$($r.hres) x0=$($r.x0) x1=$($r.x1) after=$($after.x1) saved=$saved"
   }
 
   # Row 11 -- a notch right after a resize, before the new render, writes pan_x
@@ -1105,17 +1117,24 @@ try {
 
   # Row 12 -- Ctrl+Shift+wheel still zooms (H2; correction C8). Same page, same
   # epoch, so wait for the content box itself to grow.
+  # The message itself must not pan: Shift must not ALSO take the horizontal path.
   $z0 = Read-Pan
   [void](Send-Wheel $script:Canvas $WM_MOUSEWHEEL 120 ($MK_CONTROL -bor $MK_SHIFT))
+  $zm = Last-Wheel
   $z1 = Read-Pan
   for ($k = 0; $k -lt 30 -and [double]$z1.boxw -le [double]$z0.boxw + 1; $k++) { Start-Sleep -Milliseconds 100; $z1 = Read-Pan }
-  Check 'row 12' ([double]$z1.boxw -gt [double]$z0.boxw + 1) "boxw $($z0.boxw) -> $($z1.boxw)"
+  Check 'row 12' (([double]$z1.boxw -gt [double]$z0.boxw + 1) -and (Near ([double]$zm.x1) ([double]$zm.x0)) -and (Near ([double]$zm.y1) ([double]$zm.y0))) "boxw $($z0.boxw) -> $($z1.boxw); the zoom message moved x $($zm.x0) -> $($zm.x1), y $($zm.y0) -> $($zm.y1)"
 }
 finally {
   Remove-Item $SlowFlag -ErrorAction SilentlyContinue
   if ($script:Proc -ne $null -and -not $script:Proc.HasExited) { Close-LitePdf }
 }
 Write-Host "DONE: $script:Fails FAIL, $script:Voids VOID"
+# Exit code: 0 = all rows passed, 1 = a FAIL, 2 = no FAIL but a VOID. An
+# uncaught throw also exits 1.
+if ($script:Fails -gt 0) { exit 1 }
+if ($script:Voids -gt 0) { exit 2 }
+exit 0
 ```
 
 - [ ] **Step 13: Run the checks**
@@ -1132,7 +1151,7 @@ Run from the repo root:
 powershell -NoProfile -ExecutionPolicy Bypass -File build\gui\hwheel-checks.ps1
 ```
 
-Expected: `DONE: 0 FAIL, 0 VOID`, with 14 PASS lines (rows 1-9, 3b, 9b, 10-12).
+Expected: `DONE: 0 FAIL, 0 VOID`, with 14 PASS lines (rows 1-9, 3b, 9b, 10-12), and exit code 0 (`$LASTEXITCODE`). Exit code 1 means a FAIL or an uncaught throw; 2 means a VOID.
 - **A VOID is not a pass.** Re-run once. If it repeats, report it to the controller with the log excerpt after the row's `mark` line.
 - **A FAIL** goes to `superpowers:systematic-debugging`, never a guessed fix.
 
