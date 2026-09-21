@@ -39,7 +39,7 @@
 
 ## Plan-time corrections to the spec's §4.2 mechanics
 
-The spec's decisions H1-H9 are implemented as written. Its **verification mechanics** are refined here. Nothing in this section changes what is being tested, only how.
+The spec's decisions H1-H9 are implemented as written. Its **verification mechanics** are refined here. No correction weakens a spec row. C8 and C9 add rows, and C9 moves row 3 to a document where it can fail.
 
 **C1. The probe is applied in the main checkout and reverted with `git checkout`, not in a worktree.** A worktree would rebuild MuPDF (see Global Constraints). The feature is committed first, and then the probe is added as uncommitted edits to `src/ui/PdfCanvas.cpp`. After the run, `git checkout -- src/ui/PdfCanvas.cpp` restores the committed file byte for byte. `git status --short` must be empty afterwards.
 
@@ -54,13 +54,20 @@ The spec's decisions H1-H9 are implemented as written. Its **verification mechan
 - `no-move`: horizontal, not stale, and `pan_x` unchanged. This covers a fractional notch (the residual is logged, so rows can tell), an edge clamp, and no extent.
 - `other`: any non-horizontal message, i.e. plain wheel or Ctrl+wheel.
 
-**C5. `Read-Pan` is a zero-delta `WM_MOUSEHWHEEL`.** A delta of 0 consumes no notch and has no side effect, and the probe logs the canvas state for it. That lets the driver read `pan_x`, `pan_y`, the page, the content box and the viewport at any moment.
+**C5. `Read-Pan` is a zero-delta `WM_MOUSEHWHEEL`.** A delta of 0 consumes no notch and never moves the pan, and the probe logs the canvas state for it. That lets the driver read `pan_x`, `pan_y`, the page, the content box and the viewport at any moment. Its one side effect: while the bitmap is stale it zeroes the horizontal residual, exactly as a real notch would. No row depends on a residual across a stale window.
 
 **C6. The pan is reset with the arrow keys.** Sixty `WM_KEYDOWN` `VK_LEFT` + `VK_UP` pairs, sent to the canvas, pin the pan at (0, 0). That needs neither the foreground nor a mouse capture.
 
 **C7. Row 11's notch is leftward (−120) from the bottom-right corner.** A rightward notch there would be clamped and move nothing, and the row needs a `step`.
 
 **C8. Row 12 is added:** Ctrl+Shift+wheel still zooms (H2). The spec's §4.3 asks the user to check this by hand, and it costs one message to automate.
+
+**C9. Row 3 runs on a multi-page document, and row 3b is added** (found at the plan gate).
+- On the single-page `simple.pdf`, a wrong implementation that turned the page at the horizontal edge would clamp its target to the current page and change nothing, so "the page does not change" could not fail. H6 would have had no failing row.
+- Row 3 therefore runs on `search.pdf` (7 same-size pages), on a page that is not the last.
+- Row 3b sends leftward notches at the left edge on a page after the first, where a backward page turn is possible.
+
+**C10. Every "after the render lands" read waits for it** (found at the plan gate). `Wait-Settled` polls until the probe reports the bitmap is no longer stale. A zoom re-renders the same page under the same epoch, so it is never stale; there the driver waits for the content box itself to change. A fixed sleep could read the pan before `apply_anchor` ran, and row 7 would then PASS on an implementation that zeroes `pan_x` when the new page lands.
 
 ## Known limitations (recorded in the spec, not fixed here)
 
@@ -71,6 +78,7 @@ The spec's decisions H1-H9 are implemented as written. Its **verification mechan
 | R3 | A wheel notch during a selection drag moves the page under a still pointer. Inherited from the vertical wheel. |
 | R4 | In spread mode a page flip can reset `pan_x`, depending on which half lands first. This is existing behaviour with the arrow keys. |
 | R5 | The arrow keys and the hand tool lack the tab-switch guard that H7 adds for the wheel. A separate follow-up. |
+| R6 | **No GUI row can tell which wheel setting each input reads (H5)** while `SPI_GETWHEELSCROLLCHARS` equals `SPI_GETWHEELSCROLLLINES`. Both are 3 on the development machine. Changing a system setting for the run is not done. H5's per-source choice is therefore checked by reading `on_hwheel_scroll` at the merge gate (Task 3 Step 6, item 5). |
 
 ## File Structure
 
@@ -320,7 +328,9 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Why there is no failing-test-first step here.** `PdfCanvas` has no headless harness: it is an HWND with a Direct2D target. Its behaviour is pinned by the scripted GUI run in Steps 11-14. Each row there names the observation that makes it fail, and row 5 fails on today's code (Shift+wheel scrolls vertically).
 
-- [ ] **Step 1: The residual field**
+- [ ] **Step 1: Record the starting count, then add the residual field**
+
+Before editing anything, run `ctest --test-dir build -C Release` from the repo root and record the passing count as **N1**. This task adds no unit test, so N1 is the count Steps 8 and 14 expect. `git status --short` must print nothing.
 
 In `src/ui/PdfCanvas.cpp`, in `struct PdfCanvas::Impl`, directly after `int wheel_residual = 0;` and its comment, add:
 
@@ -599,13 +609,15 @@ with:
             // Wheel input can go to the FOCUSED window: with the caret in the
             // page box the canvas would never see a notch. Forward whichever
             // wheel message arrived and return the canvas's result (#56).
-            status_bar_->set_on_wheel([this](UINT msg, WPARAM w, LPARAM l) -> LRESULT {
+            status_bar_->set_on_wheel([this](UINT wheel_msg, WPARAM w, LPARAM l) -> LRESULT {
                 if (canvas_ && canvas_->hwnd()) {
-                    return SendMessageW(canvas_->hwnd(), msg, w, l);
+                    return SendMessageW(canvas_->hwnd(), wheel_msg, w, l);
                 }
                 return 0;
             });
 ```
+
+(The parameter is `wheel_msg`, not `msg`, because the enclosing `MainWindow::handle_message` already has a `msg` parameter, and shadowing it could raise MSVC C4457 under `/W4`.)
 
 Confirm there is no other caller: `rg -n "set_on_wheel|OnWheel" src` must list only `StatusBar.hpp`, `StatusBar.cpp` and this one call in `MainWindow.cpp`.
 
@@ -616,7 +628,7 @@ cmake --build build --config Release
 ctest --test-dir build -C Release
 ```
 
-Expected: the build is clean with no new warnings, and **N0 + 3** tests pass (Task 1's count; this task adds no unit test).
+Expected: the build is clean with no new warnings, and **N1** tests pass (Step 1's count; this task adds no unit test).
 
 - [ ] **Step 9: Commit the feature**
 
@@ -731,9 +743,10 @@ bool probe_slow() {
                       static_cast<unsigned long long>(impl_->view_epoch));
 ```
 
-Build the probe binary:
+Write down the wall-clock time, then build the probe binary. Step 13 checks the exe against that time.
 
 ```bash
+date
 cmake --build build --config Release --target litepdf
 ```
 
@@ -741,7 +754,7 @@ It must compile. Warnings from the probe lines are acceptable: the project uses 
 
 - [ ] **Step 11: Write the driver**
 
-Save as `build/gui/hwheel-drive.ps1`. It is a scratch file, not committed. It runs in Windows PowerShell 5.1: no `?.`, no `??`, no ternary.
+Create the folder first (`build/gui` does not exist yet): `New-Item -ItemType Directory -Force build\gui | Out-Null`. Then save the driver as `build/gui/hwheel-drive.ps1`. It is a scratch file, not committed. It runs in 64-bit Windows PowerShell 5.1 (`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`): no `?.`, no `??`, no ternary.
 
 Function names are deliberately long. A short name like `H` or `V` would lose to a built-in alias (`h` is `Get-History`), and an alias always beats a function.
 
@@ -778,7 +791,8 @@ $SWP_NOMOVE = 0x0002; $SWP_NOZORDER = 0x0004; $SW_RESTORE = 9
 # GetTempPath, the same call the probe makes, so both sides agree on the folder.
 $ProbeLog = Join-Path ([System.IO.Path]::GetTempPath()) 'litepdf-wheel-probe.log'
 $SlowFlag = Join-Path ([System.IO.Path]::GetTempPath()) 'litepdf-probe-slow'
-$script:Fails = 0; $script:Voids = 0
+$script:Fails = 0; $script:Voids = 0; $script:Proc = $null
+$BuildExe = (Resolve-Path .\build\Release\litepdf.exe).Path
 
 function Get-Spi([uint32]$action) {
   $v = [uint32]0
@@ -787,11 +801,16 @@ function Get-Spi([uint32]$action) {
 }
 
 function Start-LitePdf([string]$file) {
+  # litepdf is single-instance: with ANY copy already running (the user's
+  # installed one included), this launch would forward its file there and exit.
+  $running = @(Get-Process litepdf -ErrorAction SilentlyContinue)
+  if ($running.Count -gt 0) {
+    throw "litepdf is already running (pid $($running[0].Id), $($running[0].Path)). Close it first: Close-AnyLitePdf closes the build copy; ask the user to close any other."
+  }
   $env:LITEPDF_NO_RESTORE = '1'
   Remove-Item $ProbeLog -ErrorAction SilentlyContinue
   Remove-Item $SlowFlag -ErrorAction SilentlyContinue
-  $exe = (Resolve-Path .\build\Release\litepdf.exe).Path
-  $p = Start-Process -PassThru $exe -ArgumentList ('"' + (Resolve-Path $file).Path + '"')
+  $p = Start-Process -PassThru $BuildExe -ArgumentList ('"' + (Resolve-Path $file).Path + '"')
   for ($i = 0; $i -lt 50 -and [int64]$p.MainWindowHandle -eq 0; $i++) { Start-Sleep -Milliseconds 100; $p.Refresh() }
   $script:Proc   = $p
   $script:Main   = [IntPtr]$p.MainWindowHandle
@@ -807,8 +826,7 @@ function Start-LitePdf([string]$file) {
 # A second file goes to the running instance (single-instance forwarding) and
 # opens as a new, active tab.
 function Open-SecondTab([string]$file) {
-  $exe = (Resolve-Path .\build\Release\litepdf.exe).Path
-  Start-Process $exe -ArgumentList ('"' + (Resolve-Path $file).Path + '"')
+  Start-Process $BuildExe -ArgumentList ('"' + (Resolve-Path $file).Path + '"')
   Start-Sleep -Milliseconds 2500
 }
 
@@ -890,22 +908,52 @@ function Pan-To-BottomRight {
   if (-not ((Near ([double]$p.x1) $ex) -and (Near ([double]$p.y1) $ey))) { throw "Pan-To-BottomRight: ($($p.x1), $($p.y1)), expected ($ex, $ey)" }
   return $p
 }
-function Zoom-Until-Overflow {
-  for ($i = 1; $i -le 4; $i++) {
+# Zoom in until the page overflows the viewport by at least $minX / $minY DIPs,
+# so every row has room for the steps it takes. A zoom re-renders the same page
+# under the same epoch, so the bitmap is never "stale" meanwhile: wait for the
+# content box itself to grow.
+function Zoom-Until-Overflow([double]$minX, [double]$minY) {
+  $prev = [double](Read-Pan).boxw
+  for ($i = 1; $i -le 6; $i++) {
     Send-Command $IDM_ZOOM_IN
     $p = Read-Pan
-    if (([double]$p.boxw -gt [double]$p.vpw + 1) -and ([double]$p.boxh -gt [double]$p.vph + 1)) {
+    for ($k = 0; $k -lt 30 -and [double]$p.boxw -le $prev + 1; $k++) { Start-Sleep -Milliseconds 100; $p = Read-Pan }
+    $prev = [double]$p.boxw
+    if (([double]$p.boxw - [double]$p.vpw -ge $minX) -and ([double]$p.boxh - [double]$p.vph -ge $minY)) {
       Write-Host "zoomed $i rung(s): box $($p.boxw) x $($p.boxh), viewport $($p.vpw) x $($p.vph)"
       return
     }
   }
-  throw 'the page does not overflow on both axes after 4 zoom-ins'
+  throw "the page does not overflow by $minX x $minY DIP after 6 zoom-ins"
+}
+
+# Poll until the bitmap on screen belongs to the current view and page, i.e. the
+# pending render has landed. Returns that state line.
+function Wait-Settled {
+  for ($i = 0; $i -lt 60; $i++) {
+    $p = Read-Pan
+    if ($p.stale -eq '0' -and [double]$p.boxw -ge 0) { return $p }
+    Start-Sleep -Milliseconds 100
+  }
+  throw 'the canvas never settled: the bitmap stayed stale for 6 s'
 }
 
 # WM_CLOSE, then WAIT: the app saves session.json on its way out.
 function Close-LitePdf {
   [void][HwU]::PostMessageW($script:Main, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
   if (-not $script:Proc.WaitForExit(10000)) { throw 'litepdf did not exit within 10 s' }
+}
+
+# Recovery for a run that died with the BUILD copy still open. Closes only
+# processes started from build\Release -- never the user's installed copy.
+function Close-AnyLitePdf {
+  foreach ($p in @(Get-Process litepdf -ErrorAction SilentlyContinue)) {
+    if ($p.Path -ne $BuildExe) { continue }
+    if ([int64]$p.MainWindowHandle -ne 0) {
+      [void][HwU]::PostMessageW([IntPtr]$p.MainWindowHandle, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+    }
+    if (-not $p.WaitForExit(10000)) { throw "litepdf pid $($p.Id) did not exit within 10 s" }
+  }
 }
 ```
 
@@ -921,133 +969,152 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 $C = Get-Spi $SPI_GETWHEELSCROLLCHARS; $L = Get-Spi $SPI_GETWHEELSCROLLLINES
-if ($C -lt 1 -or $C -gt 100 -or $L -lt 1 -or $L -gt 100) { throw "wheel settings chars=$C lines=$L: set both to 1-100 for this run" }
+if ($C -lt 1 -or $C -gt 100 -or $L -lt 1 -or $L -gt 100) { throw "wheel settings chars=${C} lines=${L} -- set both to 1-100 for this run" }
 $HStep = [double]($C * 16); $SStep = [double]($L * 16)
-Write-Host "settings: chars=$C lines=$L -> tilt step $HStep DIP, Shift step $SStep DIP"
+$Room  = 3 * [math]::Max($HStep, $SStep)   # every row takes at most 2 steps
+Write-Host "settings: chars=${C} lines=${L} -> tilt step $HStep DIP, Shift step $SStep DIP"
 
-Start-LitePdf 'tests\fixtures\simple.pdf'
-$H0 = Window-Height
+try {
+  Start-LitePdf 'tests\fixtures\simple.pdf'
+  $H0 = Window-Height
 
-# Row 5 -- FitWidth, the negative control. Nothing may move. FAILS on today's
-# code: Shift+wheel scrolls vertically there.
-$p = Read-Pan
-if ([double]$p.boxw -lt 0) { throw 'no content extent -- the canvas has not painted; is the window visible?' }
-if ([double]$p.boxw -gt [double]$p.vpw + 0.5) { throw "row 5 precondition: the FitWidth page overflows ($($p.boxw) > $($p.vpw))" }
-$a = Send-TiltWheel 120; $b = Send-ShiftWheel -120
-Check 'row 5' ((Near ([double]$a.x1) 0) -and (Near ([double]$b.x1) 0) -and (Near ([double]$b.y1) 0)) "tilt x1=$($a.x1); shift x1=$($b.x1) y1=$($b.y1)"
+  # Row 5 -- FitWidth, the negative control. Nothing may move. FAILS on today's
+  # code: Shift+wheel scrolls vertically there.
+  $p = Read-Pan
+  if ([double]$p.boxw -lt 0) { throw 'no content extent -- the canvas has not painted; is the window visible?' }
+  if ([double]$p.boxw -gt [double]$p.vpw + 0.5) { throw "row 5 precondition: the FitWidth page overflows ($($p.boxw) > $($p.vpw))" }
+  $a = Send-TiltWheel 120; $b = Send-ShiftWheel -120
+  Check 'row 5' ((Near ([double]$a.x1) 0) -and (Near ([double]$a.y1) 0) -and (Near ([double]$b.x1) 0) -and (Near ([double]$b.y1) 0)) "tilt x1=$($a.x1) y1=$($a.y1); shift x1=$($b.x1) y1=$($b.y1)"
 
-Zoom-Until-Overflow
+  Zoom-Until-Overflow $Room (2 * $SStep)
 
-# Row 1 -- a tilt notch right.
-Reset-Pan
-$r = Send-TiltWheel 120
-Check 'row 1' (($r.branch -eq 'step') -and (Near ([double]$r.x1) (-$HStep)) -and (Near ([double]$r.y1) 0)) $r.raw
+  # Row 1 -- a tilt notch right.
+  Reset-Pan
+  $r = Send-TiltWheel 120
+  Check 'row 1' (($r.branch -eq 'step') -and (Near ([double]$r.x1) (-$HStep)) -and (Near ([double]$r.y1) 0)) $r.raw
 
-# Row 2 -- Shift + the wheel toward the user.
-Reset-Pan
-$r = Send-ShiftWheel -120
-Check 'row 2' (($r.branch -eq 'step') -and (Near ([double]$r.x1) (-$SStep)) -and (Near ([double]$r.y1) 0)) $r.raw
+  # Row 2 -- Shift + the wheel toward the user.
+  Reset-Pan
+  $r = Send-ShiftWheel -120
+  Check 'row 2' (($r.branch -eq 'step') -and (Near ([double]$r.x1) (-$SStep)) -and (Near ([double]$r.y1) 0)) $r.raw
 
-# Row 3 -- repeated notches stop at the right edge; the page never changes.
-Reset-Pan
-$page = (Read-Pan).page1
-$n = 0; $pageMoved = $false
-do {
-  $r = Send-TiltWheel 120; $n++
-  if ($r.page0 -ne $page -or $r.page1 -ne $page) { $pageMoved = $true }
-} while ($r.branch -eq 'step' -and $n -lt 200)
-$edge = [double]$r.vpw - [double]$r.boxw
-Check 'row 3' (($r.branch -eq 'no-move') -and ($n -ge 2) -and (Near ([double]$r.x1) $edge) -and (-not $pageMoved)) "notches=$n x1=$($r.x1) edge=$edge pageMoved=$pageMoved"
+  # Row 4 -- fractions accumulate into one notch.
+  Reset-Pan
+  if ((Read-Pan).hres -ne '0') { throw 'row 4 precondition: the horizontal residual is not 0' }
+  $r1 = Send-TiltWheel 40; $r2 = Send-TiltWheel 40; $r3 = Send-TiltWheel 40
+  Check 'row 4' (($r1.branch -eq 'no-move') -and ($r1.hres -eq '40') -and ($r2.branch -eq 'no-move') -and ($r2.hres -eq '80') -and ($r3.branch -eq 'step') -and (Near ([double]$r3.x1) (-$HStep))) "$($r1.branch)/$($r1.hres) $($r2.branch)/$($r2.hres) $($r3.branch) x1=$($r3.x1)"
 
-# Row 4 -- fractions accumulate into one notch.
-Reset-Pan
-if ((Read-Pan).hres -ne '0') { throw 'row 4 precondition: the horizontal residual is not 0' }
-$r1 = Send-TiltWheel 40; $r2 = Send-TiltWheel 40; $r3 = Send-TiltWheel 40
-Check 'row 4' (($r1.branch -eq 'no-move') -and ($r1.hres -eq '40') -and ($r2.branch -eq 'no-move') -and ($r2.hres -eq '80') -and ($r3.branch -eq 'step') -and (Near ([double]$r3.x1) (-$HStep))) "$($r1.branch)/$($r1.hres) $($r2.branch)/$($r2.hres) $($r3.branch) x1=$($r3.x1)"
+  # Row 6 -- positive control: the plain wheel still scrolls vertically only.
+  Reset-Pan
+  $r = Send-PlainWheel -120
+  Check 'row 6' (($r.branch -eq 'other') -and (Near ([double]$r.y1) (-$SStep)) -and (Near ([double]$r.x1) 0)) $r.raw
 
-# Row 6 -- positive control: the plain wheel still scrolls vertically only.
-Reset-Pan
-$r = Send-PlainWheel -120
-Check 'row 6' (($r.branch -eq 'other') -and (Near ([double]$r.y1) (-$SStep)) -and (Near ([double]$r.x1) 0)) $r.raw
+  # Rows 8 and 9b -- WM_MOUSEHWHEEL sent to the page box reaches the canvas, and
+  # the box returns the canvas's TRUE.
+  Reset-Pan
+  Mark-Log 'row8'
+  $res = Send-Wheel $script:PageBox $WM_MOUSEHWHEEL 120
+  $w8 = @(Lines-After 'row8' | Where-Object { $_ -like 'wheel *' })
+  if ($w8.Count -ne 1) {
+    Check 'row 8' $false "expected exactly 1 forwarded wheel line, got $($w8.Count)"
+  } else {
+    $r = Parse-Probe $w8[0]
+    Check 'row 8' (($r.branch -eq 'step') -and (Near ([double]$r.x1) (-$HStep))) $r.raw
+  }
+  Check 'row 9b' ($res -eq 1) "page box returned $res"
 
-# Rows 8 and 9b -- WM_MOUSEHWHEEL sent to the page box reaches the canvas, and
-# the box returns the canvas's TRUE.
-Reset-Pan
-Mark-Log 'row8'
-$res = Send-Wheel $script:PageBox $WM_MOUSEHWHEEL 120
-$w8 = @(Lines-After 'row8' | Where-Object { $_ -like 'wheel *' })
-if ($w8.Count -ne 1) {
-  Check 'row 8' $false "expected exactly 1 forwarded wheel line, got $($w8.Count)"
-} else {
-  $r = Parse-Probe $w8[0]
-  Check 'row 8' (($r.branch -eq 'step') -and (Near ([double]$r.x1) (-$HStep))) $r.raw
+  # Row 9 -- the canvas itself returns TRUE.
+  $res = Send-Wheel $script:Canvas $WM_MOUSEHWHEEL 120
+  Check 'row 9' ($res -eq 1) "canvas returned $res"
+
+  # Row 10 -- a notch during a tab switch must not clamp the incoming tab's pan
+  # to the outgoing page. Tab A = simple.pdf (zoomed), tab B = search.pdf (FitWidth).
+  Reset-Pan
+  [void](Send-TiltWheel 120); $a = Send-TiltWheel 120
+  $saved = [double]$a.x1
+  if (-not ($saved -lt -1)) { throw "row 10 precondition: tab A pan_x is $saved, not < 0" }
+  Open-SecondTab 'tests\fixtures\search.pdf'
+  $b = Wait-Settled
+  if ([double]$b.boxw -gt [double]$b.vpw + 0.5) { throw 'row 10 precondition: tab B overflows horizontally, so a clamp against it would not reach 0' }
+  Set-Content -Path $SlowFlag -Value ''
+  Mark-Log 'row10'
+  [void][HwU]::SendMessageW($script:Main, $WM_COMMAND, [IntPtr]$IDM_TAB_GOTO_1, [IntPtr]::Zero)
+  $r = Send-TiltWheel 120
+  $landedFirst = Render-Landed-First 'row10'
+  Remove-Item $SlowFlag
+  $after = Wait-Settled
+  if ($landedFirst) {
+    Void-Row 'row 10' 'a render landed between the tab switch and the notch'
+  } else {
+    Check 'row 10' (($r.branch -eq 'stale-drop') -and (Near ([double]$after.x1) $saved)) "notch=$($r.branch) x0=$($r.x0) after=$($after.x1) saved=$saved"
+  }
+
+  # Row 11 -- a notch right after a resize, before the new render, writes pan_x
+  # only. Tab A is active and zoomed.
+  Set-WindowHeight ($H0 - 300); Start-Sleep -Milliseconds 1500
+  $before = Pan-To-BottomRight
+  Set-Content -Path $SlowFlag -Value ''
+  Mark-Log 'row11'
+  Set-WindowHeight $H0
+  $r = Send-TiltWheel -120
+  $landedFirst = Render-Landed-First 'row11'
+  Remove-Item $SlowFlag
+  Start-Sleep -Milliseconds 2000
+  if ($landedFirst) {
+    Void-Row 'row 11' 'a render landed between the resize and the notch'
+  } elseif (-not ([double]$r.vph -gt [double]$before.vph + 1)) {
+    Void-Row 'row 11' "the canvas did not grow ($($before.vph) -> $($r.vph))"
+  } else {
+    Check 'row 11' (($r.branch -eq 'step') -and (Near ([double]$r.y1) ([double]$r.y0)) -and (Near ([double]$r.x1) ([double]$r.x0 + $HStep))) $r.raw
+  }
+
+  # Tab B (search.pdf, 7 same-size pages) for every row that needs a page to
+  # turn -- or needs to prove one did NOT turn.
+  Send-Command $IDM_TAB_GOTO_2
+  [void](Wait-Settled)
+  Zoom-Until-Overflow $Room (2 * $SStep)
+
+  # Row 7 -- a vertical page turn keeps pan_x (single-page, same-size pages).
+  Reset-Pan
+  $s = Send-TiltWheel 120
+  $page = [int]$s.page1
+  for ($i = 0; $i -lt 300; $i++) { $r = Send-PlainWheel -120; if ([int]$r.page1 -ne $page) { break } }
+  if ([int]$r.page1 -ne $page + 1) { throw "row 7: the page did not turn forward ($page -> $($r.page1))" }
+  $after = Wait-Settled   # the page-turn render has LANDED: apply_anchor has run
+  Check 'row 7' (([int]$after.page1 -eq $page + 1) -and (Near ([double]$after.x1) (-$HStep)) -and (Near ([double]$after.boxw) ([double]$s.boxw))) "page $page -> $($after.page1), x1=$($after.x1), boxw $($s.boxw) -> $($after.boxw)"
+
+  # Row 3 -- repeated notches stop at the RIGHT edge and never turn the page.
+  # A multi-page document, not on its last page, so a page turn is possible.
+  Reset-Pan
+  $page = [int](Read-Pan).page1
+  $n = 0; $pageMoved = $false
+  do {
+    $r = Send-TiltWheel 120; $n++
+    if ([int]$r.page0 -ne $page -or [int]$r.page1 -ne $page) { $pageMoved = $true }
+  } while ($r.branch -eq 'step' -and $n -lt 200)
+  $edge = [double]$r.vpw - [double]$r.boxw
+  Check 'row 3' (($r.branch -eq 'no-move') -and ($n -ge 2) -and (Near ([double]$r.x1) $edge) -and (-not $pageMoved)) "page $page, notches=$n x1=$($r.x1) edge=$edge pageMoved=$pageMoved"
+
+  # Row 3b -- at the LEFT edge, on a page after the first, a leftward notch
+  # neither moves nor turns the page back.
+  Reset-Pan
+  $page = [int](Read-Pan).page1
+  if ($page -lt 1) { throw "row 3b precondition: on page $page, so a backward page turn is impossible" }
+  $r1 = Send-TiltWheel -120; $r2 = Send-TiltWheel -120
+  Check 'row 3b' (($r1.branch -eq 'no-move') -and ($r2.branch -eq 'no-move') -and ([int]$r2.page1 -eq $page) -and (Near ([double]$r2.x1) 0)) "page $page -> $($r2.page1), branches $($r1.branch)/$($r2.branch)"
+
+  # Row 12 -- Ctrl+Shift+wheel still zooms (H2; correction C8). Same page, same
+  # epoch, so wait for the content box itself to grow.
+  $z0 = Read-Pan
+  [void](Send-Wheel $script:Canvas $WM_MOUSEWHEEL 120 ($MK_CONTROL -bor $MK_SHIFT))
+  $z1 = Read-Pan
+  for ($k = 0; $k -lt 30 -and [double]$z1.boxw -le [double]$z0.boxw + 1; $k++) { Start-Sleep -Milliseconds 100; $z1 = Read-Pan }
+  Check 'row 12' ([double]$z1.boxw -gt [double]$z0.boxw + 1) "boxw $($z0.boxw) -> $($z1.boxw)"
 }
-Check 'row 9b' ($res -eq 1) "page box returned $res"
-
-# Row 9 -- the canvas itself returns TRUE.
-$res = Send-Wheel $script:Canvas $WM_MOUSEHWHEEL 120
-Check 'row 9' ($res -eq 1) "canvas returned $res"
-
-# Row 10 -- a notch during a tab switch must not clamp the incoming tab's pan
-# to the outgoing page. Tab A = simple.pdf (zoomed), tab B = search.pdf (FitWidth).
-Reset-Pan
-[void](Send-TiltWheel 120); $a = Send-TiltWheel 120
-$saved = [double]$a.x1
-if (-not ($saved -lt -1)) { throw "row 10 precondition: tab A pan_x is $saved, not < 0" }
-Open-SecondTab 'tests\fixtures\search.pdf'
-$b = Read-Pan
-if ([double]$b.boxw -gt [double]$b.vpw + 0.5) { throw 'row 10 precondition: tab B overflows horizontally, so a clamp against it would not reach 0' }
-Set-Content -Path $SlowFlag -Value ''
-Mark-Log 'row10'
-[void][HwU]::SendMessageW($script:Main, $WM_COMMAND, [IntPtr]$IDM_TAB_GOTO_1, [IntPtr]::Zero)
-$r = Send-TiltWheel 120
-Start-Sleep -Milliseconds 3000
-Remove-Item $SlowFlag
-$after = Read-Pan
-if (Render-Landed-First 'row10') {
-  Void-Row 'row 10' 'a render landed between the tab switch and the notch'
-} else {
-  Check 'row 10' (($r.branch -eq 'stale-drop') -and (Near ([double]$after.x1) $saved)) "notch=$($r.branch) x0=$($r.x0) after=$($after.x1) saved=$saved"
+finally {
+  Remove-Item $SlowFlag -ErrorAction SilentlyContinue
+  if ($script:Proc -ne $null -and -not $script:Proc.HasExited) { Close-LitePdf }
 }
-
-# Row 11 -- a notch right after a resize, before the new render, writes pan_x
-# only. Tab A is active and zoomed.
-Set-WindowHeight ($H0 - 300); Start-Sleep -Milliseconds 1500
-$before = Pan-To-BottomRight
-Set-Content -Path $SlowFlag -Value ''
-Mark-Log 'row11'
-Set-WindowHeight $H0
-$r = Send-TiltWheel -120
-Start-Sleep -Milliseconds 3000
-Remove-Item $SlowFlag
-if (Render-Landed-First 'row11') {
-  Void-Row 'row 11' 'a render landed between the resize and the notch'
-} elseif (-not ([double]$r.vph -gt [double]$before.vph + 1)) {
-  Void-Row 'row 11' "the canvas did not grow ($($before.vph) -> $($r.vph))"
-} else {
-  Check 'row 11' (($r.branch -eq 'step') -and (Near ([double]$r.y1) ([double]$r.y0)) -and (Near ([double]$r.x1) ([double]$r.x0 + $HStep))) $r.raw
-}
-
-# Row 7 -- a vertical page turn keeps pan_x (single-page, same-size pages).
-Send-Command $IDM_TAB_GOTO_2
-Zoom-Until-Overflow
-Reset-Pan
-$s = Send-TiltWheel 120
-$page = [int]$s.page1
-for ($i = 0; $i -lt 300; $i++) { $r = Send-PlainWheel -120; if ([int]$r.page1 -ne $page) { break } }
-if ([int]$r.page1 -ne $page + 1) { throw "row 7: the page did not turn forward ($page -> $($r.page1))" }
-Start-Sleep -Milliseconds 1500
-$after = Read-Pan
-Check 'row 7' (([int]$after.page1 -eq $page + 1) -and (Near ([double]$after.x1) (-$HStep)) -and (Near ([double]$after.boxw) ([double]$s.boxw))) "page $page -> $($after.page1), x1=$($after.x1), boxw $($s.boxw) -> $($after.boxw)"
-
-# Row 12 -- Ctrl+Shift+wheel still zooms (H2; correction C8).
-$z0 = Read-Pan
-[void](Send-Wheel $script:Canvas $WM_MOUSEWHEEL 120 ($MK_CONTROL -bor $MK_SHIFT))
-Start-Sleep -Milliseconds 1500
-$z1 = Read-Pan
-Check 'row 12' ([double]$z1.boxw -gt [double]$z0.boxw + 1) "boxw $($z0.boxw) -> $($z1.boxw)"
-
-Close-LitePdf
 Write-Host "DONE: $script:Fails FAIL, $script:Voids VOID"
 ```
 
@@ -1055,7 +1122,8 @@ Write-Host "DONE: $script:Fails FAIL, $script:Voids VOID"
 
 **Hygiene, before the run:**
 - Back up the live session: `Copy-Item "$env:LOCALAPPDATA\LitePDF\session.json" "$env:TEMP\litepdf-session-56.bak"`. The app auto-saves over it within ~1.5 s of launch.
-- Confirm the binary under test is the probe build: `(Get-Item .\build\Release\litepdf.exe).LastWriteTime` must be newer than Step 10's build start.
+- Confirm the binary under test is the probe build: `(Get-Item .\build\Release\litepdf.exe).LastWriteTime` must be later than the time Step 10 wrote down.
+- **No litepdf may be running, including the user's installed copy.** litepdf is single-instance, so the run's files would be forwarded to that copy. `Start-LitePdf` refuses in that case. If the refusal names a path outside `build\Release`, stop and report it; the controller asks the user to close that copy.
 - Do not touch the mouse or keyboard during the run.
 
 Run from the repo root:
@@ -1064,14 +1132,14 @@ Run from the repo root:
 powershell -NoProfile -ExecutionPolicy Bypass -File build\gui\hwheel-checks.ps1
 ```
 
-Expected: `DONE: 0 FAIL, 0 VOID`, with 13 PASS lines (rows 1-9, 9b, 10-12).
+Expected: `DONE: 0 FAIL, 0 VOID`, with 14 PASS lines (rows 1-9, 3b, 9b, 10-12).
 - **A VOID is not a pass.** Re-run once. If it repeats, report it to the controller with the log excerpt after the row's `mark` line.
 - **A FAIL** goes to `superpowers:systematic-debugging`, never a guessed fix.
 
 Put every PASS/FAIL/VOID line, the settings line and the `zoomed` line in the task report.
 
 After the run:
-- If litepdf is still running, call `Close-LitePdf` (never `Stop-Process`: a force-kill leaves `running.lock`, and the next launch offers a restore).
+- The check script closes litepdf in its `finally`, on every exit path. If a build copy is still running anyway, close it with `powershell -NoProfile -Command ". .\build\gui\hwheel-drive.ps1; Close-AnyLitePdf"`. Never use `Stop-Process`: a force-kill leaves `running.lock`, and the next launch offers a restore. `Close-AnyLitePdf` touches only processes started from `build\Release`.
 - Restore the session: `Copy-Item "$env:TEMP\litepdf-session-56.bak" "$env:LOCALAPPDATA\LitePDF\session.json" -Force`.
 
 - [ ] **Step 14: Revert the probe and rebuild clean**
@@ -1083,7 +1151,7 @@ cmake --build build --config Release
 ctest --test-dir build -C Release
 ```
 
-`git status --short` must print nothing, and `git diff HEAD --stat` must be empty. The rebuilt `litepdf.exe` is now the shipping binary. Expected: **N0 + 3** passing. Delete `%TEMP%\litepdf-wheel-probe.log` and `%TEMP%\litepdf-probe-slow` if either still exists.
+`git status --short` must print nothing, and `git diff HEAD --stat` must be empty. The rebuilt `litepdf.exe` is now the shipping binary. Expected: **N1** passing (Step 1's count). Delete `%TEMP%\litepdf-wheel-probe.log` and `%TEMP%\litepdf-probe-slow` if either still exists.
 
 If Step 13 found a defect: fix it in the source (probe reverted), commit the fix separately with its own message, then repeat Steps 10-14.
 
@@ -1099,7 +1167,9 @@ If Step 13 found a defect: fix it in the source (probe reverted), commit the fix
 - Consumes: the behaviour shipped by Task 2.
 - Produces: the PR.
 
-- [ ] **Step 1: CHANGELOG**
+- [ ] **Step 1: Record the starting count, then the CHANGELOG**
+
+Before editing, run `ctest --test-dir build -C Release` from the repo root and record the passing count as **N2**. This task changes only docs, so Step 4 expects N2. `git status --short` must print nothing.
 
 Under `## [Unreleased]` → `### Added`, after the "Hand-tool panning." bullet, add:
 
@@ -1134,12 +1204,12 @@ In the `## Keyboard shortcuts` table, after the `| Space + drag       | … |` r
 
 - [ ] **Step 3: The user's real-hardware check (spec §4.3)**
 
-The controller asks the user to run `build\Release\litepdf.exe tests\fixtures\simple.pdf`, zoom in twice (Ctrl+=), and check on their real mouse:
+The controller asks the user to close any running litepdf, run `build\Release\litepdf.exe tests\fixtures\search.pdf` (7 pages, so a wrong page turn would show), zoom in twice (Ctrl+=), and check on their real mouse:
 - Shift + wheel toward you scrolls right, and away scrolls left;
-- it stops at the edge without turning the page;
+- held at either edge, it stops there without turning the page;
 - the plain wheel still scrolls up and down;
 - Ctrl+Shift+wheel still zooms;
-- at FitWidth (Ctrl+0, then the FitWidth menu item if that is not the reset target), Shift+wheel does nothing.
+- at FitWidth (Ctrl+0), Shift+wheel does nothing.
 
 Record the user's answer in the PR description. This covers the Shift branch only. The `WM_MOUSEHWHEEL` branch has no real-device check (R1).
 
@@ -1152,7 +1222,7 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Expected: **N0 + 3** passing. Record the count and `(Get-Item build\Release\litepdf.exe).Length`; the size must be under 19,000,000 bytes. `git diff main -- VERSION` must be empty.
+Expected: **N2** passing (Step 1's count). Record the count and `(Get-Item build\Release\litepdf.exe).Length`; the size must be under 19,000,000 bytes. `git diff main -- VERSION` must be empty.
 
 - [ ] **Step 5: Commit**
 
@@ -1163,19 +1233,20 @@ git commit -m "docs: record sideways wheel scrolling
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
 
-- [ ] **Step 6: Merge gate, then PR**
+- [ ] **Step 6: Merge gate, then PR (controller)**
 
-Invoke the `risk-tiered-review` skill: Full tier, and never drop the Codex lens. Name these least-certain claims for the adversarial lens:
+The controller runs this step; it needs the whole plan, not this brief. Invoke the `risk-tiered-review` skill: Full tier, and never drop the Codex lens. Name these least-certain claims for the adversarial lens:
 
 1. **`bitmap_is_stale()` is a pure extraction.** Is the vertical wheel's behaviour byte-for-byte what it was? Check the same predicate, the same `current_bitmap &&` precondition, the canonical-left comparison, and `wheel_residual = 0` kept at the call site. Also check that `wheel_flip_seq` is untouched (decision #4).
 2. **`pan_x`-only writes.** `on_hwheel_scroll` bypasses `pan_by`. Is there a path where `pan_x` is left outside its clamp range for a paint? For example, `content_extent` succeeding against a bitmap that `bitmap_is_stale()` did not flag, or spread mode with only the left slot.
 3. **The `WM_MOUSEHWHEEL` TRUE return (H8)**, including through the page box. Both Codex lenses objected at the spec gate, and the objection was recorded and rejected. Re-check for a concrete failure TRUE causes; a norm citation alone is not one.
 4. **The `OnWheel` signature change.** Is there any caller or copy of the old `void(WPARAM, LPARAM)` shape left, and does the EDIT arm still return 0 for `WM_MOUSEWHEEL`?
+5. **H5 by reading, because no GUI row can check it (R6).** In `on_hwheel_scroll`, does `HWheelSource::Tilt` read `SPI_GETWHEELSCROLLCHARS` and `HWheelSource::Shift` read `SPI_GETWHEELSCROLLLINES`, and not the other way round?
 
 After the gate, and with the user's go-ahead, push and open the PR titled `feat: sideways wheel scrolling`. The body carries:
 - the test count and the exe size;
 - every GUI check line from Task 2 Step 13;
 - the user's hardware answer;
-- plan-time corrections C1-C8, one line each;
-- limitations R1-R5;
+- plan-time corrections C1-C10, one line each (this plan's "Plan-time corrections" section, above Task 1);
+- limitations R1-R6 (this plan's "Known limitations" table; R1-R5 are also in spec §5);
 - `Closes #56`.
