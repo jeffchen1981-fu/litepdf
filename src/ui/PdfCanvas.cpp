@@ -662,6 +662,18 @@ void PdfCanvas::on_left_button_down(bool is_double_click_message, int x_px, int 
         impl_->clicks.forget();
         return;
     }
+    // #58: space held makes this press a pan. Read at the press with
+    // GetKeyState, never latched across WM_KEYDOWN / WM_KEYUP (spec §5): hold
+    // space, Alt+Tab away, release it there, and a latch never sees the key-up.
+    // Checked BEFORE the refusals below, which guard SELECTION -- a pan is as
+    // valid in spread mode, or before this page's bitmap lands, as anywhere.
+    if ((GetKeyState(VK_SPACE) & 0x8000) != 0) {
+        // Not a click: the press counted above must not pair with the next one
+        // into a double or triple click.
+        impl_->clicks.forget();
+        begin_pan_gesture(MouseButton::Left, x_px, y_px);
+        return;
+    }
     // Refuse spread mode HERE, not only in paint: current_bitmap holds the LEFT
     // slot in that mode, so a drag would compute points with single-page
     // geometry and build an invisible selection Ctrl+C would still copy (spec §1).
@@ -824,7 +836,9 @@ void PdfCanvas::update_cursor() {
             over_page = x >= pl.x && x < pl.x + pl.w && y >= pl.y && y < pl.y + pl.h;
         }
     }
-    const bool space_held = false;   // becomes a GetKeyState read with space-drag panning
+    // Read, never latched (spec §5): a latch set by WM_KEYDOWN would stick
+    // whenever space is released in another window.
+    const bool space_held = (GetKeyState(VK_SPACE) & 0x8000) != 0;
     LPCWSTR shape = IDC_ARROW;
     switch (canvas_cursor(impl_->gesture.gesture(), space_held, can_pan(), over_page)) {
         case CanvasCursor::Move:  shape = IDC_SIZEALL; break;
@@ -965,6 +979,13 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             }
             break;
         case WM_KEYDOWN: {
+            if (w == VK_SPACE) {
+                // The hand-tool cursor follows space at once, not at the next
+                // pointer move. Nothing is stored: the key is still read on
+                // demand, by the press and by update_cursor.
+                refresh_cursor();
+                return 0;
+            }
             // Defense-in-depth for tab-navigation shortcuts. Ctrl+Tab /
             // Ctrl+Shift+Tab / Ctrl+W are registered in the main window's
             // accelerator table (see MainWindow::run) and TranslateAccel
@@ -996,6 +1017,9 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             }
             return on_key_down(w);
         }
+        case WM_KEYUP:
+            if (w == VK_SPACE) refresh_cursor();
+            break;
         case WM_MOUSEWHEEL: {
             if (!impl_->view) return 0;
             WORD modifiers = GET_KEYSTATE_WPARAM(w);
