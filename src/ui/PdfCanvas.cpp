@@ -62,6 +62,10 @@ using litepdf::ui::GestureState;
 using litepdf::ui::MouseButton;
 using litepdf::ui::PointerMetrics;
 using litepdf::ui::ReleaseAction;
+using litepdf::ui::canvas_cursor;
+using litepdf::ui::CanvasCursor;
+using litepdf::ui::content_overflows;
+using litepdf::ui::PanStep;
 
 // Per-monitor, not system: the process is PerMonitorV2 (resources/manifest.xml),
 // so a window on a second display reports mouse positions in THAT monitor's
@@ -609,6 +613,17 @@ void PdfCanvas::cancel_gesture() {
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
+void PdfCanvas::cancel_stale_gesture() {
+    // A gesture that is live while this window does NOT hold the capture is
+    // stale: SetCapture did not take (the capture belongs to the foreground
+    // thread), so the matching button-up went elsewhere and no
+    // WM_CAPTURECHANGED will ever arrive to end it. Refusing the next press
+    // would leave the canvas ignoring every press for the rest of the session.
+    if (impl_->gesture.gesture() != Gesture::None && GetCapture() != hwnd_) {
+        cancel_gesture();
+    }
+}
+
 void PdfCanvas::refresh_live_selection() {
     if (!impl_->live_selection || !impl_->drag_text.valid()) return;
     auto& sel = *impl_->live_selection;
@@ -639,15 +654,26 @@ void PdfCanvas::on_left_button_down(bool is_double_click_message, int x_px, int 
         is_double_click_message, static_cast<std::uint32_t>(GetMessageTime()),
         x_px, y_px, pointer_metrics(hwnd_));
 
-    // A gesture that is live while this window does NOT hold the capture is
-    // stale: SetCapture did not take (the capture belongs to the foreground
-    // thread), so the matching button-up went elsewhere and no
-    // WM_CAPTURECHANGED will ever arrive to end it. Refusing this press would
-    // leave the canvas ignoring every press for the rest of the session.
-    if (impl_->gesture.gesture() != Gesture::None && GetCapture() != hwnd_) {
-        cancel_gesture();
+    cancel_stale_gesture();
+    if (impl_->gesture.gesture() != Gesture::None) {
+        // Refused: a middle-button pan owns the mouse (no other gesture can be
+        // live while the left button goes down). This press is not a click, so
+        // it must not pair with the next one into a double or triple click.
+        impl_->clicks.forget();
+        return;
     }
-    if (impl_->gesture.gesture() != Gesture::None) return;
+    // #58: space held makes this press a pan. Read at the press with
+    // GetKeyState, never latched across WM_KEYDOWN / WM_KEYUP (spec §5): hold
+    // space, Alt+Tab away, release it there, and a latch never sees the key-up.
+    // Checked BEFORE the refusals below, which guard SELECTION -- a pan is as
+    // valid in spread mode, or before this page's bitmap lands, as anywhere.
+    if ((GetKeyState(VK_SPACE) & 0x8000) != 0) {
+        // Not a click: the press counted above must not pair with the next one
+        // into a double or triple click.
+        impl_->clicks.forget();
+        begin_pan_gesture(MouseButton::Left, x_px, y_px);
+        return;
+    }
     // Refuse spread mode HERE, not only in paint: current_bitmap holds the LEFT
     // slot in that mode, so a drag would compute points with single-page
     // geometry and build an invisible selection Ctrl+C would still copy (spec §1).
@@ -672,6 +698,9 @@ void PdfCanvas::on_left_button_down(bool is_double_click_message, int x_px, int 
     live.mode   = mode;
     impl_->live_selection = std::move(live);
     SetCapture(hwnd_);
+    // No WM_SETCURSOR arrives while this window holds the capture, so a drag
+    // started in the margin would otherwise keep the arrow throughout.
+    update_cursor();
 
     if (mode != litepdf::core::SelectMode::Chars) {
         // A double or triple click selects at PRESS time. A stationary click
@@ -685,6 +714,26 @@ void PdfCanvas::on_left_button_down(bool is_double_click_message, int x_px, int 
 }
 
 void PdfCanvas::on_mouse_move(int x_px, int y_px) {
+    if (impl_->gesture.gesture() == Gesture::Panning) {
+        // A pan whose capture is gone is stale (see cancel_stale_gesture) and
+        // its button is up: panning here would drag the page under a pointer
+        // that is merely passing over it.
+        if (GetCapture() != hwnd_) {
+            cancel_gesture();
+            return;
+        }
+        // Grab-and-drag: the content follows the pointer, so moving right moves
+        // the content right -- pan_by's positive direction, the one VK_LEFT
+        // uses to reveal the page's left side. Steps arrive in client pixels;
+        // pan_by takes DIPs.
+        const PanStep s = impl_->gesture.pan_step(x_px, y_px);
+        if (s.dx_px != 0 || s.dy_px != 0) {
+            const float dpi = static_cast<float>(GetDpiForWindow(hwnd_));
+            pan_by(client_px_to_dip(static_cast<float>(s.dx_px), dpi),
+                   client_px_to_dip(static_cast<float>(s.dy_px), dpi));
+        }
+        return;
+    }
     if (impl_->gesture.gesture() != Gesture::Selecting || !impl_->live_selection) return;
     impl_->gesture.move(x_px, y_px, pointer_metrics(hwnd_));
     Placement pl;
@@ -710,6 +759,8 @@ void PdfCanvas::on_left_button_up(int x_px, int y_px) {
     // held button would vanish on release (spec §4.2).
     switch (impl_->gesture.release(MouseButton::Left)) {
         case ReleaseAction::None:
+            // No live gesture belongs to the left button -- including a
+            // middle-button pan, whose capture this release must not touch.
             return;
         case ReleaseAction::ClearSelection:
             if (impl_->view) impl_->view->clear_selection();
@@ -718,16 +769,63 @@ void PdfCanvas::on_left_button_up(int x_px, int y_px) {
             commit_live_selection();
             break;
         case ReleaseAction::EndPan:
-            break;   // #58
+            break;   // a space pan: applied as the pointer moved, nothing to commit
     }
     impl_->live_selection.reset();
     impl_->drag_text = litepdf::core::Document::TextPage{};
     if (GetCapture() == hwnd_) ReleaseCapture();
     InvalidateRect(hwnd_, nullptr, FALSE);
+    refresh_cursor();   // do not wait for a WM_SETCURSOR that may only come with the next pointer move
+}
+
+void PdfCanvas::begin_pan_gesture(MouseButton button, int x_px, int y_px) {
+    // No bitmap, page or text handle is needed -- a pan only moves what is
+    // painted, and pan_by is a no-op until something is. So none of
+    // on_left_button_down's selection refusals apply, spread mode included.
+    if (!impl_->view) return;
+    if (!impl_->gesture.begin_pan(button, x_px, y_px)) return;
+    SetCapture(hwnd_);
+    update_cursor();   // no WM_SETCURSOR arrives while this window holds the capture
+}
+
+void PdfCanvas::on_middle_button_down(int x_px, int y_px) {
+    // One gesture owns the capture at a time. A middle press during a
+    // selection drag cancels the drag -- keeping anything already committed --
+    // and starts nothing of its own (spec §4.2). A live space pan makes
+    // begin_pan refuse this press (spec §5).
+    //
+    // No SetFocus, unlike the left press: a pan changes only the view, so a
+    // query half-typed into the find box keeps the keyboard.
+    if (impl_->gesture.gesture() == Gesture::Selecting) {
+        cancel_gesture();
+        return;
+    }
+    cancel_stale_gesture();
+    begin_pan_gesture(MouseButton::Middle, x_px, y_px);
+}
+
+void PdfCanvas::on_middle_button_up(int x_px, int y_px) {
+    // The release position counts, exactly as in on_left_button_up: injected
+    // input can deliver a press and a release with no move in between.
+    on_mouse_move(x_px, y_px);
+    // Decide FIRST, release SECOND: ReleaseCapture's synchronous
+    // WM_CAPTURECHANGED must find the pan already over (spec §4.2). None means
+    // no live gesture belongs to the middle button -- a space pan owns the
+    // capture, and this release must leave it alone.
+    if (impl_->gesture.release(MouseButton::Middle) == ReleaseAction::None) return;
+    if (GetCapture() == hwnd_) ReleaseCapture();
+    refresh_cursor();   // do not wait for a WM_SETCURSOR that may only come with the next pointer move
+}
+
+bool PdfCanvas::can_pan() const {
+    ContentBox box{};
+    if (!content_extent(box)) return false;   // nothing painted yet
+    const D2D1_SIZE_F vp = impl_->rt->GetSize();
+    return content_overflows(box.w, box.h, vp.width, vp.height);
 }
 
 void PdfCanvas::update_cursor() {
-    LPCWSTR shape = IDC_ARROW;
+    bool over_page = false;
     Placement pl;
     if (!impl_->dual_page && own_bitmap() && single_page_placement(pl)) {
         POINT pt;
@@ -735,12 +833,32 @@ void PdfCanvas::update_cursor() {
             const float dpi = static_cast<float>(GetDpiForWindow(hwnd_));
             const float x = client_px_to_dip(static_cast<float>(pt.x), dpi);
             const float y = client_px_to_dip(static_cast<float>(pt.y), dpi);
-            if (x >= pl.x && x < pl.x + pl.w && y >= pl.y && y < pl.y + pl.h) {
-                shape = IDC_IBEAM;
-            }
+            over_page = x >= pl.x && x < pl.x + pl.w && y >= pl.y && y < pl.y + pl.h;
         }
     }
+    // Read, never latched (spec §5): a latch set by WM_KEYDOWN would stick
+    // whenever space is released in another window.
+    const bool space_held = (GetKeyState(VK_SPACE) & 0x8000) != 0;
+    LPCWSTR shape = IDC_ARROW;
+    switch (canvas_cursor(impl_->gesture.gesture(), space_held, can_pan(), over_page)) {
+        case CanvasCursor::Move:  shape = IDC_SIZEALL; break;
+        case CanvasCursor::IBeam: shape = IDC_IBEAM;   break;
+        case CanvasCursor::Arrow: break;
+    }
     SetCursor(LoadCursorW(nullptr, shape));
+}
+
+void PdfCanvas::refresh_cursor() {
+    if (!hwnd_) return;
+    // SetCursor changes the shape wherever the pointer is. Over a sibling --
+    // the find bar sits on top of the canvas -- or another window that would
+    // be wrong until the pointer next moved, so act only when the pointer is
+    // over this window or this window holds the capture.
+    if (GetCapture() != hwnd_) {
+        POINT pt;
+        if (!GetCursorPos(&pt) || WindowFromPoint(pt) != hwnd_) return;
+    }
+    update_cursor();
 }
 
 void PdfCanvas::register_class_once(HINSTANCE hInstance) {
@@ -834,10 +952,19 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             on_left_button_up(GET_X_LPARAM(l), GET_Y_LPARAM(l));
             return 0;
         case WM_MBUTTONDOWN:
+        case WM_MBUTTONDBLCLK:
+            // CS_DBLCLKS covers every button: the second of two quick middle
+            // presses arrives as WM_MBUTTONDBLCLK and must start a pan too.
+            on_middle_button_down(GET_X_LPARAM(l), GET_Y_LPARAM(l));
+            return 0;
+        case WM_MBUTTONUP:
+            on_middle_button_up(GET_X_LPARAM(l), GET_Y_LPARAM(l));
+            return 0;
         case WM_RBUTTONDOWN:
-            // One gesture owns the capture at a time. A second button during a
-            // selection drag cancels it -- keeping anything already committed --
-            // and starts nothing of its own (spec §4.2).
+        case WM_RBUTTONDBLCLK:
+            // A right press during a selection drag cancels it, keeping anything
+            // already committed, and starts nothing of its own (spec §4.2). A
+            // pan ignores it: it has nothing a stray press could corrupt.
             if (impl_->gesture.gesture() == Gesture::Selecting) cancel_gesture();
             break;   // DefWindowProc: right-button WM_CONTEXTMENU generation unchanged
         case WM_CAPTURECHANGED:
@@ -852,6 +979,13 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             }
             break;
         case WM_KEYDOWN: {
+            if (w == VK_SPACE) {
+                // The hand-tool cursor follows space at once, not at the next
+                // pointer move. Nothing is stored: the key is still read on
+                // demand, by the press and by update_cursor.
+                refresh_cursor();
+                return 0;
+            }
             // Defense-in-depth for tab-navigation shortcuts. Ctrl+Tab /
             // Ctrl+Shift+Tab / Ctrl+W are registered in the main window's
             // accelerator table (see MainWindow::run) and TranslateAccel
@@ -883,6 +1017,9 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             }
             return on_key_down(w);
         }
+        case WM_KEYUP:
+            if (w == VK_SPACE) refresh_cursor();
+            break;
         case WM_MOUSEWHEEL: {
             if (!impl_->view) return 0;
             WORD modifiers = GET_KEYSTATE_WPARAM(w);

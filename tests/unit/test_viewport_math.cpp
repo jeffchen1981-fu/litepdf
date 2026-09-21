@@ -7,6 +7,7 @@
 
 using litepdf::ui::bitmap_px_to_dip;
 using litepdf::ui::clamp_pan;
+using litepdf::ui::content_overflows;
 using litepdf::ui::place_bitmap;
 
 TEST_CASE("ViewportMath bitmap px to dip divides by the render target dpi ratio",
@@ -114,4 +115,28 @@ TEST_CASE("ViewportMath client px to dip uses the render target dpi ratio", "[ui
     REQUIRE(client_px_to_dip(300.0f,  96.0f) == Catch::Approx(300.0f));
     REQUIRE(client_px_to_dip(300.0f, 144.0f) == Catch::Approx(200.0f));
     REQUIRE(client_px_to_dip(300.0f,   0.0f) == Catch::Approx(300.0f));
+}
+
+TEST_CASE("ViewportMath content overflows exactly when clamp pan leaves a range",
+          "[ui][viewport]") {
+    REQUIRE_FALSE(content_overflows(800.0f, 600.0f, 800.0f, 600.0f));   // exact fit
+    REQUIRE(content_overflows(800.5f, 600.0f, 800.0f, 600.0f));         // width only
+    REQUIRE(content_overflows(800.0f, 600.5f, 800.0f, 600.0f));         // height only
+    REQUIRE_FALSE(content_overflows(10.0f, 10.0f, 800.0f, 600.0f));
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    REQUIRE_FALSE(content_overflows(nan, 10.0f, 800.0f, 600.0f));
+
+    // The cursor must never promise a pan that clamp_pan would refuse, nor hide
+    // one it would allow: on every case, "overflows" must equal "clamp_pan
+    // leaves some axis a range below zero".
+    const float cases[][4] = {
+        {800.0f, 600.0f, 800.0f, 600.0f}, {801.0f, 600.0f, 800.0f, 600.0f},
+        {800.0f, 601.0f, 800.0f, 600.0f}, {100.0f, 100.0f, 800.0f, 600.0f},
+        {2000.0f, 50.0f, 800.0f, 600.0f}, {0.0f, 0.0f, 0.0f, 0.0f},
+    };
+    for (const auto& c : cases) {
+        const bool has_range = clamp_pan(-1e9f, c[0], c[2]) < 0.0f
+                            || clamp_pan(-1e9f, c[1], c[3]) < 0.0f;
+        REQUIRE(content_overflows(c[0], c[1], c[2], c[3]) == has_range);
+    }
 }

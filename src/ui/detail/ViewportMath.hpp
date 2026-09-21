@@ -41,6 +41,16 @@ inline float clamp_pan(float pan, float content, float viewport) noexcept {
     return pan;
 }
 
+// True when the content overflows the viewport on either axis -- exactly when
+// clamp_pan leaves some axis a range to pan through. The same `content >
+// viewport` test as clamp_pan, so the hand-tool cursor and the pan can never
+// disagree about whether there is anything to move. NaN never overflows,
+// matching clamp_pan's "degenerate -> pinned" branch.
+inline bool content_overflows(float content_w, float content_h,
+                              float vp_w, float vp_h) noexcept {
+    return content_w > vp_w || content_h > vp_h;
+}
+
 struct Placement {
     float x = 0.0f;
     float y = 0.0f;

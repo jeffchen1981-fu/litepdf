@@ -5,11 +5,14 @@
 #include "ui/detail/SelectionDrag.hpp"
 
 using litepdf::core::SelectMode;
+using litepdf::ui::canvas_cursor;
 using litepdf::ui::canvas_dip_to_page_point;
+using litepdf::ui::CanvasCursor;
 using litepdf::ui::ClickCounter;
 using litepdf::ui::Gesture;
 using litepdf::ui::GestureState;
 using litepdf::ui::MouseButton;
+using litepdf::ui::PanStep;
 using litepdf::ui::Placement;
 using litepdf::ui::PointerMetrics;
 using litepdf::ui::ReleaseAction;
@@ -160,4 +163,138 @@ TEST_CASE("SelectionDrag canvas position maps to a clamped page point",
     const auto no_zoom = canvas_dip_to_page_point(250.0f, 350.0f, page, 0.0f);
     REQUIRE(no_zoom.x == 0.0f);
     REQUIRE(no_zoom.y == 0.0f);
+}
+
+// --- #58 hand-tool panning -------------------------------------------------
+
+TEST_CASE("SelectionDrag a pan step is the pointer motion since the previous step",
+          "[ui][pan]") {
+    GestureState g;
+    REQUIRE(g.begin_pan(MouseButton::Middle, 100, 200));
+
+    PanStep s = g.pan_step(130, 190);   // the first step measures from the press
+    REQUIRE(s.dx_px == 30);
+    REQUIRE(s.dy_px == -10);
+
+    s = g.pan_step(125, 250);           // later steps from the previous step
+    REQUIRE(s.dx_px == -5);
+    REQUIRE(s.dy_px == 60);
+
+    s = g.pan_step(125, 250);           // no motion, no pan
+    REQUIRE(s.dx_px == 0);
+    REQUIRE(s.dy_px == 0);
+}
+
+TEST_CASE("SelectionDrag pan steps add up to the whole drag with no drift",
+          "[ui][pan]") {
+    // PdfCanvas applies each step to the pan as it is NOW, so the steps must sum
+    // to (end - press) exactly, whatever path the pointer took -- including
+    // outside the client area, where captured coordinates go negative.
+    GestureState g;
+    REQUIRE(g.begin_pan(MouseButton::Left, 50, 50));
+    int sum_x = 0, sum_y = 0;
+    const int path[][2] = { {60, 40}, {-30, 400}, {-1, -1}, {3000, -2000}, {90, 75} };
+    for (const auto& p : path) {
+        const PanStep s = g.pan_step(p[0], p[1]);
+        sum_x += s.dx_px;
+        sum_y += s.dy_px;
+    }
+    REQUIRE(sum_x == 90 - 50);
+    REQUIRE(sum_y == 75 - 50);
+}
+
+TEST_CASE("SelectionDrag pan steps are zero unless a pan is live", "[ui][pan]") {
+    GestureState g;
+    PanStep s = g.pan_step(10, 10);                 // nothing live
+    REQUIRE(s.dx_px == 0);
+    REQUIRE(s.dy_px == 0);
+
+    REQUIRE(g.begin_select(SelectMode::Chars, 0, 0));
+    s = g.pan_step(40, 40);                         // a SELECTION is live
+    REQUIRE(s.dx_px == 0);
+    REQUIRE(s.dy_px == 0);
+    REQUIRE(g.abort() == Gesture::Selecting);
+
+    REQUIRE(g.begin_pan(MouseButton::Middle, 0, 0));
+    (void)g.pan_step(500, 500);
+    REQUIRE(g.release(MouseButton::Middle) == ReleaseAction::EndPan);
+    s = g.pan_step(600, 600);                       // the pan is over
+    REQUIRE(s.dx_px == 0);
+    REQUIRE(s.dy_px == 0);
+
+    // A new pan measures from ITS press, not from where the last one ended.
+    REQUIRE(g.begin_pan(MouseButton::Middle, 10, 10));
+    s = g.pan_step(12, 13);
+    REQUIRE(s.dx_px == 2);
+    REQUIRE(s.dy_px == 3);
+}
+
+TEST_CASE("SelectionDrag a space pan belongs to the left button and never clears a selection",
+          "[ui][pan]") {
+    GestureState g;
+    // A plain click first, so mode() is Chars and moved() is false -- the exact
+    // state in which a LEFT release means "clear the selection".
+    REQUIRE(g.begin_select(SelectMode::Chars, 5, 5));
+    REQUIRE(g.release(MouseButton::Left) == ReleaseAction::ClearSelection);
+
+    // Space + click with no movement: the same button, the same stale mode, and
+    // it must still end as a pan. PdfCanvas's EndPan arm commits and clears
+    // nothing, so a Space click keeps the reader's selection.
+    REQUIRE(g.begin_pan(MouseButton::Left, 5, 5));
+    REQUIRE_FALSE(g.begin_pan(MouseButton::Middle, 5, 5));      // one gesture at a time
+    REQUIRE(g.release(MouseButton::Middle) == ReleaseAction::None);
+    REQUIRE(g.gesture() == Gesture::Panning);
+    REQUIRE(g.release(MouseButton::Left) == ReleaseAction::EndPan);
+}
+
+TEST_CASE("SelectionDrag a press that became a pan starts a new click sequence",
+          "[ui][pan]") {
+    const PointerMetrics m;
+
+    // A real click, then Space + a quick second press, which Windows reports as
+    // a double click and the canvas turns into a pan. A plain click right after
+    // must be a single click, not the third of a triple (a whole line).
+    ClickCounter a;
+    REQUIRE(a.press(false, 1000, 100, 100, m) == SelectMode::Chars);
+    (void)a.press(true, 1050, 100, 100, m);
+    a.forget();
+    REQUIRE(a.press(false, 1100, 100, 100, m) == SelectMode::Chars);
+
+    // Space + a press (a pan), then a quick plain press that Windows reports as
+    // a double click. Its first half was the pan, so it is a single click, not
+    // a word.
+    ClickCounter b;
+    (void)b.press(false, 2000, 50, 50, m);
+    b.forget();
+    REQUIRE(b.press(true, 2100, 50, 50, m) == SelectMode::Chars);
+
+    // Counting is normal again afterwards.
+    REQUIRE(b.press(false, 3000, 50, 50, m) == SelectMode::Chars);
+    REQUIRE(b.press(true, 3050, 50, 50, m) == SelectMode::Words);
+}
+
+TEST_CASE("SelectionDrag cursor precedence for selection and panning", "[ui][cursor]") {
+    using C = CanvasCursor;
+    //                     live               space  can_pan over_page
+    // Nothing live, no space: the I-beam over a single-page page, else the arrow.
+    REQUIRE(canvas_cursor(Gesture::None,      false, true,  true)  == C::IBeam);
+    REQUIRE(canvas_cursor(Gesture::None,      false, true,  false) == C::Arrow);
+    REQUIRE(canvas_cursor(Gesture::None,      false, false, true)  == C::IBeam);
+
+    // Space held: the move cursor ANYWHERE in the client, margins included,
+    // because a Space press pans from there too -- but only when something can
+    // pan. Otherwise the arrow: a Space press would pan (a no-op), not select,
+    // so an I-beam would promise a selection it will not make.
+    REQUIRE(canvas_cursor(Gesture::None,      true,  true,  true)  == C::Move);
+    REQUIRE(canvas_cursor(Gesture::None,      true,  true,  false) == C::Move);
+    REQUIRE(canvas_cursor(Gesture::None,      true,  false, true)  == C::Arrow);
+
+    // A live pan: the same rule, space or not.
+    REQUIRE(canvas_cursor(Gesture::Panning,   false, true,  true)  == C::Move);
+    REQUIRE(canvas_cursor(Gesture::Panning,   false, false, true)  == C::Arrow);
+
+    // A live selection keeps the I-beam even if Space goes down mid-drag: Space
+    // is read at the press, so it cannot turn this drag into a pan.
+    REQUIRE(canvas_cursor(Gesture::Selecting, true,  true,  false) == C::IBeam);
+    REQUIRE(canvas_cursor(Gesture::Selecting, false, false, false) == C::IBeam);
 }

@@ -12,6 +12,7 @@
 #include "ui/detail/ScrollMath.hpp"
 #include "core/TextSelection.hpp"
 #include "ui/detail/ViewportMath.hpp"
+#include "ui/detail/SelectionDrag.hpp"
 
 // Forward-decl so the header stays COM-free. ComPtr in .cpp only.
 struct ID2D1Factory;
@@ -328,6 +329,19 @@ private:
     void on_mouse_move(int x_px, int y_px);
     void on_left_button_up(int x_px, int y_px);
 
+    // #58 hand-tool panning (spec §5): middle-drag here; left-drag with space
+    // held is routed to begin_pan_gesture by on_left_button_down.
+    void on_middle_button_down(int x_px, int y_px);
+    void on_middle_button_up(int x_px, int y_px);
+
+    // Start a pan owned by `button`: begin_pan, SetCapture, and the pan cursor
+    // -- which must be set here, because Windows sends no WM_SETCURSOR to a
+    // window that holds the capture.
+    void begin_pan_gesture(MouseButton button, int x_px, int y_px);
+
+    // End a gesture that is live while this window does NOT hold the capture.
+    void cancel_stale_gesture();
+
     // End any live gesture WITHOUT committing, drop its text handle and release
     // the capture. Never dereferences impl_->view: set_view calls it before
     // repointing, on the tab-close path where the outgoing view is already
@@ -343,8 +357,18 @@ private:
     // Client pixels -> a clamped point on the page drawn at `page`.
     litepdf::core::SelPoint page_point_at(int x_px, int y_px, const Placement& page) const;
 
+    // True when the painted content overflows the viewport on either axis --
+    // when pan_by can move anything at all.
+    bool can_pan() const;
+
     // WM_SETCURSOR for the client area.
     void update_cursor();
+
+    // update_cursor outside WM_SETCURSOR: when a gesture ends normally (a
+    // selection drag or click, or a pan), and when space goes down or up with
+    // the pointer still. Does nothing unless the pointer is over this window
+    // or this window holds the capture.
+    void refresh_cursor();
 
     HWND hwnd_ = nullptr;
     bool log_timings_ = false;
