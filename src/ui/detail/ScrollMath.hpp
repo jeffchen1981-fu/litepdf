@@ -9,6 +9,11 @@
 // ViewportMath.hpp). Wheel UP is delta > 0 and moves the reader toward the top,
 // so step > 0 and pan_y increases toward 0. This matches the arrow keys:
 // VK_UP calls pan_by(0, +100).
+//
+// HORIZONTAL (#56). pan_x lives in [vp_w - content_w, 0], with 0 at the page's
+// LEFT edge. rightward_delta turns either horizontal input into a delta where
+// > 0 reveals the content to the RIGHT; the canvas then SUBTRACTS the step
+// from pan_x. This matches the arrow keys: VK_RIGHT calls pan_by(-100, 0).
 
 #include "ui/detail/ViewportMath.hpp"
 
@@ -43,23 +48,47 @@ inline int consume_notches(int delta, int& residual) noexcept {
     return notches;
 }
 
-// Scroll magnitude in DIPs for `notches` whole notches. Positive = toward the
-// top of the page.
+// Scroll magnitude in DIPs for `notches` whole notches, along the axis that
+// `vp_extent` measures: the viewport HEIGHT for the vertical wheel (positive =
+// toward the top of the page), its WIDTH for the horizontal one (positive =
+// rightward, see rightward_delta). `lines_per_notch` is the setting for the
+// control that moved -- SPI_GETWHEELSCROLLLINES, or SPI_GETWHEELSCROLLCHARS
+// for a tilt wheel.
 inline float wheel_step_dip(int notches, unsigned lines_per_notch,
-                            float vp_h) noexcept {
+                            float vp_extent) noexcept {
     if (notches == 0) return 0.0f;
     float per_notch;
     if (lines_per_notch == kWheelPageScroll) {
-        // "One screen at a time". A full viewport height would land exactly on
-        // the far edge, so the very next notch would flip the page with no
-        // overlap for the reader to reacquire their place. 90% leaves a strip.
-        per_notch = vp_h * 0.9f;
+        // "One screen at a time". A full viewport would land exactly on the
+        // far edge -- vertically, the very next notch would then flip the page
+        // -- with no overlap for the reader to reacquire their place. 90%
+        // leaves a strip. Documented for the lines setting only; a chars value
+        // of UINT_MAX lands here too, which no Windows UI can set.
+        per_notch = vp_extent * 0.9f;
     } else if (lines_per_notch == 0) {
         return 0.0f;                     // the user turned wheel scrolling off
     } else {
         per_notch = static_cast<float>(lines_per_notch) * kWheelLineDip;
     }
     return static_cast<float>(notches) * per_notch;
+}
+
+// Which control produced a horizontal wheel message (#56).
+enum class HWheelSource {
+    Tilt,    // WM_MOUSEHWHEEL: a tilt wheel, or a sideways touchpad swipe
+    Shift,   // WM_MOUSEWHEEL with Shift held: the plain wheel, turned sideways
+};
+
+// Normalise a horizontal wheel delta so that > 0 means "reveal the content to
+// the RIGHT" (pan_x decreases, the direction VK_RIGHT pans).
+//
+// WM_MOUSEHWHEEL is positive when the wheel tilts right, which already is that
+// direction. Shift + the plain wheel follows the browser convention: rolling
+// the wheel toward the user (delta < 0, which scrolls DOWN without Shift)
+// scrolls right, so its sign flips. Negating is safe: the raw value comes from
+// GET_WHEEL_DELTA_WPARAM, a 16-bit short.
+inline int rightward_delta(int raw, HWheelSource src) noexcept {
+    return (src == HWheelSource::Shift) ? -raw : raw;
 }
 
 struct WheelResult {

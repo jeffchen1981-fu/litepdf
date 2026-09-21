@@ -12,6 +12,8 @@
 using litepdf::ui::apply_wheel;
 using litepdf::ui::consume_notches;
 using litepdf::ui::Flip;
+using litepdf::ui::HWheelSource;
+using litepdf::ui::rightward_delta;
 using litepdf::ui::wheel_step_dip;
 
 TEST_CASE("ScrollMath consumes one whole notch and keeps no residual",
@@ -135,4 +137,47 @@ TEST_CASE("ScrollMath does nothing for a zero step", "[ui][scroll]") {
     const auto r = apply_wheel(-100.0f, 2000.0f, 800.0f, 0.0f);
     REQUIRE(r.flip == Flip::None);
     REQUIRE(r.pan_y == Catch::Approx(-100.0f));
+}
+
+// #56: horizontal wheel input. pan_x lives in [vp_w - content_w, 0] with 0 at
+// the page's LEFT edge; rightward_delta > 0 reveals the content to the right,
+// and the canvas subtracts the resulting step from pan_x (VK_RIGHT's direction).
+
+TEST_CASE("ScrollMath tilt wheel keeps its sign: tilting right is rightward",
+          "[ui][scroll]") {
+    // WM_MOUSEHWHEEL: "A positive value indicates that the wheel was rotated
+    // to the right" -- already the rightward convention.
+    REQUIRE(rightward_delta(120, HWheelSource::Tilt) == 120);
+    REQUIRE(rightward_delta(-120, HWheelSource::Tilt) == -120);
+    REQUIRE(rightward_delta(40, HWheelSource::Tilt) == 40);
+}
+
+TEST_CASE("ScrollMath Shift wheel toward the user scrolls right",
+          "[ui][scroll]") {
+    // WM_MOUSEWHEEL is negative when the wheel rolls toward the user -- which
+    // scrolls DOWN without Shift, and scrolls RIGHT with it.
+    REQUIRE(rightward_delta(-120, HWheelSource::Shift) == 120);
+    REQUIRE(rightward_delta(120, HWheelSource::Shift) == -120);
+    REQUIRE(rightward_delta(-40, HWheelSource::Shift) == 40);
+}
+
+TEST_CASE("ScrollMath Shift and tilt describing one motion give the same notches",
+          "[ui][scroll]") {
+    // The same rightward-then-back-then-rightward motion, once from a tilt
+    // wheel and once from Shift + the plain wheel (whose raw deltas carry the
+    // opposite sign), must fire the same notches in the same places.
+    const int tilt_raw[]  = {40, 40, 50, -30, 150};
+    const int shift_raw[] = {-40, -40, -50, 30, -150};
+    const int expected[]  = {0, 0, 1, 0, 1};
+    int tilt_residual = 0;
+    int shift_residual = 0;
+    for (int i = 0; i < 5; ++i) {
+        const int t = consume_notches(rightward_delta(tilt_raw[i], HWheelSource::Tilt),
+                                      tilt_residual);
+        const int s = consume_notches(rightward_delta(shift_raw[i], HWheelSource::Shift),
+                                      shift_residual);
+        REQUIRE(t == expected[i]);
+        REQUIRE(s == expected[i]);
+        REQUIRE(tilt_residual == shift_residual);
+    }
 }
