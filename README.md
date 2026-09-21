@@ -44,7 +44,7 @@ Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab i
 - **Mouse-wheel scrolling** — scrolls within a page and turns the page at the edge, honouring your system's lines-per-notch setting; Ctrl+wheel zooms (v1.3.0)
 - **Page indicator** — status bar showing the current page and page count, with a box you can type a page into (v1.3.0)
 - **Text selection and copy** — drag to select, double-click for a word, triple-click for a line; Ctrl+C copies and Ctrl+A selects the page (unreleased)
-- **Hand-tool panning** — middle-drag, or hold Space and drag, to move a zoomed-in page; the arrow keys pan too (unreleased)
+- **Hand-tool panning** — middle-drag, or hold Space and drag, to move a zoomed-in page (unreleased)
 - **MRU** — recent files in File menu, persisted across runs
 
 ## Keyboard shortcuts
