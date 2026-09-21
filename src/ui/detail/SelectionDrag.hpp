@@ -1,9 +1,9 @@
 #pragma once
 
-// #52: pure gesture logic for PdfCanvas text selection (and, in #58, panning).
-// No Win32, no Direct2D, no MuPDF -- headless-testable, the same pattern as
-// ViewportMath.hpp and SplitterMath.hpp. PdfCanvas feeds it message coordinates
-// and system metrics and acts on what it returns.
+// #52 / #58: pure gesture logic for PdfCanvas text selection and hand-tool
+// panning. No Win32, no Direct2D, no MuPDF -- headless-testable, the same
+// pattern as ViewportMath.hpp and SplitterMath.hpp. PdfCanvas feeds it message
+// coordinates and system metrics and acts on what it returns.
 
 #include "core/TextSelection.hpp"
 #include "ui/detail/ViewportMath.hpp"
@@ -43,7 +43,9 @@ public:
                            int x_px, int y_px, const PointerMetrics& m) noexcept {
         int count = 1;
         if (is_double_click_message) {
-            count = 2;
+            // After forget(), Windows' double click pairs this press with a
+            // press that was not a click, so it starts a new sequence.
+            count = restart_ ? 1 : 2;
         } else if (last_count_ == 2
                    // Unsigned subtraction: correct across GetMessageTime's wrap.
                    && static_cast<std::uint32_t>(time_ms - last_time_ms_) <= m.dblclk_ms
@@ -51,6 +53,7 @@ public:
                    && std::abs(y_px - last_y_) <= m.dblclk_cy / 2) {
             count = 3;
         }
+        restart_ = false;
         last_count_   = count;
         last_time_ms_ = time_ms;
         last_x_       = x_px;
@@ -62,11 +65,28 @@ public:
         }
     }
 
+    // The press just counted was not a click: it started a pan (#58). The next
+    // press begins a new sequence -- a single click, even when Windows reports
+    // it as the second half of a double click. Without this, Space + click
+    // followed by a quick plain click selects a word, and a click, Space + a
+    // second press, then a plain click selects a whole line.
+    void forget() noexcept {
+        last_count_ = 0;
+        restart_    = true;
+    }
+
 private:
     int           last_count_   = 0;
     std::uint32_t last_time_ms_ = 0;
     int           last_x_       = 0;
     int           last_y_       = 0;
+    bool          restart_      = false;   // set by forget()
+};
+
+// Pointer motion between two pan steps, in client pixels.
+struct PanStep {
+    int dx_px = 0;
+    int dy_px = 0;
 };
 
 // What a button release asks PdfCanvas to do. By the time the caller acts, the
@@ -105,6 +125,8 @@ public:
         moved_    = false;
         origin_x_ = x_px;
         origin_y_ = y_px;
+        last_x_   = x_px;
+        last_y_   = y_px;
         return true;
     }
 
@@ -122,6 +144,23 @@ public:
             || std::abs(y_px - origin_y_) > m.drag_cy) {
             moved_ = true;
         }
+    }
+
+    // A pan's pointer motion (#58): the displacement since the previous step,
+    // or since the press for the first one. {0, 0} unless a pan is live.
+    //
+    // Incremental, not measured from the press: PdfCanvas applies each step to
+    // the pan as it is NOW, so anything that re-clamps the pan mid-drag (a
+    // render landing, a zoom) never makes the content jump to catch up with a
+    // stale absolute offset, and dragging back after overshooting an edge moves
+    // the content at once instead of through a dead zone. Integer steps sum to
+    // the whole drag exactly.
+    PanStep pan_step(int x_px, int y_px) noexcept {
+        if (gesture_ != Gesture::Panning) return {};
+        const PanStep s{ x_px - last_x_, y_px - last_y_ };
+        last_x_ = x_px;
+        last_y_ = y_px;
+        return s;
     }
 
     // A button release: decides what it means AND ends the gesture, before
@@ -159,7 +198,30 @@ private:
     bool             moved_    = false;
     int              origin_x_ = 0;
     int              origin_y_ = 0;
+    int              last_x_   = 0;   // previous pan step (#58)
+    int              last_y_   = 0;
 };
+
+// The canvas cursor (spec §4.5, §5). The move shape is the hand tool's; the
+// system has no grab hand (IDC_HAND is the hyperlink pointer).
+enum class CanvasCursor { Arrow, IBeam, Move };
+
+// In precedence order:
+//   - a live SELECTION keeps the I-beam, Space or not -- Space is read at the
+//     press, so going down mid-drag cannot turn the drag into a pan;
+//   - a live pan, or Space held: the move shape when something can pan, and
+//     the arrow when nothing can. Anywhere in the client, margins included,
+//     because a Space press pans from there too. Not the I-beam when nothing
+//     can pan: a Space press would pan (a no-op), not select;
+//   - otherwise the I-beam over a single-page page and the arrow elsewhere.
+inline CanvasCursor canvas_cursor(Gesture live, bool space_held, bool can_pan,
+                                  bool over_page) noexcept {
+    if (live == Gesture::Selecting) return CanvasCursor::IBeam;
+    if (live == Gesture::Panning || space_held) {
+        return can_pan ? CanvasCursor::Move : CanvasCursor::Arrow;
+    }
+    return over_page ? CanvasCursor::IBeam : CanvasCursor::Arrow;
+}
 
 // A canvas position in DIPs -> a point on the page in PDF points, clamped to the
 // page. `page` is where on_paint drew the bitmap: its top-left corner is the
