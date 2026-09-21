@@ -862,7 +862,7 @@ one capture-lifecycle implementation.
 
 **Plan-time refinements (2026-09-21, #58).** Writing the PR-2 plan
 (`docs/superpowers/plans/2026-09-21-hand-tool-panning-58.md`) re-checked this
-section against `main` @ `b4bb162`. Everything above holds; nine things it did not
+section against `main` @ `b4bb162`. Everything above holds; eleven things it did not
 say are settled here (P10 and P11 found at the plan gate):
 
 - **P1** `WM_MBUTTONDBLCLK` must start a pan too. #52 added `CS_DBLCLKS`, which

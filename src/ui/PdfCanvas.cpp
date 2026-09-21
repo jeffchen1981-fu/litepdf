@@ -775,7 +775,7 @@ void PdfCanvas::on_left_button_up(int x_px, int y_px) {
     impl_->drag_text = litepdf::core::Document::TextPage{};
     if (GetCapture() == hwnd_) ReleaseCapture();
     InvalidateRect(hwnd_, nullptr, FALSE);
-    refresh_cursor();   // no WM_SETCURSOR arrives until the pointer next moves
+    refresh_cursor();   // do not wait for a WM_SETCURSOR that may only come with the next pointer move
 }
 
 void PdfCanvas::begin_pan_gesture(MouseButton button, int x_px, int y_px) {
@@ -814,7 +814,7 @@ void PdfCanvas::on_middle_button_up(int x_px, int y_px) {
     // capture, and this release must leave it alone.
     if (impl_->gesture.release(MouseButton::Middle) == ReleaseAction::None) return;
     if (GetCapture() == hwnd_) ReleaseCapture();
-    refresh_cursor();   // no WM_SETCURSOR arrives until the pointer next moves
+    refresh_cursor();   // do not wait for a WM_SETCURSOR that may only come with the next pointer move
 }
 
 bool PdfCanvas::can_pan() const {

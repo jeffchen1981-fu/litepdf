@@ -364,9 +364,10 @@ private:
     // WM_SETCURSOR for the client area.
     void update_cursor();
 
-    // update_cursor outside WM_SETCURSOR: when a pan ends, and when space goes
-    // down or up with the pointer still. Does nothing unless the pointer is
-    // over this window or this window holds the capture.
+    // update_cursor outside WM_SETCURSOR: when a gesture ends normally (a
+    // selection drag or click, or a pan), and when space goes down or up with
+    // the pointer still. Does nothing unless the pointer is over this window
+    // or this window holds the capture.
     void refresh_cursor();
 
     HWND hwnd_ = nullptr;
