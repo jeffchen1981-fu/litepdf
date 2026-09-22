@@ -291,6 +291,11 @@ public:
     // out of range, or extraction or the context clone fails. Callers MUST
     // tolerate an empty handle -- a drag that cannot acquire one simply does not
     // start.
+    //
+    // noexcept, and it takes doc_mutex: a caller that already holds the lock on
+    // this thread gets an empty handle rather than the std::terminate a throw
+    // out of a noexcept function would be (#70). Do not rely on that -- the
+    // empty handle is silent. Nothing may call this under doc_mutex.
     [[nodiscard]] TextPage text_page(std::size_t page) const noexcept;
 
 private:
