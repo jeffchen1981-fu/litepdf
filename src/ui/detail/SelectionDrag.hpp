@@ -42,20 +42,28 @@ public:
     core::SelectMode press(bool is_double_click_message, std::uint32_t time_ms,
                            int x_px, int y_px, const PointerMetrics& m) noexcept {
         int count = 1;
-        bool repaired = false;
+        bool shifted = false;
         if (is_double_click_message) {
-            // After forget(), Windows' double click pairs this press with a
-            // press that was not a click, so it starts a new sequence -- and
-            // Windows, having spent its pair, reports the next press as a plain
-            // one, which must then be counted as this click's second (#77).
-            count    = restart_ ? 1 : 2;
-            repaired = restart_;
+            if (restart_) {
+                // After forget(), Windows' double click pairs this press with a
+                // press that was not a click, so it starts a new sequence. From
+                // here Windows' pairs run one press behind this sequence (#77):
+                // it reports the second click as a plain press and pairs the
+                // third with it.
+                shifted = true;
+            } else {
+                count = (shifted_ && last_count_ == 2) ? 3 : 2;
+            }
         } else if (follows_quickly(time_ms, x_px, y_px, m)) {
-            if (last_count_ == 2)   count = 3;
-            else if (repair_)       count = 2;
+            if (last_count_ == 2) {
+                count = 3;
+            } else if (shifted_) {
+                count   = 2;
+                shifted = true;
+            }
         }
         restart_ = false;
-        repair_  = repaired;
+        shifted_ = shifted;
         last_count_   = count;
         last_time_ms_ = time_ms;
         last_x_       = x_px;
@@ -78,7 +86,7 @@ public:
     void forget() noexcept {
         last_count_ = 0;
         restart_    = true;
-        repair_     = false;
+        shifted_    = false;
     }
 
 private:
@@ -97,7 +105,7 @@ private:
     int           last_x_       = 0;
     int           last_y_       = 0;
     bool          restart_      = false;   // set by forget()
-    bool          repair_       = false;   // the last press was a double click restart_ turned into a single
+    bool          shifted_      = false;   // Windows' pairs run one press behind (see press)
 };
 
 // Pointer motion between two pan steps, in client pixels.

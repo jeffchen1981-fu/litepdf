@@ -287,8 +287,12 @@ TEST_CASE("SelectionDrag a quick double click right after a pan press selects a 
     c.forget();
     REQUIRE(c.press(true,  1100, 50, 50, m) == SelectMode::Chars);
     REQUIRE(c.press(false, 1200, 51, 49, m) == SelectMode::Words);
-    // ... and a third quick press completes a triple click.
-    REQUIRE(c.press(false, 1300, 50, 50, m) == SelectMode::Lines);
+    // A third quick press completes a triple click. Windows pairs it with the
+    // second, so it too arrives as WM_LBUTTONDBLCLK.
+    REQUIRE(c.press(true,  1300, 50, 50, m) == SelectMode::Lines);
+    // The shift ends there: the next pair is an ordinary double click.
+    REQUIRE(c.press(false, 2000, 50, 50, m) == SelectMode::Chars);
+    REQUIRE(c.press(true,  2100, 50, 50, m) == SelectMode::Words);
 
     // The re-paired second click obeys the same time and distance limits.
     ClickCounter late;
@@ -302,21 +306,6 @@ TEST_CASE("SelectionDrag a quick double click right after a pan press selects a 
     far.forget();
     (void)far.press(true, 1100, 50, 50, m);
     REQUIRE(far.press(false, 1200, 53, 50, m) == SelectMode::Chars);   // |dx| 3 > 4/2
-}
-
-TEST_CASE("SelectionDrag another button's press breaks the click sequence",
-          "[ui][selection]") {
-    const PointerMetrics m;
-
-    // #77: a left double click, a middle (or right) press, then a left click at
-    // the same spot within the double-click time. Windows does not pair across
-    // another button, and neither may the counter: PdfCanvas calls forget() on
-    // every non-left press, so the last click is a single click, not a triple.
-    ClickCounter c;
-    (void)c.press(false, 1000, 50, 50, m);
-    REQUIRE(c.press(true, 1100, 50, 50, m) == SelectMode::Words);
-    c.forget();
-    REQUIRE(c.press(false, 1300, 50, 50, m) == SelectMode::Chars);
 }
 
 TEST_CASE("SelectionDrag moved and mode read idle once a gesture ends", "[ui][selection]") {

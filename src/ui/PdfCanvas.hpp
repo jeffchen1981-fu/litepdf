@@ -247,7 +247,9 @@ public:
 
     // Whether select_all would act: the enable state of Edit > Select All,
     // which must match the dispatch exactly (see MainWindow's WM_INITMENUPOPUP).
-    // Ignores whether the page has any text, like select_all's own refusals.
+    // Does not look at the page's text: on a page with none the item stays
+    // enabled and select_all does nothing -- the safe direction, since a
+    // grayed item would swallow Ctrl+A.
     bool can_select_all() const;
 
     // Put the painted selection on the clipboard (Edit > Copy): a live drag's,
