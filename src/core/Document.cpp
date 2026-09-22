@@ -785,7 +785,22 @@ Document::TextPage Document::text_page(std::size_t index) const noexcept {
     // Only ACQUISITION serialises with the other users of this Document's
     // context: building the stext page loads a page from impl_->doc. Everything
     // afterwards runs on the handle's escrow, lock-free (spec §3.2).
-    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
+    //
+    // Taken through a deferred unique_lock rather than a lock_guard because this
+    // function is noexcept: std::mutex::lock() throws std::system_error when the
+    // calling thread already holds the mutex (MSVC raises
+    // resource_deadlock_would_occur), and a throw out of a noexcept function is
+    // std::terminate, not the empty handle this contract promises. No caller
+    // holds doc_mutex today -- and none may: the empty handle is SILENT in every
+    // configuration this project can build (all of them define NDEBUG; Debug
+    // does not link against the Release-only MuPDF libs), so a re-entrant caller
+    // would just see a selection that never starts (#70).
+    std::unique_lock<std::mutex> lk(impl_->doc_mutex, std::defer_lock);
+    try {
+        lk.lock();
+    } catch (...) {
+        return result;
+    }
 
     handle->escrow = EscrowContext::clone_from(impl_->ctx);
     if (!handle->escrow.valid()) return result;
