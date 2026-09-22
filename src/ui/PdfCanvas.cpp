@@ -19,6 +19,7 @@
 #include <mutex>
 #include <new>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #pragma comment(lib, "d2d1.lib")
 
@@ -588,9 +589,19 @@ const litepdf::core::TextSelection* PdfCanvas::painted_selection() const noexcep
     return committed ? &*committed : nullptr;
 }
 
+bool PdfCanvas::can_select_all() const {
+    if (!impl_ || !impl_->view || impl_->dual_page) return false;
+    // A drag owns the selection. A stale one does not -- select_all ends it
+    // first, as the next press would. That matters because Edit's
+    // WM_INITMENUPOPUP asks this too, and TranslateAcceleratorW sends that
+    // message only while no capture is held: any gesture live there is stale,
+    // so refusing it would gray Ctrl+A for nothing (#68).
+    return impl_->gesture.gesture() == Gesture::None || GetCapture() != hwnd_;
+}
+
 void PdfCanvas::select_all() {
-    if (!impl_ || !impl_->view || impl_->dual_page) return;
-    if (impl_->gesture.gesture() != Gesture::None) return;   // a drag owns the selection
+    if (!can_select_all()) return;
+    cancel_stale_gesture();
     const int page = impl_->view->current_page();
     const auto text = impl_->view->document().text_page(static_cast<std::size_t>(page));
     litepdf::core::SelPoint first, last;
@@ -609,9 +620,19 @@ void PdfCanvas::select_all() {
 
 void PdfCanvas::copy_selection_to_clipboard() const {
     if (!impl_ || !impl_->view || !hwnd_) return;
-    const auto& sel = impl_->view->selection();
-    if (!sel || sel->text_utf8.empty()) return;
-    set_clipboard_text(hwnd_, sel->text_utf8);
+    // Copy what is painted (#69). While a drag is live, its extent exists only
+    // in the live selection: a held double- or triple-click drag committed its
+    // press-time word or line, and has outgrown it since.
+    std::string text;
+    if (impl_->live_selection && impl_->drag_text.valid()) {
+        const auto& sel = *impl_->live_selection;
+        const auto snapped = impl_->drag_text.snap(sel.anchor, sel.extent, sel.mode);
+        text = impl_->drag_text.copy(snapped.a, snapped.b);
+    } else if (const auto& sel = impl_->view->selection()) {
+        text = sel->text_utf8;
+    }
+    if (text.empty()) return;
+    set_clipboard_text(hwnd_, text);
 }
 
 litepdf::core::SelPoint PdfCanvas::page_point_at(int x_px, int y_px,
@@ -633,7 +654,7 @@ void PdfCanvas::cancel_gesture() {
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
-void PdfCanvas::cancel_stale_gesture() {
+bool PdfCanvas::cancel_stale_gesture() {
     // A gesture that is live while this window does NOT hold the capture is
     // stale: SetCapture did not take (the capture belongs to the foreground
     // thread), so the matching button-up went elsewhere and no
@@ -641,7 +662,9 @@ void PdfCanvas::cancel_stale_gesture() {
     // would leave the canvas ignoring every press for the rest of the session.
     if (impl_->gesture.gesture() != Gesture::None && GetCapture() != hwnd_) {
         cancel_gesture();
+        return true;
     }
+    return false;
 }
 
 void PdfCanvas::refresh_live_selection() {
@@ -734,14 +757,11 @@ void PdfCanvas::on_left_button_down(bool is_double_click_message, int x_px, int 
 }
 
 void PdfCanvas::on_mouse_move(int x_px, int y_px) {
+    // A gesture whose capture is gone is stale and its button is up: panning
+    // or extending a selection here would follow a pointer that is merely
+    // passing over the canvas (#58 for a pan, #77 for a selection).
+    if (cancel_stale_gesture()) return;
     if (impl_->gesture.gesture() == Gesture::Panning) {
-        // A pan whose capture is gone is stale (see cancel_stale_gesture) and
-        // its button is up: panning here would drag the page under a pointer
-        // that is merely passing over it.
-        if (GetCapture() != hwnd_) {
-            cancel_gesture();
-            return;
-        }
         // Grab-and-drag: the content follows the pointer, so moving right moves
         // the content right -- pan_by's positive direction, the one VK_LEFT
         // uses to reveal the page's left side. Steps arrive in client pixels;
@@ -816,11 +836,17 @@ void PdfCanvas::on_middle_button_down(int x_px, int y_px) {
     //
     // No SetFocus, unlike the left press: a pan changes only the view, so a
     // query half-typed into the find box keeps the keyboard.
+    //
+    // Windows does not pair a double click across another button, so neither
+    // may the click counter (#77).
+    impl_->clicks.forget();
+    // Stale first: a gesture whose capture is gone is no gesture at all, and
+    // must not swallow this press as a live selection drag would (#77).
+    cancel_stale_gesture();
     if (impl_->gesture.gesture() == Gesture::Selecting) {
         cancel_gesture();
         return;
     }
-    cancel_stale_gesture();
     begin_pan_gesture(MouseButton::Middle, x_px, y_px);
 }
 
@@ -984,7 +1010,10 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         case WM_RBUTTONDBLCLK:
             // A right press during a selection drag cancels it, keeping anything
             // already committed, and starts nothing of its own (spec §4.2). A
-            // pan ignores it: it has nothing a stray press could corrupt.
+            // pan ignores it: it has nothing a stray press could corrupt. Either
+            // way it breaks a left click sequence, as it does Windows' own
+            // double-click pairing (#77).
+            impl_->clicks.forget();
             if (impl_->gesture.gesture() == Gesture::Selecting) cancel_gesture();
             break;   // DefWindowProc: right-button WM_CONTEXTMENU generation unchanged
         case WM_CAPTURECHANGED:

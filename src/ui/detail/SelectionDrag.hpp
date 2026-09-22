@@ -42,18 +42,20 @@ public:
     core::SelectMode press(bool is_double_click_message, std::uint32_t time_ms,
                            int x_px, int y_px, const PointerMetrics& m) noexcept {
         int count = 1;
+        bool repaired = false;
         if (is_double_click_message) {
             // After forget(), Windows' double click pairs this press with a
-            // press that was not a click, so it starts a new sequence.
-            count = restart_ ? 1 : 2;
-        } else if (last_count_ == 2
-                   // Unsigned subtraction: correct across GetMessageTime's wrap.
-                   && static_cast<std::uint32_t>(time_ms - last_time_ms_) <= m.dblclk_ms
-                   && std::abs(x_px - last_x_) <= m.dblclk_cx / 2
-                   && std::abs(y_px - last_y_) <= m.dblclk_cy / 2) {
-            count = 3;
+            // press that was not a click, so it starts a new sequence -- and
+            // Windows, having spent its pair, reports the next press as a plain
+            // one, which must then be counted as this click's second (#77).
+            count    = restart_ ? 1 : 2;
+            repaired = restart_;
+        } else if (follows_quickly(time_ms, x_px, y_px, m)) {
+            if (last_count_ == 2)   count = 3;
+            else if (repair_)       count = 2;
         }
         restart_ = false;
+        repair_  = repaired;
         last_count_   = count;
         last_time_ms_ = time_ms;
         last_x_       = x_px;
@@ -70,17 +72,32 @@ public:
     // it as the second half of a double click. Without this, Space + click
     // followed by a quick plain click selects a word, and a click, Space + a
     // second press, then a plain click selects a whole line.
+    //
+    // PdfCanvas also calls it for a middle or right press: Windows does not
+    // pair a click across another button, so neither may this counter.
     void forget() noexcept {
         last_count_ = 0;
         restart_    = true;
+        repair_     = false;
     }
 
 private:
+    // Within the double-click time and rectangle of the previous press. The
+    // rectangle is centred on that press, hence the halved metrics.
+    bool follows_quickly(std::uint32_t time_ms, int x_px, int y_px,
+                         const PointerMetrics& m) const noexcept {
+        // Unsigned subtraction: correct across GetMessageTime's wrap.
+        return static_cast<std::uint32_t>(time_ms - last_time_ms_) <= m.dblclk_ms
+            && std::abs(x_px - last_x_) <= m.dblclk_cx / 2
+            && std::abs(y_px - last_y_) <= m.dblclk_cy / 2;
+    }
+
     int           last_count_   = 0;
     std::uint32_t last_time_ms_ = 0;
     int           last_x_       = 0;
     int           last_y_       = 0;
     bool          restart_      = false;   // set by forget()
+    bool          repair_       = false;   // the last press was a double click restart_ turned into a single
 };
 
 // Pointer motion between two pan steps, in client pixels.
@@ -174,10 +191,12 @@ public:
     // for the same reason.
     ReleaseAction release(MouseButton button) noexcept {
         if (gesture_ == Gesture::None || button != owner_) return ReleaseAction::None;
-        const Gesture ended = gesture_;
-        gesture_ = Gesture::None;
+        const Gesture          ended = gesture_;
+        const core::SelectMode mode  = mode_;
+        const bool             moved = moved_;
+        end();
         if (ended == Gesture::Panning) return ReleaseAction::EndPan;
-        if (mode_ == core::SelectMode::Chars && !moved_) return ReleaseAction::ClearSelection;
+        if (mode == core::SelectMode::Chars && !moved) return ReleaseAction::ClearSelection;
         return ReleaseAction::CommitSelection;
     }
 
@@ -187,11 +206,20 @@ public:
     // later press. Returns what was live (None if nothing was).
     Gesture abort() noexcept {
         const Gesture was = gesture_;
-        gesture_ = Gesture::None;
+        end();
         return was;
     }
 
 private:
+    // gesture() is the single source of truth for whether a gesture is live
+    // (#68): a finished gesture leaves mode() and moved() at their idle values,
+    // so neither can answer for a drag that is already over.
+    void end() noexcept {
+        gesture_ = Gesture::None;
+        mode_    = core::SelectMode::Chars;
+        moved_   = false;
+    }
+
     Gesture          gesture_  = Gesture::None;
     MouseButton      owner_    = MouseButton::Left;
     core::SelectMode mode_     = core::SelectMode::Chars;

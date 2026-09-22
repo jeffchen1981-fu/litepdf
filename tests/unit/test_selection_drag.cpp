@@ -237,8 +237,8 @@ TEST_CASE("SelectionDrag a space pan belongs to the left button and never clears
     REQUIRE(g.begin_select(SelectMode::Chars, 5, 5));
     REQUIRE(g.release(MouseButton::Left) == ReleaseAction::ClearSelection);
 
-    // Space + click with no movement: the same button, the same stale mode, and
-    // it must still end as a pan. PdfCanvas's EndPan arm commits and clears
+    // Space + click with no movement: the same button, mode() Chars and moved()
+    // false again, and it must still end as a pan. PdfCanvas's EndPan arm commits and clears
     // nothing, so a Space click keeps the reader's selection.
     REQUIRE(g.begin_pan(MouseButton::Left, 5, 5));
     REQUIRE_FALSE(g.begin_pan(MouseButton::Middle, 5, 5));      // one gesture at a time
@@ -271,6 +271,81 @@ TEST_CASE("SelectionDrag a press that became a pan starts a new click sequence",
     // Counting is normal again afterwards.
     REQUIRE(b.press(false, 3000, 50, 50, m) == SelectMode::Chars);
     REQUIRE(b.press(true, 3050, 50, 50, m) == SelectMode::Words);
+}
+
+TEST_CASE("SelectionDrag a quick double click right after a pan press selects a word",
+          "[ui][pan]") {
+    const PointerMetrics m;
+
+    // #77: Space + a stationary click (a pan), then a real double click at the
+    // same spot. Windows pairs the pan press with the double click's first
+    // press, so that press arrives as WM_LBUTTONDBLCLK and counts as a single
+    // click; the double click's second press then arrives as a plain press and
+    // must be counted as the second click.
+    ClickCounter c;
+    (void)c.press(false, 1000, 50, 50, m);
+    c.forget();
+    REQUIRE(c.press(true,  1100, 50, 50, m) == SelectMode::Chars);
+    REQUIRE(c.press(false, 1200, 51, 49, m) == SelectMode::Words);
+    // ... and a third quick press completes a triple click.
+    REQUIRE(c.press(false, 1300, 50, 50, m) == SelectMode::Lines);
+
+    // The re-paired second click obeys the same time and distance limits.
+    ClickCounter late;
+    (void)late.press(false, 1000, 50, 50, m);
+    late.forget();
+    (void)late.press(true, 1100, 50, 50, m);
+    REQUIRE(late.press(false, 1601, 50, 50, m) == SelectMode::Chars);
+
+    ClickCounter far;
+    (void)far.press(false, 1000, 50, 50, m);
+    far.forget();
+    (void)far.press(true, 1100, 50, 50, m);
+    REQUIRE(far.press(false, 1200, 53, 50, m) == SelectMode::Chars);   // |dx| 3 > 4/2
+}
+
+TEST_CASE("SelectionDrag another button's press breaks the click sequence",
+          "[ui][selection]") {
+    const PointerMetrics m;
+
+    // #77: a left double click, a middle (or right) press, then a left click at
+    // the same spot within the double-click time. Windows does not pair across
+    // another button, and neither may the counter: PdfCanvas calls forget() on
+    // every non-left press, so the last click is a single click, not a triple.
+    ClickCounter c;
+    (void)c.press(false, 1000, 50, 50, m);
+    REQUIRE(c.press(true, 1100, 50, 50, m) == SelectMode::Words);
+    c.forget();
+    REQUIRE(c.press(false, 1300, 50, 50, m) == SelectMode::Chars);
+}
+
+TEST_CASE("SelectionDrag moved and mode read idle once a gesture ends", "[ui][selection]") {
+    const PointerMetrics m;
+
+    // #68: gesture() is the single source of truth for a live gesture, so the
+    // finished gesture's moved() and mode() must not stay readable after it.
+    GestureState released;
+    REQUIRE(released.begin_select(SelectMode::Words, 0, 0));
+    released.move(50, 0, m);
+    REQUIRE(released.moved());
+    REQUIRE(released.release(MouseButton::Left) == ReleaseAction::CommitSelection);
+    REQUIRE(released.gesture() == Gesture::None);
+    REQUIRE_FALSE(released.moved());
+    REQUIRE(released.mode() == SelectMode::Chars);
+
+    GestureState aborted;
+    REQUIRE(aborted.begin_select(SelectMode::Lines, 0, 0));
+    aborted.move(50, 0, m);
+    REQUIRE(aborted.abort() == Gesture::Selecting);
+    REQUIRE_FALSE(aborted.moved());
+    REQUIRE(aborted.mode() == SelectMode::Chars);
+
+    // A pan that moved leaves nothing behind either.
+    GestureState panned;
+    REQUIRE(panned.begin_pan(MouseButton::Middle, 0, 0));
+    panned.move(50, 0, m);
+    REQUIRE(panned.release(MouseButton::Middle) == ReleaseAction::EndPan);
+    REQUIRE_FALSE(panned.moved());
 }
 
 TEST_CASE("SelectionDrag cursor precedence for selection and panning", "[ui][cursor]") {

@@ -1427,7 +1427,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 const bool edit_has_focus = focused_edit_control() != nullptr;
                 const bool has_doc        = v && v->document().is_open();
                 const bool has_selection  = has_doc && v->selection().has_value();
-                const bool can_select_all = has_doc && !v->dual_page();
+                const bool can_select_all = has_doc && canvas_ && canvas_->can_select_all();
                 EnableMenuItem(popup, IDM_EDIT_COPY,
                                MF_BYCOMMAND
                                | ((edit_has_focus || has_selection) ? MF_ENABLED : MF_GRAYED));
