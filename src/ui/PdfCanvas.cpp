@@ -624,7 +624,7 @@ void PdfCanvas::copy_selection_to_clipboard() const {
     // in the live selection: a held double- or triple-click drag committed its
     // press-time word or line, and has outgrown it since.
     std::string text;
-    if (impl_->live_selection && impl_->drag_text.valid()) {
+    if (has_live_selection()) {
         const auto& sel = *impl_->live_selection;
         const auto snapped = impl_->drag_text.snap(sel.anchor, sel.extent, sel.mode);
         text = impl_->drag_text.copy(snapped.a, snapped.b);
@@ -633,6 +633,10 @@ void PdfCanvas::copy_selection_to_clipboard() const {
     }
     if (text.empty()) return;
     set_clipboard_text(hwnd_, text);
+}
+
+bool PdfCanvas::has_live_selection() const noexcept {
+    return impl_ && impl_->live_selection && impl_->drag_text.valid();
 }
 
 litepdf::core::SelPoint PdfCanvas::page_point_at(int x_px, int y_px,

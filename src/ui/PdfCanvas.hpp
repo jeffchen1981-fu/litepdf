@@ -257,6 +257,10 @@ public:
     // selection.
     void copy_selection_to_clipboard() const;
 
+    // Whether a live drag selection exists -- the one copy_selection_to_clipboard
+    // prefers. Part of Edit > Copy's enable state, which must match the dispatch.
+    bool has_live_selection() const noexcept;
+
 private:
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
     static void register_class_once(HINSTANCE hInstance);

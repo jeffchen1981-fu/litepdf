@@ -816,7 +816,7 @@ returns 1, no `WM_COMMAND`; the same item re-enabled inside that handler: the
 inside the find box whenever the page had no selection. So:
 
 - Copy is enabled when an edit control holds the focus, or the active view has a
-  selection.
+  selection, or the canvas has a live drag selection (which Copy copies, #69).
 - Select All is enabled when an edit control holds the focus, or a document is
   open **and** the view is in single-page mode (in spread mode it can do nothing,
   §1) **and** no gesture holds the capture. Both this and the dispatch ask
