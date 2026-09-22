@@ -20,6 +20,12 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
   the pointer turns into a move cursor whenever the page is larger than the
   window. Works in two-page spread mode too. Dragging with the left button
   alone still selects text.
+- Sideways scrolling with the mouse. On a page zoomed wider than the window, a
+  tilt wheel or a sideways touchpad swipe scrolls left and right, and so does
+  the ordinary wheel with Shift held (toward you scrolls right). It stops at
+  the page's edge instead of turning the page. Shift+wheel used to scroll up
+  and down as if Shift were not held; it now scrolls sideways, and does
+  nothing when the page already fits the window's width (#56).
 
 ### Fixed
 

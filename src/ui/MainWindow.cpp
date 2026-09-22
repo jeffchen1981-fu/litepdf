@@ -1151,12 +1151,14 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             status_bar_->set_on_focus_out([this] {
                 if (canvas_ && canvas_->hwnd()) SetFocus(canvas_->hwnd());
             });
-            // WM_MOUSEWHEEL goes to the FOCUSED window: with the caret in the
-            // page box the canvas would never see a notch.
-            status_bar_->set_on_wheel([this](WPARAM w, LPARAM l) {
+            // Wheel input can go to the FOCUSED window: with the caret in the
+            // page box the canvas would never see a notch. Forward whichever
+            // wheel message arrived and return the canvas's result (#56).
+            status_bar_->set_on_wheel([this](UINT wheel_msg, WPARAM w, LPARAM l) -> LRESULT {
                 if (canvas_ && canvas_->hwnd()) {
-                    SendMessageW(canvas_->hwnd(), WM_MOUSEWHEEL, w, l);
+                    return SendMessageW(canvas_->hwnd(), wheel_msg, w, l);
                 }
+                return 0;
             });
 
             // Observer chains: CrossTabSearch's own aggregator runs on a

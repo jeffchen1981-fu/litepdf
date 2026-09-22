@@ -54,6 +54,8 @@ using litepdf::ui::consume_notches;
 using litepdf::ui::Flip;
 using litepdf::ui::wheel_step_dip;
 using litepdf::ui::WheelResult;
+using litepdf::ui::HWheelSource;
+using litepdf::ui::rightward_delta;
 using litepdf::ui::canvas_dip_to_page_point;
 using litepdf::ui::ClickCounter;
 using litepdf::ui::client_px_to_dip;
@@ -212,6 +214,12 @@ struct PdfCanvas::Impl {
     // canvas would either round every fragment up to a full notch or drop it.
     // See ui/detail/ScrollMath.hpp.
     int                           wheel_residual = 0;
+    // The horizontal wheel's own leftover delta (#56), in "rightward" units
+    // (see rightward_delta). Separate from wheel_residual so a diagonal
+    // touchpad swipe cannot feed horizontal motion into a vertical notch, and
+    // cleared only by bitmap_is_stale() -- never by the pending-flip latch,
+    // since this axis never turns the page.
+    int                           hwheel_residual = 0;
     // Non-zero between a wheel-driven page flip and the completion that lands the
     // new page. Without it, every further notch in that window flips again:
     // the pan and the bitmap still describe the OLD page, so apply_wheel keeps
@@ -1039,8 +1047,25 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 }
                 return 0;
             }
+            // #56: Shift turns the plain wheel sideways. Tested AFTER Ctrl, so
+            // Ctrl+Shift+wheel still zooms.
+            if (modifiers & MK_SHIFT) {
+                return on_hwheel_scroll(GET_WHEEL_DELTA_WPARAM(w),
+                                        HWheelSource::Shift);
+            }
             return on_wheel_scroll(GET_WHEEL_DELTA_WPARAM(w));
         }
+        case WM_MOUSEHWHEEL:
+            // #56: a tilt wheel, or a sideways touchpad swipe. Modifiers are
+            // ignored: there is no horizontal zoom.
+            on_hwheel_scroll(GET_WHEEL_DELTA_WPARAM(w), HWheelSource::Tilt);
+            // TRUE, not the 0 the current reference asks for. Real wheel input
+            // is posted, and no message loop reads this value; the only readers
+            // are senders -- drivers that EMULATE the message, for which
+            // Microsoft's device guidance says TRUE marks it handled and
+            // without it "the horizontal scroll action may be repeated".
+            // Returned with no document open too, for the same reason.
+            return TRUE;
         case WM_DPICHANGED_BEFOREPARENT:
             // DPI is changing. Discard render target; next paint rebuilds at new DPI.
             // Both slot bitmaps are sized for the OLD DPI and are bound to the
@@ -1346,6 +1371,22 @@ LRESULT PdfCanvas::pan_by(float dx, float dy) {
     return 0;
 }
 
+bool PdfCanvas::bitmap_is_stale() const {
+    if (!impl_ || !impl_->view || !impl_->current_bitmap) return false;
+    // Compare against the CANONICAL left, exactly as accept_completion does:
+    // bitmap_page is written only by the LEFT slot, so in spread mode it holds
+    // the pair's left page. Deriving that here rather than trusting
+    // current_page to be left-aligned keeps the guard independent of an
+    // invariant maintained four call sites away.
+    const int total = impl_->view->page_count();
+    const int canon =
+        impl_->dual_page
+            ? dual_page_compute_left(impl_->view->current_page(), total)
+            : impl_->view->current_page();
+    return impl_->bitmap_epoch != impl_->view_epoch
+        || impl_->bitmap_page  != canon;
+}
+
 LRESULT PdfCanvas::on_wheel_scroll(int delta) {
     if (!impl_ || !impl_->view) return 0;
 
@@ -1378,20 +1419,9 @@ LRESULT PdfCanvas::on_wheel_scroll(int delta) {
     // they just asked for.
     //
     // bitmap_epoch/bitmap_page are what make that detectable; scroll_into_view
-    // runs the same test for the same reason (Task 6). Compare against the
-    // CANONICAL left, exactly as accept_completion does: bitmap_page is written
-    // only by the LEFT slot, so in spread mode it holds the pair's left page.
-    // Deriving that here rather than trusting current_page to be left-aligned
-    // keeps the guard independent of an invariant maintained four call sites
-    // away -- the same reasoning as the flip guard further down.
-    const int wheel_total = impl_->view->page_count();
-    const int wheel_canon =
-        impl_->dual_page
-            ? dual_page_compute_left(impl_->view->current_page(), wheel_total)
-            : impl_->view->current_page();
-    if (impl_->current_bitmap
-        && (impl_->bitmap_epoch != impl_->view_epoch
-            || impl_->bitmap_page != wheel_canon)) {
+    // runs the same test for the same reason (Task 6). bitmap_is_stale() holds
+    // the predicate, which the horizontal wheel shares (#56).
+    if (bitmap_is_stale()) {
         impl_->wheel_residual = 0;
         return 0;
     }
@@ -1451,6 +1481,50 @@ LRESULT PdfCanvas::on_wheel_scroll(int delta) {
                                                     : PageAnchor::bottom());
     // navigate_to_page opened a submission batch, so next_seq now names it.
     impl_->wheel_flip_seq = impl_->next_seq;
+    return 0;
+}
+
+LRESULT PdfCanvas::on_hwheel_scroll(int raw_delta, HWheelSource src) {
+    if (!impl_ || !impl_->view) return 0;
+
+    // The bitmap on screen may still be the OUTGOING tab's or page's: a tab
+    // switch or a page change whose render has not landed. Its extent is the
+    // wrong one to clamp against. After a tab switch a notch here would clamp
+    // the pan that set_pan just restored for the incoming tab to the outgoing
+    // document's width -- to 0 if that one fit -- and apply_anchor only
+    // re-clamps, so the reader's column would be lost. Drop the notch and the
+    // residual, as on_wheel_scroll does. The wheel_flip_seq latch is
+    // deliberately NOT consulted: it stops a notch from turning the page
+    // twice, and this path never turns the page.
+    if (bitmap_is_stale()) {
+        impl_->hwheel_residual = 0;
+        return 0;
+    }
+
+    const int notches =
+        consume_notches(rightward_delta(raw_delta, src), impl_->hwheel_residual);
+    if (notches == 0) return 0;   // a fraction of a notch: keep accumulating
+
+    ContentBox box{};
+    if (!content_extent(box)) return 0;   // nothing rendered yet
+    const D2D1_SIZE_F vp = impl_->rt->GetSize();
+
+    // Each input reads the setting for the control that moved. A tilt wheel has
+    // its own "characters" setting; Shift + the wheel is the vertical wheel, so
+    // it honours the lines setting. Both default to 3.
+    UINT units = 3;   // the Windows default, and the value if the query fails
+    SystemParametersInfoW(src == HWheelSource::Tilt ? SPI_GETWHEELSCROLLCHARS
+                                                    : SPI_GETWHEELSCROLLLINES,
+                          0, &units, 0);
+    const float step = wheel_step_dip(notches, units, vp.width);
+
+    // pan_x ONLY. pan_by would re-clamp pan_y as well, against whatever bitmap
+    // and viewport are current -- right after a resize, before the replacement
+    // render lands, that moves the reader vertically. The vertical wheel
+    // likewise writes pan_y only. A rightward step reveals the content's right
+    // side, so pan_x decreases: the direction VK_RIGHT pans.
+    impl_->pan_x = clamp_pan(impl_->pan_x - step, box.w, vp.width);
+    InvalidateRect(hwnd_, nullptr, FALSE);
     return 0;
 }
 

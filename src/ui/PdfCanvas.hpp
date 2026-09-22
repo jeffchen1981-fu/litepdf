@@ -308,6 +308,18 @@ private:
     // edge the wheel is pushing toward.
     LRESULT on_wheel_scroll(int delta);
 
+    // Horizontal wheel scrolling (#56): WM_MOUSEHWHEEL, or Shift + the plain
+    // wheel. Writes pan_x ONLY and never turns the page -- at the edge it
+    // clamps.
+    LRESULT on_hwheel_scroll(int raw_delta, litepdf::ui::HWheelSource src);
+
+    // True while current_bitmap belongs to another view or page than the one
+    // showing. set_view and navigate_to_page keep painting the outgoing bitmap
+    // until the incoming render lands, and both wheels drop a notch until
+    // then. NOT own_bitmap(): this compares against the CANONICAL left page in
+    // spread mode, and it is false when there is no bitmap at all.
+    bool bitmap_is_stale() const;
+
     bool    content_extent(ContentBox& out) const;
 
     // True when current_bitmap is THIS view's rendering of THIS page. set_view
