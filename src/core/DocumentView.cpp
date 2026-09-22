@@ -26,6 +26,25 @@ void fz_drop_pixmap(fz_context*, fz_pixmap*);
 
 namespace litepdf::core {
 
+namespace {
+struct DropContext {
+    void operator()(fz_context* ctx) const noexcept { fz_drop_context(ctx); }
+};
+// An fz_context clone owned by DocumentView::Impl.
+//
+// ui_ctx and cache_ctx used to be raw fz_context*, dropped by ~DocumentView
+// (and by the constructor's own null-clone branch). ~DocumentView never runs
+// for a half-built object, so a throw
+// from the PageCache, RenderEngine or SearchSession constructor leaked both
+// clones -- and, since #62/#63, the family's root context with them. ~Impl DOES
+// run on that path, and it drops these (#74).
+//
+// Declaration position inside Impl still carries the teardown order: declared
+// after `doc` and before `cache`, they are destroyed AFTER `cache` and BEFORE
+// `doc` -- exactly what the contract at the top of Impl asks for.
+using ClonedContext = std::unique_ptr<fz_context, DropContext>;
+}  // namespace
+
 struct DocumentView::Impl {
     // NOTE: declaration order == reverse destruction order. Members
     // declared LATER destruct EARLIER. The required tear-down order is
@@ -38,11 +57,11 @@ struct DocumentView::Impl {
     // ui_ctx is UI-thread-exclusive (D3). cache_ctx is a dedicated clone
     // used by PageCache for its internal keep/drop ops from worker
     // threads — MuPDF's lock table serializes refcount updates across
-    // clones of the same root, so this is safe. Both are raw fz_context*
-    // (dropped explicitly in ~DocumentView); they do not RAII-destruct
-    // in reverse-declaration order.
-    fz_context*                   ui_ctx    = nullptr;
-    fz_context*                   cache_ctx = nullptr;
+    // clones of the same root, so this is safe. Both own their clone and
+    // destruct in reverse-declaration order like every other member, which is
+    // what makes the constructor's failure path leak-free (#74).
+    ClonedContext                 ui_ctx;
+    ClonedContext                 cache_ctx;
     std::unique_ptr<PageCache>    cache;
     std::unique_ptr<RenderEngine> engine;
 
@@ -111,22 +130,23 @@ DocumentView::DocumentView(Document doc,
     impl_->doc = std::move(doc);
 
     // Clone the UI-thread ctx and a dedicated cache_ctx BEFORE
-    // constructing cache/engine so that a throw here doesn't leak
-    // half-built subobjects. ui_ctx stays UI-thread-exclusive (D3);
+    // constructing cache/engine. ui_ctx stays UI-thread-exclusive (D3);
     // cache_ctx is conceptually "the cache's own ctx" and is used by
-    // workers via PageCache for refcount ops.
-    impl_->ui_ctx    = impl_->doc.clone_context();
-    impl_->cache_ctx = impl_->doc.clone_context();
+    // workers via PageCache for refcount ops. Both are adopted by a
+    // ClonedContext as soon as they exist, so every throw below this point --
+    // including one out of this function's own `throw` -- drops them through
+    // ~Impl (#74).
+    impl_->ui_ctx.reset(impl_->doc.clone_context());
+    impl_->cache_ctx.reset(impl_->doc.clone_context());
     if (!impl_->ui_ctx || !impl_->cache_ctx) {
-        if (impl_->cache_ctx) { fz_drop_context(impl_->cache_ctx); impl_->cache_ctx = nullptr; }
-        if (impl_->ui_ctx)    { fz_drop_context(impl_->ui_ctx);    impl_->ui_ctx    = nullptr; }
         throw std::runtime_error(
             "DocumentView: Document is not open (clone_context returned null)");
     }
 
     // Cache uses cache_ctx (not ui_ctx) for its internal keep/drop —
-    // those ops happen on worker threads.
-    impl_->cache = std::make_unique<PageCache>(l1_capacity, l2_capacity, impl_->cache_ctx);
+    // those ops happen on worker threads. The cache does not own it.
+    impl_->cache =
+        std::make_unique<PageCache>(l1_capacity, l2_capacity, impl_->cache_ctx.get());
 
     // Engine clones its own per-worker contexts off the Document.
     impl_->engine =
@@ -163,14 +183,10 @@ DocumentView::~DocumentView() {
     // Cache next — drops remaining pixmaps / display lists via cache_ctx.
     impl_->cache.reset();
     // cache_ctx before ui_ctx; both before doc (doc destructs via Impl).
-    if (impl_->cache_ctx) {
-        fz_drop_context(impl_->cache_ctx);
-        impl_->cache_ctx = nullptr;
-    }
-    if (impl_->ui_ctx) {
-        fz_drop_context(impl_->ui_ctx);
-        impl_->ui_ctx = nullptr;
-    }
+    // Redundant with Impl's declaration order, which drops them in exactly
+    // this sequence -- kept explicit so the contracted order reads here too.
+    impl_->cache_ctx.reset();
+    impl_->ui_ctx.reset();
     // Document cleans up automatically via its own Impl.
 }
 
@@ -366,7 +382,7 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb) {
 }
 
 fz_context* DocumentView::ui_ctx() const noexcept {
-    return impl_->ui_ctx;
+    return impl_->ui_ctx.get();
 }
 
 const std::filesystem::path& DocumentView::source_path() const {

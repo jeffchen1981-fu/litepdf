@@ -1,12 +1,22 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <stdexcept>
 #include <utility>
 
 #include "app/SearchDispatcher.hpp"
 #include "core/Document.hpp"
 #include "core/DocumentView.hpp"
+#include "core/EscrowContext.hpp"
 #include "ui/detail/ViewportMath.hpp"
+
+// The unit-test target has no MuPDF include path (litepdf_core links MuPDF
+// privately). fz_drop_context is plain extern "C", so a local declaration is
+// enough -- the same approach as test_escrow_context.cpp.
+extern "C" {
+struct fz_context;
+void fz_drop_context(fz_context* ctx);
+}
 
 using litepdf::app::InlineDispatcher;
 using litepdf::core::Document;
@@ -300,4 +310,38 @@ TEST_CASE("DocumentView set_selection replaces the previous selection",
     view.set_selection(second);
 
     REQUIRE(view.selection()->text_utf8 == "second");
+}
+
+// #74: DocumentView clones ui_ctx and cache_ctx before it builds PageCache,
+// RenderEngine and SearchSession. Only ~DocumentView used to drop those two
+// clones, and ~DocumentView never runs for a half-built object -- so a throw
+// from any of the three leaked both.
+//
+// num_workers == 0 is the deterministic seam: RenderEngine's ctor rejects it
+// with std::invalid_argument, after the clones exist and after PageCache has
+// been built on cache_ctx.
+//
+// The escrow is the oracle. It holds the family's root alive past the
+// Document's death, so family_context_count keeps reporting after the throw:
+// root + escrow == 2 when the clones were dropped, 4 when they leaked.
+TEST_CASE("DocumentView drops its context clones when a member ctor throws",
+          "[core][view][ctor]") {
+    InlineDispatcher disp;
+    litepdf::core::EscrowContext probe;
+    {
+        Document doc;
+        REQUIRE_FALSE(doc.open("tests/fixtures/simple.pdf").has_value());
+
+        fz_context* worker = doc.clone_context();
+        REQUIRE(worker != nullptr);
+        probe = litepdf::core::EscrowContext::clone_from(worker);
+        fz_drop_context(worker);
+        REQUIRE(probe.valid());
+        REQUIRE(litepdf::core::detail::family_context_count(probe.get()) == 2);
+
+        REQUIRE_THROWS_AS(DocumentView(std::move(doc), disp, 0),
+                          std::invalid_argument);
+    }
+
+    REQUIRE(litepdf::core::detail::family_context_count(probe.get()) == 2);
 }

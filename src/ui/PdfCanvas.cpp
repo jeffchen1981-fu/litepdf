@@ -164,6 +164,18 @@ bool post_render_done_impl(HWND target, UINT msg, litepdf::ui::Slot slot,
         delete meta;
         return false;
     }
+    // A post that SUCCEEDS but is never dispatched leaks `meta`, its pixmap and
+    // the escrow's hold on the lock table and root context: once the window is
+    // destroyed, what is still queued for it is never delivered. Accepted,
+    // deliberately (#74). The canvas HWND is created once and survives every tab
+    // CLOSE; it dies only at process exit, as a child in the main window's
+    // DestroyWindow cascade, while every tab and its RenderEngine workers are
+    // still alive. The OS reclaims what is left then -- the same stance
+    // MainWindow states for its own queued WM_USER_OPEN_OK /
+    // WM_USER_PASSWORD_PROMPT payloads. Draining the queue in WM_DESTROY would
+    // not close it: those workers can post again after the drain, until tabs_
+    // joins them in ~MainWindow. Those later posts fail against the dead HWND
+    // and are freed by the branch above, which is why it is not dead code.
     return true;
 }
 }  // namespace
