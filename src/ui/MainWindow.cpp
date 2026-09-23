@@ -1428,7 +1428,8 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 const bool has_doc        = v && v->document().is_open();
                 // A live drag selection too: Copy copies it (#69). Only a stale
                 // one can be live here -- no WM_INITMENUPOPUP arrives while a
-                // capture is held, so a held drag keeps the pre-drag state.
+                // capture is held. (Nor does Ctrl+C: while a capture is held,
+                // TranslateAcceleratorW sends no WM_COMMAND at all.)
                 const bool has_selection  = has_doc && (v->selection().has_value()
                                             || (canvas_ && canvas_->has_live_selection()));
                 const bool can_select_all = has_doc && canvas_ && canvas_->can_select_all();

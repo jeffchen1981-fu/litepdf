@@ -603,8 +603,11 @@ an HWND, following `SplitterMath.hpp` / `ViewportMath.hpp`.
   refused for the rest of the session. Found at the plan gate. The next
   `WM_MOUSEMOVE` cancels it too, or a selection would keep extending under a
   pointer whose button is up (#77).
-- *Copy during a held drag copies the live selection* — what is painted, not the
-  press-time word or line a double or triple click committed (#69).
+- *Copy copies the live selection when one exists* — what is painted, not the
+  press-time word or line a double or triple click committed (#69). Only a stale
+  gesture can reach this: while the canvas holds the capture,
+  `TranslateAcceleratorW` sends no `WM_COMMAND` even for an enabled item, so
+  Ctrl+C during a held drag does nothing (live-probed 2026-09-23).
 - *A gesture that captures no text commits nothing* — it clears, rather than
   leaving an empty selection that would enable Copy for nothing.
 - *`fz_snap_selection` never writes the far end when it lies past the page's last
@@ -817,6 +820,8 @@ inside the find box whenever the page had no selection. So:
 
 - Copy is enabled when an edit control holds the focus, or the active view has a
   selection, or the canvas has a live drag selection (which Copy copies, #69).
+  Only a stale gesture's is ever seen here: no `WM_INITMENUPOPUP` is sent while
+  a capture is held.
 - Select All is enabled when an edit control holds the focus, or a document is
   open **and** the view is in single-page mode (in spread mode it can do nothing,
   §1) **and** no gesture holds the capture. Both this and the dispatch ask

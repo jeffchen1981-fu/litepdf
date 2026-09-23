@@ -620,9 +620,12 @@ void PdfCanvas::select_all() {
 
 void PdfCanvas::copy_selection_to_clipboard() const {
     if (!impl_ || !impl_->view || !hwnd_) return;
-    // Copy what is painted (#69). While a drag is live, its extent exists only
-    // in the live selection: a held double- or triple-click drag committed its
-    // press-time word or line, and has outgrown it since.
+    // Copy what is painted (#69). While a gesture is live, its extent exists
+    // only in the live selection: a double- or triple-click drag committed its
+    // press-time word or line, and has outgrown it since. Ctrl+C reaches here
+    // with a live selection only for a STALE gesture -- while this window holds
+    // the capture, TranslateAcceleratorW sends no WM_COMMAND even for an enabled
+    // item (live-probed 2026-09-23).
     std::string text;
     if (has_live_selection()) {
         const auto& sel = *impl_->live_selection;
