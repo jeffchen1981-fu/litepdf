@@ -245,9 +245,21 @@ public:
     // any existing selection alone.
     void select_all();
 
-    // Put the active view's selection on the clipboard (Edit > Copy). Touches
-    // the clipboard not at all when there is no selection.
+    // Whether select_all would act: the enable state of Edit > Select All,
+    // which must match the dispatch exactly (see MainWindow's WM_INITMENUPOPUP).
+    // Does not look at the page's text: on a page with none the item stays
+    // enabled and select_all does nothing -- the safe direction, since a
+    // grayed item would swallow Ctrl+A.
+    bool can_select_all() const;
+
+    // Put the painted selection on the clipboard (Edit > Copy): a live drag's,
+    // else the active view's. Touches the clipboard not at all when there is no
+    // selection.
     void copy_selection_to_clipboard() const;
+
+    // Whether a live drag selection exists -- the one copy_selection_to_clipboard
+    // prefers. Part of Edit > Copy's enable state, which must match the dispatch.
+    bool has_live_selection() const noexcept;
 
 private:
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -352,7 +364,8 @@ private:
     void begin_pan_gesture(MouseButton button, int x_px, int y_px);
 
     // End a gesture that is live while this window does NOT hold the capture.
-    void cancel_stale_gesture();
+    // Returns whether it ended one.
+    bool cancel_stale_gesture();
 
     // End any live gesture WITHOUT committing, drop its text handle and release
     // the capture. Never dereferences impl_->view: set_view calls it before

@@ -553,7 +553,7 @@ button is held and then vanishes on release, copying nothing.
 | `WM_MOUSEMOVE` (`gesture == Selecting`) | Store the clamped point as `extent`; set `moved_past_threshold` once the displacement from `anchor` exceeds `SM_CXDRAG` / `SM_CYDRAG`; snap copies; `highlight()`; `InvalidateRect`. |
 | `WM_LBUTTONUP` | **First of all**: feed the message's own coordinates through the `WM_MOUSEMOVE` path. The release position is not always preceded by a move for the same point -- injected input delivers a press and a release with nothing between -- and deciding without it turns a drag into a click that clears the selection. **Then**: decide and commit. If `mode == Chars` and `!moved_past_threshold`, this was a click — clear the selection (1b's "next click clears"). Otherwise materialise `quads` + `text_utf8`. `gesture = None`. **Then**: `if (GetCapture() == hwnd_) ReleaseCapture();` and release the handle. |
 | `WM_CAPTURECHANGED` | **Whatever `gesture` is, set it to `None`**, releasing the handle without committing if it was `Selecting`. This must cover `Panning` as well as `Selecting`: capture taken by another window mid-pan would otherwise leave `gesture == Panning` forever, and since every button-down refuses to start while `gesture != None`, the canvas would accept no mouse gesture again for the rest of the session. (After a normal button-up this arm finds `gesture` already `None` and does nothing.) |
-| `WM_MBUTTONDOWN` / `WM_RBUTTONDOWN` while `gesture == Selecting` | Abort the selection drag: `gesture = None`, release the handle, keep whatever was already committed, and do **not** start panning from this press. |
+| `WM_MBUTTONDOWN` / `WM_RBUTTONDOWN` while `gesture == Selecting` | Abort the selection drag: `gesture = None`, release the handle, keep whatever was already committed, and do **not** start panning from this press. A *stale* selection (below) is not a drag: the middle press cancels it first and pans (#77). Either press also breaks the left click sequence, as it breaks Windows' own double-click pairing (#77). |
 | `set_view` | Same teardown, and **first**: before `impl_->view` is reassigned (`PdfCanvas.cpp:239`). The teardown must not dereference `impl_->view` at all — it sets `gesture = None`, releases capture if held, and resets the handle, none of which needs the view. Placing it after the reassignment would run it against the incoming view; placing a view dereference inside it would, on the tab-close path, touch the outgoing view after `TabList::remove` has destroyed it (§3.3). |
 
 **Only one gesture may be live at a time, and the state machine has to say so.**
@@ -600,7 +600,14 @@ an HWND, following `SplitterMath.hpp` / `ViewportMath.hpp`.
 - *A live gesture without the capture is stale.* If `SetCapture` did not take, the
   button-up goes elsewhere and no `WM_CAPTURECHANGED` arrives, so the next press
   cancels such a gesture instead of refusing — otherwise every later press would be
-  refused for the rest of the session. Found at the plan gate.
+  refused for the rest of the session. Found at the plan gate. The next
+  `WM_MOUSEMOVE` cancels it too, or a selection would keep extending under a
+  pointer whose button is up (#77).
+- *Copy copies the live selection when one exists* — what is painted, not the
+  press-time word or line a double or triple click committed (#69). Only a stale
+  gesture can reach this: while the canvas holds the capture,
+  `TranslateAcceleratorW` sends no `WM_COMMAND` even for an enabled item, so
+  Ctrl+C during a held drag does nothing (live-probed 2026-09-23).
 - *A gesture that captures no text commits nothing* — it clears, rather than
   leaving an empty selection that would enable Copy for nothing.
 - *`fz_snap_selection` never writes the far end when it lies past the page's last
@@ -812,10 +819,16 @@ returns 1, no `WM_COMMAND`; the same item re-enabled inside that handler: the
 inside the find box whenever the page had no selection. So:
 
 - Copy is enabled when an edit control holds the focus, or the active view has a
-  selection.
+  selection, or the canvas has a live drag selection (which Copy copies, #69).
+  Only a stale gesture's is ever seen here: no `WM_INITMENUPOPUP` is sent while
+  a capture is held.
 - Select All is enabled when an edit control holds the focus, or a document is
   open **and** the view is in single-page mode (in spread mode it can do nothing,
-  §1).
+  §1) **and** no gesture holds the capture. Both this and the dispatch ask
+  `PdfCanvas::can_select_all()`. `TranslateAcceleratorW` sends no
+  `WM_INITMENUPOPUP` while a capture is held, so any gesture live when this runs
+  is stale; `select_all` ends a stale gesture rather than refusing it, or the
+  item would gray for nothing (#68).
 
 "An edit control holds the focus" is the same class-name test §4.7's `WM_COMMAND`
 arms dispatch on, so the enable state and the dispatch cannot disagree.

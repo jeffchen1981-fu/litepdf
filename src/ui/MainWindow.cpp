@@ -1426,8 +1426,13 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 auto* v = active_view();
                 const bool edit_has_focus = focused_edit_control() != nullptr;
                 const bool has_doc        = v && v->document().is_open();
-                const bool has_selection  = has_doc && v->selection().has_value();
-                const bool can_select_all = has_doc && !v->dual_page();
+                // A live drag selection too: Copy copies it (#69). Only a stale
+                // one can be live here -- no WM_INITMENUPOPUP arrives while a
+                // capture is held. (Nor does Ctrl+C: while a capture is held,
+                // TranslateAcceleratorW sends no WM_COMMAND at all.)
+                const bool has_selection  = has_doc && (v->selection().has_value()
+                                            || (canvas_ && canvas_->has_live_selection()));
+                const bool can_select_all = has_doc && canvas_ && canvas_->can_select_all();
                 EnableMenuItem(popup, IDM_EDIT_COPY,
                                MF_BYCOMMAND
                                | ((edit_has_focus || has_selection) ? MF_ENABLED : MF_GRAYED));
