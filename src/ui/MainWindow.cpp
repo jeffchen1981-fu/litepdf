@@ -1576,7 +1576,9 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 case IDM_FILE_PRINT: {
                     auto* view = active_view();
                     if (view && view->document().is_open()) {
-                        litepdf::printing::PrintJob::run(
+                        // false is a cancel or an error PrintJob has already
+                        // reported in its own MessageBox; nothing left to do.
+                        (void)litepdf::printing::PrintJob::run(
                             hwnd, view->document(),
                             static_cast<std::size_t>(view->current_page()));
                     }
