@@ -1357,16 +1357,25 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             break;
         }
         case WM_SETTINGCHANGE: {
-            // PR-B: WM_SETTINGCHANGE is broadcast to top-level windows only,
-            // so the status bar (a child HWND) never sees it directly even
-            // though it has its own arm that re-detects dark mode and High
-            // Contrast together and repaints. Forward unconditionally rather
-            // than gating on the "ImmersiveColorSet" name below: a High
-            // Contrast toggle does not necessarily carry that section name,
-            // and the bar's own arm already no-ops when neither state
-            // changed. Keep the tabs_ forwarding exactly as it was.
-            if (status_bar_ && status_bar_->hwnd()) {
-                SendMessageW(status_bar_->hwnd(), WM_SETTINGCHANGE, w, l);
+            // WM_SETTINGCHANGE is broadcast to top-level windows only, so no
+            // child HWND ever sees it directly, even the ones with their own
+            // arm that re-detects the theme and repaints. Forward to each of
+            // them (PR-B: the status bar; #51: the find bar, results panel and
+            // both splitters) unconditionally rather than gating on the
+            // "ImmersiveColorSet" name below: a High Contrast toggle does not
+            // necessarily carry that section name, and every forwarded arm
+            // already no-ops when its state did not change. A hidden control
+            // is forwarded too, so it is current when it next shows. Keep the
+            // tabs_ forwarding exactly as it was.
+            const HWND themed_children[] = {
+                status_bar_    ? status_bar_->hwnd()    : nullptr,
+                find_bar_      ? find_bar_->hwnd()      : nullptr,
+                results_panel_ ? results_panel_->hwnd() : nullptr,
+                splitter_      ? splitter_->hwnd()      : nullptr,
+                v_splitter_    ? v_splitter_->hwnd()    : nullptr,
+            };
+            for (HWND child : themed_children) {
+                if (child) SendMessageW(child, WM_SETTINGCHANGE, w, l);
             }
             if (w == 0 && l != 0) {
                 auto* name = reinterpret_cast<const wchar_t*>(l);
@@ -1697,6 +1706,18 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     // revert point.
                     if (status_bar_ && status_bar_->page_box_has_focus()) {
                         if (canvas_ && canvas_->hwnd()) SetFocus(canvas_->hwnd());
+                        return 0;
+                    }
+                    // #47: the results panel next, for the same reason the page
+                    // box goes first -- the focused control owns ESC. Before
+                    // this, ESC in the results panel fell through to the find
+                    // bar branch below and closed the find bar instead, leaving
+                    // the panel open. on_results_close() is exactly what the
+                    // panel's own close button does. Gated on focus, not on
+                    // visibility: with the canvas focused, ESC keeps closing
+                    // only the find bar, as it always has.
+                    if (results_panel_ && results_panel_->has_focus()) {
+                        on_results_close();
                         return 0;
                     }
                     // Scope ESC: claim it for the find bar when that is the

@@ -492,10 +492,13 @@ LRESULT CALLBACK find_bar_edit_subclass(HWND hwnd, UINT msg, WPARAM w,
                  | DefSubclassProc(hwnd, msg, w, l);
         case WM_KEYDOWN: {
             const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            // ESC is deliberately absent from this switch (#47). It is a BARE
+            // ACCELERATOR in this app, so TranslateAcceleratorW converts it to
+            // WM_COMMAND(IDM_FIND_CLOSE) before the message is ever dispatched
+            // to this control -- the `case VK_ESCAPE` that used to sit here
+            // never ran. MainWindow's IDM_FIND_CLOSE arm owns ESC and closes
+            // the bar whenever it is visible.
             switch (w) {
-                case VK_ESCAPE:
-                    if (impl->on_close) impl->on_close();
-                    return 0;  // consumed
                 case VK_RETURN:
                     // Regex mode defers running until Enter: if the query was
                     // edited since the last run (regex_dirty), compile + run it
@@ -517,8 +520,11 @@ LRESULT CALLBACK find_bar_edit_subclass(HWND hwnd, UINT msg, WPARAM w,
             break;
         }
         case WM_CHAR: {
-            // Swallow the character form of Enter/Escape so the Edit control
-            // doesn't ding (MessageBeep) complaining it can't handle them.
+            // Swallow the character form of Enter so the Edit control doesn't
+            // ding (MessageBeep) complaining it can't handle it. ESC never
+            // becomes a WM_CHAR (the pump skips TranslateMessage for a
+            // translated accelerator); its disjunct is a one-token guard
+            // against the accelerator table changing.
             if (w == VK_RETURN || w == VK_ESCAPE) return 0;
             break;
         }
@@ -675,9 +681,10 @@ LRESULT CALLBACK find_bar_wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         }
 
         case WM_SETTINGCHANGE: {
-            // TODO(phase-6.x): full dark-mode hot-swap. For now we do a light
-            // touch: re-detect and repaint if the mode flipped. No relaunch
-            // needed in the common case.
+            // Light theme hot-swap: re-detect and repaint if the mode flipped.
+            // WM_SETTINGCHANGE is broadcast to top-level windows only, so this
+            // arm runs because MainWindow forwards the message (#51); before
+            // that it never ran.
             HWND parent = GetParent(hwnd);
             const bool new_dark = detect_dark_mode(parent ? parent : hwnd);
             if (new_dark != impl->dark_mode) {
