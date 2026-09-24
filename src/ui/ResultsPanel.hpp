@@ -38,8 +38,10 @@ public:
     void hide();
     bool visible() const;
 
-    // True while the keyboard focus is on the panel or any control inside it
-    // (the query box, a latch button, the result list).
+    // True while the panel is visible and the keyboard focus is on it or any
+    // control inside it (the query box, a latch button, the result list).
+    // Visibility is part of the test because hiding a window does not move
+    // the focus off it.
     //
     // MainWindow needs this because ESC is a BARE ACCELERATOR in this app
     // (`{ FVIRTKEY, VK_ESCAPE, IDM_FIND_CLOSE }`), and TranslateAcceleratorW

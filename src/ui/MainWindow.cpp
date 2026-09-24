@@ -1713,9 +1713,10 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     // this, ESC in the results panel fell through to the find
                     // bar branch below and closed the find bar instead, leaving
                     // the panel open. on_results_close() is exactly what the
-                    // panel's own close button does. Gated on focus, not on
-                    // visibility: with the canvas focused, ESC keeps closing
-                    // only the find bar, as it always has.
+                    // panel's own close button does. Gated on focus (which
+                    // has_focus() only reports for a VISIBLE panel), not on
+                    // visibility alone: with the canvas focused, ESC keeps
+                    // closing only the find bar, as it always has.
                     if (results_panel_ && results_panel_->has_focus()) {
                         on_results_close();
                         return 0;
@@ -2129,7 +2130,14 @@ void MainWindow::on_cross_tab_find() {
 void MainWindow::on_toggle_results() {
     if (!results_panel_) return;
     if (results_panel_->visible()) {
+        // Hiding a window does not move the keyboard focus off it: without
+        // this, F6 left the focus on the invisible query box (typing went
+        // into it) and the next ESC reached the panel instead of the find
+        // bar. Read the focus before hide(), while has_focus() can still see
+        // it; a focus elsewhere (the canvas, a pane) is left where it is.
+        const bool had_focus = results_panel_->has_focus();
         results_panel_->hide();
+        if (had_focus && canvas_ && canvas_->hwnd()) SetFocus(canvas_->hwnd());
     } else {
         if (!active_view()) return;  // nothing to search
         if (results_panel_height_px_ == 0) {
@@ -2352,8 +2360,9 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
         { FCONTROL | FVIRTKEY, '8', IDM_TAB_GOTO_8 },
         { FCONTROL | FVIRTKEY, '9', IDM_TAB_GOTO_9 },
         // Phase 6: in-doc find + (stubbed) cross-tab find + results
-        // panel toggle. ESC only fires when the find bar is the active
-        // UI — see IDM_FIND_CLOSE handler in WM_COMMAND above.
+        // panel toggle. ESC is a bare accelerator, so it reaches
+        // IDM_FIND_CLOSE whatever holds the focus; that handler in
+        // WM_COMMAND above decides which UI it closes.
         { FCONTROL | FVIRTKEY,          'F',       IDM_FIND           },
         { FVIRTKEY,                     VK_F3,     IDM_FIND_NEXT      },
         { FSHIFT   | FVIRTKEY,          VK_F3,     IDM_FIND_PREV      },

@@ -830,7 +830,9 @@ bool ResultsPanel::visible() const {
 }
 
 bool ResultsPanel::has_focus() const {
-    if (!impl_ || !impl_->hwnd) return false;
+    // visible() first: hiding the panel does not move the focus off its
+    // children, so without it a panel F6 had hidden still claimed ESC.
+    if (!visible()) return false;
     HWND focus = GetFocus();
     return focus && (focus == impl_->hwnd || IsChild(impl_->hwnd, focus));
 }

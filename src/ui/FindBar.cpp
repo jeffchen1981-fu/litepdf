@@ -497,7 +497,8 @@ LRESULT CALLBACK find_bar_edit_subclass(HWND hwnd, UINT msg, WPARAM w,
             // WM_COMMAND(IDM_FIND_CLOSE) before the message is ever dispatched
             // to this control -- the `case VK_ESCAPE` that used to sit here
             // never ran. MainWindow's IDM_FIND_CLOSE arm owns ESC and closes
-            // the bar whenever it is visible.
+            // the bar while it is visible and neither the status bar's page
+            // box nor the results panel holds the focus.
             switch (w) {
                 case VK_RETURN:
                     // Regex mode defers running until Enter: if the query was
