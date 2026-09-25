@@ -38,6 +38,18 @@ public:
     void hide();
     bool visible() const;
 
+    // True while the panel is visible and the keyboard focus is on it or any
+    // control inside it (the query box, a latch button, the result list).
+    // Visibility is part of the test because hiding a window does not move
+    // the focus off it.
+    //
+    // MainWindow needs this because ESC is a BARE ACCELERATOR in this app
+    // (`{ FVIRTKEY, VK_ESCAPE, IDM_FIND_CLOSE }`), and TranslateAcceleratorW
+    // runs before the message is dispatched to any child -- so ESC never
+    // reaches this panel's controls and the panel cannot claim it on its own.
+    // The IDM_FIND_CLOSE arm asks this question instead (#47).
+    bool has_focus() const;
+
     // Called during MainWindow::on_layout with the full panel rect.
     void set_bounds(const RECT& bounds);
 

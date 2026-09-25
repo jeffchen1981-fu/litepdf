@@ -320,8 +320,8 @@ void paint_button(const DRAWITEMSTRUCT* dis, ButtonKind kind,
 }  // namespace
 
 // ----------------------------------------------------------------------------
-// Edit subclass — intercept Enter (submit) and Escape (close) so the Edit
-// control doesn't ding on them.
+// Edit subclass — intercept Enter (submit) so the Edit control doesn't ding on
+// it. ESC (close) is handled by MainWindow; see WM_KEYDOWN below.
 // ----------------------------------------------------------------------------
 LRESULT CALLBACK results_edit_subclass(HWND hwnd, UINT msg, WPARAM w,
                                        LPARAM l, UINT_PTR /*id*/,
@@ -334,20 +334,25 @@ LRESULT CALLBACK results_edit_subclass(HWND hwnd, UINT msg, WPARAM w,
             return DLGC_WANTALLKEYS | DLGC_WANTCHARS
                  | DefSubclassProc(hwnd, msg, w, l);
         case WM_KEYDOWN: {
+            // ESC is deliberately absent from this switch (#47). It is a BARE
+            // ACCELERATOR in this app, so TranslateAcceleratorW converts it to
+            // WM_COMMAND(IDM_FIND_CLOSE) before the message is ever dispatched
+            // to this control -- the `case VK_ESCAPE` that used to sit here
+            // never ran. MainWindow's IDM_FIND_CLOSE arm owns ESC and closes
+            // the panel when ResultsPanel::has_focus() says it holds the focus.
             switch (w) {
                 case VK_RETURN:
                     // Submit-on-Enter, folding in the current latch flags.
                     impl->submit_current();
                     return 0;
-                case VK_ESCAPE:
-                    if (impl->on_close) impl->on_close();
-                    return 0;
             }
             break;
         }
         case WM_CHAR:
-            // Swallow the character form of Enter/Escape so the Edit
-            // doesn't MessageBeep.
+            // Swallow the character form of Enter so the Edit doesn't
+            // MessageBeep. ESC never becomes a WM_CHAR (the pump skips
+            // TranslateMessage for a translated accelerator); its disjunct is
+            // a one-token guard against the accelerator table changing.
             if (w == VK_RETURN || w == VK_ESCAPE) return 0;
             break;
         case WM_NCDESTROY:
@@ -622,7 +627,12 @@ LRESULT CALLBACK results_panel_wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) 
                     ListView_SetTextColor  (impl->listview,
                                             impl->palette.list_fg);
                 }
-                InvalidateRect(hwnd, nullptr, TRUE);
+                // Not InvalidateRect: the panel is WS_CLIPCHILDREN, so that
+                // repaints only the strips between the children and leaves the
+                // query box, latch buttons and list in the old palette until
+                // something else repaints them (#51, observed on a live flip).
+                RedrawWindow(hwnd, nullptr, nullptr,
+                             RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
             }
             return 0;
         }
@@ -817,6 +827,14 @@ void ResultsPanel::hide() {
 
 bool ResultsPanel::visible() const {
     return impl_ && impl_->hwnd && IsWindowVisible(impl_->hwnd);
+}
+
+bool ResultsPanel::has_focus() const {
+    // visible() first: hiding the panel does not move the focus off its
+    // children, so without it a panel F6 had hidden still claimed ESC.
+    if (!visible()) return false;
+    HWND focus = GetFocus();
+    return focus && (focus == impl_->hwnd || IsChild(impl_->hwnd, focus));
 }
 
 void ResultsPanel::set_bounds(const RECT& bounds) {

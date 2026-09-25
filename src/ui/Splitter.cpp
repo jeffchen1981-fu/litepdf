@@ -183,6 +183,9 @@ LRESULT SplitterCore::handle_message(HWND hwnd_in, UINT msg, WPARAM w, LPARAM l)
 
         case WM_SETTINGCHANGE: {
             // Light theme hot-swap (consistent with FindBar/TabManager).
+            // Shared by Splitter and VerticalSplitter. WM_SETTINGCHANGE is
+            // broadcast to top-level windows only, so this arm runs because
+            // MainWindow forwards the message to both (#51).
             HWND parent = GetParent(hwnd_in);
             const bool new_dark = detect_dark_mode(parent ? parent : hwnd_in);
             if (new_dark != dark_mode) {
