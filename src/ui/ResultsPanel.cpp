@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cwchar>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -34,6 +35,7 @@ constexpr int kBtnCloseWidthDip   = 28;
 constexpr int kColFileWidthDip    = 200;
 constexpr int kColPageWidthDip    = 60;
 constexpr int kColSnippetMinDip   = 200;  // last-column floor
+constexpr int kHeaderTextPadDip   = 3;    // = the light header's text inset, measured
 
 // Child control IDs.
 constexpr WORD kIdEdit     = 6001;
@@ -44,6 +46,7 @@ constexpr WORD kIdBtnRegex = 6005;
 constexpr WORD kIdBtnWhole = 6006;
 
 constexpr UINT_PTR kEditSubclassId = 0xF601;
+constexpr UINT_PTR kListSubclassId = 0xF602;
 
 constexpr wchar_t kWndClass[] = L"LitePDFResultsPanel";
 
@@ -127,6 +130,17 @@ bool detect_dark_mode(HWND hwnd) {
     return false;
 }
 
+// Same check as StatusBar's local copy. Only the list header consults it so
+// far; the rest of the panel ignoring High Contrast is #83.
+bool is_high_contrast_active() {
+    HIGHCONTRASTW hc = {};
+    hc.cbSize = sizeof(hc);
+    if (SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0)) {
+        return (hc.dwFlags & HCF_HIGHCONTRASTON) != 0;
+    }
+    return false;
+}
+
 HFONT create_panel_font(UINT dpi, int pt_size = 9) {
     LOGFONTW lf = {};
     lf.lfHeight  = -MulDiv(pt_size, static_cast<int>(dpi), 72);
@@ -165,6 +179,8 @@ LRESULT CALLBACK results_edit_subclass(HWND hwnd, UINT msg, WPARAM w, LPARAM l,
                                        UINT_PTR id, DWORD_PTR ref_data);
 LRESULT CALLBACK results_btn_subclass(HWND hwnd, UINT msg, WPARAM w, LPARAM l,
                                       UINT_PTR id, DWORD_PTR ref_data);
+LRESULT CALLBACK results_list_subclass(HWND hwnd, UINT msg, WPARAM w, LPARAM l,
+                                       UINT_PTR id, DWORD_PTR ref_data);
 
 // ----------------------------------------------------------------------------
 // Impl — private state.
@@ -438,6 +454,122 @@ LRESULT CALLBACK results_btn_subclass(HWND hwnd, UINT msg, WPARAM w,
         }
         case WM_NCDESTROY:
             RemoveWindowSubclass(hwnd, results_btn_subclass, ctl_id);
+            break;
+    }
+    return DefSubclassProc(hwnd, msg, w, l);
+}
+
+// ----------------------------------------------------------------------------
+// ListView subclass -- dark-mode paint for the list's column header (#84).
+//
+// ListView_SetBkColor and friends colour the rows only; the SysHeader32 child
+// keeps drawing itself with the light visual style. The header's parent is the
+// list, so its NM_CUSTOMDRAW arrives here, not at the panel. In dark mode each
+// item is drawn from the palette and the strip right of the last column is
+// filled at POSTPAINT, after the header has drawn its own light filler there.
+//
+// Light mode and High Contrast return CDRF_DODEFAULT at PREPAINT, so the header
+// keeps the system's own paint -- the same thing it drew before this subclass
+// existed. Nothing is cached per theme: every paint re-reads dark_mode, and the
+// panel's WM_SETTINGCHANGE arm redraws with RDW_ALLCHILDREN, which reaches the
+// header as a grandchild.
+// ----------------------------------------------------------------------------
+LRESULT CALLBACK results_list_subclass(HWND hwnd, UINT msg, WPARAM w,
+                                       LPARAM l, UINT_PTR /*id*/,
+                                       DWORD_PTR ref_data) {
+    auto* impl = reinterpret_cast<ResultsPanel::Impl*>(ref_data);
+    if (!impl) return DefSubclassProc(hwnd, msg, w, l);
+
+    switch (msg) {
+        case WM_NOTIFY: {
+            auto* nmh = reinterpret_cast<NMHDR*>(l);
+            if (!nmh || nmh->code != NM_CUSTOMDRAW) break;
+            HWND header = ListView_GetHeader(hwnd);
+            if (!header || nmh->hwndFrom != header) break;
+
+            auto* cd = reinterpret_cast<NMCUSTOMDRAW*>(l);
+            const Palette& pal = impl->palette;
+            switch (cd->dwDrawStage) {
+                case CDDS_PREPAINT:
+                    if (!impl->dark_mode || is_high_contrast_active()) {
+                        return CDRF_DODEFAULT;
+                    }
+                    return CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT;
+
+                case CDDS_ITEMPREPAINT: {
+                    const RECT rc = cd->rc;
+                    const COLORREF bg =
+                        (cd->uItemState & CDIS_SELECTED) ? pal.btn_pressed
+                        : (cd->uItemState & CDIS_HOT)    ? pal.btn_hover
+                                                         : pal.panel_bg;
+                    HBRUSH fill = CreateSolidBrush(bg);
+                    FillRect(cd->hdc, &rc, fill);
+                    DeleteObject(fill);
+
+                    // 1 px divider on the right edge and 1 px rule along the
+                    // bottom, where the light style draws its own.
+                    HBRUSH line = CreateSolidBrush(pal.border);
+                    RECT div = { rc.right - 1, rc.top, rc.right, rc.bottom };
+                    RECT rule = { rc.left, rc.bottom - 1, rc.right, rc.bottom };
+                    FillRect(cd->hdc, &div, line);
+                    FillRect(cd->hdc, &rule, line);
+                    DeleteObject(line);
+
+                    wchar_t text[128] = {};
+                    HDITEMW item = {};
+                    item.mask       = HDI_TEXT | HDI_FORMAT;
+                    item.pszText    = text;
+                    item.cchTextMax = static_cast<int>(std::size(text));
+                    Header_GetItem(header, static_cast<int>(cd->dwItemSpec),
+                                   &item);
+                    UINT align = DT_LEFT;
+                    switch (item.fmt & HDF_JUSTIFYMASK) {
+                        case HDF_RIGHT:  align = DT_RIGHT;  break;
+                        case HDF_CENTER: align = DT_CENTER; break;
+                    }
+                    RECT trc = rc;
+                    const int pad = dp(kHeaderTextPadDip, impl->dpi);
+                    trc.left  += pad;
+                    trc.right -= pad;
+                    HGDIOBJ old_font =
+                        SelectObject(cd->hdc, impl->font_text.get());
+                    SetTextColor(cd->hdc, pal.list_fg);
+                    SetBkMode(cd->hdc, TRANSPARENT);
+                    DrawTextW(cd->hdc, text, -1, &trc,
+                              align | DT_VCENTER | DT_SINGLELINE
+                                  | DT_END_ELLIPSIS | DT_NOPREFIX);
+                    SelectObject(cd->hdc, old_font);
+                    return CDRF_SKIPDEFAULT;
+                }
+
+                case CDDS_POSTPAINT: {
+                    // The filler right of the last column is not an item, so
+                    // no ITEMPREPAINT covers it.
+                    RECT client;
+                    GetClientRect(header, &client);
+                    const int n = Header_GetItemCount(header);
+                    RECT last = {};
+                    if (n > 0) Header_GetItemRect(header, n - 1, &last);
+                    RECT rest = client;
+                    rest.left = last.right;
+                    if (rest.left < rest.right) {
+                        HBRUSH fill = CreateSolidBrush(pal.panel_bg);
+                        FillRect(cd->hdc, &rest, fill);
+                        DeleteObject(fill);
+                        HBRUSH line = CreateSolidBrush(pal.border);
+                        RECT rule = rest;
+                        rule.top = rule.bottom - 1;
+                        FillRect(cd->hdc, &rule, line);
+                        DeleteObject(line);
+                    }
+                    return CDRF_DODEFAULT;
+                }
+            }
+            break;
+        }
+        case WM_NCDESTROY:
+            RemoveWindowSubclass(hwnd, results_list_subclass,
+                                 kListSubclassId);
             break;
     }
     return DefSubclassProc(hwnd, msg, w, l);
@@ -773,6 +905,9 @@ ResultsPanel::ResultsPanel(HINSTANCE hInstance, HWND parent,
         ListView_SetBkColor    (impl_->listview, impl_->palette.list_bg);
         ListView_SetTextBkColor(impl_->listview, impl_->palette.list_bg);
         ListView_SetTextColor  (impl_->listview, impl_->palette.list_fg);
+        SetWindowSubclass(impl_->listview, results_list_subclass,
+                          kListSubclassId,
+                          reinterpret_cast<DWORD_PTR>(impl_.get()));
         SendMessageW(impl_->listview, WM_SETFONT,
                      reinterpret_cast<WPARAM>(impl_->font_text.get()),
                      MAKELPARAM(TRUE, 0));
