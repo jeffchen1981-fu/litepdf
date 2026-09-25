@@ -130,7 +130,7 @@ bool detect_dark_mode(HWND hwnd) {
     return false;
 }
 
-// Same check as StatusBar's local copy. Only the list header consults it so
+// Same check as StatusBar's local copy. Only the list header acts on it so
 // far; the rest of the panel ignoring High Contrast is #83.
 bool is_high_contrast_active() {
     HIGHCONTRASTW hc = {};
@@ -198,6 +198,9 @@ struct ResultsPanel::Impl {
 
     UINT    dpi       = 96;
     bool    dark_mode = false;
+    // Read by the list header's custom draw only (#84); see
+    // results_list_subclass.
+    bool    high_contrast = false;
     Palette palette   = make_palette(false);
 
     unique_hfont font_text  { nullptr, &DeleteObject };
@@ -470,9 +473,10 @@ LRESULT CALLBACK results_btn_subclass(HWND hwnd, UINT msg, WPARAM w,
 //
 // Light mode and High Contrast return CDRF_DODEFAULT at PREPAINT, so the header
 // keeps the system's own paint -- the same thing it drew before this subclass
-// existed. Nothing is cached per theme: every paint re-reads dark_mode, and the
-// panel's WM_SETTINGCHANGE arm redraws with RDW_ALLCHILDREN, which reaches the
-// header as a grandchild.
+// existed. Both flags are re-read on every paint, and the panel's
+// WM_SETTINGCHANGE arm redraws with RDW_ALLCHILDREN, which reaches the header
+// as a grandchild, when EITHER flag changes: a High Contrast toggle alone
+// leaves dark_mode as it was.
 // ----------------------------------------------------------------------------
 LRESULT CALLBACK results_list_subclass(HWND hwnd, UINT msg, WPARAM w,
                                        LPARAM l, UINT_PTR /*id*/,
@@ -491,18 +495,18 @@ LRESULT CALLBACK results_list_subclass(HWND hwnd, UINT msg, WPARAM w,
             const Palette& pal = impl->palette;
             switch (cd->dwDrawStage) {
                 case CDDS_PREPAINT:
-                    if (!impl->dark_mode || is_high_contrast_active()) {
+                    if (!impl->dark_mode || impl->high_contrast) {
                         return CDRF_DODEFAULT;
                     }
                     return CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT;
 
                 case CDDS_ITEMPREPAINT: {
+                    // Flat: no hover or pressed shade. The header reports no
+                    // CDIS_HOT here (probed: a hovered item's uItemState never
+                    // changed the paint), and a click on it does nothing --
+                    // the panel handles no LVN_COLUMNCLICK.
                     const RECT rc = cd->rc;
-                    const COLORREF bg =
-                        (cd->uItemState & CDIS_SELECTED) ? pal.btn_pressed
-                        : (cd->uItemState & CDIS_HOT)    ? pal.btn_hover
-                                                         : pal.panel_bg;
-                    HBRUSH fill = CreateSolidBrush(bg);
+                    HBRUSH fill = CreateSolidBrush(pal.panel_bg);
                     FillRect(cd->hdc, &rc, fill);
                     DeleteObject(fill);
 
@@ -744,6 +748,17 @@ LRESULT CALLBACK results_panel_wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) 
         case WM_SETTINGCHANGE: {
             HWND parent = GetParent(hwnd);
             const bool new_dark = detect_dark_mode(parent ? parent : hwnd);
+            const bool new_hc   = is_high_contrast_active();
+            if (new_hc != impl->high_contrast) {
+                impl->high_contrast = new_hc;
+                // Only the list header paints differently under High
+                // Contrast. When dark_mode changed too, the redraw below
+                // covers it.
+                if (new_dark == impl->dark_mode && impl->listview) {
+                    RedrawWindow(impl->listview, nullptr, nullptr,
+                                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+                }
+            }
             if (new_dark != impl->dark_mode) {
                 impl->dark_mode = new_dark;
                 impl->palette   = make_palette(new_dark);
@@ -816,6 +831,7 @@ ResultsPanel::ResultsPanel(HINSTANCE hInstance, HWND parent,
     impl_->dpi       = GetDpiForWindow(parent);
     if (impl_->dpi == 0) impl_->dpi = 96;
     impl_->dark_mode = detect_dark_mode(parent);
+    impl_->high_contrast = is_high_contrast_active();
     impl_->palette   = make_palette(impl_->dark_mode);
     impl_->bg_brush  = CreateSolidBrush(impl_->palette.panel_bg);
 
