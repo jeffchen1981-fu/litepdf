@@ -1,5 +1,8 @@
 #include "ui/ResultsPanel.hpp"
 
+#include "ui/detail/ButtonColors.hpp"
+#include "ui/detail/HighContrast.hpp"
+
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <windowsx.h>
@@ -73,12 +76,35 @@ struct Palette {
     COLORREF btn_hover;
     COLORREF btn_pressed;
     COLORREF btn_fg;
+    COLORREF btn_hover_fg;
+    COLORREF btn_pressed_fg;
     COLORREF close_hover_bg;
     COLORREF close_hover_fg;
     COLORREF border;
 };
 
-Palette make_palette(bool dark) {
+// Under High Contrast every colour comes from the system (#83), with the same
+// button mapping as FindBar's palette: a hovered button keeps the face colour
+// and takes the hot-light text colour, a latched one sits on the highlight.
+Palette make_palette(bool dark, bool high_contrast) {
+    if (high_contrast) {
+        return {
+            /*panel_bg*/       GetSysColor(COLOR_BTNFACE),
+            /*edit_bg*/        GetSysColor(COLOR_WINDOW),
+            /*edit_fg*/        GetSysColor(COLOR_WINDOWTEXT),
+            /*list_bg*/        GetSysColor(COLOR_WINDOW),
+            /*list_fg*/        GetSysColor(COLOR_WINDOWTEXT),
+            /*btn_normal*/     GetSysColor(COLOR_BTNFACE),
+            /*btn_hover*/      GetSysColor(COLOR_BTNFACE),
+            /*btn_pressed*/    GetSysColor(COLOR_HIGHLIGHT),
+            /*btn_fg*/         GetSysColor(COLOR_BTNTEXT),
+            /*btn_hover_fg*/   GetSysColor(COLOR_HOTLIGHT),
+            /*btn_pressed_fg*/ GetSysColor(COLOR_HIGHLIGHTTEXT),
+            /*close_hover_bg*/ GetSysColor(COLOR_BTNFACE),
+            /*close_hover_fg*/ GetSysColor(COLOR_HOTLIGHT),
+            /*border*/         GetSysColor(COLOR_WINDOWFRAME),
+        };
+    }
     if (dark) {
         return {
             /*panel_bg*/       RGB(0x2B, 0x2B, 0x2B),
@@ -90,6 +116,8 @@ Palette make_palette(bool dark) {
             /*btn_hover*/      RGB(0x3A, 0x3A, 0x3A),
             /*btn_pressed*/    RGB(0x50, 0x50, 0x50),
             /*btn_fg*/         RGB(0xE0, 0xE0, 0xE0),
+            /*btn_hover_fg*/   RGB(0xE0, 0xE0, 0xE0),
+            /*btn_pressed_fg*/ RGB(0xE0, 0xE0, 0xE0),
             /*close_hover_bg*/ RGB(0xC4, 0x2B, 0x1C),
             /*close_hover_fg*/ RGB(0xFF, 0xFF, 0xFF),
             /*border*/         RGB(0x3A, 0x3A, 0x3A),
@@ -105,6 +133,8 @@ Palette make_palette(bool dark) {
         /*btn_hover*/      RGB(0xEA, 0xEA, 0xEA),
         /*btn_pressed*/    RGB(0xD8, 0xD8, 0xD8),
         /*btn_fg*/         RGB(0x30, 0x30, 0x30),
+        /*btn_hover_fg*/   RGB(0x30, 0x30, 0x30),
+        /*btn_pressed_fg*/ RGB(0x30, 0x30, 0x30),
         /*close_hover_bg*/ RGB(0xE8, 0x11, 0x23),
         /*close_hover_fg*/ RGB(0xFF, 0xFF, 0xFF),
         /*border*/         RGB(0xD0, 0xD0, 0xD0),
@@ -130,16 +160,7 @@ bool detect_dark_mode(HWND hwnd) {
     return false;
 }
 
-// Same check as StatusBar's local copy. Only the list header acts on it so
-// far; the rest of the panel ignoring High Contrast is #83.
-bool is_high_contrast_active() {
-    HIGHCONTRASTW hc = {};
-    hc.cbSize = sizeof(hc);
-    if (SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0)) {
-        return (hc.dwFlags & HCF_HIGHCONTRASTON) != 0;
-    }
-    return false;
-}
+using detail::is_high_contrast_active;
 
 HFONT create_panel_font(UINT dpi, int pt_size = 9) {
     LOGFONTW lf = {};
@@ -198,10 +219,10 @@ struct ResultsPanel::Impl {
 
     UINT    dpi       = 96;
     bool    dark_mode = false;
-    // Read by the list header's custom draw only (#84); see
-    // results_list_subclass.
+    // Selects the system-colour palette (#83); the list header's custom
+    // draw also reads it to keep the system's own paint (#84).
     bool    high_contrast = false;
-    Palette palette   = make_palette(false);
+    Palette palette   = make_palette(false, false);
 
     unique_hfont font_text  { nullptr, &DeleteObject };
     unique_hfont font_glyph { nullptr, &DeleteObject };
@@ -294,26 +315,14 @@ void paint_button(const DRAWITEMSTRUCT* dis, ButtonKind kind,
     HDC  hdc = dis->hDC;
     RECT rc  = dis->rcItem;
 
-    COLORREF bg = pal.btn_normal;
-    if (kind == ButtonKind::Close && hover) {
-        bg = pal.close_hover_bg;
-    } else if (pressed) {
-        bg = pal.btn_pressed;
-    } else if (latched) {
-        bg = pal.btn_pressed;
-    } else if (hover) {
-        bg = pal.btn_hover;
-    }
-
-    HBRUSH br = CreateSolidBrush(bg);
+    const detail::ButtonColors c = detail::button_colors(
+        pal, kind == ButtonKind::Close, hover, pressed, latched);
+    HBRUSH br = CreateSolidBrush(c.bg);
     FillRect(hdc, &rc, br);
     DeleteObject(br);
 
-    const COLORREF fg = (kind == ButtonKind::Close && hover)
-                            ? pal.close_hover_fg
-                            : pal.btn_fg;
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, fg);
+    SetTextColor(hdc, c.fg);
 
     const wchar_t* glyph    = L"\u2715";  // close glyph by default
     HFONT          use_font = font_glyph;
@@ -745,23 +754,23 @@ LRESULT CALLBACK results_panel_wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) 
             break;
         }
 
+        case WM_SYSCOLORCHANGE:
         case WM_SETTINGCHANGE: {
+            // Both messages are broadcast to top-level windows only; MainWindow
+            // forwards them here (#51, #83). The list is a common control, so
+            // hand it WM_SYSCOLORCHANGE too, as a top-level window must.
+            if (msg == WM_SYSCOLORCHANGE && impl->listview) {
+                SendMessageW(impl->listview, msg, w, l);
+            }
             HWND parent = GetParent(hwnd);
             const bool new_dark = detect_dark_mode(parent ? parent : hwnd);
             const bool new_hc   = is_high_contrast_active();
-            if (new_hc != impl->high_contrast) {
+            if (detail::theme_needs_rebuild(impl->dark_mode,
+                                            impl->high_contrast,
+                                            new_dark, new_hc)) {
+                impl->dark_mode     = new_dark;
                 impl->high_contrast = new_hc;
-                // Only the list header paints differently under High
-                // Contrast. When dark_mode changed too, the redraw below
-                // covers it.
-                if (new_dark == impl->dark_mode && impl->listview) {
-                    RedrawWindow(impl->listview, nullptr, nullptr,
-                                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
-                }
-            }
-            if (new_dark != impl->dark_mode) {
-                impl->dark_mode = new_dark;
-                impl->palette   = make_palette(new_dark);
+                impl->palette       = make_palette(new_dark, new_hc);
                 if (impl->bg_brush)   DeleteObject(impl->bg_brush);
                 if (impl->edit_brush) DeleteObject(impl->edit_brush);
                 impl->bg_brush   = CreateSolidBrush(impl->palette.panel_bg);
@@ -832,7 +841,7 @@ ResultsPanel::ResultsPanel(HINSTANCE hInstance, HWND parent,
     if (impl_->dpi == 0) impl_->dpi = 96;
     impl_->dark_mode = detect_dark_mode(parent);
     impl_->high_contrast = is_high_contrast_active();
-    impl_->palette   = make_palette(impl_->dark_mode);
+    impl_->palette   = make_palette(impl_->dark_mode, impl_->high_contrast);
     impl_->bg_brush  = CreateSolidBrush(impl_->palette.panel_bg);
 
     // Root panel — created hidden. lpCreateParams stashes Impl* so

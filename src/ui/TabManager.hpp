@@ -51,13 +51,20 @@ public:
     // can emit SwitchCb. Returns true if the notification was handled.
     bool handle_notify(const NMHDR* hdr);
 
-    // Parent's WM_DRAWITEM routes here when the tab control is the sender.
+    // Paints one tab. The strip's own WM_PAINT (tab_subclass_proc) calls it
+    // for every tab; the parent's WM_DRAWITEM still routes here, but only a
+    // paint that bypasses that WM_PAINT (WM_PRINTCLIENT) sends one now (#86).
     // Returns true if the DRAWITEMSTRUCT was ours and was painted.
     bool handle_draw_item(const DRAWITEMSTRUCT* dis);
 
-    // Parent's WM_SETTINGCHANGE routes here on "ImmersiveColorSet" so the
-    // strip can re-detect dark mode and repaint without a restart.
+    // Parent's WM_SETTINGCHANGE and WM_SYSCOLORCHANGE route here, whatever
+    // the section name, so the strip can re-detect dark mode and High
+    // Contrast and repaint without a restart (#83).
     void handle_theme_change();
+
+    // Parent's WM_DWMCOLORIZATIONCOLORCHANGED routes here: repaints the
+    // active tab's accent bar in the current DWM colour.
+    void handle_accent_change();
 
     // Returns the tab-strip height in the control's own pixel units
     // (measured via TCM_ADJUSTRECT — respects theme + font + DPI of the

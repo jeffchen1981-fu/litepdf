@@ -22,6 +22,8 @@
 // Splitter.cpp and the future VerticalSplitter.cpp. TODO phase-6.x:
 // consolidate with FindBar/TabManager Palettes into ui/Theme.hpp.
 
+#include "ui/detail/HighContrast.hpp"
+
 #include <windows.h>
 #include <dwmapi.h>
 
@@ -36,7 +38,15 @@ struct Palette {
     COLORREF bar_hover;
 };
 
-inline Palette make_palette(bool dark) {
+// Under High Contrast the bar is the system face colour and its hover or
+// drag state the system highlight (#83); dark/light no longer matter.
+inline Palette make_palette(bool dark, bool high_contrast) {
+    if (high_contrast) {
+        return {
+            /*bar_bg*/    GetSysColor(COLOR_BTNFACE),
+            /*bar_hover*/ GetSysColor(COLOR_HIGHLIGHT),
+        };
+    }
     if (dark) {
         return {
             /*bar_bg*/    RGB(0x3A, 0x3A, 0x3A),
@@ -83,8 +93,9 @@ struct SplitterCore {
 
     OnDrag on_drag;
 
-    bool        dark_mode = false;
-    Palette     palette   = make_palette(false);
+    bool        dark_mode     = false;
+    bool        high_contrast = false;
+    Palette     palette       = make_palette(false, false);
     Orientation orient    = Orientation::Horizontal;
 
     // Dispatches WndProc messages. Returns the LRESULT for handled messages

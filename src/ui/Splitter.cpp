@@ -181,16 +181,20 @@ LRESULT SplitterCore::handle_message(HWND hwnd_in, UINT msg, WPARAM w, LPARAM l)
             return 1;
         }
 
+        case WM_SYSCOLORCHANGE:
         case WM_SETTINGCHANGE: {
-            // Light theme hot-swap (consistent with FindBar/TabManager).
-            // Shared by Splitter and VerticalSplitter. WM_SETTINGCHANGE is
-            // broadcast to top-level windows only, so this arm runs because
-            // MainWindow forwards the message to both (#51).
+            // Light theme and High Contrast hot-swap (consistent with
+            // FindBar/TabManager). Shared by Splitter and VerticalSplitter.
+            // Both messages are broadcast to top-level windows only, so this
+            // arm runs because MainWindow forwards them to both (#51, #83).
             HWND parent = GetParent(hwnd_in);
             const bool new_dark = detect_dark_mode(parent ? parent : hwnd_in);
-            if (new_dark != dark_mode) {
-                dark_mode = new_dark;
-                palette   = make_palette(new_dark);
+            const bool new_hc   = is_high_contrast_active();
+            if (theme_needs_rebuild(dark_mode, high_contrast,
+                                    new_dark, new_hc)) {
+                dark_mode     = new_dark;
+                high_contrast = new_hc;
+                palette       = make_palette(new_dark, new_hc);
                 InvalidateRect(hwnd_in, nullptr, TRUE);
             }
             return 0;
@@ -251,8 +255,10 @@ Splitter::Splitter(HINSTANCE hInstance, HWND parent)
     register_class_once(hInstance);
 
     impl_->core.orient    = detail::Orientation::Horizontal;
-    impl_->core.dark_mode = detail::detect_dark_mode(parent);
-    impl_->core.palette   = detail::make_palette(impl_->core.dark_mode);
+    impl_->core.dark_mode     = detail::detect_dark_mode(parent);
+    impl_->core.high_contrast = detail::is_high_contrast_active();
+    impl_->core.palette       = detail::make_palette(
+        impl_->core.dark_mode, impl_->core.high_contrast);
 
     impl_->core.hwnd = CreateWindowExW(
         0, kWndClass, L"",
