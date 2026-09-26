@@ -1356,17 +1356,21 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             }
             break;
         }
+        case WM_SYSCOLORCHANGE:
         case WM_SETTINGCHANGE: {
-            // WM_SETTINGCHANGE is broadcast to top-level windows only, so no
-            // child HWND ever sees it directly, even the ones with their own
-            // arm that re-detects the theme and repaints. Forward to each of
-            // them (PR-B: the status bar; #51: the find bar, results panel and
-            // both splitters) unconditionally rather than gating on the
-            // "ImmersiveColorSet" name below: a High Contrast toggle does not
-            // necessarily carry that section name, and every forwarded arm
-            // already no-ops when its state did not change. A hidden control
-            // is forwarded too, so it is current when it next shows. Keep the
-            // tabs_ forwarding exactly as it was.
+            // Both messages are broadcast to top-level windows only, so no
+            // child HWND ever sees them directly, even the ones with their
+            // own arm that re-detects the theme and repaints. Forward to each
+            // of them (PR-B: the status bar; #51: the find bar, results panel
+            // and both splitters; #83: WM_SYSCOLORCHANGE, which a switch
+            // between two High Contrast themes sends and which a top-level
+            // window must hand to its common controls) unconditionally rather
+            // than gating on a section name such as "ImmersiveColorSet": a
+            // High Contrast toggle does not necessarily carry it, and every
+            // forwarded arm already no-ops when its state did not change. A
+            // hidden control is forwarded too, so it is current when it next
+            // shows. The tab strip has no arm of its own; handle_theme_change
+            // is its equivalent, ungated for the same reason (#83).
             const HWND themed_children[] = {
                 status_bar_    ? status_bar_->hwnd()    : nullptr,
                 find_bar_      ? find_bar_->hwnd()      : nullptr,
@@ -1375,13 +1379,13 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 v_splitter_    ? v_splitter_->hwnd()    : nullptr,
             };
             for (HWND child : themed_children) {
-                if (child) SendMessageW(child, WM_SETTINGCHANGE, w, l);
+                if (child) SendMessageW(child, msg, w, l);
             }
-            if (w == 0 && l != 0) {
-                auto* name = reinterpret_cast<const wchar_t*>(l);
-                if (wcscmp(name, L"ImmersiveColorSet") == 0) {
-                    if (tabs_) tabs_->handle_theme_change();
+            if (tabs_) {
+                if (msg == WM_SYSCOLORCHANGE && tabs_->hwnd()) {
+                    SendMessageW(tabs_->hwnd(), msg, w, l);
                 }
+                tabs_->handle_theme_change();
             }
             break;
         }

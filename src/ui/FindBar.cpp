@@ -1,5 +1,8 @@
 #include "ui/FindBar.hpp"
 
+#include "ui/detail/ButtonColors.hpp"
+#include "ui/detail/HighContrast.hpp"
+
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <windowsx.h>
@@ -80,12 +83,36 @@ struct Palette {
     COLORREF btn_hover;
     COLORREF btn_pressed;
     COLORREF btn_fg;
+    COLORREF btn_hover_fg;
+    COLORREF btn_pressed_fg;
     COLORREF close_hover_bg;
     COLORREF close_hover_fg;
     COLORREF border;
 };
 
-Palette make_palette(bool dark) {
+// Under High Contrast every colour comes from the system (#83). A hovered
+// button keeps the face colour and takes the hot-light text colour, so it
+// still reads differently from a latched one on the highlight colour. The
+// invalid-pattern red in WM_CTLCOLOREDIT is deliberately not in the palette:
+// it is the bar's only signal that a pattern failed to compile.
+Palette make_palette(bool dark, bool high_contrast) {
+    if (high_contrast) {
+        return {
+            /*bar_bg*/         GetSysColor(COLOR_BTNFACE),
+            /*edit_bg*/        GetSysColor(COLOR_WINDOW),
+            /*edit_fg*/        GetSysColor(COLOR_WINDOWTEXT),
+            /*counter_fg*/     GetSysColor(COLOR_BTNTEXT),
+            /*btn_normal*/     GetSysColor(COLOR_BTNFACE),
+            /*btn_hover*/      GetSysColor(COLOR_BTNFACE),
+            /*btn_pressed*/    GetSysColor(COLOR_HIGHLIGHT),
+            /*btn_fg*/         GetSysColor(COLOR_BTNTEXT),
+            /*btn_hover_fg*/   GetSysColor(COLOR_HOTLIGHT),
+            /*btn_pressed_fg*/ GetSysColor(COLOR_HIGHLIGHTTEXT),
+            /*close_hover_bg*/ GetSysColor(COLOR_BTNFACE),
+            /*close_hover_fg*/ GetSysColor(COLOR_HOTLIGHT),
+            /*border*/         GetSysColor(COLOR_WINDOWFRAME),
+        };
+    }
     if (dark) {
         return {
             /*bar_bg*/         RGB(0x2B, 0x2B, 0x2B),
@@ -96,6 +123,8 @@ Palette make_palette(bool dark) {
             /*btn_hover*/      RGB(0x3A, 0x3A, 0x3A),
             /*btn_pressed*/    RGB(0x50, 0x50, 0x50),
             /*btn_fg*/         RGB(0xE0, 0xE0, 0xE0),
+            /*btn_hover_fg*/   RGB(0xE0, 0xE0, 0xE0),
+            /*btn_pressed_fg*/ RGB(0xE0, 0xE0, 0xE0),
             /*close_hover_bg*/ RGB(0xC4, 0x2B, 0x1C),
             /*close_hover_fg*/ RGB(0xFF, 0xFF, 0xFF),
             /*border*/         RGB(0x3A, 0x3A, 0x3A),
@@ -115,6 +144,8 @@ Palette make_palette(bool dark) {
         /*btn_hover*/      RGB(0xDA, 0xDA, 0xDA),
         /*btn_pressed*/    RGB(0xC4, 0xC4, 0xC4),
         /*btn_fg*/         RGB(0x30, 0x30, 0x30),
+        /*btn_hover_fg*/   RGB(0x30, 0x30, 0x30),
+        /*btn_pressed_fg*/ RGB(0x30, 0x30, 0x30),
         /*close_hover_bg*/ RGB(0xE8, 0x11, 0x23),
         /*close_hover_fg*/ RGB(0xFF, 0xFF, 0xFF),
         /*border*/         RGB(0xA8, 0xA8, 0xA8),
@@ -219,8 +250,9 @@ struct FindBar::Impl {
     HBRUSH bg_brush   = nullptr;
     HBRUSH edit_brush = nullptr;
 
-    bool   dark_mode = false;
-    Palette palette  = make_palette(false);
+    bool   dark_mode     = false;
+    bool   high_contrast = false;
+    Palette palette      = make_palette(false, false);
     UINT    dpi      = 96;
 
     // Callbacks (all fire on the UI thread).
@@ -296,30 +328,18 @@ void paint_button(const DRAWITEMSTRUCT* dis, ButtonKind kind,
     HDC  hdc = dis->hDC;
     RECT rc  = dis->rcItem;
 
-    // Background color. Close button gets a red hover color (destructive-ish
-    // affordance consistent with tab close). Toggle buttons (Case/Regex/Whole)
-    // use the pressed color while latched so the user sees the current mode at
-    // a glance.
-    COLORREF bg = pal.btn_normal;
-    if (kind == ButtonKind::Close && v.hover) {
-        bg = pal.close_hover_bg;
-    } else if (v.pressed) {
-        bg = pal.btn_pressed;
-    } else if (latched) {
-        bg = pal.btn_pressed;
-    } else if (v.hover) {
-        bg = pal.btn_hover;
-    }
-    HBRUSH br = CreateSolidBrush(bg);
+    // Close button gets a red hover color (destructive-ish affordance
+    // consistent with tab close). Toggle buttons (Case/Regex/Whole) use the
+    // pressed color while latched so the user sees the current mode at a
+    // glance.
+    const detail::ButtonColors c = detail::button_colors(
+        pal, kind == ButtonKind::Close, v.hover, v.pressed, latched);
+    HBRUSH br = CreateSolidBrush(c.bg);
     FillRect(hdc, &rc, br);
     DeleteObject(br);
 
-    COLORREF fg = (kind == ButtonKind::Close && v.hover)
-                      ? pal.close_hover_fg
-                      : pal.btn_fg;
-
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, fg);
+    SetTextColor(hdc, c.fg);
 
     const wchar_t* glyph = L"";
     HFONT          use_font = font_glyph;
@@ -681,16 +701,24 @@ LRESULT CALLBACK find_bar_wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             return TRUE;
         }
 
+        case WM_SYSCOLORCHANGE:
         case WM_SETTINGCHANGE: {
-            // Light theme hot-swap: re-detect and repaint if the mode flipped.
-            // WM_SETTINGCHANGE is broadcast to top-level windows only, so this
-            // arm runs because MainWindow forwards the message (#51); before
-            // that it never ran.
+            // Light theme and High Contrast hot-swap: re-detect and repaint
+            // if either changed, or on every message while High Contrast is
+            // on (see detail::theme_needs_rebuild). Both messages are
+            // broadcast to top-level windows only, so this arm runs because
+            // MainWindow forwards them (#51, #83); before that it never ran.
+            // The bar has no WS_CLIPCHILDREN, so the InvalidateRect below
+            // reaches the edit and the owner-drawn buttons as well.
             HWND parent = GetParent(hwnd);
             const bool new_dark = detect_dark_mode(parent ? parent : hwnd);
-            if (new_dark != impl->dark_mode) {
-                impl->dark_mode = new_dark;
-                impl->palette   = make_palette(new_dark);
+            const bool new_hc   = detail::is_high_contrast_active();
+            if (detail::theme_needs_rebuild(impl->dark_mode,
+                                            impl->high_contrast,
+                                            new_dark, new_hc)) {
+                impl->dark_mode     = new_dark;
+                impl->high_contrast = new_hc;
+                impl->palette       = make_palette(new_dark, new_hc);
                 if (impl->bg_brush)   DeleteObject(impl->bg_brush);
                 if (impl->edit_brush) DeleteObject(impl->edit_brush);
                 impl->bg_brush   = CreateSolidBrush(impl->palette.bar_bg);
@@ -757,9 +785,10 @@ FindBar::FindBar(HINSTANCE hInstance, HWND parent)
 
     impl_->dpi       = GetDpiForWindow(parent);
     if (impl_->dpi == 0) impl_->dpi = 96;
-    impl_->dark_mode = detect_dark_mode(parent);
-    impl_->palette   = make_palette(impl_->dark_mode);
-    impl_->bg_brush  = CreateSolidBrush(impl_->palette.bar_bg);
+    impl_->dark_mode     = detect_dark_mode(parent);
+    impl_->high_contrast = detail::is_high_contrast_active();
+    impl_->palette       = make_palette(impl_->dark_mode, impl_->high_contrast);
+    impl_->bg_brush      = CreateSolidBrush(impl_->palette.bar_bg);
 
     // Sizing.
     const int bar_w = dp(kBarWidthDip,  impl_->dpi);
