@@ -38,6 +38,12 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
   safely, however late it arrives (#61).
 - Search highlights are no longer drawn over the previous page, or the previous
   tab's page, in the moment before the new one finishes rendering.
+- The tab strip is dark in dark mode. The area beside and around the tabs, and a
+  thin frame around each tab, stayed light grey (#86).
+- High Contrast themes are followed by the tab strip, the find bar, the search
+  results panel and the pane dividers, not only the status bar. They switch to
+  the system's contrast colours at startup and when High Contrast is turned on
+  or off while LitePDF is running (#83).
 
 ## [1.3.0] — 2026-09-13 — Zoom, wheel scrolling, and the page indicator
 

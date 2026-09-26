@@ -78,6 +78,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_page_anchor.cpp          # PR-A2 Task 2
     unit/test_scroll_math.cpp          # PR-A2 Task 7
     unit/test_status_bar_math.cpp      # PR-B Task 1
+    unit/test_theme_colors.cpp         # #83 / #86 High Contrast palettes
     unit/test_escrow_context.cpp       # #61 escrow lock table + root context
     unit/test_document_selection.cpp   # #52 Task 6
     unit/test_selection_drag.cpp       # #52 Task 8

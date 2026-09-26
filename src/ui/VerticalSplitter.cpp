@@ -90,8 +90,10 @@ VerticalSplitter::VerticalSplitter(HINSTANCE hInstance, HWND parent)
     register_class_once(hInstance);
 
     impl_->core.orient    = detail::Orientation::Vertical;
-    impl_->core.dark_mode = detail::detect_dark_mode(parent);
-    impl_->core.palette   = detail::make_palette(impl_->core.dark_mode);
+    impl_->core.dark_mode     = detail::detect_dark_mode(parent);
+    impl_->core.high_contrast = detail::is_high_contrast_active();
+    impl_->core.palette       = detail::make_palette(
+        impl_->core.dark_mode, impl_->core.high_contrast);
 
     impl_->core.hwnd = CreateWindowExW(
         0, kWndClass, L"",

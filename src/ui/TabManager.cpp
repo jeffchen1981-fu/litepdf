@@ -1,5 +1,7 @@
 #include "ui/TabManager.hpp"
 
+#include "ui/detail/HighContrast.hpp"
+
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <windowsx.h>
@@ -30,17 +32,21 @@ unique_hfont make_unique_hfont(HFONT h) {
     return unique_hfont(h, &DeleteObject);
 }
 
+// bg_normal is also the strip behind the tabs (tab_subclass_proc's
+// WM_PAINT, #86), so an inactive tab sits flush with it.
 struct Palette {
     COLORREF bg_normal;
     COLORREF bg_hover;
     COLORREF bg_active;
     COLORREF text_inactive;
+    COLORREF text_hover;
     COLORREF text_active;
     COLORREF separator;
     COLORREF accent;
     COLORREF close_hover_bg;
     COLORREF close_hover_fg;
     COLORREF close_fg;
+    COLORREF close_fg_active;
 };
 
 COLORREF resolve_accent_color() {
@@ -57,32 +63,57 @@ COLORREF resolve_accent_color() {
     return GetSysColor(COLOR_HOTLIGHT);
 }
 
-Palette make_palette(bool dark) {
+// Under High Contrast every colour comes from the system (#83): the strip and
+// idle tabs on the face colour, the active tab on the window colour with a
+// highlight bar, a hovered tab in the hot-light text colour. The close glyph
+// takes the text colour of the tab it sits on, which is why it has an
+// active-tab variant.
+Palette make_palette(bool dark, bool high_contrast) {
+    if (high_contrast) {
+        return {
+            /*bg_normal*/       GetSysColor(COLOR_BTNFACE),
+            /*bg_hover*/        GetSysColor(COLOR_BTNFACE),
+            /*bg_active*/       GetSysColor(COLOR_WINDOW),
+            /*text_inactive*/   GetSysColor(COLOR_BTNTEXT),
+            /*text_hover*/      GetSysColor(COLOR_HOTLIGHT),
+            /*text_active*/     GetSysColor(COLOR_WINDOWTEXT),
+            /*separator*/       GetSysColor(COLOR_GRAYTEXT),
+            /*accent*/          GetSysColor(COLOR_HIGHLIGHT),
+            /*close_hover_bg*/  GetSysColor(COLOR_HIGHLIGHT),
+            /*close_hover_fg*/  GetSysColor(COLOR_HIGHLIGHTTEXT),
+            /*close_fg*/        GetSysColor(COLOR_BTNTEXT),
+            /*close_fg_active*/ GetSysColor(COLOR_WINDOWTEXT),
+        };
+    }
     if (dark) {
         return {
-            /*bg_normal*/      RGB(0x26, 0x26, 0x26),
-            /*bg_hover*/       RGB(0x3A, 0x3A, 0x3A),
-            /*bg_active*/      RGB(0x2D, 0x2D, 0x2D),
-            /*text_inactive*/  RGB(0xA0, 0xA0, 0xA0),
-            /*text_active*/    RGB(0xF2, 0xF2, 0xF2),
-            /*separator*/      RGB(0x3A, 0x3A, 0x3A),
-            /*accent*/         resolve_accent_color(),
-            /*close_hover_bg*/ RGB(0xC4, 0x2B, 0x1C),
-            /*close_hover_fg*/ RGB(0xFF, 0xFF, 0xFF),
-            /*close_fg*/       RGB(0xC8, 0xC8, 0xC8),
+            /*bg_normal*/       RGB(0x26, 0x26, 0x26),
+            /*bg_hover*/        RGB(0x3A, 0x3A, 0x3A),
+            /*bg_active*/       RGB(0x2D, 0x2D, 0x2D),
+            /*text_inactive*/   RGB(0xA0, 0xA0, 0xA0),
+            /*text_hover*/      RGB(0xA0, 0xA0, 0xA0),
+            /*text_active*/     RGB(0xF2, 0xF2, 0xF2),
+            /*separator*/       RGB(0x3A, 0x3A, 0x3A),
+            /*accent*/          resolve_accent_color(),
+            /*close_hover_bg*/  RGB(0xC4, 0x2B, 0x1C),
+            /*close_hover_fg*/  RGB(0xFF, 0xFF, 0xFF),
+            /*close_fg*/        RGB(0xC8, 0xC8, 0xC8),
+            /*close_fg_active*/ RGB(0xC8, 0xC8, 0xC8),
         };
     }
     return {
-        /*bg_normal*/      RGB(0xF3, 0xF3, 0xF3),
-        /*bg_hover*/       RGB(0xEA, 0xEA, 0xEA),
-        /*bg_active*/      RGB(0xFF, 0xFF, 0xFF),
-        /*text_inactive*/  RGB(0x60, 0x60, 0x60),
-        /*text_active*/    RGB(0x1C, 0x1C, 0x1C),
-        /*separator*/      RGB(0xD8, 0xD8, 0xD8),
-        /*accent*/         resolve_accent_color(),
-        /*close_hover_bg*/ RGB(0xE8, 0x11, 0x23),
-        /*close_hover_fg*/ RGB(0xFF, 0xFF, 0xFF),
-        /*close_fg*/       RGB(0x50, 0x50, 0x50),
+        /*bg_normal*/       RGB(0xF3, 0xF3, 0xF3),
+        /*bg_hover*/        RGB(0xEA, 0xEA, 0xEA),
+        /*bg_active*/       RGB(0xFF, 0xFF, 0xFF),
+        /*text_inactive*/   RGB(0x60, 0x60, 0x60),
+        /*text_hover*/      RGB(0x60, 0x60, 0x60),
+        /*text_active*/     RGB(0x1C, 0x1C, 0x1C),
+        /*separator*/       RGB(0xD8, 0xD8, 0xD8),
+        /*accent*/          resolve_accent_color(),
+        /*close_hover_bg*/  RGB(0xE8, 0x11, 0x23),
+        /*close_hover_fg*/  RGB(0xFF, 0xFF, 0xFF),
+        /*close_fg*/        RGB(0x50, 0x50, 0x50),
+        /*close_fg_active*/ RGB(0x50, 0x50, 0x50),
     };
 }
 
@@ -163,9 +194,11 @@ void paint_tab(const DRAWITEMSTRUCT* dis, const std::wstring& label,
         DeleteObject(accent);
     }
 
+    COLORREF text = pc.palette.text_inactive;
+    if (state == TabVisualState::Hover)  text = pc.palette.text_hover;
+    if (state == TabVisualState::Active) text = pc.palette.text_active;
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, (state == TabVisualState::Active)
-        ? pc.palette.text_active : pc.palette.text_inactive);
+    SetTextColor(hdc, text);
     HFONT chosen = (state == TabVisualState::Active) ? pc.font_bold
                                                      : pc.font_normal;
     HGDIOBJ old_font = SelectObject(hdc, chosen);
@@ -191,8 +224,11 @@ void paint_tab(const DRAWITEMSTRUCT* dis, const std::wstring& label,
             FillRect(hdc, &cb, hb);
             DeleteObject(hb);
         }
-        COLORREF x_color = close_is_hot ? pc.palette.close_hover_fg
-                                        : pc.palette.close_fg;
+        COLORREF x_color = pc.palette.close_fg;
+        if (state == TabVisualState::Active) {
+            x_color = pc.palette.close_fg_active;
+        }
+        if (close_is_hot) x_color = pc.palette.close_hover_fg;
         HPEN pen = CreatePen(PS_SOLID,
                              MulDiv(1, static_cast<int>(pc.dpi), 96),
                              x_color);
@@ -267,8 +303,9 @@ struct TabManager::Impl {
     unique_hfont font_bold   { nullptr, &DeleteObject };
     UINT cached_dpi = 0;
 
-    bool dark_mode = false;
-    Palette palette = make_palette(false);
+    bool dark_mode     = false;
+    bool high_contrast = false;
+    Palette palette = make_palette(false, false);
 
     void ensure_fonts(UINT dpi) {
         if (cached_dpi == dpi && font_normal && font_bold) return;
@@ -300,8 +337,9 @@ TabManager::TabManager(HINSTANCE hInstance, HWND parent)
                  reinterpret_cast<WPARAM>(impl_->font_normal.get()),
                  MAKELPARAM(TRUE, 0));
 
-    impl_->dark_mode = detect_dark_mode(parent);
-    impl_->palette   = make_palette(impl_->dark_mode);
+    impl_->dark_mode     = detect_dark_mode(parent);
+    impl_->high_contrast = detail::is_high_contrast_active();
+    impl_->palette       = make_palette(impl_->dark_mode, impl_->high_contrast);
 }
 
 TabManager::~TabManager() {
@@ -466,9 +504,16 @@ void TabManager::handle_theme_change() {
     if (!impl_ || !impl_->hwnd) return;
     HWND parent = GetParent(impl_->hwnd);
     const bool new_dark = detect_dark_mode(parent ? parent : impl_->hwnd);
-    if (new_dark == impl_->dark_mode) return;
-    impl_->dark_mode = new_dark;
-    impl_->palette   = make_palette(new_dark);
+    const bool new_hc   = detail::is_high_contrast_active();
+    if (!detail::theme_needs_rebuild(impl_->dark_mode, impl_->high_contrast,
+                                     new_dark, new_hc)) {
+        return;
+    }
+    impl_->dark_mode     = new_dark;
+    impl_->high_contrast = new_hc;
+    impl_->palette       = make_palette(new_dark, new_hc);
+    // The whole client area: the strip behind the tabs is painted from the
+    // palette too (tab_subclass_proc's WM_PAINT, #86).
     InvalidateRect(impl_->hwnd, nullptr, TRUE);
 }
 
@@ -481,6 +526,61 @@ LRESULT CALLBACK tab_subclass_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l,
     auto& impl = *self->impl_;
 
     switch (msg) {
+        case WM_ERASEBKGND:
+            // WM_PAINT below fills every pixel; erasing first would only
+            // flash the background under the tabs.
+            return 1;
+        case WM_PAINT: {
+            // The whole strip is painted here, not by the control (#86). Its
+            // own paint fills the strip with COLOR_BTNFACE, which is light in
+            // dark mode, and draws a 2 px themed frame around every item plus
+            // a pane border along the bottom -- all outside the rcItem that
+            // WM_DRAWITEM hands the owner. So: fill with bg_normal (a system
+            // colour under High Contrast), then draw each tab through
+            // handle_draw_item with its full TCM_GETITEMRECT rectangle, the
+            // same rectangle the close button's hit test uses. Buffered, so a
+            // hover repaint does not flash the background under the tab.
+            PAINTSTRUCT ps;
+            HDC  hdc = BeginPaint(hwnd, &ps);
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            auto paint_strip = [&](HDC dc) {
+                HBRUSH br = CreateSolidBrush(impl.palette.bg_normal);
+                FillRect(dc, &rc, br);
+                DeleteObject(br);
+                const int sel = static_cast<int>(
+                    SendMessageW(hwnd, TCM_GETCURSEL, 0, 0));
+                for (int i = 0, n = self->count(); i < n; ++i) {
+                    DRAWITEMSTRUCT dis = {};
+                    dis.CtlType    = ODT_TAB;
+                    dis.itemID     = static_cast<UINT>(i);
+                    dis.itemAction = ODA_DRAWENTIRE;
+                    dis.itemState  = (i == sel) ? ODS_SELECTED : 0;
+                    dis.hwndItem   = hwnd;
+                    dis.hDC        = dc;
+                    dis.rcItem     = impl.tab_rect(i);
+                    self->handle_draw_item(&dis);
+                }
+            };
+            HDC     mem = CreateCompatibleDC(hdc);
+            HBITMAP bmp = mem ? CreateCompatibleBitmap(hdc, rc.right, rc.bottom)
+                              : nullptr;
+            if (bmp) {
+                HGDIOBJ old_bmp = SelectObject(mem, bmp);
+                paint_strip(mem);
+                BitBlt(hdc, ps.rcPaint.left, ps.rcPaint.top,
+                       ps.rcPaint.right - ps.rcPaint.left,
+                       ps.rcPaint.bottom - ps.rcPaint.top,
+                       mem, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
+                SelectObject(mem, old_bmp);
+                DeleteObject(bmp);
+            } else {
+                paint_strip(hdc);  // unbuffered beats leaving it unpainted
+            }
+            if (mem) DeleteDC(mem);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
         case WM_MBUTTONDOWN: {
             TCHITTESTINFO hti = {};
             hti.pt.x = GET_X_LPARAM(l);

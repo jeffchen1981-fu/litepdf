@@ -1,6 +1,7 @@
 // LitePDF -- ui::StatusBar: bottom status bar with page indicator + go-to-page.
 #include "ui/StatusBar.hpp"
 
+#include "ui/detail/HighContrast.hpp"
 #include "ui/detail/StatusBarMath.hpp"
 
 #include <commctrl.h>
@@ -83,17 +84,10 @@ bool detect_dark_mode(HWND hwnd) {
     return false;
 }
 
-// True while the OS is running under a High Contrast theme. Checked
+// High Contrast is detected by detail::is_high_contrast_active(), checked
 // independently of dark/light so a HC user's own theme is never overridden by
 // this control's custom palette (see the Palette comment above).
-bool is_high_contrast_active() {
-    HIGHCONTRASTW hc = {};
-    hc.cbSize = sizeof(hc);
-    if (SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0)) {
-        return (hc.dwFlags & HCF_HIGHCONTRASTON) != 0;
-    }
-    return false;
-}
+using detail::is_high_contrast_active;
 
 HFONT create_status_font(UINT dpi, int pt_size = 9) {
     LOGFONTW lf = {};
@@ -380,17 +374,22 @@ LRESULT CALLBACK status_bar_subclass(HWND hwnd, UINT msg, WPARAM w,
             SetBkMode(hdc, TRANSPARENT);
             return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
         }
+        case WM_SYSCOLORCHANGE:
         case WM_SETTINGCHANGE: {
             // Light theme hot-swap (consistent with FindBar/ResultsPanel/
             // Splitter). Re-derives both dark-mode and High-Contrast state
             // together since either one changes what status_bar_subclass
-            // should paint above.
+            // should paint above. While High Contrast stays on, every message
+            // repaints: a switch between two contrast themes changes the
+            // system colours the HC branches above read. Falls through to
+            // DefSubclassProc, so the status bar control sees the message too.
             if (impl) {
                 HWND parent = GetParent(hwnd);
                 const bool new_dark = detect_dark_mode(parent ? parent : hwnd);
                 const bool new_hc   = is_high_contrast_active();
-                if (new_dark != impl->dark_mode ||
-                    new_hc   != impl->high_contrast) {
+                if (detail::theme_needs_rebuild(impl->dark_mode,
+                                                impl->high_contrast,
+                                                new_dark, new_hc)) {
                     impl->dark_mode     = new_dark;
                     impl->high_contrast = new_hc;
                     impl->palette       = make_palette(new_dark);
