@@ -44,6 +44,12 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
   results panel and the pane dividers, not only the status bar. They switch to
   the system's contrast colours at startup and when High Contrast is turned on
   or off while LitePDF is running (#83).
+- The thumbnail pane follows the theme. It kept the colours it started with
+  when you switched between dark and light mode or turned High Contrast on or
+  off, until LitePDF was restarted, and it ignored High Contrast entirely. It
+  now switches like the rest of the window, in every open tab. The frame around
+  the current page follows the system accent colour, and no longer stays black
+  for the whole session after LitePDF starts under High Contrast (#90).
 
 ## [1.3.0] — 2026-09-13 — Zoom, wheel scrolling, and the page indicator
 

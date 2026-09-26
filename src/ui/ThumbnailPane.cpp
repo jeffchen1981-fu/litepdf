@@ -3,6 +3,8 @@
 #include "core/ThumbCache.hpp"
 #include "core/ThumbnailModel.hpp"
 #include "core/ThumbnailRenderer.hpp"
+#include "ui/detail/HighContrast.hpp"
+#include "ui/detail/ThumbnailPalette.hpp"
 
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -60,24 +62,19 @@ constexpr int kLabelHeightDip  = 16;  // height of the "Page N" label line
 constexpr int kBorderWidthDip  = 2;   // current-page highlight border width
 constexpr int kPlaceholderInsetDip = 1;  // 1-px outline around the tile box
 
-struct Palette {
-    COLORREF pane_bg;       // pane background (around tiles)
-    COLORREF tile_fill;     // placeholder rectangle fill
-    COLORREF tile_border;   // placeholder rectangle outline
-    COLORREF text;          // page-number label color
-    COLORREF current_border;// current-page highlight border (uses accent)
-};
+using Palette = detail::ThumbnailPalette;
 
-// M2 carry-over: pre-created GDI brushes for the four palette colors used
-// per row paint. Defined at namespace scope (rather than nested inside
+// M2 carry-over: pre-created GDI brushes for the palette colors used on
+// every row paint. Defined at namespace scope (rather than nested inside
 // Impl) so the anonymous-namespace painters can take it by reference
 // without having to friend `Impl`. Owned by Impl; rebuilt whenever
-// `palette` changes (ctor / on_dpi_changed / future WM_SETTINGCHANGE).
+// `palette` changes (ctor / on_dpi_changed / theme change). The current-page
+// frame has no cached brush: its colour can be the DWM accent, read at
+// paint time, and only one row per pass draws it.
 struct PaletteBrushes {
-    HBRUSH pane_bg        = nullptr;
-    HBRUSH tile_fill      = nullptr;
-    HBRUSH tile_border    = nullptr;
-    HBRUSH current_border = nullptr;
+    HBRUSH pane_bg     = nullptr;
+    HBRUSH tile_fill   = nullptr;
+    HBRUSH tile_border = nullptr;
 };
 
 COLORREF resolve_accent_color() {
@@ -90,25 +87,6 @@ COLORREF resolve_accent_color() {
         return RGB(r, g, b);
     }
     return GetSysColor(COLOR_HOTLIGHT);
-}
-
-Palette make_palette(bool dark) {
-    if (dark) {
-        return {
-            /*pane_bg*/        RGB(0x1F, 0x1F, 0x1F),
-            /*tile_fill*/      RGB(0x2D, 0x2D, 0x2D),
-            /*tile_border*/    RGB(0x55, 0x55, 0x55),
-            /*text*/           RGB(0xE0, 0xE0, 0xE0),
-            /*current_border*/ resolve_accent_color(),
-        };
-    }
-    return {
-        /*pane_bg*/        RGB(0xF5, 0xF5, 0xF5),
-        /*tile_fill*/      RGB(0xFF, 0xFF, 0xFF),
-        /*tile_border*/    RGB(0xC8, 0xC8, 0xC8),
-        /*text*/           RGB(0x30, 0x30, 0x30),
-        /*current_border*/ resolve_accent_color(),
-    };
 }
 
 bool detect_dark_mode(HWND hwnd) {
@@ -168,17 +146,17 @@ struct ThumbnailPane::Impl {
     litepdf::core::ThumbCache*        cache    = nullptr;
     litepdf::core::ThumbnailRenderer* renderer = nullptr;
 
-    bool    dark_mode = false;
-    Palette palette   = make_palette(false);
-    UINT    cached_dpi = 96;
+    bool    dark_mode     = false;
+    bool    high_contrast = false;
+    Palette palette       = detail::make_thumbnail_palette(false, false);
+    UINT    cached_dpi    = 96;
 
-    // M2 carry-over: pre-create the four brushes paint_placeholder /
-    // paint_thumb use on every row paint. Without caching, a 30-tile
-    // repaint at 4K DPI would CreateSolidBrush / DeleteObject 120-150
-    // times per pass; the GDI object table churn is measurable. Rebuilt
-    // whenever the palette changes (ctor, on_dpi_changed, future
-    // WM_SETTINGCHANGE for dark-mode flip). Type lives at namespace scope
-    // so the anonymous-namespace painters can accept it by reference.
+    // M2 carry-over: pre-create the brushes paint_placeholder / paint_thumb
+    // use on every row paint. Without caching, a 30-tile repaint at 4K DPI
+    // would CreateSolidBrush / DeleteObject 120-150 times per pass; the GDI
+    // object table churn is measurable. Rebuilt whenever the palette
+    // changes (ctor, on_dpi_changed, theme change). Type lives at namespace
+    // scope so the anonymous-namespace painters can accept it by reference.
     PaletteBrushes brushes_;
 
     // T6: the set of pages for which a render is currently in flight (i.e.
@@ -190,10 +168,9 @@ struct ThumbnailPane::Impl {
 
     void rebuild_brushes() {
         delete_brushes();
-        brushes_.pane_bg        = CreateSolidBrush(palette.pane_bg);
-        brushes_.tile_fill      = CreateSolidBrush(palette.tile_fill);
-        brushes_.tile_border    = CreateSolidBrush(palette.tile_border);
-        brushes_.current_border = CreateSolidBrush(palette.current_border);
+        brushes_.pane_bg     = CreateSolidBrush(palette.pane_bg);
+        brushes_.tile_fill   = CreateSolidBrush(palette.tile_fill);
+        brushes_.tile_border = CreateSolidBrush(palette.tile_border);
     }
 
     void delete_brushes() {
@@ -201,7 +178,6 @@ struct ThumbnailPane::Impl {
             &brushes_.pane_bg,
             &brushes_.tile_fill,
             &brushes_.tile_border,
-            &brushes_.current_border,
         };
         for (HBRUSH* slot : slots) {
             if (*slot) {
@@ -209,6 +185,30 @@ struct ThumbnailPane::Impl {
                 *slot = nullptr;
             }
         }
+    }
+
+    // Adopt a theme: palette, cached brushes, and the ListView's own colours
+    // (it paints the area below the last row itself). Used by the ctor and by
+    // the theme arm in thumb_list_subclass_proc.
+    void apply_theme(bool dark, bool hc) {
+        dark_mode     = dark;
+        high_contrast = hc;
+        palette       = detail::make_thumbnail_palette(dark, hc);
+        rebuild_brushes();
+        if (!list_hwnd) return;
+        ListView_SetBkColor    (list_hwnd, palette.pane_bg);
+        ListView_SetTextBkColor(list_hwnd, palette.pane_bg);
+        ListView_SetTextColor  (list_hwnd, palette.text);
+        InvalidateRect(list_hwnd, nullptr, TRUE);
+    }
+
+    // The current-page frame's colour. Outside High Contrast it is the DWM
+    // accent, asked for at paint time (see make_thumbnail_palette): the
+    // WM_DWMCOLORIZATIONCOLORCHANGED arm repaints when DWM announces a new
+    // colour, including the one it restores when High Contrast goes off.
+    COLORREF current_border() const {
+        return palette.current_border != CLR_INVALID ? palette.current_border
+                                                     : resolve_accent_color();
     }
 
     // Cancel any in-flight renders and drop the pending set. Called at
@@ -297,16 +297,11 @@ ThumbnailPane::ThumbnailPane(HINSTANCE hInstance, HWND parent)
 
     ListView_SetExtendedListViewStyle(impl_->list_hwnd, LVS_EX_DOUBLEBUFFER);
 
-    // Cache DPI + dark-mode state for the palette. detect_dark_mode reads
-    // from the parent so the pane matches the rest of the chrome.
+    // Cache DPI + theme state for the palette. detect_dark_mode reads from
+    // the parent so the pane matches the rest of the chrome.
     impl_->cached_dpi = GetDpiForWindow(impl_->list_hwnd);
-    impl_->dark_mode  = detect_dark_mode(parent);
-    impl_->palette    = make_palette(impl_->dark_mode);
-    impl_->rebuild_brushes();  // M2: cache GDI brushes, refreshed on DPI / theme change.
-
-    ListView_SetBkColor    (impl_->list_hwnd, impl_->palette.pane_bg);
-    ListView_SetTextBkColor(impl_->list_hwnd, impl_->palette.pane_bg);
-    ListView_SetTextColor  (impl_->list_hwnd, impl_->palette.text);
+    impl_->apply_theme(detect_dark_mode(parent),
+                       detail::is_high_contrast_active());
 
     // Single full-width column (LVCF_WIDTH only — no header text needed
     // since LVS_NOCOLUMNHEADER hides the bar).
@@ -542,9 +537,7 @@ void ThumbnailPane::on_dpi_changed(unsigned new_dpi) {
     impl_->cancel_in_flight();
 
     // M2: palette colors are DPI-invariant in our scheme, but rebuild
-    // brushes for symmetry with future WM_SETTINGCHANGE handlers — and
-    // because if the dark-mode probe ever runs here we'd otherwise leak
-    // the old brushes when palette swaps.
+    // brushes for symmetry with the theme arm (apply_theme).
     impl_->rebuild_brushes();
 
     impl_->refresh_item_height();
@@ -568,6 +561,7 @@ struct PaintArgs {
     int                   page_count;
     const Palette&        palette;
     const PaletteBrushes& brushes;  // M2: cached, owned by Impl.
+    COLORREF              current_border;  // resolved per paint, see Impl
 };
 
 // Compute the centered tile rectangle within a row's rcItem. Shared by
@@ -591,7 +585,8 @@ void paint_current_highlight(HDC hdc, const RECT& tile, int page,
                               const PaintArgs& args) {
     if (page != args.current_page || args.page_count <= 0) return;
     const int bw = std::max(1, dp(kBorderWidthDip, args.dpi));
-    HBRUSH hb = args.brushes.current_border;
+    HBRUSH hb = CreateSolidBrush(args.current_border);
+    if (!hb) return;
     RECT hrc = tile;
     InflateRect(&hrc, bw, bw);
     // Top, bottom, left, right strips drawn via FillRect for crisp pixel
@@ -604,6 +599,7 @@ void paint_current_highlight(HDC hdc, const RECT& tile, int page,
     FillRect(hdc, &b, hb);
     FillRect(hdc, &l, hb);
     FillRect(hdc, &r, hb);
+    DeleteObject(hb);
 }
 
 // Draw the "Page N" label below the tile. Shared by both paint paths.
@@ -754,6 +750,35 @@ LRESULT CALLBACK thumb_list_subclass_proc(HWND hwnd, UINT msg, WPARAM w,
             // the row scrolls back into view.
             return 0;
         }
+        case WM_SYSCOLORCHANGE:
+        case WM_SETTINGCHANGE: {
+            // Theme hot-swap (#90). Both messages are broadcast to top-level
+            // windows only, so this arm runs because MainWindow forwards them
+            // to every tab's pane, hidden or not. The ListView handles them
+            // first (a common control must see WM_SYSCOLORCHANGE), so nothing
+            // it does in response can override the colours apply_theme sets.
+            // Rebuild on a dark/light flip or a High Contrast toggle, and on
+            // every message while High Contrast is on (see
+            // detail::theme_needs_rebuild).
+            const LRESULT r = DefSubclassProc(hwnd, msg, w, l);
+            const bool new_dark = detect_dark_mode(impl.parent);
+            const bool new_hc   = detail::is_high_contrast_active();
+            if (detail::theme_needs_rebuild(impl.dark_mode, impl.high_contrast,
+                                            new_dark, new_hc)) {
+                impl.apply_theme(new_dark, new_hc);
+            }
+            return r;
+        }
+        case WM_DWMCOLORIZATIONCOLORCHANGED: {
+            // The current-page frame reads the DWM accent at paint time, so
+            // repainting that row is all it takes. MainWindow forwards this
+            // top-level-only message too.
+            const int cur = impl.model.current_page();
+            if (cur >= 0 && cur < impl.model.page_count()) {
+                ListView_RedrawItems(hwnd, cur, cur);
+            }
+            return 0;
+        }
         case WM_SIZE: {
             const int new_h = HIWORD(l);
             impl.model.set_viewport_h_px(new_h);
@@ -860,6 +885,10 @@ LRESULT CALLBACK thumb_parent_subclass_proc(HWND hwnd, UINT msg, WPARAM w,
                     impl.model.page_count(),
                     impl.palette,
                     impl.brushes_,
+                    // Only the current page draws the frame, so only it
+                    // asks DWM for the accent.
+                    page == impl.model.current_page() ? impl.current_border()
+                                                      : CLR_INVALID,
                 };
 
                 // T6: cache hit → blit; miss → placeholder + submit.

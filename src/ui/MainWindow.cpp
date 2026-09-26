@@ -406,6 +406,17 @@ HWND MainWindow::left_pane_hwnd() const {
     return nullptr;
 }
 
+void MainWindow::send_to_thumb_panes(UINT msg, WPARAM w, LPARAM l) {
+    if (!tabs_) return;
+    for (int i = 0, n = tabs_->count(); i < n; ++i) {
+        auto* t = tabs_->tab_at(i);
+        if (!t || !t->view) continue;
+        if (auto* tp = t->view->thumb_pane(); tp && tp->hwnd()) {
+            SendMessageW(tp->hwnd(), msg, w, l);
+        }
+    }
+}
+
 void MainWindow::on_layout() {
     if (!hwnd_) return;
     RECT rc; GetClientRect(hwnd_, &rc);
@@ -1359,8 +1370,10 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         case WM_DWMCOLORIZATIONCOLORCHANGED:
             // The tab strip's accent bar follows the DWM colour, which is
             // black under High Contrast; this repaints it when DWM restores
-            // or the user changes it (#83).
+            // or the user changes it (#83). The thumbnail panes' current-page
+            // frame follows it the same way (#90).
             if (tabs_) tabs_->handle_accent_change();
+            send_to_thumb_panes(msg, w, l);
             break;
         case WM_SYSCOLORCHANGE:
         case WM_SETTINGCHANGE: {
@@ -1389,6 +1402,9 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             for (HWND child : themed_children) {
                 if (child) SendMessageW(child, msg, w, l);
             }
+            // One thumbnail pane per tab, so they are not in the fixed list
+            // above (#90).
+            send_to_thumb_panes(msg, w, l);
             if (tabs_) {
                 if (msg == WM_SYSCOLORCHANGE && tabs_->hwnd()) {
                     SendMessageW(tabs_->hwnd(), msg, w, l);

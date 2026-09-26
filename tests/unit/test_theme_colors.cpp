@@ -1,4 +1,4 @@
-// #83 / #86: High Contrast palette rules shared by the custom-painted
+// #83 / #86 / #90: High Contrast palette rules shared by the custom-painted
 // components -- when a theme message rebuilds a palette, and which colour
 // pair each owner-drawn button state gets.
 #include <catch2/catch_test_macros.hpp>
@@ -6,6 +6,7 @@
 #include "ui/detail/ButtonColors.hpp"
 #include "ui/detail/HighContrast.hpp"
 #include "ui/detail/SplitterCore.hpp"
+#include "ui/detail/ThumbnailPalette.hpp"
 
 using litepdf::ui::detail::button_colors;
 using litepdf::ui::detail::theme_needs_rebuild;
@@ -83,4 +84,27 @@ TEST_CASE("Theme splitter palette uses system colours under High Contrast", "[th
     // Outside High Contrast the fixed palettes are untouched.
     REQUIRE(make_palette(true,  false).bar_bg == RGB(0x3A, 0x3A, 0x3A));
     REQUIRE(make_palette(false, false).bar_bg == RGB(0xD8, 0xD8, 0xD8));
+}
+
+TEST_CASE("Theme thumbnail palette uses system colours under High Contrast", "[theme]") {
+    using litepdf::ui::detail::make_thumbnail_palette;
+    for (bool dark : {false, true}) {
+        const auto pal = make_thumbnail_palette(dark, /*high_contrast=*/true);
+        REQUIRE(pal.pane_bg        == GetSysColor(COLOR_WINDOW));
+        REQUIRE(pal.tile_fill      == GetSysColor(COLOR_WINDOW));
+        REQUIRE(pal.tile_border    == GetSysColor(COLOR_WINDOWTEXT));
+        REQUIRE(pal.text           == GetSysColor(COLOR_WINDOWTEXT));
+        REQUIRE(pal.current_border == GetSysColor(COLOR_HIGHLIGHT));
+    }
+    // Outside High Contrast the fixed palettes are untouched.
+    REQUIRE(make_thumbnail_palette(true,  false).pane_bg == RGB(0x1F, 0x1F, 0x1F));
+    REQUIRE(make_thumbnail_palette(false, false).pane_bg == RGB(0xF5, 0xF5, 0xF5));
+}
+
+TEST_CASE("Theme thumbnail palette leaves the accent to paint time outside High Contrast", "[theme]") {
+    // #90: DWM reports black under High Contrast, so an accent frozen into the
+    // palette would stay black. The sentinel makes the pane ask DWM per paint.
+    using litepdf::ui::detail::make_thumbnail_palette;
+    REQUIRE(make_thumbnail_palette(false, false).current_border == CLR_INVALID);
+    REQUIRE(make_thumbnail_palette(true,  false).current_border == CLR_INVALID);
 }
