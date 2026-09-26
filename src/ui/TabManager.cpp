@@ -540,6 +540,24 @@ LRESULT CALLBACK tab_subclass_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l,
             // handle_draw_item with its full TCM_GETITEMRECT rectangle, the
             // same rectangle the close button's hit test uses. Buffered, so a
             // hover repaint does not flash the background under the tab.
+            //
+            // The strip's only child, the scroll up-down that appears when
+            // the tabs overflow, must be clipped out of the copy. The control
+            // has no WS_CLIPCHILDREN, and TCM_GETITEMRECT can run its deferred
+            // layout, which shows the up-down and paints it before the copy
+            // lands: an unclipped BitBlt covered the arrows until the next
+            // scroll (probed with eight tabs in a 1800 px window).
+            auto clip_out_children = [&](HDC dc) {
+                for (HWND c = GetWindow(hwnd, GW_CHILD); c;
+                     c = GetWindow(c, GW_HWNDNEXT)) {
+                    if (!IsWindowVisible(c)) continue;
+                    RECT cr;
+                    GetWindowRect(c, &cr);
+                    MapWindowPoints(nullptr, hwnd,
+                                    reinterpret_cast<POINT*>(&cr), 2);
+                    ExcludeClipRect(dc, cr.left, cr.top, cr.right, cr.bottom);
+                }
+            };
             PAINTSTRUCT ps;
             HDC  hdc = BeginPaint(hwnd, &ps);
             RECT rc;
@@ -568,6 +586,7 @@ LRESULT CALLBACK tab_subclass_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l,
             if (bmp) {
                 HGDIOBJ old_bmp = SelectObject(mem, bmp);
                 paint_strip(mem);
+                clip_out_children(hdc);  // after the layout paint_strip ran
                 BitBlt(hdc, ps.rcPaint.left, ps.rcPaint.top,
                        ps.rcPaint.right - ps.rcPaint.left,
                        ps.rcPaint.bottom - ps.rcPaint.top,
@@ -575,6 +594,7 @@ LRESULT CALLBACK tab_subclass_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l,
                 SelectObject(mem, old_bmp);
                 DeleteObject(bmp);
             } else {
+                clip_out_children(hdc);
                 paint_strip(hdc);  // unbuffered beats leaving it unpainted
             }
             if (mem) DeleteDC(mem);

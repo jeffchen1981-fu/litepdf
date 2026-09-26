@@ -1367,7 +1367,9 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // window must hand to its common controls) unconditionally rather
             // than gating on a section name such as "ImmersiveColorSet": a
             // High Contrast toggle does not necessarily carry it, and every
-            // forwarded arm already no-ops when its state did not change. A
+            // forwarded arm already no-ops when its state did not change
+            // (outside High Contrast; under it each arm repaints, see
+            // detail::theme_needs_rebuild). A
             // hidden control is forwarded too, so it is current when it next
             // shows. The tab strip has no arm of its own; handle_theme_change
             // is its equivalent, ungated for the same reason (#83).
