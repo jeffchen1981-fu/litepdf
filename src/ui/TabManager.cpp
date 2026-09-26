@@ -485,7 +485,15 @@ bool TabManager::handle_draw_item(const DRAWITEMSTRUCT* dis) {
         state = TabVisualState::Hover;
     }
 
-    PaintCtx pc { impl_->palette, impl_->font_normal.get(),
+    // The DWM accent is read at paint time, not frozen into the palette: under
+    // High Contrast DWM reports black, so a palette built then -- at a start
+    // under High Contrast -- kept the active tab's bar black after High
+    // Contrast was turned off (live-probed on a real contrast theme; the
+    // build before #83 did the same). handle_accent_change repaints when DWM
+    // announces its colour, which also picks up an accent the user changes.
+    Palette pal = impl_->palette;
+    if (!impl_->high_contrast) pal.accent = resolve_accent_color();
+    PaintCtx pc { pal, impl_->font_normal.get(),
                   impl_->font_bold.get(), dpi };
     const bool has_next = (idx + 1) < count();
     const bool next_is_active = has_next && (idx + 1 == active_index());
@@ -515,6 +523,11 @@ void TabManager::handle_theme_change() {
     // The whole client area: the strip behind the tabs is painted from the
     // palette too (tab_subclass_proc's WM_PAINT, #86).
     InvalidateRect(impl_->hwnd, nullptr, TRUE);
+}
+
+void TabManager::handle_accent_change() {
+    // handle_draw_item reads the accent afresh, so a repaint is all it takes.
+    if (impl_ && impl_->hwnd) InvalidateRect(impl_->hwnd, nullptr, FALSE);
 }
 
 LRESULT CALLBACK tab_subclass_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l,

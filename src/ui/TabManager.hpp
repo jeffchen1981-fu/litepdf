@@ -62,6 +62,10 @@ public:
     // Contrast and repaint without a restart (#83).
     void handle_theme_change();
 
+    // Parent's WM_DWMCOLORIZATIONCOLORCHANGED routes here: repaints the
+    // active tab's accent bar in the current DWM colour.
+    void handle_accent_change();
+
     // Returns the tab-strip height in the control's own pixel units
     // (measured via TCM_ADJUSTRECT — respects theme + font + DPI of the
     // control HWND). The `dpi` argument is kept for source-compatibility

@@ -1356,6 +1356,12 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             }
             break;
         }
+        case WM_DWMCOLORIZATIONCOLORCHANGED:
+            // The tab strip's accent bar follows the DWM colour, which is
+            // black under High Contrast; this repaints it when DWM restores
+            // or the user changes it (#83).
+            if (tabs_) tabs_->handle_accent_change();
+            break;
         case WM_SYSCOLORCHANGE:
         case WM_SETTINGCHANGE: {
             // Both messages are broadcast to top-level windows only, so no
