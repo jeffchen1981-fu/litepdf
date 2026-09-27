@@ -45,4 +45,21 @@ inline int compute_drag_target_x(int mouse_x, [[maybe_unused]] int parent_w,
     return std::clamp(mouse_x, min_w, max_w);
 }
 
+// Bottom-docked panel height to lay out (#93). `avail_h` is the vertical
+// strip the canvas and the panel share: the space between the tab strip and
+// the status bar, less the splitter. The stored height is the user's choice
+// and is not written back; the caller clamps it here on every layout, so the
+// panel grows back when the window is enlarged again.
+//
+// Priority when the strip is short: the canvas keeps `min_canvas_h` first,
+// then the panel keeps `min_panel_h` (its query row stays reachable), and in
+// every case the panel is capped at `avail_h`, so the canvas never goes
+// below 0 and the splitter never leaves the strip.
+inline int clamp_bottom_panel_height(int stored_h, int avail_h,
+                                     int min_panel_h, int min_canvas_h) {
+    const int h = std::max(std::min(stored_h, avail_h - min_canvas_h),
+                           min_panel_h);
+    return std::clamp(h, 0, std::max(0, avail_h));
+}
+
 }  // namespace litepdf::ui::detail

@@ -62,6 +62,13 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
   from 200% to 150% they stayed a third larger than the rest of the window.
   The results panel keeps its share of the window's height, and a File or Page
   column you resized by hand keeps its size relative to the text (#87).
+- The search results panel no longer squeezes the page out of the window when
+  the window gets shorter. Opened in a maximized window and then restored, it
+  kept its full height, so the page shrank to a sliver or vanished, and in a
+  short enough window the panel's search box and the divider above it slid
+  behind the tab strip, where the divider could no longer be dragged. The
+  panel now gives way so the page keeps some room, never leaves the window,
+  and grows back to the height you chose when the window does (#93).
 
 ## [1.3.0] — 2026-09-13 — Zoom, wheel scrolling, and the page indicator
 
