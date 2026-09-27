@@ -6,8 +6,12 @@
 // Also supports `--render N` to render page N via RenderEngine and emit
 // a binary PPM (P6) image to stdout. Used for manual smoke-checking the
 // render path during Phase 2+ development.
+//
+// `--bench-selection [--page N] [--iterations N]` times the text-selection
+// work PdfCanvas does on the UI thread, page by page (#73; bench_selection.hpp).
 
 #include "cli/bench_iteration.hpp"
+#include "cli/bench_selection.hpp"
 #include "cli/render_to_ppm.hpp"
 #include "core/Document.hpp"
 
@@ -105,12 +109,81 @@ int run_benchmark(const char* path, int iterations, bool json) {
     return 0;
 }
 
+// --bench-selection (#73): one row per page, then each column's worst page.
+// Human-readable only; nothing gates on these numbers.
+int run_selection_benchmark(const char* path, int only_page, int iterations) {
+    litepdf::core::Document doc;
+    litepdf::core::Document primer;   // see bench_selection_page
+    for (auto* d : { &doc, &primer }) {
+        if (auto err = d->open(path)) {
+            std::fprintf(stderr, "Open error: %d\n", static_cast<int>(*err));
+            return 1;
+        }
+    }
+    const int count = static_cast<int>(doc.page_count());
+    if (only_page >= count) {
+        std::fprintf(stderr, "--page %d is out of range (%d pages)\n", only_page, count);
+        return 2;
+    }
+    const int begin = only_page >= 0 ? only_page : 0;
+    const int end   = only_page >= 0 ? only_page + 1 : count;
+
+    std::printf("Selection cost %s (median of %d, ms; move/release columns are "
+                "Chars/Words/Lines)\n", path, iterations);
+    std::printf("%5s %6s %5s | %7s %7s %7s | %7s | %-23s | %-23s | %-23s | %7s\n",
+                "page", "chars", "quads", "acqcold", "acq1st", "acquire", "search",
+                "move to page end", "move, extent at anchor", "release at page end",
+                "sel-all");
+
+    std::vector<litepdf::cli::SelectionPageTiming> rows;
+    for (int p = begin; p < end; ++p) {
+        litepdf::cli::SelectionPageTiming t;
+        // A page MuPDF cannot load is reported and skipped: one broken page in a
+        // real document should not cost the numbers for the rest.
+        if (!litepdf::cli::bench_selection_page(doc, primer, p, iterations, t)) continue;
+        rows.push_back(t);
+        std::printf("%5d %6zu %5zu | %7.3f %7.3f %7.3f | %7.3f | %7.3f %7.3f %7.3f | "
+                    "%7.3f %7.3f %7.3f | %7.3f %7.3f %7.3f | %7.3f\n",
+                    t.page + 1, t.chars, t.quads, t.acquire_cold_ms, t.acquire_first_ms,
+                    t.acquire_ms, t.search_lock_ms,
+                    t.move_full_ms[0], t.move_full_ms[1], t.move_full_ms[2],
+                    t.move_short_ms[0], t.move_short_ms[1], t.move_short_ms[2],
+                    t.release_full_ms[0], t.release_full_ms[1], t.release_full_ms[2],
+                    t.select_all_ms);
+    }
+
+    if (rows.empty()) {
+        std::fprintf(stderr, "No page could be measured\n");
+        return 1;
+    }
+    // Each figure's worst page, with the page (1-based) it came from.
+    const auto worst = [&rows](const char* name, auto field) {
+        const litepdf::cli::SelectionPageTiming* w = &rows.front();
+        for (const auto& r : rows) if (field(r) > field(*w)) w = &r;
+        std::printf("  %-26s %8.3f ms  (page %d, %zu chars)\n",
+                    name, field(*w), w->page + 1, w->chars);
+    };
+    using T = litepdf::cli::SelectionPageTiming;
+    std::printf("Worst page per figure:\n");
+    worst("acquire, process cold",   [](const T& r) { return r.acquire_cold_ms; });
+    worst("acquire, first",          [](const T& r) { return r.acquire_first_ms; });
+    worst("acquire",                 [](const T& r) { return r.acquire_ms; });
+    worst("search lock hold",        [](const T& r) { return r.search_lock_ms; });
+    worst("move to page end, Chars", [](const T& r) { return r.move_full_ms[0]; });
+    worst("move to page end, Words", [](const T& r) { return r.move_full_ms[1]; });
+    worst("move to page end, Lines", [](const T& r) { return r.move_full_ms[2]; });
+    worst("release, Words",          [](const T& r) { return r.release_full_ms[1]; });
+    worst("select all",              [](const T& r) { return r.select_all_ms; });
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::fprintf(stderr,
-            "Usage: %s <file> [--render N | --benchmark [--iterations N] [--json]]\n",
+            "Usage: %s <file> [--render N | --benchmark [--iterations N] [--json]\n"
+            "                  | --bench-selection [--page N] [--iterations N]]\n",
             argv[0]);
         return 2;
     }
@@ -121,6 +194,8 @@ int main(int argc, char* argv[]) {
     int iterations = 5;
     bool iterations_set = false;
     bool json = false;
+    bool bench_selection = false;
+    int selection_page = -1;   // 0-based; -1 = every page
     for (int i = 2; i < argc; ++i) {
         if (std::strcmp(argv[i], "--render") == 0 && i + 1 < argc) {
             render_page = std::atoi(argv[++i]);
@@ -131,7 +206,34 @@ int main(int argc, char* argv[]) {
             iterations_set = true;
         } else if (std::strcmp(argv[i], "--json") == 0) {
             json = true;
+        } else if (std::strcmp(argv[i], "--bench-selection") == 0) {
+            bench_selection = true;
+        } else if (std::strcmp(argv[i], "--page") == 0 && i + 1 < argc) {
+            selection_page = std::atoi(argv[++i]) - 1;   // 1-based on the command line
+            if (selection_page < 0) {
+                std::fprintf(stderr, "--page must be >= 1\n");
+                return 2;
+            }
         }
+    }
+
+    if (bench_selection) {
+        if (benchmark || render_page >= 0 || json) {
+            std::fprintf(stderr,
+                "--bench-selection excludes --benchmark, --render and --json\n");
+            return 2;
+        }
+        // Most samples are one sub-millisecond call, so take more than --benchmark's 5.
+        if (!iterations_set) iterations = 25;
+        if (iterations < 1) {
+            std::fprintf(stderr, "--iterations must be >= 1\n");
+            return 2;
+        }
+        return run_selection_benchmark(path, selection_page, iterations);
+    }
+    if (selection_page >= 0) {
+        std::fprintf(stderr, "--page is only valid with --bench-selection\n");
+        return 2;
     }
 
     if (benchmark && render_page >= 0) {
@@ -140,7 +242,8 @@ int main(int argc, char* argv[]) {
     }
     // --iterations / --json are only meaningful with --benchmark (spec §3.1).
     if (!benchmark && (json || iterations_set)) {
-        std::fprintf(stderr, "--iterations/--json are only valid with --benchmark\n");
+        std::fprintf(stderr, "--iterations/--json are only valid with --benchmark "
+                             "(--iterations also with --bench-selection)\n");
         return 2;
     }
     if (benchmark && iterations < 1) {
