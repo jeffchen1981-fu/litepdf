@@ -516,7 +516,12 @@ void MainWindow::on_layout() {
     // Splitter + results panel bottom strip.
     if (splitter_) {
         if (panel_shown) {
-            RECT sr = { 0, canvas_bottom, w, canvas_bottom + splitter_h };
+            // Clipped to layout_h like the panel below: in a client too
+            // short for the tab strip, splitter and status bar together it
+            // would otherwise overlap the status bar.
+            const int split_top = std::min(canvas_bottom, layout_h);
+            RECT sr = { 0, split_top, w,
+                        std::min(split_top + splitter_h, layout_h) };
             splitter_->set_bounds(sr);
             if (splitter_->hwnd()) {
                 ShowWindow(splitter_->hwnd(), SW_SHOW);
