@@ -4,6 +4,7 @@
 #include "core/ThumbnailModel.hpp"
 #include "core/ThumbnailRenderer.hpp"
 #include "ui/detail/HighContrast.hpp"
+#include "ui/detail/ThemeFrame.hpp"
 #include "ui/detail/ThumbnailPalette.hpp"
 
 #include <commctrl.h>
@@ -326,6 +327,7 @@ ThumbnailPane::ThumbnailPane(HINSTANCE hInstance, HWND parent)
     SetWindowSubclass(impl_->list_hwnd, thumb_list_subclass_proc,
                       kListSubclassId,
                       reinterpret_cast<DWORD_PTR>(this));
+    detail::repaint_frame_on_theme_change(impl_->list_hwnd);  // #89
     impl_->parent_subclass_id =
         g_next_parent_subclass_id.fetch_add(1, std::memory_order_relaxed);
     SetWindowSubclass(parent, thumb_parent_subclass_proc,
