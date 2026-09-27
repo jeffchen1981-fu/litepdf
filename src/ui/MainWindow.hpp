@@ -86,6 +86,11 @@ private:
     // so at most one is non-null at any time.
     HWND left_pane_hwnd() const;
 
+    // Send a theme message to every tab's thumbnail pane, hidden or not,
+    // so each is current when it next shows (#90). Tabs whose pane was
+    // never created are skipped; the pane reads the theme when it is.
+    void send_to_thumb_panes(UINT msg, WPARAM w, LPARAM l);
+
     // Phase 6 Task 10: find-bar integration.
     void on_find_open();        // IDM_FIND: show or focus find bar
     void on_find_next();        // IDM_FIND_NEXT or Enter / F3
