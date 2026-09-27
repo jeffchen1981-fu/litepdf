@@ -27,7 +27,8 @@ namespace litepdf::ui {
 namespace {
 
 // ----------------------------------------------------------------------------
-// Sizing constants (DIP). Scaled per parent's DPI at construction.
+// Sizing constants (DIP). Scaled per parent's DPI at construction and again
+// by update_dpi() on a per-monitor DPI change (#87).
 // ----------------------------------------------------------------------------
 constexpr int kTopRowHeightDip    = 32;
 constexpr int kInnerPadDip        = 4;
@@ -1072,6 +1073,43 @@ void ResultsPanel::set_bounds(const RECT& bounds) {
                                        w - file_w - page_w);
         ListView_SetColumnWidth(impl_->listview, 2, snippet_w);
     }
+}
+
+UINT ResultsPanel::dpi() const { return impl_ ? impl_->dpi : 96; }
+
+void ResultsPanel::update_dpi(UINT dpi) {
+    if (!impl_ || !impl_->hwnd) return;
+    if (dpi == 0) dpi = 96;
+    const UINT old_dpi = impl_->dpi;
+    impl_->dpi = dpi;
+    // Keep the old fonts alive until every WM_SETFONT below has landed
+    // (same reason as StatusBar::update_dpi).
+    auto old_text  = std::move(impl_->font_text);
+    auto old_glyph = std::move(impl_->font_glyph);
+    impl_->font_text  = make_unique_hfont(create_panel_font(dpi, 9));
+    impl_->font_glyph = make_unique_hfont(create_panel_font(dpi, 12));
+    const WPARAM text  = reinterpret_cast<WPARAM>(impl_->font_text.get());
+    const WPARAM glyph = reinterpret_cast<WPARAM>(impl_->font_glyph.get());
+    for (HWND c : { impl_->edit, impl_->btn_case, impl_->btn_regex,
+                    impl_->btn_whole, impl_->listview }) {
+        if (c) SendMessageW(c, WM_SETFONT, text, MAKELPARAM(TRUE, 0));
+    }
+    if (impl_->btn_close) {
+        SendMessageW(impl_->btn_close, WM_SETFONT, glyph, MAKELPARAM(TRUE, 0));
+    }
+    // Scale the current widths rather than resetting them to their DIP
+    // defaults, so a column the user dragged keeps its size. The snippet
+    // column is re-stretched by the next set_bounds().
+    if (impl_->listview && old_dpi != dpi) {
+        for (int col = 0; col < 3; ++col) {
+            const int cur = ListView_GetColumnWidth(impl_->listview, col);
+            ListView_SetColumnWidth(impl_->listview, col,
+                MulDiv(cur, static_cast<int>(dpi), static_cast<int>(old_dpi)));
+        }
+    }
+    // WS_CLIPCHILDREN: a plain InvalidateRect would miss the children.
+    RedrawWindow(impl_->hwnd, nullptr, nullptr,
+                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 }
 
 void ResultsPanel::refresh_count() {

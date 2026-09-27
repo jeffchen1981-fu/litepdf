@@ -41,6 +41,13 @@ public:
     // 8 DIP top margin.
     void reposition(const RECT& canvas_rect);
 
+    // Per-monitor DPI change (#87): rebuilds the fonts and resends them to
+    // the children. Sizes are re-derived by the next reposition(), so the
+    // caller runs its layout after this -- MainWindow's WM_DPICHANGED arm
+    // calls it before on_layout(). A hidden bar picks the new sizes up when
+    // on_find_open() lays it out.
+    void update_dpi(UINT dpi);
+
     // Counter Static text (e.g., "3 / 12" or "3 / 12+" for scanning, "" for idle).
     void set_counter(const std::wstring& txt);
 

@@ -24,7 +24,8 @@ namespace {
 
 // -----------------------------------------------------------------------------
 // DIP constants. Bar and child sizes are expressed in device-independent pixels
-// (1 DIP = 1 px at 96 DPI) and scaled per the parent window's DPI at creation.
+// (1 DIP = 1 px at 96 DPI) and scaled per the parent window's DPI at creation
+// and again by update_dpi() on a per-monitor DPI change (#87).
 // -----------------------------------------------------------------------------
 constexpr int kBarHeightDip        = 32;
 // Widened from 380 to fit two new toggle buttons (regex ".*" + whole-word
@@ -240,8 +241,8 @@ struct FindBar::Impl {
     bool pressed_whole = false;
     bool pressed_close = false;
 
-    // Cached fonts (DPI-aware). Rebuilt on WM_DPICHANGED in future; for now
-    // DPI is captured at WM_CREATE and considered stable for the bar's life.
+    // Cached fonts (DPI-aware). Created at the parent's DPI in the ctor and
+    // rebuilt by update_dpi() on a per-monitor DPI change (#87).
     unique_hfont font_text  { nullptr, &DeleteObject };
     unique_hfont font_glyph { nullptr, &DeleteObject };
 
@@ -952,6 +953,29 @@ void FindBar::reposition(const RECT& canvas_rect) {
     cx += w_whole + pad;
     SetWindowPos(impl_->btn_close, nullptr, cx, pad, w_close,   ctrl_h,
                  SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void FindBar::update_dpi(UINT dpi) {
+    if (!impl_ || !impl_->hwnd) return;
+    if (dpi == 0) dpi = 96;
+    impl_->dpi = dpi;
+    // Keep the old fonts alive until every WM_SETFONT below has landed
+    // (same reason as StatusBar::update_dpi): reassigning in place would
+    // free the HFONTs the children still hold during the sends.
+    auto old_text  = std::move(impl_->font_text);
+    auto old_glyph = std::move(impl_->font_glyph);
+    impl_->font_text  = make_unique_hfont(create_findbar_font(dpi, 9));
+    impl_->font_glyph = make_unique_hfont(create_findbar_font(dpi, 12));
+    const WPARAM f = reinterpret_cast<WPARAM>(impl_->font_text.get());
+    for (HWND c : { impl_->edit, impl_->counter,
+                    impl_->btn_prev, impl_->btn_next,
+                    impl_->btn_case, impl_->btn_regex,
+                    impl_->btn_whole, impl_->btn_close }) {
+        if (c) SendMessageW(c, WM_SETFONT, f, MAKELPARAM(TRUE, 0));
+    }
+    // The owner-drawn buttons paint from impl_'s fonts, not the one they
+    // were sent; the bar has no WS_CLIPCHILDREN, so this reaches them too.
+    InvalidateRect(impl_->hwnd, nullptr, TRUE);
 }
 
 void FindBar::set_counter(const std::wstring& txt) {
