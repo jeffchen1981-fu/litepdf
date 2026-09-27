@@ -208,8 +208,10 @@ bool bench_selection_page(const std::filesystem::path& path, const Document& sha
         const SelectMode mode = modes[m];
         out.move_full_ms[m] =
             median_ms(iterations, [&] { return move(text, first_pt, last_pt, mode); });
+        note_core();
         out.move_short_ms[m] =
             median_ms(iterations, [&] { return move(text, first_pt, first_pt, mode); });
+        note_core();
         out.release_full_ms[m] =
             median_ms(iterations, [&] { return release(text, first_pt, last_pt, mode); });
         note_core();

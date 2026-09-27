@@ -65,14 +65,15 @@ TEST_CASE("cli bench-selection reads the whole file into the cache",
 namespace {
 
 // Independent of the harness's own detection: CPU sets, not processor
-// relationships. Only the group-0 processors this process may run on -- a
-// restricted affinity (`start /affinity`, a job object) makes pinning to any
-// other one a silent no-op.
-struct ClassedCpu { unsigned index; unsigned char efficiency_class; };
+// relationships. Only the processors this thread may run on, in its current
+// processor group -- a restricted affinity (`start /affinity`, a job object)
+// makes pinning to any other one fail, and a machine with more than 64
+// logical processors may start the process in a group other than 0.
+struct ClassedCpu { WORD group; unsigned number; unsigned char efficiency_class; };
 
-std::vector<ClassedCpu> allowed_group0_cpus() {
-    DWORD_PTR process_mask = 0, system_mask = 0;
-    if (!GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask)) return {};
+std::vector<ClassedCpu> allowed_cpus() {
+    GROUP_AFFINITY current{};
+    if (!GetThreadGroupAffinity(GetCurrentThread(), &current)) return {};
     ULONG len = 0;
     GetSystemCpuSetInformation(nullptr, 0, &len, GetCurrentProcess(), 0);
     std::vector<unsigned char> buf(len);
@@ -81,22 +82,25 @@ std::vector<ClassedCpu> allowed_group0_cpus() {
     if (!GetSystemCpuSetInformation(first, len, &len, GetCurrentProcess(), 0)) return out;
     for (ULONG off = 0; off < len;) {
         const auto* info = reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(buf.data() + off);
-        const unsigned index = info->CpuSet.LogicalProcessorIndex;
-        if (info->Type == CpuSetInformation && info->CpuSet.Group == 0 && index < 64
-            && (process_mask & (DWORD_PTR{ 1 } << index)) != 0) {
-            out.push_back({ index, info->CpuSet.EfficiencyClass });
+        const unsigned number = info->CpuSet.LogicalProcessorIndex;
+        if (info->Type == CpuSetInformation && info->CpuSet.Group == current.Group
+            && number < 64 && (current.Mask & (KAFFINITY{ 1 } << number)) != 0) {
+            out.push_back({ current.Group, number, info->CpuSet.EfficiencyClass });
         }
         off += info->Size;
     }
     return out;
 }
 
-// on_efficiency_core() with the thread pinned to processor `index`.
-bool pinned_answer(unsigned index) {
-    const DWORD_PTR old = SetThreadAffinityMask(GetCurrentThread(), DWORD_PTR{ 1 } << index);
-    REQUIRE(old != 0);   // the pin took; otherwise the answer is some other core's
+// on_efficiency_core() with the thread pinned to one processor.
+bool pinned_answer(const ClassedCpu& cpu) {
+    GROUP_AFFINITY pin{};
+    pin.Group = cpu.group;
+    pin.Mask  = KAFFINITY{ 1 } << cpu.number;
+    GROUP_AFFINITY old{};
+    REQUIRE(SetThreadGroupAffinity(GetCurrentThread(), &pin, &old));   // else: some other core
     const bool answer = litepdf::cli::on_efficiency_core();
-    SetThreadAffinityMask(GetCurrentThread(), old);
+    SetThreadGroupAffinity(GetCurrentThread(), &old, nullptr);
     return answer;
 }
 
@@ -108,7 +112,7 @@ TEST_CASE("cli bench-selection flags an efficiency core and nothing else",
     // pinned thread; only that Windows accepts it is pinned here.
     CHECK(litepdf::cli::prefer_performance_cores());
 
-    const auto cpus = allowed_group0_cpus();
+    const auto cpus = allowed_cpus();
     REQUIRE_FALSE(cpus.empty());
     // Classes are ranked machine-wide, so the reference is every processor's
     // highest, not only the allowed ones'.
@@ -133,8 +137,8 @@ TEST_CASE("cli bench-selection flags an efficiency core and nothing else",
     // single-class CI runner.
     // Every allowed processor, so each class present is checked both ways.
     for (const auto& c : cpus) {
-        INFO("logical processor " << c.index << ", class " << int{ c.efficiency_class });
-        CHECK(pinned_answer(c.index) == (c.efficiency_class < top));
+        INFO("processor " << c.group << ":" << c.number << ", class " << int{ c.efficiency_class });
+        CHECK(pinned_answer(c) == (c.efficiency_class < top));
     }
     if (top == bottom) WARN("one core class: no efficiency core to pin to");
 }

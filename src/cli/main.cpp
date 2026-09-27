@@ -21,7 +21,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #ifdef _WIN32
@@ -128,7 +130,14 @@ int run_selection_benchmark(const char* path, int only_page, int iterations) {
 
     // Keep the file cache and efficiency cores out of the figures as far as the
     // harness can; see bench_selection.hpp.
-    (void)litepdf::cli::warm_file_cache(path);
+    {
+        std::error_code ec;
+        const auto size = std::filesystem::file_size(path, ec);
+        if (ec || litepdf::cli::warm_file_cache(path) != size) {
+            std::fprintf(stderr, "Could not read the whole file ahead; first-read "
+                                 "columns may include disk waits\n");
+        }
+    }
     if (!litepdf::cli::prefer_performance_cores()) {
         std::fprintf(stderr, "Could not opt out of EcoQoS; watch for E-marked rows\n");
     }
