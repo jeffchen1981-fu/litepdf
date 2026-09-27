@@ -50,6 +50,12 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
   switches like the rest of the window, in every open tab. The frame around
   the current page follows the system accent colour, and no longer stays black
   for the whole session after LitePDF starts under High Contrast (#90).
+- Turning High Contrast off no longer leaves flat, square borders behind. When
+  LitePDF had been started under High Contrast, the search boxes in the find bar
+  and the results panel, the results list and the outline pane kept a flat white
+  border in place of the normal rounded one once High Contrast was turned off,
+  and the outline pane kept part of its dark contrast frame. They now get their
+  normal borders back, and so do the page box and the thumbnail pane (#89).
 
 ## [1.3.0] — 2026-09-13 — Zoom, wheel scrolling, and the page indicator
 

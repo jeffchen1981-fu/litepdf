@@ -4,18 +4,19 @@
 //
 // A WS_EX_CLIENTEDGE border (EDIT, ListView, TreeView) is non-client and is
 // drawn by the visual style. When High Contrast is turned off, such a control
-// repaints that frame after WM_SYSCOLORCHANGE while it still holds the
-// contrast theme, which gives a flat, square edge in the wrong colours, and
-// only afterwards receives WM_THEMECHANGED and reopens the normal theme.
-// Nothing repaints the frame after that, so the flat edge stays until
+// repaints that frame after WM_SYSCOLORCHANGE, before it has received
+// WM_THEMECHANGED, which gives a flat, square edge in the wrong colours. An
+// EDIT was seen to reopen its theme only in WM_THEMECHANGED, and nothing
+// repaints any of these frames after that, so the flat edge stays until
 // something else happens to redraw it. Measured on controls created while
 // High Contrast was on.
 //
-// The components' own theme arms cannot fix this: they run on
-// WM_SETTINGCHANGE, which arrives before WM_THEMECHANGED, so an RDW_FRAME
-// there repaints with the old theme (tried and reverted in PR #88). This
-// subclass repaints after the control's own WM_THEMECHANGED handling, the
-// first point at which the new theme is in place.
+// The components' own theme arms cannot fix this. They rebuild only when the
+// dark or High Contrast state changes, and that change is seen on the first
+// WM_SETTINGCHANGE, which arrives before WM_THEMECHANGED; the ones that follow
+// it are no-ops. So an RDW_FRAME there repaints with the old theme (tried and
+// reverted in PR #88). This subclass repaints after the control's own
+// WM_THEMECHANGED handling, the first point at which the new theme is in place.
 
 #include <windows.h>
 #include <commctrl.h>
