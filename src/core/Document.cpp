@@ -605,6 +605,8 @@ struct Document::TextPage::Impl {
     bool           has_range  = false;
     SelPoint       range_first{};
     SelPoint       range_last{};
+    // highlight() runs on every drag move; log its quad cap once per handle.
+    bool           quad_cap_logged = false;
 
     Impl() = default;
     ~Impl() {
@@ -618,8 +620,8 @@ namespace {
 
 constexpr int kSelectionQuadsInitial = 256;
 // A memory bound, not a correctness limit: past it the HIGHLIGHT is truncated
-// (copy() is unaffected). 65,536 disjoint quads on one page is far beyond real
-// documents; recorded as a known limitation.
+// (copy() is unaffected) and highlight() logs it. 65,536 disjoint quads on one
+// page is far beyond real documents; recorded as a known limitation.
 constexpr int kSelectionQuadsMax     = 1 << 16;
 
 fz_point to_fz(SelPoint p) noexcept { return fz_make_point(p.x, p.y); }
@@ -735,6 +737,16 @@ std::vector<Quad> Document::TextPage::highlight(SelPoint a, SelPoint b) const {
             break;
         }
         buf.resize(buf.size() * 2);
+    }
+
+    // Same policy as page_hits' D15 log: a capped result must be visible. At the
+    // cap an exact fit and a dropped tail both return n == cap, so this may fire
+    // on a complete highlight -- hence "may be".
+    if (n >= kSelectionQuadsMax && !impl_->quad_cap_logged) {
+        impl_->quad_cap_logged = true;
+        std::fprintf(stderr,
+            "litepdf: highlight: quad cap %d reached on page %d — tail may be dropped\n",
+            kSelectionQuadsMax, impl_->page);
     }
 
     out.reserve(static_cast<std::size_t>(n));
