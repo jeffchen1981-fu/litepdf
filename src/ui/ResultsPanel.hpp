@@ -60,6 +60,11 @@ public:
     // MainWindow's WM_DPICHANGED arm calls it before on_layout().
     void update_dpi(UINT dpi);
 
+    // The DPI the panel's sizes are currently derived from. Before
+    // update_dpi() runs this is still the OLD DPI, which lets MainWindow
+    // rescale the panel height it owns by the same ratio.
+    UINT dpi() const;
+
     // Call when CrossTabSearch hits vector grows; triggers
     // ListView_SetItemCountEx(... LVSICF_NOSCROLL).
     void refresh_count();

@@ -1075,6 +1075,8 @@ void ResultsPanel::set_bounds(const RECT& bounds) {
     }
 }
 
+UINT ResultsPanel::dpi() const { return impl_ ? impl_->dpi : 96; }
+
 void ResultsPanel::update_dpi(UINT dpi) {
     if (!impl_ || !impl_->hwnd) return;
     if (dpi == 0) dpi = 96;

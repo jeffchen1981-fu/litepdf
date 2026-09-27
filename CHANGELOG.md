@@ -59,8 +59,9 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 - The find bar and the search results panel rescale when LitePDF moves to a
   monitor with a different display scale, or when the scale changes while it
   runs. They kept the size and text size they were opened with, so after going
-  from 200% to 150% they stayed a third larger than the rest of the window. A
-  results column you resized by hand keeps its width (#87).
+  from 200% to 150% they stayed a third larger than the rest of the window.
+  The results panel keeps its share of the window's height, and a File or Page
+  column you resized by hand keeps its size relative to the text (#87).
 
 ## [1.3.0] — 2026-09-13 — Zoom, wheel scrolling, and the page indicator
 

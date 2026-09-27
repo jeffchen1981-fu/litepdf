@@ -1341,8 +1341,18 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             if (status_bar_) status_bar_->update_dpi(HIWORD(w));
             // #87: so are the find bar's and the results panel's, hidden or
             // not. on_layout() below re-derives their sizes.
-            if (find_bar_)      find_bar_->update_dpi(HIWORD(w));
-            if (results_panel_) results_panel_->update_dpi(HIWORD(w));
+            if (find_bar_) find_bar_->update_dpi(HIWORD(w));
+            if (results_panel_) {
+                // The panel height is physical px at the panel's old DPI
+                // (seeded or dragged). Scale it by the same ratio as the
+                // window, so the panel keeps its share of the client area.
+                const UINT old_dpi = results_panel_->dpi();
+                if (results_panel_height_px_ > 0 && old_dpi != HIWORD(w)) {
+                    results_panel_height_px_ = MulDiv(results_panel_height_px_,
+                        HIWORD(w), static_cast<int>(old_dpi));
+                }
+                results_panel_->update_dpi(HIWORD(w));
+            }
             // The user's left_pane_width_px_ is in physical px at the
             // OLD DPI. The on_layout clamp will keep it inside [120
             // dip, client - 100 px] at the NEW DPI; a too-narrow stored
