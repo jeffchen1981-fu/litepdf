@@ -11,6 +11,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+using litepdf::ui::detail::clamp_bottom_panel_height;
 using litepdf::ui::detail::compute_drag_target_x;
 using litepdf::ui::detail::compute_drag_target_y;
 
@@ -38,4 +39,39 @@ TEST_CASE("compute_drag_target_x: clamps above max", "[splitter_math]") {
     // mouse_x = 900 (parent_w unused) -> clamp(900, 150, 800) = 800.
     REQUIRE(compute_drag_target_x(/*mouse_x=*/900, /*parent_w=*/1000,
                                   /*min_w=*/150, /*max_w=*/800) == 800);
+}
+
+// #93: the results panel's stored height is clamped against the live space
+// on every layout. Arguments: (stored_h, avail_h, min_panel_h, min_canvas_h),
+// where avail_h is the strip the canvas and the panel share.
+
+TEST_CASE("clamp_bottom_panel_height: a height that fits is kept", "[splitter_math]") {
+    REQUIRE(clamp_bottom_panel_height(300, 1000, 160, 200) == 300);
+}
+
+TEST_CASE("clamp_bottom_panel_height: a tall panel leaves the canvas its minimum",
+          "[splitter_math]") {
+    // The #93 repro at 200 %: 660 px stored, 674 px shared. Unclamped, the
+    // canvas kept 14 px; clamped, it keeps its 200.
+    REQUIRE(clamp_bottom_panel_height(660, 674, 160, 200) == 474);
+}
+
+TEST_CASE("clamp_bottom_panel_height: a short panel is raised to its minimum",
+          "[splitter_math]") {
+    REQUIRE(clamp_bottom_panel_height(50, 1000, 160, 200) == 160);
+}
+
+TEST_CASE("clamp_bottom_panel_height: the panel minimum wins over the canvas minimum",
+          "[splitter_math]") {
+    // 300 px cannot hold both minimums; the query row stays reachable.
+    REQUIRE(clamp_bottom_panel_height(660, 300, 160, 200) == 160);
+}
+
+TEST_CASE("clamp_bottom_panel_height: never taller than the shared strip",
+          "[splitter_math]") {
+    // Shorter than the panel minimum: the canvas goes to 0, never below,
+    // so the splitter cannot be pushed above the strip's top.
+    REQUIRE(clamp_bottom_panel_height(660, 100, 160, 200) == 100);
+    REQUIRE(clamp_bottom_panel_height(660, 0, 160, 200) == 0);
+    REQUIRE(clamp_bottom_panel_height(660, -20, 160, 200) == 0);
 }

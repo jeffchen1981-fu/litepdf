@@ -15,6 +15,7 @@
 #include "ui/password_retry.hpp"  // Phase 8 Task 1
 #include "printing/PrintJob.hpp"  // Phase 8.5 Task 10
 #include "ui/ThumbnailPane.hpp"  // Phase 7 Task 8: F4 toggle uses ThumbnailPane methods.
+#include "ui/detail/SplitterMath.hpp"  // #93: results panel height clamp
 
 #include <commctrl.h>
 #include <commdlg.h>
@@ -450,14 +451,20 @@ void MainWindow::on_layout() {
 
     // Phase 6 Tasks 12-13: reserve bottom space for splitter + results
     // panel when visible. Splitter is 4 DIP tall, docked immediately
-    // above the panel. When the panel is hidden (panel_h == 0), both
-    // vanish and the canvas spans the full remaining vertical strip.
-    const int panel_h = (results_panel_ && results_panel_->visible())
-                         ? results_panel_height_px_ : 0;
-    const int splitter_h = (panel_h > 0)
+    // above the panel. When the panel is hidden, both vanish and the
+    // canvas spans the full remaining vertical strip.
+    // #93: the stored height is clamped against the live strip, the way
+    // left_pane_width_px_ is below; a window that shrank would otherwise
+    // push the splitter and the query row above the tab strip. Visibility
+    // decides the splitter, not panel_h, which a tiny window can clamp to 0.
+    const bool panel_shown = results_panel_ && results_panel_->visible();
+    const int panel_h = panel_shown
+                         ? clamp_results_panel_height(results_panel_height_px_)
+                         : 0;
+    const int splitter_h = panel_shown
                            ? MulDiv(4, static_cast<int>(dpi), 96) : 0;
-    const int canvas_bottom = layout_h - panel_h - splitter_h;
-    const int row_h = std::max(0, canvas_bottom - row_y);
+    const int row_h = std::max(0, layout_h - row_y - splitter_h - panel_h);
+    const int canvas_bottom = row_y + row_h;
 
     // Phase 7 Task 8: left dock — at most one of outline / thumb pane
     // is visible at a time (F4/F5 mutual exclusion). When either is
@@ -508,8 +515,13 @@ void MainWindow::on_layout() {
 
     // Splitter + results panel bottom strip.
     if (splitter_) {
-        if (panel_h > 0 && splitter_h > 0) {
-            RECT sr = { 0, canvas_bottom, w, canvas_bottom + splitter_h };
+        if (panel_shown) {
+            // Clipped to layout_h like the panel below: in a client too
+            // short for the tab strip, splitter and status bar together it
+            // would otherwise overlap the status bar.
+            const int split_top = std::min(canvas_bottom, layout_h);
+            RECT sr = { 0, split_top, w,
+                        std::min(split_top + splitter_h, layout_h) };
             splitter_->set_bounds(sr);
             if (splitter_->hwnd()) {
                 ShowWindow(splitter_->hwnd(), SW_SHOW);
@@ -518,8 +530,11 @@ void MainWindow::on_layout() {
             ShowWindow(splitter_->hwnd(), SW_HIDE);
         }
     }
-    if (results_panel_ && panel_h > 0) {
-        RECT pr = { 0, canvas_bottom + splitter_h, w, layout_h };
+    if (panel_shown) {
+        // min(): a client shorter than the tab strip + splitter leaves no
+        // room at all; never hand the panel a negative height.
+        RECT pr = { 0, std::min(canvas_bottom + splitter_h, layout_h),
+                    w, layout_h };
         results_panel_->set_bounds(pr);
     }
 
@@ -539,6 +554,27 @@ void MainWindow::on_layout() {
         RECT cr_client = { tl.x, tl.y, br.x, br.y };
         find_bar_->reposition(cr_client);
     }
+}
+
+int MainWindow::clamp_results_panel_height(int h) const {
+    // Minimums in DIP: the panel keeps its 32-DIP query row plus the list
+    // header and about one row; the canvas keeps 100.
+    constexpr int kPanelMinDip  = 80;
+    constexpr int kCanvasMinDip = 100;
+    RECT rc; GetClientRect(hwnd_, &rc);
+    const UINT dpi = GetDpiForWindow(hwnd_);
+    // The strip the canvas and the panel share -- the same terms on_layout
+    // subtracts: status bar, tab strip, splitter.
+    const int status_h   = status_bar_ ? status_bar_->height_px() : 0;
+    const int tab_h      = (tabs_ && tabs_->count() > 0)
+                           ? tabs_->strip_height(dpi) : 0;
+    const int splitter_h = MulDiv(4, static_cast<int>(dpi), 96);
+    const int avail_h    = static_cast<int>(rc.bottom - rc.top)
+                           - status_h - tab_h - splitter_h;
+    return detail::clamp_bottom_panel_height(
+        h, avail_h,
+        MulDiv(kPanelMinDip,  static_cast<int>(dpi), 96),
+        MulDiv(kCanvasMinDip, static_cast<int>(dpi), 96));
 }
 
 void MainWindow::toggle_outline() {
@@ -1114,9 +1150,10 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 [this] { on_results_close(); });
             splitter_->set_on_drag([this](int new_h) {
                 // Clamp the dragged height so the splitter can't swallow
-                // the canvas entirely — leave at least ~100 px of canvas
-                // visible and refuse a panel shorter than ~80 px (below
-                // which the ListView has no room for even a single row).
+                // the canvas entirely. #93: the bounds are the ones on_layout
+                // applies on every layout (clamp_results_panel_height: at
+                // least 100 DIP of canvas, a panel of at least 80 DIP), so a
+                // drag can never store a height the next layout would move.
                 // PR-B: `new_h` is computed by Splitter (Splitter.cpp) against
                 // the PARENT'S RAW client rect -- GetClientRect(hwnd_, ...)
                 // there is NOT reduced for the status bar's strip, so new_h
@@ -1128,19 +1165,13 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 // offset upward by status_h px (the panel's top lands at
                 // mouse_y - status_h instead of tracking the cursor at
                 // mouse_y).
-                // max_h below is this same outer bound, expressed in
-                // layout_h space so it stays dimensionally consistent with
-                // the clamped value -- but it rarely binds in practice:
-                // Splitter's own internal clamp on new_h (max(100 px,
-                // raw_client_h - 200 px), in Splitter.cpp) is tighter than
-                // this one at any status-bar height under 100 px, i.e.
-                // always. This bound is an outer safety net, not the one
-                // doing the real work.
-                RECT client; GetClientRect(hwnd_, &client);
+                // Splitter only keeps new_h inside the raw client
+                // (Splitter.cpp); the bounds are all ours. It used to reserve
+                // 200 raw px itself, which below ~150 % DPI was tighter than
+                // the layout bound, so a grabbed splitter jumped down.
                 const int status_h = status_bar_ ? status_bar_->height_px() : 0;
-                const int max_h = std::max(80,
-                    static_cast<int>(client.bottom) - status_h - 100);
-                results_panel_height_px_ = std::clamp(new_h - status_h, 80, max_h);
+                results_panel_height_px_ =
+                    clamp_results_panel_height(new_h - status_h);
                 on_layout();
             });
 

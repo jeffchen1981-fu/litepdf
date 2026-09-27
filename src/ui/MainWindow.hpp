@@ -76,6 +76,9 @@ private:
     void navigate_click(int page);
 
     void on_layout();                    // reposition canvas + outline + tab strip
+    // Results panel height `h` clamped to the live client (#93). on_layout
+    // and the splitter drag both go through it, so they agree on the bounds.
+    int clamp_results_panel_height(int h) const;
     void toggle_outline();               // F5 handler
     void toggle_thumbs();                // F4 handler (Phase 7 Task 8)
     void on_outline_navigate(int page);  // callback from OutlinePane
@@ -182,6 +185,8 @@ private:
     // dtor order doesn't matter (no cross-references).
     std::unique_ptr<VerticalSplitter> v_splitter_;
     // 0 = hidden; first Ctrl+Shift+F / F6 seeds to max(200 px, 1/3 client).
+    // The user's chosen height: on_layout lays out a clamped copy and never
+    // writes it back, so the panel grows back when the window does (#93).
     int                           results_panel_height_px_ = 0;
     // Phase 7 D12: width of the left dock (outline / thumb pane) in
     // device pixels. Single-instance app-wide value — no persistence,
