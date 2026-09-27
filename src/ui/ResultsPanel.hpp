@@ -53,6 +53,13 @@ public:
     // Called during MainWindow::on_layout with the full panel rect.
     void set_bounds(const RECT& bounds);
 
+    // Per-monitor DPI change (#87): rebuilds the fonts, resends them to the
+    // children and rescales the list's column widths (a column the user
+    // dragged keeps its size in DIPs). Child positions are re-derived by the
+    // next set_bounds(), so the caller runs its layout after this --
+    // MainWindow's WM_DPICHANGED arm calls it before on_layout().
+    void update_dpi(UINT dpi);
+
     // Call when CrossTabSearch hits vector grows; triggers
     // ListView_SetItemCountEx(... LVSICF_NOSCROLL).
     void refresh_count();

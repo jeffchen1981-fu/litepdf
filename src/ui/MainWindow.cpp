@@ -1339,6 +1339,10 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             }
             // PR-B: the status bar's font and natural height are DPI-derived.
             if (status_bar_) status_bar_->update_dpi(HIWORD(w));
+            // #87: so are the find bar's and the results panel's, hidden or
+            // not. on_layout() below re-derives their sizes.
+            if (find_bar_)      find_bar_->update_dpi(HIWORD(w));
+            if (results_panel_) results_panel_->update_dpi(HIWORD(w));
             // The user's left_pane_width_px_ is in physical px at the
             // OLD DPI. The on_layout clamp will keep it inside [120
             // dip, client - 100 px] at the NEW DPI; a too-narrow stored

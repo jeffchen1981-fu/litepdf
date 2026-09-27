@@ -56,6 +56,11 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
   border in place of the normal rounded one once High Contrast was turned off,
   and the outline pane kept part of its dark contrast frame. They now get their
   normal borders back, and so do the page box and the thumbnail pane (#89).
+- The find bar and the search results panel rescale when LitePDF moves to a
+  monitor with a different display scale, or when the scale changes while it
+  runs. They kept the size and text size they were opened with, so after going
+  from 200% to 150% they stayed a third larger than the rest of the window. A
+  results column you resized by hand keeps its width (#87).
 
 ## [1.3.0] — 2026-09-13 — Zoom, wheel scrolling, and the page indicator
 
