@@ -126,8 +126,8 @@ int run_selection_benchmark(const char* path, int only_page, int iterations) {
     const int begin = only_page >= 0 ? only_page : 0;
     const int end   = only_page >= 0 ? only_page + 1 : count;
 
-    // So that no figure waits on the disk or runs on an efficiency core; see
-    // bench_selection.hpp.
+    // Keep the file cache and efficiency cores out of the figures as far as the
+    // harness can; see bench_selection.hpp.
     (void)litepdf::cli::warm_file_cache(path);
     if (!litepdf::cli::prefer_performance_cores()) {
         std::fprintf(stderr, "Could not opt out of EcoQoS; watch for E-marked rows\n");
@@ -135,7 +135,7 @@ int run_selection_benchmark(const char* path, int only_page, int iterations) {
 
     std::printf("Selection cost %s (ms; medians of %d except scan1st/acq1st/acqseq, "
                 "one sample each; move/release columns are Chars/Words/Lines; file "
-                "cache warmed first, so disk waits are excluded; E = timed partly on "
+                "cache warmed first, so cold-cache disk waits are excluded; E = timed partly on "
                 "an efficiency core)\n",
                 path, iterations);
     std::printf("%5s %6s %5s | %7s %7s %7s %7s | %7s | %-23s | %-23s | %-23s | %7s\n",

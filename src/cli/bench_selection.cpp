@@ -147,7 +147,7 @@ bool prefer_performance_cores() noexcept {
     PROCESS_POWER_THROTTLING_STATE state{};
     state.Version     = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
     state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
-    state.StateMask   = 0;   // controlled, and off: never throttle execution speed
+    state.StateMask   = 0;   // controlled, and off: High QoS (still not a pin)
     return SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state,
                                  sizeof(state)) != FALSE;
 }

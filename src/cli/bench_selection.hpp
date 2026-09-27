@@ -26,21 +26,24 @@
 // The point is to put a number on the cost before deciding whether anything
 // needs caching or moving off the UI thread.
 //
-// Two things about the machine can move the numbers without the code changing,
+// Two things about the machine moved the numbers without the code changing,
 // both measured while chasing spikes in the first runs:
 //   - A cold OS file cache. The first reader of a page's bytes waits on the
-//     disk and every later reader does not, so scan_first -- the first reader
-//     -- spiked on up to a fifth of the pages of a freshly copied file (an
+//     disk and later readers do not, so scan_first -- the first reader --
+//     spiked on more than a fifth of the pages of a freshly copied file (an
 //     off-CPU median of 1.5 ms against 0.1 ms, single waits up to ~200 ms)
-//     while acquire_first, right behind it, did not. Run the file through
-//     warm_file_cache first and every column measures CPU work alone. That is
-//     the GUI's case for a press (the render worker has read the page), but
-//     NOT always for a search scan, which can reach pages nothing has read.
+//     while acquire_first, right behind it, did not. warm_file_cache removes
+//     those waits. That matches the GUI's case for a press (the render worker
+//     has read the page), but NOT always a search scan, which can reach pages
+//     nothing has read. Not everything is explained: one run on an already
+//     warm file still showed off-CPU scan_first spikes on 23 late pages, on
+//     performance cores, and an immediate re-run showed none.
 //   - A hybrid CPU's efficiency cores run this work about half as fast (an
-//     i7-12700 pinned to them: 51-63 ms against 26-36 ms on its performance
+//     i7-12700 pinned to them: 49-63 ms against 26-36 ms on its performance
 //     cores, same pages). Runs started from a background shell sometimes spent
-//     nearly their whole length there (736 of 753 pages in one).
-//     prefer_performance_cores asks Windows not to, and each page records
+//     nearly their whole length there (736 of 753 pages in one; before
+//     prefer_performance_cores, 2 of 7 full runs). prefer_performance_cores
+//     asks Windows not to -- no run has since, in 3 -- and each page records
 //     whether a timed section began or ended on one anyway.
 
 #include <cstddef>
@@ -101,8 +104,8 @@ std::uintmax_t warm_file_cache(const std::filesystem::path& path);
 bool on_efficiency_core() noexcept;
 
 // Opts this process out of Windows' EcoQoS execution-speed throttling, the
-// state in which Windows prefers efficiency cores -- as it never does for the
-// GUI's foreground UI thread, the one these figures stand for. A preference,
+// state in which Windows prefers efficiency cores -- which it does not apply
+// to the GUI's foreground UI thread, the one these figures stand for. A preference,
 // not a pin: efficiency_core still reports where the work actually ran.
 // Returns whether Windows accepted the request.
 bool prefer_performance_cores() noexcept;
