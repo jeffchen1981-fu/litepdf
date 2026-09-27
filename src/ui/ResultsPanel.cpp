@@ -2,6 +2,7 @@
 
 #include "ui/detail/ButtonColors.hpp"
 #include "ui/detail/HighContrast.hpp"
+#include "ui/detail/ThemeFrame.hpp"
 
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -874,6 +875,7 @@ ResultsPanel::ResultsPanel(HINSTANCE hInstance, HWND parent,
     SetWindowSubclass(impl_->edit, results_edit_subclass,
                       kEditSubclassId,
                       reinterpret_cast<DWORD_PTR>(impl_.get()));
+    detail::repaint_frame_on_theme_change(impl_->edit);  // #89
 
     // Three latch toggles (Aa / .* / W) + close, all owner-draw. Created at
     // 0x0; positioned in set_bounds(). Toggles use the text font (so "Aa"/".*"
@@ -933,6 +935,7 @@ ResultsPanel::ResultsPanel(HINSTANCE hInstance, HWND parent,
         SetWindowSubclass(impl_->listview, results_list_subclass,
                           kListSubclassId,
                           reinterpret_cast<DWORD_PTR>(impl_.get()));
+        detail::repaint_frame_on_theme_change(impl_->listview);  // #89
         SendMessageW(impl_->listview, WM_SETFONT,
                      reinterpret_cast<WPARAM>(impl_->font_text.get()),
                      MAKELPARAM(TRUE, 0));

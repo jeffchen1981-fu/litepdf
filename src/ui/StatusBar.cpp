@@ -3,6 +3,7 @@
 
 #include "ui/detail/HighContrast.hpp"
 #include "ui/detail/StatusBarMath.hpp"
+#include "ui/detail/ThemeFrame.hpp"
 
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -550,6 +551,9 @@ StatusBar::StatusBar(HINSTANCE hInstance, HWND parent)
                  static_cast<WPARAM>(kEditTextMax), 0);
     SetWindowSubclass(impl_->edit, status_bar_edit_subclass, kEditSubclassId,
                       reinterpret_cast<DWORD_PTR>(impl_.get()));
+    // #89: today this box happens to get a later WM_NCPAINT after a High
+    // Contrast exit anyway; the subclass makes that independent of luck.
+    detail::repaint_frame_on_theme_change(impl_->edit);
 
     impl_->label = CreateWindowExW(
         0, L"STATIC", L"",

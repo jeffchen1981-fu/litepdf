@@ -1,5 +1,7 @@
 #include "ui/OutlinePane.hpp"
 
+#include "ui/detail/ThemeFrame.hpp"
+
 #include <commctrl.h>
 #include <stdexcept>
 #include <vector>
@@ -32,6 +34,7 @@ OutlinePane::OutlinePane(HINSTANCE hInstance, HWND parent)
         nullptr);
     if (!impl_->tree)
         throw std::runtime_error("Failed to create OutlinePane TreeView HWND");
+    detail::repaint_frame_on_theme_change(impl_->tree);  // #89
 }
 
 OutlinePane::~OutlinePane() {

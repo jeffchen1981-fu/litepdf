@@ -2,6 +2,7 @@
 
 #include "ui/detail/ButtonColors.hpp"
 #include "ui/detail/HighContrast.hpp"
+#include "ui/detail/ThemeFrame.hpp"
 
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -823,6 +824,7 @@ FindBar::FindBar(HINSTANCE hInstance, HWND parent)
     SetWindowSubclass(impl_->edit, find_bar_edit_subclass,
                       kEditSubclassId,
                       reinterpret_cast<DWORD_PTR>(impl_.get()));
+    detail::repaint_frame_on_theme_change(impl_->edit);  // #89
 
     impl_->counter = CreateWindowExW(
         0, L"STATIC", L"",
