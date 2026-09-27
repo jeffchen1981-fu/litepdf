@@ -30,16 +30,19 @@ double median(std::vector<double> v) {   // by value: sorts a copy
 }
 
 // Median wall time of `iterations` calls of `fn`, after one untimed warm-up
-// call so a first-touch allocation does not land in the sample.
+// call so a first-touch allocation does not land in the sample. `fn` returns
+// its result so that destroying it -- dropping a TextPage handle, which no
+// press pays for -- happens after the clock stops.
 template <typename Fn>
 double median_ms(int iterations, Fn&& fn) {
-    fn();
+    (void)fn();
     std::vector<double> samples;
     samples.reserve(static_cast<std::size_t>(iterations));
     for (int i = 0; i < iterations; ++i) {
         const auto t0 = Clock::now();
-        fn();
+        const auto result = fn();
         samples.push_back(ms_since(t0));
+        (void)result;
     }
     return median(std::move(samples));
 }
@@ -66,65 +69,74 @@ std::size_t release(const Document::TextPage& text, SelPoint anchor, SelPoint ex
     return text.highlight(s.a, s.b).size() + text.copy(s.a, s.b).size();
 }
 
-// No real query is this, so the scan walks the whole page: the longest the
-// search worker holds doc_mutex for this page.
+// No real query is this, so the scan walks the whole page.
 constexpr const char* kNeverMatches = "\x7Fqz\x7F";
+
+std::size_t scan(const Document& doc, std::size_t index) {
+    return doc.page_hits(index, kNeverMatches, Document::SearchFlags{}, nullptr).size();
+}
 
 }  // namespace
 
-bool bench_selection_page(const Document& doc, const Document& primer, int page,
-                          int iterations, SelectionPageTiming& out) {
+bool bench_selection_page(const std::filesystem::path& path, const Document& shared,
+                          int page, int iterations, SelectionPageTiming& out) {
     out = SelectionPageTiming{};
     out.page = page;
     const auto index = static_cast<std::size_t>(page);
 
-    // The primer loads the page first and pays what the render worker has
-    // already paid by the time anyone can press on the page: process-wide
-    // state, chiefly SystemFonts' DirectWrite lookup for a non-embedded font.
+    // Two Documents that have never built any page: the first stands in for a
+    // search scan's first visit, the second for a tab's first press.
+    Document scanner, fresh;
+    if (scanner.open(path) || fresh.open(path)) {
+        std::fprintf(stderr, "bench-selection: cannot open %s\n", path.string().c_str());
+        return false;
+    }
     auto t0 = Clock::now();
-    (void)primer.text_page(index);
-    out.acquire_cold_ms = ms_since(t0);
+    (void)scan(scanner, index);
+    out.scan_first_ms = ms_since(t0);
 
-    // Then `doc`, whose own context has still never loaded this page.
     t0 = Clock::now();
-    Document::TextPage text = doc.text_page(index);
+    const Document::TextPage first = fresh.text_page(index);
     out.acquire_first_ms = ms_since(t0);
-    if (!text.valid()) {
-        std::fprintf(stderr, "bench-selection: no text handle for page %d\n", page);
+    if (!first.valid()) {
+        std::fprintf(stderr, "bench-selection: no text handle for page %d\n", page + 1);
         return false;
     }
 
-    // Each sample drops its handle inside the timed region, as a press that
-    // replaces the previous drag's handle does.
-    out.acquire_ms = median_ms(iterations, [&] { (void)doc.text_page(index); });
+    t0 = Clock::now();
+    Document::TextPage text = shared.text_page(index);
+    out.acquire_seq_ms = ms_since(t0);
+    if (!text.valid()) {
+        std::fprintf(stderr, "bench-selection: no text handle for page %d\n", page + 1);
+        return false;
+    }
 
-    out.search_lock_ms = median_ms(iterations, [&] {
-        (void)doc.page_hits(index, kNeverMatches, Document::SearchFlags{}, nullptr);
-    });
+    out.acquire_ms = median_ms(iterations, [&] { return shared.text_page(index); });
+    out.search_ms  = median_ms(iterations, [&] { return scan(shared, index); });
 
-    SelPoint first, last;
-    if (!text.full_range(first, last)) return true;   // no text: nothing to drag over
-    out.chars = count_code_points(text.copy(first, last));
-    out.quads = text.highlight(first, last).size();
+    SelPoint first_pt, last_pt;
+    if (!text.full_range(first_pt, last_pt)) return true;   // no text: nothing to drag over
+    out.chars = count_code_points(text.copy(first_pt, last_pt));
+    out.quads = text.highlight(first_pt, last_pt).size();
 
     const SelectMode modes[3] = { SelectMode::Chars, SelectMode::Words, SelectMode::Lines };
-    volatile std::size_t sink = 0;   // keeps the calls from being optimised away
     for (int m = 0; m < 3; ++m) {
         const SelectMode mode = modes[m];
-        out.move_full_ms[m] = median_ms(iterations, [&] { sink = move(text, first, last, mode); });
+        out.move_full_ms[m] =
+            median_ms(iterations, [&] { return move(text, first_pt, last_pt, mode); });
         out.move_short_ms[m] =
-            median_ms(iterations, [&] { sink = move(text, first, first, mode); });
+            median_ms(iterations, [&] { return move(text, first_pt, first_pt, mode); });
         out.release_full_ms[m] =
-            median_ms(iterations, [&] { sink = release(text, first, last, mode); });
+            median_ms(iterations, [&] { return release(text, first_pt, last_pt, mode); });
     }
 
     // PdfCanvas::select_all, acquisition included.
     out.select_all_ms = median_ms(iterations, [&] {
-        const auto t = doc.text_page(index);
+        const auto t = shared.text_page(index);
         SelPoint a, b;
-        if (t.full_range(a, b)) sink = t.highlight(a, b).size() + t.copy(a, b).size();
+        return t.full_range(a, b) ? t.highlight(a, b).size() + t.copy(a, b).size()
+                                  : std::size_t{0};
     });
-    (void)sink;
     return true;
 }
 

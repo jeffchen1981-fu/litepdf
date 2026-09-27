@@ -109,43 +109,42 @@ int run_benchmark(const char* path, int iterations, bool json) {
     return 0;
 }
 
-// --bench-selection (#73): one row per page, then each column's worst page.
-// Human-readable only; nothing gates on these numbers.
+// --bench-selection (#73): one row per page, then each column's worst page and
+// how the first-acquisition figures are spread. Human-readable only; nothing
+// gates on these numbers.
 int run_selection_benchmark(const char* path, int only_page, int iterations) {
-    litepdf::core::Document doc;
-    litepdf::core::Document primer;   // see bench_selection_page
-    for (auto* d : { &doc, &primer }) {
-        if (auto err = d->open(path)) {
-            std::fprintf(stderr, "Open error: %d\n", static_cast<int>(*err));
-            return 1;
-        }
+    litepdf::core::Document doc;   // the shared one; see SelectionPageTiming
+    if (auto err = doc.open(path)) {
+        std::fprintf(stderr, "Open error: %d\n", static_cast<int>(*err));
+        return 1;
     }
     const int count = static_cast<int>(doc.page_count());
     if (only_page >= count) {
-        std::fprintf(stderr, "--page %d is out of range (%d pages)\n", only_page, count);
+        std::fprintf(stderr, "--page %d is out of range (%d pages)\n", only_page + 1, count);
         return 2;
     }
     const int begin = only_page >= 0 ? only_page : 0;
     const int end   = only_page >= 0 ? only_page + 1 : count;
 
-    std::printf("Selection cost %s (median of %d, ms; move/release columns are "
-                "Chars/Words/Lines)\n", path, iterations);
-    std::printf("%5s %6s %5s | %7s %7s %7s | %7s | %-23s | %-23s | %-23s | %7s\n",
-                "page", "chars", "quads", "acqcold", "acq1st", "acquire", "search",
-                "move to page end", "move, extent at anchor", "release at page end",
-                "sel-all");
+    std::printf("Selection cost %s (ms; medians of %d except scan1st/acq1st/acqseq, "
+                "one sample each; move/release columns are Chars/Words/Lines)\n",
+                path, iterations);
+    std::printf("%5s %6s %5s | %7s %7s %7s %7s | %7s | %-23s | %-23s | %-23s | %7s\n",
+                "page", "chars", "quads", "scan1st", "acq1st", "acqseq", "acquire",
+                "search", "move to page end", "move, extent at anchor",
+                "release at page end", "sel-all");
 
     std::vector<litepdf::cli::SelectionPageTiming> rows;
     for (int p = begin; p < end; ++p) {
         litepdf::cli::SelectionPageTiming t;
         // A page MuPDF cannot load is reported and skipped: one broken page in a
         // real document should not cost the numbers for the rest.
-        if (!litepdf::cli::bench_selection_page(doc, primer, p, iterations, t)) continue;
+        if (!litepdf::cli::bench_selection_page(path, doc, p, iterations, t)) continue;
         rows.push_back(t);
-        std::printf("%5d %6zu %5zu | %7.3f %7.3f %7.3f | %7.3f | %7.3f %7.3f %7.3f | "
+        std::printf("%5d %6zu %5zu | %7.3f %7.3f %7.3f %7.3f | %7.3f | %7.3f %7.3f %7.3f | "
                     "%7.3f %7.3f %7.3f | %7.3f %7.3f %7.3f | %7.3f\n",
-                    t.page + 1, t.chars, t.quads, t.acquire_cold_ms, t.acquire_first_ms,
-                    t.acquire_ms, t.search_lock_ms,
+                    t.page + 1, t.chars, t.quads, t.scan_first_ms, t.acquire_first_ms,
+                    t.acquire_seq_ms, t.acquire_ms, t.search_ms,
                     t.move_full_ms[0], t.move_full_ms[1], t.move_full_ms[2],
                     t.move_short_ms[0], t.move_short_ms[1], t.move_short_ms[2],
                     t.release_full_ms[0], t.release_full_ms[1], t.release_full_ms[2],
@@ -156,24 +155,45 @@ int run_selection_benchmark(const char* path, int only_page, int iterations) {
         std::fprintf(stderr, "No page could be measured\n");
         return 1;
     }
+    using T = litepdf::cli::SelectionPageTiming;
     // Each figure's worst page, with the page (1-based) it came from.
     const auto worst = [&rows](const char* name, auto field) {
-        const litepdf::cli::SelectionPageTiming* w = &rows.front();
+        const T* w = &rows.front();
         for (const auto& r : rows) if (field(r) > field(*w)) w = &r;
         std::printf("  %-26s %8.3f ms  (page %d, %zu chars)\n",
                     name, field(*w), w->page + 1, w->chars);
     };
-    using T = litepdf::cli::SelectionPageTiming;
     std::printf("Worst page per figure:\n");
-    worst("acquire, process cold",   [](const T& r) { return r.acquire_cold_ms; });
-    worst("acquire, first",          [](const T& r) { return r.acquire_first_ms; });
-    worst("acquire",                 [](const T& r) { return r.acquire_ms; });
-    worst("search lock hold",        [](const T& r) { return r.search_lock_ms; });
-    worst("move to page end, Chars", [](const T& r) { return r.move_full_ms[0]; });
-    worst("move to page end, Words", [](const T& r) { return r.move_full_ms[1]; });
-    worst("move to page end, Lines", [](const T& r) { return r.move_full_ms[2]; });
-    worst("release, Words",          [](const T& r) { return r.release_full_ms[1]; });
-    worst("select all",              [](const T& r) { return r.select_all_ms; });
+    worst("search scan, first visit", [](const T& r) { return r.scan_first_ms; });
+    worst("acquire, first in tab",    [](const T& r) { return r.acquire_first_ms; });
+    worst("acquire, after prior pages", [](const T& r) { return r.acquire_seq_ms; });
+    worst("acquire",                  [](const T& r) { return r.acquire_ms; });
+    worst("search scan",              [](const T& r) { return r.search_ms; });
+    worst("move to page end, Chars",  [](const T& r) { return r.move_full_ms[0]; });
+    worst("move to page end, Words",  [](const T& r) { return r.move_full_ms[1]; });
+    worst("move to page end, Lines",  [](const T& r) { return r.move_full_ms[2]; });
+    worst("release, Words",           [](const T& r) { return r.release_full_ms[1]; });
+    worst("select all",               [](const T& r) { return r.select_all_ms; });
+
+    // The one-sample figures vary most from page to page, so a worst case
+    // alone misleads: give their median and how many pages cross one 60 Hz
+    // frame (16.7 ms) and 100 ms.
+    const auto spread = [&rows](const char* name, auto field) {
+        std::vector<double> v;
+        v.reserve(rows.size());
+        for (const auto& r : rows) v.push_back(field(r));
+        std::sort(v.begin(), v.end());
+        const std::size_t over_frame = static_cast<std::size_t>(
+            v.end() - std::upper_bound(v.begin(), v.end(), 16.7));
+        const std::size_t over_100 = static_cast<std::size_t>(
+            v.end() - std::upper_bound(v.begin(), v.end(), 100.0));
+        std::printf("  %-26s median %8.3f ms, %zu of %zu pages > 16.7 ms, %zu > 100 ms\n",
+                    name, vmedian(v), over_frame, v.size(), over_100);
+    };
+    std::printf("Spread:\n");
+    spread("search scan, first visit",   [](const T& r) { return r.scan_first_ms; });
+    spread("acquire, first in tab",      [](const T& r) { return r.acquire_first_ms; });
+    spread("acquire, after prior pages", [](const T& r) { return r.acquire_seq_ms; });
     return 0;
 }
 
