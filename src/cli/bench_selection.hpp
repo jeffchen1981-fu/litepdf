@@ -25,8 +25,26 @@
 // Not a gate: timings are machine-dependent and nothing asserts on their size.
 // The point is to put a number on the cost before deciding whether anything
 // needs caching or moving off the UI thread.
+//
+// Two things about the machine can move the numbers without the code changing,
+// both measured while chasing spikes in the first runs:
+//   - A cold OS file cache. The first reader of a page's bytes waits on the
+//     disk and every later reader does not, so scan_first -- the first reader
+//     -- spiked on up to a fifth of the pages of a freshly copied file (an
+//     off-CPU median of 1.5 ms against 0.1 ms, single waits up to ~200 ms)
+//     while acquire_first, right behind it, did not. Run the file through
+//     warm_file_cache first and every column measures CPU work alone. That is
+//     the GUI's case for a press (the render worker has read the page), but
+//     NOT always for a search scan, which can reach pages nothing has read.
+//   - A hybrid CPU's efficiency cores run this work about half as fast (an
+//     i7-12700 pinned to them: 51-63 ms against 26-36 ms on its performance
+//     cores, same pages). Runs started from a background shell sometimes spent
+//     nearly their whole length there (736 of 753 pages in one).
+//     prefer_performance_cores asks Windows not to, and each page records
+//     whether a timed section began or ended on one anyway.
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 
 namespace litepdf::core { class Document; }
@@ -46,10 +64,8 @@ struct SelectionPageTiming {
     // in the GUI before anyone can press. acquire_first: then a second fresh
     // Document's first acquisition -- the first press in a tab that has not
     // built any page yet, i.e. every resource the page uses parsed cold.
-    // Both are single samples. In one run scan_first spiked to several times
-    // acquire_first on dozens of pages; every spike that was re-run -- in a
-    // whole-document run, or alone with --page -- came back within ~30% of
-    // acquire_first. Re-run an outlier before quoting it.
+    // Single samples. scan_first reads the page's bytes first, so a cold file
+    // cache lands on it alone -- see the header comment.
     double scan_first_ms    = 0.0;
     double acquire_first_ms = 0.0;
     // One sample, on the Document shared across the run: the page's first
@@ -67,7 +83,29 @@ struct SelectionPageTiming {
     double release_full_ms[3] = {};
 
     double select_all_ms = 0.0;
+
+    // A timed section began or ended on an efficiency core: this page's
+    // figures may be up to about twice a performance core's. Sampled at the
+    // sections' boundaries, so a section that visits one only in its middle
+    // goes unflagged.
+    bool efficiency_core = false;
 };
+
+// Reads the file at `path` once, end to end, so its bytes sit in the OS file
+// cache. Returns the bytes read: 0 when the file cannot be opened.
+std::uintmax_t warm_file_cache(const std::filesystem::path& path);
+
+// True when the calling thread is on a core of a lower efficiency class than
+// the machine's highest -- an E-core of a hybrid CPU. Always false on a CPU
+// with one core class.
+bool on_efficiency_core() noexcept;
+
+// Opts this process out of Windows' EcoQoS execution-speed throttling, the
+// state in which Windows prefers efficiency cores -- as it never does for the
+// GUI's foreground UI thread, the one these figures stand for. A preference,
+// not a pin: efficiency_core still reports where the work actually ran.
+// Returns whether Windows accepted the request.
+bool prefer_performance_cores() noexcept;
 
 // Measures page `page` (0-based) of the document at `path`, `iterations`
 // samples per median. `shared` is a Document open on the same file that has not

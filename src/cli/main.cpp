@@ -126,8 +126,17 @@ int run_selection_benchmark(const char* path, int only_page, int iterations) {
     const int begin = only_page >= 0 ? only_page : 0;
     const int end   = only_page >= 0 ? only_page + 1 : count;
 
+    // So that no figure waits on the disk or runs on an efficiency core; see
+    // bench_selection.hpp.
+    (void)litepdf::cli::warm_file_cache(path);
+    if (!litepdf::cli::prefer_performance_cores()) {
+        std::fprintf(stderr, "Could not opt out of EcoQoS; watch for E-marked rows\n");
+    }
+
     std::printf("Selection cost %s (ms; medians of %d except scan1st/acq1st/acqseq, "
-                "one sample each; move/release columns are Chars/Words/Lines)\n",
+                "one sample each; move/release columns are Chars/Words/Lines; file "
+                "cache warmed first, so disk waits are excluded; E = timed partly on "
+                "an efficiency core)\n",
                 path, iterations);
     std::printf("%5s %6s %5s | %7s %7s %7s %7s | %7s | %-23s | %-23s | %-23s | %7s\n",
                 "page", "chars", "quads", "scan1st", "acq1st", "acqseq", "acquire",
@@ -142,13 +151,13 @@ int run_selection_benchmark(const char* path, int only_page, int iterations) {
         if (!litepdf::cli::bench_selection_page(path, doc, p, iterations, t)) continue;
         rows.push_back(t);
         std::printf("%5d %6zu %5zu | %7.3f %7.3f %7.3f %7.3f | %7.3f | %7.3f %7.3f %7.3f | "
-                    "%7.3f %7.3f %7.3f | %7.3f %7.3f %7.3f | %7.3f\n",
+                    "%7.3f %7.3f %7.3f | %7.3f %7.3f %7.3f | %7.3f%s\n",
                     t.page + 1, t.chars, t.quads, t.scan_first_ms, t.acquire_first_ms,
                     t.acquire_seq_ms, t.acquire_ms, t.search_ms,
                     t.move_full_ms[0], t.move_full_ms[1], t.move_full_ms[2],
                     t.move_short_ms[0], t.move_short_ms[1], t.move_short_ms[2],
                     t.release_full_ms[0], t.release_full_ms[1], t.release_full_ms[2],
-                    t.select_all_ms);
+                    t.select_all_ms, t.efficiency_core ? " E" : "");
     }
 
     if (rows.empty()) {
@@ -194,6 +203,15 @@ int run_selection_benchmark(const char* path, int only_page, int iterations) {
     spread("search scan, first visit",   [](const T& r) { return r.scan_first_ms; });
     spread("acquire, first in tab",      [](const T& r) { return r.acquire_first_ms; });
     spread("acquire, after prior pages", [](const T& r) { return r.acquire_seq_ms; });
+
+    const auto on_e = std::count_if(rows.begin(), rows.end(),
+                                    [](const T& r) { return r.efficiency_core; });
+    if (on_e > 0) {
+        std::printf("Warning: %zu of %zu pages were timed partly on an efficiency core "
+                    "(marked E), which runs this work about half as fast. To exclude it, "
+                    "re-run under `start /affinity <mask of the performance cores>`.\n",
+                    static_cast<std::size_t>(on_e), rows.size());
+    }
     return 0;
 }
 
