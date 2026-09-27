@@ -553,8 +553,7 @@ void MainWindow::on_layout() {
 
 int MainWindow::clamp_results_panel_height(int h) const {
     // Minimums in DIP: the panel keeps its 32-DIP query row plus the list
-    // header and about one row; the canvas keeps the same 100 the splitter
-    // drag has always left it, now DPI-scaled.
+    // header and about one row; the canvas keeps 100.
     constexpr int kPanelMinDip  = 80;
     constexpr int kCanvasMinDip = 100;
     RECT rc; GetClientRect(hwnd_, &rc);
@@ -1161,10 +1160,10 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 // offset upward by status_h px (the panel's top lands at
                 // mouse_y - status_h instead of tracking the cursor at
                 // mouse_y).
-                // Splitter also clamps new_h itself, to [100 px, raw client
-                // height - 200 px] in raw pixels (Splitter.cpp). Depending on
-                // the DPI either clamp can be the tighter one; ours runs last,
-                // so the stored height always satisfies on_layout's bounds.
+                // Splitter only keeps new_h inside the raw client
+                // (Splitter.cpp); the bounds are all ours. It used to reserve
+                // 200 raw px itself, which below ~150 % DPI was tighter than
+                // the layout bound, so a grabbed splitter jumped down.
                 const int status_h = status_bar_ ? status_bar_->height_px() : 0;
                 results_panel_height_px_ =
                     clamp_results_panel_height(new_h - status_h);

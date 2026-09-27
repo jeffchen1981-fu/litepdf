@@ -50,8 +50,10 @@ struct Splitter::Impl {
 namespace litepdf::ui::detail {
 
 LRESULT SplitterCore::handle_message(HWND hwnd_in, UINT msg, WPARAM w, LPARAM l) {
-    // Local clamp bounds. Mirrors Splitter.cpp's anonymous-namespace
-    // constants so VerticalSplitter.cpp doesn't have to re-define them.
+    // Local clamp bounds, used by the vertical orientation only; the
+    // horizontal one leaves its bounds to the owner (#93). Mirrors
+    // Splitter.cpp's anonymous-namespace constants so VerticalSplitter.cpp
+    // doesn't have to re-define them.
     // (Keeping them inside this function — rather than as inline header
     // constants — keeps the public detail surface minimal.)
     constexpr int kMinExtentPx     = 100;
@@ -104,14 +106,15 @@ LRESULT SplitterCore::handle_message(HWND hwnd_in, UINT msg, WPARAM w, LPARAM l)
                     if (orient == Orientation::Horizontal) {
                         // Horizontal splitter: panel anchored at bottom.
                         // panel_h = parent_h - mouse_y_in_parent_client.
-                        const int max_h = (std::max)(
-                            kMinExtentPx,
-                            static_cast<int>(pr.bottom) - kReservePx);
+                        // Only kept inside the parent here: the owner's
+                        // on_drag applies the real bounds, the same ones its
+                        // layout applies (#93). A tighter bound here made a
+                        // grabbed splitter jump away from where layout had
+                        // put it.
+                        const int parent_h = static_cast<int>(pr.bottom);
                         const int new_h = compute_drag_target_y(
                             static_cast<int>(pt_in_parent.y),
-                            static_cast<int>(pr.bottom),
-                            kMinExtentPx,
-                            max_h);
+                            parent_h, 0, parent_h);
                         on_drag(new_h);
                     } else {
                         // Vertical splitter (Phase 7 T4b): pane anchored at

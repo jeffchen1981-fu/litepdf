@@ -51,8 +51,9 @@ TEST_CASE("clamp_bottom_panel_height: a height that fits is kept", "[splitter_ma
 
 TEST_CASE("clamp_bottom_panel_height: a tall panel leaves the canvas its minimum",
           "[splitter_math]") {
-    // The #93 repro: 660 px stored, 718 px shared -> the canvas kept 58 px.
-    REQUIRE(clamp_bottom_panel_height(660, 718, 160, 200) == 518);
+    // The #93 repro at 200 %: 660 px stored, 674 px shared. Unclamped, the
+    // canvas kept 14 px; clamped, it keeps its 200.
+    REQUIRE(clamp_bottom_panel_height(660, 674, 160, 200) == 474);
 }
 
 TEST_CASE("clamp_bottom_panel_height: a short panel is raised to its minimum",

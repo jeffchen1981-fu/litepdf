@@ -54,7 +54,9 @@ inline int compute_drag_target_x(int mouse_x, [[maybe_unused]] int parent_w,
 // Priority when the strip is short: the canvas keeps `min_canvas_h` first,
 // then the panel keeps `min_panel_h` (its query row stays reachable), and in
 // every case the panel is capped at `avail_h`, so the canvas never goes
-// below 0 and the splitter never leaves the strip.
+// below 0. A negative `avail_h` (a client shorter than the tab strip, the
+// splitter and the status bar together) gives 0: there is no strip to keep
+// the splitter in.
 inline int clamp_bottom_panel_height(int stored_h, int avail_h,
                                      int min_panel_h, int min_canvas_h) {
     const int h = std::max(std::min(stored_h, avail_h - min_canvas_h),
