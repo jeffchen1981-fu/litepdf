@@ -243,8 +243,9 @@ public:
     //
     // A handle is single-threaded, though: full_range() memoises the page's
     // first and last edges into the handle (warmed at acquisition, so a drag
-    // never pays for the walk), which two threads calling it on the same handle
-    // would race on. Everything that touches a handle today runs on the UI
+    // never pays for the walk), and highlight() records that it has logged its
+    // quad cap; two threads calling either on the same handle would race on
+    // those writes. Everything that touches a handle today runs on the UI
     // thread.
     class TextPage {
     public:
