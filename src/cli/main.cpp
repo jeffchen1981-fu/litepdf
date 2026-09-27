@@ -228,7 +228,13 @@ int main(int argc, char* argv[]) {
             json = true;
         } else if (std::strcmp(argv[i], "--bench-selection") == 0) {
             bench_selection = true;
-        } else if (std::strcmp(argv[i], "--page") == 0 && i + 1 < argc) {
+        } else if (std::strcmp(argv[i], "--page") == 0) {
+            // A missing value is an error, not "every page": that would turn a
+            // typo into a whole-document run, minutes long on a big file.
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "--page needs a page number\n");
+                return 2;
+            }
             selection_page = std::atoi(argv[++i]) - 1;   // 1-based on the command line
             if (selection_page < 0) {
                 std::fprintf(stderr, "--page must be >= 1\n");
