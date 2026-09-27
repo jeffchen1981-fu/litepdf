@@ -2,10 +2,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-// Forward-declare the bits of the MuPDF C ABI we need here. The unit-tests
-// target does not get MuPDF's include path (litepdf_core links mupdf PRIVATE),
-// but fz_drop_context is a plain extern-C function so a local declaration is
-// enough to exercise clone_context's return value at the raw context level.
+// Forward-declare the bits of the MuPDF C ABI we need here, keeping this TU
+// MuPDF-header-free: fz_drop_context is a plain extern-C function, so a local
+// declaration is enough to exercise clone_context's return value at the raw
+// context level.
 extern "C" {
 struct fz_context;
 void fz_drop_context(fz_context* ctx);

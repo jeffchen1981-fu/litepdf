@@ -10,9 +10,9 @@
 #include "core/EscrowContext.hpp"
 #include "ui/detail/ViewportMath.hpp"
 
-// The unit-test target has no MuPDF include path (litepdf_core links MuPDF
-// privately). fz_drop_context is plain extern "C", so a local declaration is
-// enough -- the same approach as test_escrow_context.cpp.
+// fz_drop_context is plain extern "C", so a local declaration is enough and
+// keeps this TU MuPDF-header-free -- the same approach as
+// test_escrow_context.cpp.
 extern "C" {
 struct fz_context;
 void fz_drop_context(fz_context* ctx);

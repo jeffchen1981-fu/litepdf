@@ -141,9 +141,9 @@ TEST_CASE("DocumentSelection a wide gap on one baseline yields separate quads",
     REQUIRE(text.highlight(first, last).size() >= 2);
 }
 
-TEST_CASE("DocumentSelection a gap under 0.8 em stays one quad with a space copied",
+TEST_CASE("DocumentSelection a gap between 0.15 and 0.8 em stays one quad with a space copied",
           "[core][selection]") {
-    // The other half of the wide-gap rule. 0.5 em is inside the window where
+    // The other half of the wide-gap rule. 0.65 em is inside the window where
     // MuPDF keeps one stext line and inserts a synthetic space across the gap,
     // so a highlight split at every gap between runs is as wrong as one that
     // never splits: it would break a single spaced line into pieces.

@@ -24,7 +24,7 @@ TEST_CASE("ClipboardText utf8 to utf16 replaces an invalid byte and keeps the re
     // result: with MB_ERR_INVALID_CHARS the conversion fails outright, and one
     // bad byte on a page would copy nothing at all.
     const std::wstring wide = litepdf::ui::utf8_to_utf16("a\xFF" "b");
-    REQUIRE(wide == std::wstring(L"a�b"));
+    REQUIRE(wide == std::wstring{ L'a', wchar_t(0xFFFD), L'b' });
 }
 
 TEST_CASE("ClipboardText utf8 to utf16 encodes an astral character as a surrogate pair",

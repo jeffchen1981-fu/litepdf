@@ -105,7 +105,9 @@ TEST_CASE("SelectionDrag the drag threshold comes from the pointer metrics per a
           "[ui][selection]") {
     // PdfCanvas reads SM_CXDRAG and SM_CYDRAG for the window's DPI. A threshold
     // hard-coded to the 4 px default, or one axis measured against the other's
-    // metric, reads a 200% monitor's 8 px as 4.
+    // metric, reads a 200% monitor's 8 px as 4. This pins only that move()
+    // honours the struct; the Win32 reads in PdfCanvas's pointer_metrics() are
+    // not headless-testable.
     PointerMetrics m;
     m.drag_cx = 10;
     m.drag_cy = 2;
@@ -128,7 +130,8 @@ TEST_CASE("SelectionDrag the drag threshold comes from the pointer metrics per a
 
 TEST_CASE("SelectionDrag the triple click window comes from the pointer metrics",
           "[ui][selection]") {
-    // GetDoubleClickTime and SM_C?DOUBLECLK, for the window's DPI. The rectangle
+    // GetDoubleClickTime and SM_C?DOUBLECLK, for the window's DPI (read by
+    // PdfCanvas; this pins only that press() honours the struct). The rectangle
     // is centred on the previous press, so each axis allows half its metric.
     PointerMetrics m;
     m.dblclk_ms = 200;
