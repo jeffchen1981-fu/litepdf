@@ -83,6 +83,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_document_selection.cpp   # #52 Task 6
     unit/test_selection_drag.cpp       # #52 Task 8
     unit/test_clipboard_text.cpp       # #52 Task 8
+    unit/test_mupdf_root.cpp           # #66 MuPDFRoot::of foreign lock table
     # The CLI helpers under test are compiled straight into the test binary
     # (they are not part of litepdf_core). Both are MuPDF-header-free and
     # resolve their fz_* calls through the litepdf::mupdf dependency that
@@ -91,6 +92,10 @@ target_sources(litepdf_unit_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/src/cli/bench_iteration.cpp"
 )
 target_link_libraries(litepdf_unit_tests PRIVATE litepdf_core)
+# MuPDF's include path, for the tests that reach src/core's internal headers
+# (test_mupdf_root.cpp). litepdf_core links MuPDF privately, so its headers do
+# not propagate; the libraries are already on the link line through it.
+target_link_libraries(litepdf_unit_tests PRIVATE litepdf::mupdf)
 
 litepdf_apply_flags(litepdf_unit_tests)
 
