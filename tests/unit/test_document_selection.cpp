@@ -23,7 +23,9 @@ constexpr std::size_t kWideGap    = 1;
 constexpr std::size_t kBlank      = 2;
 constexpr std::size_t kWords      = 3;
 constexpr std::size_t kManyRuns   = 4;
-constexpr std::size_t kCropOffset = 5;
+constexpr std::size_t kMediumGap  = 5;
+constexpr std::size_t kSingleChar = 6;
+constexpr std::size_t kCropOffset = 7;
 
 Document open_fixture(const char* path) {
     Document doc;
@@ -87,7 +89,7 @@ TEST_CASE("DocumentSelection text page is empty when there is nothing to extract
     REQUIRE_FALSE(unopened.text_page(0).valid());
 
     const Document doc = open_selection_fixture();
-    REQUIRE_FALSE(doc.text_page(6).valid());      // one past the last page
+    REQUIRE_FALSE(doc.text_page(8).valid());      // one past the last page
     REQUIRE_FALSE(doc.text_page(99999).valid());
 
     const Document::TextPage empty;
@@ -137,6 +139,33 @@ TEST_CASE("DocumentSelection a wide gap on one baseline yields separate quads",
     // One quad would be a highlight bar painted straight across ~270 pt of
     // whitespace -- what a hand-rolled one-quad-per-line walk produces.
     REQUIRE(text.highlight(first, last).size() >= 2);
+}
+
+TEST_CASE("DocumentSelection a gap between 0.15 and 0.8 em stays one quad with a space copied",
+          "[core][selection]") {
+    // The other half of the wide-gap rule. 0.65 em is inside the window where
+    // MuPDF keeps one stext line and inserts a synthetic space across the gap,
+    // so a highlight split at every gap between runs is as wrong as one that
+    // never splits: it would break a single spaced line into pieces.
+    const Document doc = open_selection_fixture();
+    const auto text = doc.text_page(kMediumGap);
+    SelPoint first, last;
+    REQUIRE(text.full_range(first, last));
+    REQUIRE(text.highlight(first, last).size() == 1);
+    REQUIRE(text.copy(first, last) == "NEAR RUN");
+}
+
+TEST_CASE("DocumentSelection select all on a single character page copies it",
+          "[core][selection]") {
+    // The first and last characters are the same one: the range runs from its
+    // leading edge to its trailing edge.
+    const Document doc = open_selection_fixture();
+    const auto text = doc.text_page(kSingleChar);
+    SelPoint first, last;
+    REQUIRE(text.full_range(first, last));
+    REQUIRE(first.x < last.x);
+    REQUIRE(text.highlight(first, last).size() == 1);
+    REQUIRE(text.copy(first, last) == "X");
 }
 
 TEST_CASE("DocumentSelection a page with no text has no range and copies nothing",
@@ -192,6 +221,9 @@ TEST_CASE("DocumentSelection chars mode passes points through unsnapped",
           "[core][selection]") {
     const Document doc = open_selection_fixture();
     const auto text = doc.text_page(kWords);
+    // An empty handle returns its inputs too, through the same branch -- so the
+    // pass-through proves nothing about Chars mode unless the page is real.
+    REQUIRE(text.valid());
     const SelPoint a{ 80.0f, 70.0f };
     const SelPoint b{ 150.0f, 90.0f };
     const auto s = text.snap(a, b, SelectMode::Chars);

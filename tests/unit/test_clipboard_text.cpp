@@ -17,3 +17,19 @@ TEST_CASE("ClipboardText utf8 to utf16 keeps CJK and CRLF and adds no terminator
 TEST_CASE("ClipboardText utf8 to utf16 of empty text is empty", "[ui][clipboard]") {
     REQUIRE(litepdf::ui::utf8_to_utf16(std::string{}).empty());
 }
+
+TEST_CASE("ClipboardText utf8 to utf16 replaces an invalid byte and keeps the rest",
+          "[ui][clipboard]") {
+    // 0xFF never occurs in UTF-8. The header promises U+FFFD, not an empty
+    // result: with MB_ERR_INVALID_CHARS the conversion fails outright, and one
+    // bad byte on a page would copy nothing at all.
+    const std::wstring wide = litepdf::ui::utf8_to_utf16("a\xFF" "b");
+    REQUIRE(wide == std::wstring{ L'a', wchar_t(0xFFFD), L'b' });
+}
+
+TEST_CASE("ClipboardText utf8 to utf16 encodes an astral character as a surrogate pair",
+          "[ui][clipboard]") {
+    // U+1F600, four UTF-8 bytes, two UTF-16 units.
+    const std::wstring wide = litepdf::ui::utf8_to_utf16("\xF0\x9F\x98\x80" "z");
+    REQUIRE(wide == std::wstring{ wchar_t(0xD83D), wchar_t(0xDE00), L'z' });
+}

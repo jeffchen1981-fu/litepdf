@@ -4,6 +4,8 @@
 
 #include "ui/detail/SelectionDrag.hpp"
 
+#include <cstdint>
+
 using litepdf::core::SelectMode;
 using litepdf::ui::canvas_cursor;
 using litepdf::ui::canvas_dip_to_page_point;
@@ -90,6 +92,62 @@ TEST_CASE("SelectionDrag a stationary double click commits a word", "[ui][select
     REQUIRE(mode == SelectMode::Words);
     REQUIRE(g.begin_select(mode, 50, 50));
     REQUIRE(g.release(MouseButton::Left) == ReleaseAction::CommitSelection);
+
+    // And a stationary triple click commits its line: release() must treat every
+    // mode but Chars alike, not Words alone.
+    mode = clicks.press(false, 1200, 50, 50, m);
+    REQUIRE(mode == SelectMode::Lines);
+    REQUIRE(g.begin_select(mode, 50, 50));
+    REQUIRE(g.release(MouseButton::Left) == ReleaseAction::CommitSelection);
+}
+
+TEST_CASE("SelectionDrag the drag threshold comes from the pointer metrics per axis",
+          "[ui][selection]") {
+    // PdfCanvas reads SM_CXDRAG and SM_CYDRAG for the window's DPI. A threshold
+    // hard-coded to the 4 px default, or one axis measured against the other's
+    // metric, reads a 200% monitor's 8 px as 4. This pins only that move()
+    // honours the struct; the Win32 reads in PdfCanvas's pointer_metrics() are
+    // not headless-testable.
+    PointerMetrics m;
+    m.drag_cx = 10;
+    m.drag_cy = 2;
+    GestureState g;
+
+    REQUIRE(g.begin_select(SelectMode::Chars, 100, 100));
+    g.move(110, 102, m);                                  // at both thresholds
+    REQUIRE_FALSE(g.moved());
+    REQUIRE(g.release(MouseButton::Left) == ReleaseAction::ClearSelection);
+
+    REQUIRE(g.begin_select(SelectMode::Chars, 100, 100));
+    g.move(111, 100, m);                                  // past drag_cx
+    REQUIRE(g.moved());
+    (void)g.abort();
+
+    REQUIRE(g.begin_select(SelectMode::Chars, 100, 100));
+    g.move(100, 97, m);                                   // past drag_cy
+    REQUIRE(g.moved());
+}
+
+TEST_CASE("SelectionDrag the triple click window comes from the pointer metrics",
+          "[ui][selection]") {
+    // GetDoubleClickTime and SM_C?DOUBLECLK, for the window's DPI (read by
+    // PdfCanvas; this pins only that press() honours the struct). The rectangle
+    // is centred on the previous press, so each axis allows half its metric.
+    PointerMetrics m;
+    m.dblclk_ms = 200;
+    m.dblclk_cx = 20;   // |dx| <= 10
+    m.dblclk_cy = 6;    // |dy| <= 3
+
+    const auto third = [&m](std::uint32_t t, int x, int y) {
+        ClickCounter c;
+        (void)c.press(false, 1000, 50, 50, m);
+        (void)c.press(true,  1100, 50, 50, m);
+        return c.press(false, t, x, y, m);
+    };
+    REQUIRE(third(1300, 60, 53) == SelectMode::Lines);   // at every limit
+    REQUIRE(third(1301, 50, 50) == SelectMode::Chars);   // past dblclk_ms
+    REQUIRE(third(1200, 61, 50) == SelectMode::Chars);   // past dblclk_cx / 2
+    REQUIRE(third(1200, 50, 54) == SelectMode::Chars);   // past dblclk_cy / 2
 }
 
 TEST_CASE("SelectionDrag release decides before the capture changed abort runs",

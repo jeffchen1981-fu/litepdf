@@ -1,7 +1,8 @@
 #pragma once
 
 // INTERNAL to litepdf_core: includes <mupdf/fitz.h>. Include it only from .cpp
-// files in src/core -- never from a public header.
+// files in src/core, or from a unit test that reaches core internals -- never
+// from a public header.
 //
 // The root of one Document's MuPDF context family: the lock table MuPDF calls
 // through for every context in the family, plus the context every other one is

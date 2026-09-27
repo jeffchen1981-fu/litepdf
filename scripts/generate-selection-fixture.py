@@ -15,7 +15,15 @@ Page index -> what it pins:
      snapping.
   4  30 rows x 10 runs, 55 pt apart: 300 separate highlight quads -- past the
      256-quad initial buffer, so the grow-and-retry path runs.
-  5  CropBox [36 36 576 756], "ORIGIN" drawn at user space (108, 684). MuPDF moves
+  5  One baseline, two runs 0.65 em apart -- inside the 0.15-0.8 em window
+     (SPACE_DIST .. SPACE_MAX_DIST) where MuPDF keeps one stext line and inserts
+     a synthetic space spanning the gap. The other half of page 1's rule: the
+     highlight is ONE quad and the copy has a space between the runs. Wider
+     than the highlight's 0.5 em merge fuzz, so without that space the runs
+     would highlight as two quads.
+  6  A single character, so the page's first and last characters are the same
+     one.
+  7  CropBox [36 36 576 756], "ORIGIN" drawn at user space (108, 684). MuPDF moves
      the CropBox origin to (0, 0), so the word starts at page space (72, 72).
      MUST STAY THE LAST PAGE: reportlab applies a CropBox to the page that sets
      it and to every page after.
@@ -89,6 +97,18 @@ def page_many_runs(c):
             c.drawString(40 + 55 * col, 740 - 20 * row, "xx")
 
 
+def page_medium_gap(c):
+    c.setFont("Helvetica", 12)
+    c.drawString(72, 720, "NEAR")
+    # 7.8 pt = 0.65 em at 12 pt, measured from the pen after "NEAR".
+    c.drawString(72 + c.stringWidth("NEAR", "Helvetica", 12) + 7.8, 720, "RUN")
+
+
+def page_single_char(c):
+    c.setFont("Helvetica", 12)
+    c.drawString(72, 720, "X")
+
+
 def page_crop_offset(c):
     c.setCropBox((36, 36, 576, 756))
     c.setFont("Helvetica", 12)
@@ -101,6 +121,8 @@ PAGES = [
     page_blank,
     page_words,
     page_many_runs,
+    page_medium_gap,
+    page_single_char,
     page_crop_offset,  # must stay last -- see the module docstring
 ]
 
