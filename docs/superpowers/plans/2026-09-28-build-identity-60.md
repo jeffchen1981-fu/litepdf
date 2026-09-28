@@ -728,7 +728,7 @@ and pass `argv[0]` twice to that `fprintf` (`argv[0], argv[0]);`).
 .\build\Release\litepdf-cli.exe --version; "exit=$LASTEXITCODE"
 .\build\Release\litepdf-cli.exe; "exit=$LASTEXITCODE"
 ```
-Expected: first command prints `version=1.3.0-dev`, `build=v1.3.0-<n>-g<sha>`, `release=0`, `exit=0`. Second prints both usage lines and `exit=2`.
+Expected: first command prints `version=1.3.0-dev`, `build=v1.3.0-<n>-g<sha>-dirty` (this task's edit is not committed yet, so the tree is dirty), `release=0`, `exit=0`. Second prints both usage lines and `exit=2`.
 
 - [ ] **Step 5: Commit**
 
@@ -1135,7 +1135,7 @@ powershell -NoProfile -File build\gui\about-probe.ps1
 Select-String -Path src\ui\MainWindow.cpp -Pattern 'LitePDF v\d'
 ```
 (This text probe stands in for the spec §4 "screenshot About" item: it checks the same content, reproducibly.)
-Expected: `TITLE: LitePDF 1.3.0-dev — bookmarks.pdf`; About text starts `LitePDF 1.3.0-dev`, then `Build: v1.3.0-<n>-g<sha>`, and ends with the `Releases:` line; the `Select-String` prints nothing (the literal is gone).
+Expected: `TITLE: LitePDF 1.3.0-dev — bookmarks.pdf`; About text starts `LitePDF 1.3.0-dev`, then `Build: v1.3.0-<n>-g<sha>-dirty` (uncommitted task edits), and ends with the `Releases:` line; the `Select-String` prints nothing (the literal is gone).
 
 - [ ] **Step 6: Run the gates and the full suite**
 
