@@ -141,6 +141,17 @@ try {
     Check ($f["FACT_TOPLEVEL_MATCH"] -eq "1") "K: CJK path resolves and matches"
     Check ($f["FACT_SHORT_SHA"] -ne "") "K: CJK path records the sha"
 
+    # L: a clean tree on a tag whose NAME ends in -dirty is not dirty.
+    # Annotated (not lightweight): the dirty probe is `describe --always
+    # --dirty` with no --tags, which only resolves annotated tags -- a
+    # lightweight tag would fall back to the short SHA and never exercise
+    # the bug this case targets.
+    $dt = New-Repo "dirtynamedtag"
+    Invoke-Git $dt @("-c", "tag.gpgsign=false", "tag", "-a", "v9.9.9-dirty", "-m", "rel")
+    $f = Get-Facts $dt $Git
+    Check ($f["FACT_EXACT_TAG"] -eq "v9.9.9-dirty") "L: -dirty-named tag is the exact tag"
+    Check ($f["FACT_DIRTY"] -eq "0") "L: a -dirty-named tag on a clean tree is not dirty"
+
     # H: an unchanged state leaves the header untouched (no rebuild).
     $stable = Join-Path $work "stable.h"
     Invoke-Collector $repo $Git $stable

@@ -535,8 +535,10 @@ if(_toplevel_match)
     # No answer counts as dirty: this is the one fact whose unknown value must
     # be the dev value (a corrupt index can fail this probe while the tag
     # lookup still succeeds).
-    _litepdf_git(_always describe --always --dirty)
-    if(_always STREQUAL "" OR _always MATCHES "-dirty$")
+    # ":dirty" cannot occur in a ref name, so a tag such as v1.3.0-dirty can
+    # never be mistaken for the dirty marker.
+    _litepdf_git(_always describe --always --dirty=:dirty)
+    if(_always STREQUAL "" OR _always MATCHES ":dirty$")
         set(_dirty 1)
     endif()
 endif()
