@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Build and test **Release** only; Debug fails with LNK2038 against the prebuilt MuPDF libs.
-- `cmake`/`ctest` are not on PATH locally. Every PowerShell session that runs a step first sets:
+- **Never run a bare `cmake`/`ctest`**: the ones on PATH are a MinGW/WinLibs CMake 4.3.3, not the VS BuildTools CMake 3.31 that configured `build/`. Every PowerShell session that runs a step first sets:
   `$cmake = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"; $ctest = Join-Path (Split-Path $cmake) "ctest.exe"`
   Build dir is `build/` (already configured).
 - Run the unit-test exe and `ctest` **from the repo root** (fixtures resolve relative to it).
@@ -22,7 +22,7 @@
 - Release iff git proves it: `toplevel_match && exact_tag non-empty && !dirty`. Anything else is dev. A false "release" is the defect this work exists to prevent.
 - Release `build_id` is the exact tag (`v1.3.0`), never the long describe form (`v1.3.0-0-g88513f2`).
 - Fact strings are sanitized **as a whole value** to `^[A-Za-z0-9._-]+$`; a value with any other character becomes empty.
-- Release title stays `LitePDF — x.pdf` / `LitePDF`; dev title is `LitePDF 1.3.0-dev — x.pdf` / `LitePDF 1.3.0-dev`. `kWindowTitle` stays `L"LitePDF"` (it is also every MessageBox caption).
+- Release title stays `LitePDF — x.pdf` / `LitePDF`; dev title is `LitePDF 1.3.0-dev — x.pdf` / `LitePDF 1.3.0-dev`. `kWindowTitle` stays `L"LitePDF"` (it is also the caption of MainWindow's MessageBoxes, About included).
 - `.ps1` files: Windows PowerShell 5.1-compatible (no `?.`, `??`, ternary) and **ASCII-only outside comments**. The em dash is `[char]0x2014`, never a literal.
 - Catch2 test names: ASCII, prefixed `Version:`, tag `[version]`.
 - Test baseline before this work: re-measure with `ctest --test-dir build -C Release` at the start of Task 1 and record the number; do not quote an older one.
@@ -654,7 +654,7 @@ Expected: `[version]` 10 test cases pass; the ctest run passes; the header shows
 - [ ] **Step 7: Verify the no-rebuild behaviour**
 
 ```powershell
-& $cmake --build build --config Release --target litepdf_core -- /v:n | Select-String "Version.cpp|Document.cpp"
+& $cmake --build build --config Release --target litepdf_core -- /v:n | Select-String '^\s+[\w.-]+\.cpp\s*$'
 ```
 Expected: no output — a second build with no new commit compiles nothing. (The recompile-on-new-commit half is checked in Task 3 Step 1, after this task's commit exists.)
 
@@ -688,9 +688,9 @@ git commit -m "build: collect git build facts on every build (#60)" -m "Co-Autho
 
 Task 2's commit changed HEAD, so the facts header must change:
 ```powershell
-& $cmake --build build --config Release --target litepdf_core -- /v:n | Select-String "\.cpp"
+& $cmake --build build --config Release --target litepdf_core -- /v:n | Select-String '^\s+[\w.-]+\.cpp\s*$'
 ```
-Expected: exactly one compiled source, `Version.cpp`. Record the output in the task report. If other TUs recompile, stop and report — the header dependency is wider than designed.
+Expected: exactly one line, `Version.cpp` (the pattern matches MSBuild's bare per-file lines, not the `cl.exe` command line). Record the output in the task report. If other TUs recompile, stop and report — the header dependency is wider than designed.
 
 - [ ] **Step 2: Show the current (failing) behaviour**
 
@@ -753,11 +753,11 @@ git commit -m "feat(cli): --version prints the build identity (#60)" -m "Co-Auth
 ```powershell
 powershell -NoProfile -File scripts\check-version-sync.ps1 -ExpectRelease; "exit=$LASTEXITCODE"
 ```
-Expected: FAIL to parse — `A parameter cannot be found that matches parameter name 'ExpectRelease'`. (The gate has no way to assert classification yet.)
+Expected: exit 0 with `[OK]`. The script has no `param` block, so `-ExpectRelease` is silently ignored — that silence is the point: the gate cannot assert classification yet. Record that it exits 0.
 
 - [ ] **Step 2: Replace the header comment and add the parameters**
 
-Replace everything from line 4 (`# Runs under BOTH Windows PowerShell 5.1 …`) through the line `$ErrorActionPreference = "Stop"` with:
+Replace everything from line 3 (`# Runs under BOTH Windows PowerShell 5.1 …`) through the line `$ErrorActionPreference = "Stop"` with:
 ```powershell
 # Runs under BOTH Windows PowerShell 5.1 (local dev -- no pwsh 7 here) and
 # PowerShell 7 (CI invokes it via `shell: pwsh`). #Requires -Version 5.1 is a
@@ -920,6 +920,9 @@ if ((Test-Path $cliExe) -and (Test-Path $appExe)) {
         exit 1
     }
     $artifactStatus = "$mode OK: " + (($cliOut | ForEach-Object { "$_".Trim() }) -join ", ")
+    if ($mode -eq "Local") {
+        $artifactStatus += " (classification not asserted; pass -ExpectDev or -ExpectRelease)"
+    }
 } elseif ($env:CI -eq "true" -or $mode -ne "Local") {
     Write-Host "[FAIL] build/Release/litepdf-cli.exe or litepdf.exe not found."
     Write-Host "  This gate asserts the built binaries; run it after the Build step."
@@ -974,6 +977,7 @@ git commit -m "ci: version-sync gate asserts the built binaries' identity (#60)"
 
 **Files:**
 - Modify: `src/ui/MainWindow.cpp` (includes ~line 9-18; anonymous-namespace constants at lines 40-41; `update_window_title` at 205-215; `IDM_HELP_ABOUT` at ~1695-1704; `CreateWindowExW` at ~2392-2396)
+- Modify: `src/ui/MainWindow.hpp:125` (comment only)
 - Modify: `src/app/CrashHandler.cpp`, `src/app/CrashHandler.hpp:8`, `src/app/AppPaths.cpp:55`
 - Modify: `scripts/ux-probe.ps1:57`
 
@@ -1032,6 +1036,8 @@ std::wstring title_base() {
     return t;
 }
 ```
+
+In `src/ui/MainWindow.hpp`, change the comment `// Rewrite window title based on the active tab (or reset to "LitePDF").` to `// Rewrite window title based on the active tab (or reset to the bare title; dev builds add "<version>-dev").`
 
 Replace the body of `MainWindow::update_window_title()`:
 ```cpp
@@ -1128,6 +1134,7 @@ with
 powershell -NoProfile -File build\gui\about-probe.ps1
 Select-String -Path src\ui\MainWindow.cpp -Pattern 'LitePDF v\d'
 ```
+(This text probe stands in for the spec §4 "screenshot About" item: it checks the same content, reproducibly.)
 Expected: `TITLE: LitePDF 1.3.0-dev — bookmarks.pdf`; About text starts `LitePDF 1.3.0-dev`, then `Build: v1.3.0-<n>-g<sha>`, and ends with the `Releases:` line; the `Select-String` prints nothing (the literal is gone).
 
 - [ ] **Step 6: Run the gates and the full suite**
@@ -1141,7 +1148,7 @@ Expected: gate exit 0; all tests pass (same count as after Task 4).
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/ui/MainWindow.cpp src/app/CrashHandler.cpp src/app/CrashHandler.hpp src/app/AppPaths.cpp scripts/ux-probe.ps1
+git add src/ui/MainWindow.cpp src/ui/MainWindow.hpp src/app/CrashHandler.cpp src/app/CrashHandler.hpp src/app/AppPaths.cpp scripts/ux-probe.ps1
 git commit -m "feat(ui): dev builds name their version in the title; About shows the build (#60)" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 

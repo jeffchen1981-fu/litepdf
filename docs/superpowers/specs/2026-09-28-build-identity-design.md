@@ -63,7 +63,7 @@ The script **collects facts and never classifies**. Inputs: `GIT_EXECUTABLE`, `S
   script **never fails the build on a git error**. A bug in the script itself still errors
   and fails the build, which is intended.
 - Every string fact is **sanitized as a whole value**: it must match
-  `^[A-Za-z0-9._-]+$` or it becomes empty. All 12 current tags pass.
+  `^[A-Za-z0-9._-]+$` or it becomes empty. All 24 current tags pass (checked 2026-09-28).
 - The header is written to a temp file, then `copy_if_different` onto `OUT`. When the
   commit has not changed, the header's mtime does not change and nothing recompiles.
   When it has, only `Version.cpp` recompiles.
@@ -126,14 +126,14 @@ constant in the same header).
 - The hard-coded `L"LitePDF v1.3.0\n\n"` About literal is removed. `Engine: MuPDF
   1.27.2` stays a literal. It is sourced from the submodule, and this design does not
   change it.
-- `kWindowTitle` stays `L"LitePDF"`: it is also the caption of every `MessageBoxW`
-  (About included). The dev title is built separately in the title-setting paths. The
+- `kWindowTitle` stays `L"LitePDF"`: it is also the caption of MainWindow's `MessageBoxW`
+  calls (About included). The dev title is built separately in the title-setting paths. The
   single-instance lookup finds the window by class (`SingleInstance.cpp:26`), so it is
   unaffected.
 - `litepdf-cli`: recognize `--version` **before** the `argc < 2` usage exit and the
   `argv[1]` path read (`src/cli/main.cpp:229-238`). Print the three `key=value` lines to
-  stdout and exit 0. No other consumer parses cli stdout except `benchmark.ps1`, which
-  reads only `--json` output.
+  stdout and exit 0. The only other consumers of cli stdout (`benchmark.ps1`,
+  `benchmark.yml`) read `--benchmark --json` output only.
 - Crash dump: `install_crash_handler` appends `litepdf-<display_version>-` to `g_prefix`
   once, at install time. The exception filter's format becomes `%s%lu-%lu.dmp`, so the
   filter does no more work than today. `prune_crash_dumps` selects by the `.dmp`
