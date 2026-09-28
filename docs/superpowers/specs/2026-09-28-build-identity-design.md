@@ -54,8 +54,8 @@ The script **collects facts and never classifies**. Inputs: `GIT_EXECUTABLE`, `S
 | Fact | Source | Absent / error |
 |---|---|---|
 | `toplevel_match` | `file(REAL_PATH)` of `git rev-parse --show-toplevel` equals `file(REAL_PATH)` of `SRC`, compared case-insensitively | `0` |
-| `exact_tag` | `git describe --tags --exact-match` | empty |
-| `describe` | `git describe --tags --long --dirty` | empty |
+| `exact_tag` | `git describe --tags --exact-match --match "v[0-9]*"` — only release-shaped tags count, so a local tag such as `wip` never makes a release | empty |
+| `describe` | `git describe --tags --long --dirty --match "v[0-9]*"` | empty |
 | `short_sha` | `git rev-parse --short HEAD` | empty |
 | `dirty` | `1` if `git describe --always --dirty` ends in `-dirty` — the same mechanism as `describe`, so both facts agree, and it works with no tags | `0` |
 
