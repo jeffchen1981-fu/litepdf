@@ -1,6 +1,8 @@
 // LitePDF -- core::Version (#60).
 #include "core/Version.hpp"
 
+#include "litepdf_build_facts.h"  // generated, see cmake/CollectBuildFacts.cmake
+
 namespace litepdf::core {
 
 BuildIdentity classify(const BuildFacts& facts, std::string_view version) {
@@ -21,6 +23,19 @@ BuildIdentity classify(const BuildFacts& facts, std::string_view version) {
             id.build_id = "g" + std::string(facts.short_sha) + (facts.dirty ? "-dirty" : "");
         }
     }
+    return id;
+}
+
+const BuildIdentity& build_identity() {
+    static const BuildIdentity id = [] {
+        BuildFacts f;
+        f.toplevel_match = LITEPDF_FACT_TOPLEVEL_MATCH != 0;
+        f.exact_tag = LITEPDF_FACT_EXACT_TAG;
+        f.describe = LITEPDF_FACT_DESCRIBE;
+        f.short_sha = LITEPDF_FACT_SHORT_SHA;
+        f.dirty = LITEPDF_FACT_DIRTY != 0;
+        return classify(f, LITEPDF_VERSION_TRIPLE);
+    }();
     return id;
 }
 

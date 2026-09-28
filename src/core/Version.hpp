@@ -28,6 +28,10 @@ struct BuildIdentity {
 // triple from VERSION.
 BuildIdentity classify(const BuildFacts& facts, std::string_view version);
 
+// This build's identity, from the facts collected when it was built.
+// Computed once; safe to call from any thread.
+const BuildIdentity& build_identity();
+
 // Widens a string known to be ASCII (every BuildIdentity field is).
 std::wstring ascii_to_wide(std::string_view ascii);
 

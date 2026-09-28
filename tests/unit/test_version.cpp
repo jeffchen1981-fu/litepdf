@@ -87,3 +87,15 @@ TEST_CASE("Version: ascii_to_wide widens byte for byte", "[version]") {
     REQUIRE(ascii_to_wide("1.3.0-dev") == L"1.3.0-dev");
     REQUIRE(ascii_to_wide("").empty());
 }
+
+TEST_CASE("Version: this build's identity is well formed", "[version]") {
+    const auto& id = litepdf::core::build_identity();
+    REQUIRE_FALSE(id.display_version.empty());
+    if (id.is_release) {
+        REQUIRE(id.display_version.find("-dev") == std::string::npos);
+        REQUIRE_FALSE(id.build_id.empty());
+    } else {
+        REQUIRE(id.display_version.size() > 4);
+        REQUIRE(id.display_version.substr(id.display_version.size() - 4) == "-dev");
+    }
+}
