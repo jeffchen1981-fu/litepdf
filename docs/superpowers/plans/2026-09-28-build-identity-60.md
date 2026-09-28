@@ -510,12 +510,12 @@ set(_dirty 0)
 
 # Only trust git when its top-level IS this source tree. release.yml extracts
 # the source tarball inside the checkout, where git would answer for the parent
-# repository. REAL_PATH + lower-case absorbs 8.3 names, junctions and
+# repository. REALPATH + lower-case absorbs 8.3 names, junctions and
 # drive-letter case.
 _litepdf_git(_toplevel rev-parse --show-toplevel)
 if(NOT _toplevel STREQUAL "")
-    file(REAL_PATH "${_toplevel}" _top_real)
-    file(REAL_PATH "${SRC}" _src_real)
+    get_filename_component(_top_real "${_toplevel}" REALPATH)
+    get_filename_component(_src_real "${SRC}" REALPATH)
     string(TOLOWER "${_top_real}" _top_real)
     string(TOLOWER "${_src_real}" _src_real)
     if(_top_real STREQUAL _src_real)

@@ -53,7 +53,7 @@ The script **collects facts and never classifies**. Inputs: `GIT_EXECUTABLE`, `S
 
 | Fact | Source | Absent / error |
 |---|---|---|
-| `toplevel_match` | `file(REAL_PATH)` of `git rev-parse --show-toplevel` equals `file(REAL_PATH)` of `SRC`, compared case-insensitively | `0` |
+| `toplevel_match` | `get_filename_component(... REALPATH)` of `git rev-parse --show-toplevel` equals that of `SRC`, compared case-insensitively. Not `file(REAL_PATH)`: VS BuildTools' CMake 3.31.6-msvc6 crashes on it for a CJK path (0xC0000409) | `0` |
 | `exact_tag` | `git describe --tags --exact-match --match "v[0-9]*"` — only release-shaped tags count, so a local tag such as `wip` never makes a release | empty |
 | `describe` | `git describe --tags --long --dirty --match "v[0-9]*"` | empty |
 | `short_sha` | `git rev-parse --short HEAD` | empty |
