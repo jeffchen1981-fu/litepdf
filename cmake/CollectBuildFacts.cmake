@@ -67,8 +67,12 @@ if(_toplevel_match)
     _litepdf_git(_short_sha rev-parse --short HEAD)
     # Same dirty mechanism as _describe, and it works with no tags. It honours
     # .gitmodules `ignore = dirty`, so the MuPDF prune edits do not count.
+    # Only tracked files count; untracked files never make a tree dirty.
+    # No answer counts as dirty: this is the one fact whose unknown value must
+    # be the dev value (a corrupt index can fail this probe while the tag
+    # lookup still succeeds).
     _litepdf_git(_always describe --always --dirty)
-    if(_always MATCHES "-dirty$")
+    if(_always STREQUAL "" OR _always MATCHES "-dirty$")
         set(_dirty 1)
     endif()
 endif()

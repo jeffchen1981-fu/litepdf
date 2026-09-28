@@ -117,6 +117,15 @@ try {
     Check ($f["FACT_DESCRIBE"] -eq "") "G: illegal describe blanked"
     Check ($f["FACT_SHORT_SHA"] -ne "") "G: sha unaffected"
 
+    # I: the tag lookup answers but the dirty probe fails (corrupt index).
+    # Unknown dirtiness must fail toward dev.
+    $broken = New-Repo "brokenindex"
+    Invoke-Git $broken @("tag", "v9.9.9")
+    [System.IO.File]::WriteAllBytes((Join-Path $broken ".git/index"), [byte[]](1, 2, 3))
+    $f = Get-Facts $broken $Git
+    Check ($f["FACT_EXACT_TAG"] -eq "v9.9.9") "I: tag lookup still answers"
+    Check ($f["FACT_DIRTY"] -eq "1") "I: a failed dirty probe records dirty"
+
     # H: an unchanged state leaves the header untouched (no rebuild).
     $stable = Join-Path $work "stable.h"
     Invoke-Collector $repo $Git $stable
