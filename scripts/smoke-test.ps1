@@ -2,8 +2,19 @@
 #Requires -Version 5.1
 # Smoke test: build artifact checks + cold-start render + timing budget.
 # Exits non-zero on any failure; CI uses this as the final gate.
+#
+# #60: -ExpectDev / -ExpectRelease assert the window title's build marker.
+# ci.yml passes -ExpectDev (title must carry "<VERSION>-dev"); release.yml
+# passes -ExpectRelease (title must carry no version). With neither, only the
+# document name is checked.
+[CmdletBinding()]
+param(
+    [switch]$ExpectDev,
+    [switch]$ExpectRelease
+)
 
 $ErrorActionPreference = "Stop"
+if ($ExpectDev -and $ExpectRelease) { throw "-ExpectDev and -ExpectRelease are mutually exclusive" }
 $repoRoot = Split-Path -Parent $PSScriptRoot
 
 # Phase 12: this script force-kills each litepdf instance, which leaves the
@@ -142,14 +153,25 @@ if ($hwnd2 -eq [IntPtr]::Zero) {
 }
 Write-Host "[OK] bookmarks.pdf main window handle: $hwnd2"
 
-# Title is set in MainWindow WM_USER_OPEN_OK to "LitePDF - <filename>", so it
-# takes a moment past the bare window creation for the title to update.
+# Title is set in MainWindow WM_USER_OPEN_OK to "LitePDF[ <ver>-dev] <U+2014> <label>",
+# so it takes a moment past the bare window creation for the title to update.
+# The dash is built from its code point: this file has no BOM, and Windows
+# PowerShell 5.1 on a non-UTF-8 code page would misread a literal em dash.
 Start-Sleep -Seconds 1
 $proc2.Refresh()
 $title2 = $proc2.MainWindowTitle
-if ($title2 -notmatch "bookmarks") {
+$dash = [string][char]0x2014
+if ($ExpectDev) {
+    $verTriple = ((Get-Content (Join-Path $repoRoot "VERSION") -Raw).Trim()) -replace '-.*$', ''
+    $titlePattern = "^LitePDF " + [regex]::Escape($verTriple) + "-dev " + $dash + " bookmarks"
+} elseif ($ExpectRelease) {
+    $titlePattern = "^LitePDF " + $dash + " bookmarks"
+} else {
+    $titlePattern = "bookmarks"
+}
+if ($title2 -notmatch $titlePattern) {
     Stop-Process -Id $proc2.Id -Force -ErrorAction SilentlyContinue
-    throw "bookmarks.pdf window title did not contain 'bookmarks': '$title2'"
+    throw "bookmarks.pdf window title '$title2' did not match '$titlePattern'"
 }
 Write-Host "[OK] bookmarks.pdf window title: $title2"
 
