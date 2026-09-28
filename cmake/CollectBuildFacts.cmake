@@ -62,8 +62,10 @@ if(NOT _toplevel STREQUAL "")
 endif()
 
 if(_toplevel_match)
-    _litepdf_git(_exact_tag describe --tags --exact-match)
-    _litepdf_git(_describe describe --tags --long --dirty)
+    # Only release-shaped tags count: a local tag such as `wip` must never
+    # make a release.
+    _litepdf_git(_exact_tag describe --tags --exact-match --match "v[0-9]*")
+    _litepdf_git(_describe describe --tags --long --dirty --match "v[0-9]*")
     _litepdf_git(_short_sha rev-parse --short HEAD)
     # Same dirty mechanism as _describe, and it works with no tags. It honours
     # .gitmodules `ignore = dirty`, so the MuPDF prune edits do not count.

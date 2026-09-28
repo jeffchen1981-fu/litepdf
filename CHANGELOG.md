@@ -12,9 +12,9 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 
 - The running build is identifiable (#60). Development builds name their version
   in the title bar (`LitePDF 1.3.0-dev — file.pdf`); release builds are unchanged.
-  Help → About shows the build (for example `Build: v1.3.0-18-gf7b1ed6`) and a
-  link to the Releases page, `litepdf-cli --version` prints the same, and crash
-  dumps carry the version in their file name.
+  Help → About shows the build (for example `Build: v1.3.0-18-gf7b1ed6`) and
+  the Releases page address, `litepdf-cli --version` prints the same, and
+  crash dumps carry the version in their file name.
 - Text selection and copy. Drag across a page to select text, double-click to
   select a word, triple-click to select a line; Ctrl+C copies the selection and
   Ctrl+A selects the whole page. A new Edit menu carries both. A selection stays

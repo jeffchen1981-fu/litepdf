@@ -39,7 +39,7 @@ function New-Repo([string]$Name) {
     Set-Content -Path (Join-Path $dir "a.txt") -Value "one" -Encoding ascii
     Set-Content -Path (Join-Path $dir "sub/b.txt") -Value "two" -Encoding ascii
     Invoke-Git $dir @("add", ".")
-    Invoke-Git $dir @("commit", "-q", "-m", "first")
+    Invoke-Git $dir @("-c", "commit.gpgsign=false", "-c", "core.hooksPath=NUL", "commit", "-q", "-m", "first")
     return $dir
 }
 
@@ -86,7 +86,7 @@ try {
     Check ($f["FACT_DESCRIBE"] -like "*-dirty") "B: describe carries -dirty"
 
     # C: one commit past the tag.
-    Invoke-Git $repo @("commit", "-q", "-am", "second")
+    Invoke-Git $repo @("-c", "commit.gpgsign=false", "-c", "core.hooksPath=NUL", "commit", "-q", "-am", "second")
     $f = Get-Facts $repo $Git
     Check ($f["FACT_EXACT_TAG"] -eq "") "C: no exact tag past the tag"
     Check ($f["FACT_DESCRIBE"] -like "v9.9.9-1-g*") "C: describe counts one commit"
@@ -125,6 +125,14 @@ try {
     $f = Get-Facts $broken $Git
     Check ($f["FACT_EXACT_TAG"] -eq "v9.9.9") "I: tag lookup still answers"
     Check ($f["FACT_DIRTY"] -eq "1") "I: a failed dirty probe records dirty"
+
+    # J: a tag that is not release-shaped never counts.
+    $wip = New-Repo "wiptag"
+    Invoke-Git $wip @("tag", "wip-before-refactor")
+    $f = Get-Facts $wip $Git
+    Check ($f["FACT_EXACT_TAG"] -eq "") "J: non-v tag is not an exact release tag"
+    Check ($f["FACT_DESCRIBE"] -eq "") "J: non-v tag is not described"
+    Check ($f["FACT_SHORT_SHA"] -ne "") "J: sha still recorded"
 
     # H: an unchanged state leaves the header untouched (no rebuild).
     $stable = Join-Path $work "stable.h"
