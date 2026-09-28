@@ -194,6 +194,13 @@ if(BUILD_TESTING)
         set_tests_properties(benchmark_selftest PROPERTIES
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
+        # #60: proves the version-sync gate's artifact assertions can fail.
+        add_test(NAME version_sync_selftest
+                 COMMAND "${LITEPDF_PWSH}" -NoProfile -File
+                         "${CMAKE_SOURCE_DIR}/scripts/check-version-sync.ps1" -SelfTest)
+        set_tests_properties(version_sync_selftest PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
         # #60: the build-time git fact collector, against throwaway repos.
         if(GIT_FOUND)
             add_test(NAME version_script_selftest
