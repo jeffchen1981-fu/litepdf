@@ -11,7 +11,8 @@
 // litepdf-cli's argument parsing (#100). Before it, a value-taking flag with no
 // value, and an unknown flag, fell through the parse loop unreported, and
 // atoi read garbage as 0: the CLI then ran something other than what was asked
-// for and exited 0. Every case below that expects an error used to parse.
+// for and exited 0. The cases that used to parse are marked; the rest were
+// already usage errors and are pinned so the move out of main() cannot lose them.
 
 using Catch::Matchers::ContainsSubstring;
 using litepdf::cli::CliOptions;
@@ -36,24 +37,25 @@ std::optional<std::string> parse(std::initializer_list<const char*> args) {
 
 TEST_CASE("CliArgs: a value-taking flag with no value is a usage error",
           "[cli][args]") {
-    const auto render = parse({"--render"});
+    const auto render = parse({"--render"});   // used to parse
     REQUIRE(render);
     CHECK_THAT(*render, ContainsSubstring("--render"));
 
-    const auto bench = parse({"--benchmark", "--iterations"});
+    const auto bench = parse({"--benchmark", "--iterations"});   // used to parse
     REQUIRE(bench);
     CHECK_THAT(*bench, ContainsSubstring("--iterations"));
 
-    const auto selection = parse({"--bench-selection", "--iterations"});
+    const auto selection = parse({"--bench-selection", "--iterations"});   // used to parse
     REQUIRE(selection);
     CHECK_THAT(*selection, ContainsSubstring("--iterations"));
 
-    const auto page = parse({"--bench-selection", "--page"});
+    const auto page = parse({"--bench-selection", "--page"});   // already an error (#99)
     REQUIRE(page);
     CHECK_THAT(*page, ContainsSubstring("--page"));
 }
 
 TEST_CASE("CliArgs: an unknown argument is a usage error", "[cli][args]") {
+    // All three used to parse.
     const auto flag = parse({"--bogus"});
     REQUIRE(flag);
     CHECK_THAT(*flag, ContainsSubstring("--bogus"));
@@ -69,6 +71,8 @@ TEST_CASE("CliArgs: an unknown argument is a usage error", "[cli][args]") {
 
 TEST_CASE("CliArgs: a value that is not a whole integer is a usage error",
           "[cli][args]") {
+    // Most used to parse: atoi read "abc" and "" as 0 and "1x" as 1. Only those
+    // that came out as an iteration count or page below 1 were already errors.
     for (const char* bad : {"abc", "1x", "", "2.5", " 1", "+1", "99999999999"}) {
         INFO("value: '" << bad << "'");
         const auto render = parse({"--render", bad});
@@ -97,7 +101,7 @@ TEST_CASE("CliArgs: a flag is never taken as the previous flag's value",
 
 TEST_CASE("CliArgs: out-of-range values are usage errors", "[cli][args]") {
     CHECK(parse({"--render", "-1"}));   // used to print the summary instead
-    CHECK(parse({"--benchmark", "--iterations", "0"}));
+    CHECK(parse({"--benchmark", "--iterations", "0"}));   // the rest were already errors
     CHECK(parse({"--bench-selection", "--iterations", "-3"}));
     CHECK(parse({"--bench-selection", "--page", "0"}));
 }
@@ -137,6 +141,7 @@ TEST_CASE("CliArgs: well-formed commands parse", "[cli][args]") {
 
 TEST_CASE("CliArgs: flag combinations that make no sense stay usage errors",
           "[cli][args]") {
+    // All already errors; pinned so the move out of main() cannot lose them.
     CHECK(parse({"--bench-selection", "--json"}));
     CHECK(parse({"--bench-selection", "--benchmark"}));
     CHECK(parse({"--bench-selection", "--render", "0"}));
