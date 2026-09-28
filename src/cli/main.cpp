@@ -14,6 +14,7 @@
 #include "cli/bench_selection.hpp"
 #include "cli/render_to_ppm.hpp"
 #include "core/Document.hpp"
+#include "core/Version.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -227,11 +228,22 @@ int run_selection_benchmark(const char* path, int only_page, int iterations) {
 } // namespace
 
 int main(int argc, char* argv[]) {
+    // #60: build identity for gates and bug reports. key=value lines so
+    // scripts/check-version-sync.ps1 never has to guess the format.
+    if (argc >= 2 && std::strcmp(argv[1], "--version") == 0) {
+        const auto& id = litepdf::core::build_identity();
+        std::printf("version=%s\nbuild=%s\nrelease=%d\n",
+                    id.display_version.c_str(), id.build_id.c_str(),
+                    id.is_release ? 1 : 0);
+        return 0;
+    }
+
     if (argc < 2) {
         std::fprintf(stderr,
-            "Usage: %s <file> [--render N | --benchmark [--iterations N] [--json]\n"
+            "Usage: %s --version\n"
+            "       %s <file> [--render N | --benchmark [--iterations N] [--json]\n"
             "                  | --bench-selection [--page N] [--iterations N]]\n",
-            argv[0]);
+            argv[0], argv[0]);
         return 2;
     }
 
