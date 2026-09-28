@@ -58,14 +58,14 @@ jobs:
 
       - name: Version sync gate
         shell: pwsh
-        run: ./scripts/check-version-sync.ps1
+        run: ./scripts/check-version-sync.ps1 -ExpectRelease -Tag $env:GITHUB_REF_NAME
 
       - name: Unit tests
         run: ctest --test-dir build -C Release --output-on-failure
 
       - name: Smoke test
         shell: pwsh
-        run: ./scripts/smoke-test.ps1
+        run: ./scripts/smoke-test.ps1 -ExpectRelease
 
       - name: Derive + verify version
         id: ver

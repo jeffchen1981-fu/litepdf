@@ -54,7 +54,11 @@ public struct RECT { public int Left, Top, Right, Bottom; }
 
 function Get-LitePdfHwnd {
   $hwnd = [W.U32]::FindWindow('LitePDFMainWindow', $null)
-  if ($hwnd -eq [IntPtr]::Zero) { $hwnd = [W.U32]::FindWindow($null, 'LitePDF') }
+  if ($hwnd -eq [IntPtr]::Zero) {
+    # #60: dev builds title the window "LitePDF <version>-dev", so match by prefix.
+    $p = Get-Process litepdf -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like 'LitePDF*' } | Select-Object -First 1
+    if ($p) { $hwnd = $p.MainWindowHandle }
+  }
   if ($hwnd -eq [IntPtr]::Zero) {
     # Try by partial title match via Get-Process
     $p = Get-Process litepdf -ErrorAction SilentlyContinue | Select-Object -First 1

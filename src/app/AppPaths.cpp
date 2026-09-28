@@ -52,7 +52,7 @@ void prune_crash_dumps(const std::filesystem::path& crashes_dir, std::size_t kee
     }
     if (dumps.size() <= keep) return;
     // Sort oldest-first by last-write time so the newest `keep` survive. A
-    // lexical filename sort is wrong: names are litepdf-<pid>-<tick>.dmp, so it
+    // lexical filename sort is wrong: names are litepdf-<version>-<pid>-<tick>.dmp, so it
     // is dominated by the PID, and the embedded GetTickCount also resets across
     // reboots — both can keep older dumps over newer ones.
     std::sort(dumps.begin(), dumps.end(),

@@ -10,6 +10,7 @@
 #include "core/DocumentView.hpp"
 #include "core/SearchSession.hpp"
 #include "core/TabList.hpp"
+#include "core/Version.hpp"          // #60 build identity
 #include "ui/ColdStartTimer.hpp"
 #include "ui/PasswordDialog.hpp"  // Phase 8 Task 1
 #include "ui/password_retry.hpp"  // Phase 8 Task 1
@@ -39,6 +40,19 @@
 namespace {
 constexpr wchar_t kWindowClassName[] = L"LitePDFMainWindow";
 constexpr wchar_t kWindowTitle[]     = L"LitePDF";
+
+// #60: a non-release build names its version in every title, so a dev build
+// can never pass for a release. Release builds keep the bare product name.
+// kWindowTitle itself stays "LitePDF": it is also every MessageBox caption.
+std::wstring title_base() {
+    const auto& id = litepdf::core::build_identity();
+    std::wstring t = kWindowTitle;
+    if (!id.is_release) {
+        t += L' ';
+        t += litepdf::core::ascii_to_wide(id.display_version);
+    }
+    return t;
+}
 
 constexpr UINT WM_USER_OPEN_OK       = WM_USER + 1;
 constexpr UINT WM_USER_OPEN_FAILED   = WM_USER + 2;
@@ -205,12 +219,11 @@ litepdf::core::DocumentView* MainWindow::active_view() {
 void MainWindow::update_window_title() {
     if (!hwnd_) return;
     auto* t = tabs_ ? tabs_->active_tab() : nullptr;
-    if (!t) {
-        SetWindowTextW(hwnd_, kWindowTitle);
-        return;
+    std::wstring title = title_base();
+    if (t) {
+        title += L" \u2014 ";
+        title += t->label;
     }
-    std::wstring title = L"LitePDF \u2014 ";
-    title += t->label;
     SetWindowTextW(hwnd_, title.c_str());
 }
 
@@ -1692,16 +1705,30 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 case IDM_FILE_EXIT:
                     DestroyWindow(hwnd);
                     return 0;
-                case IDM_HELP_ABOUT:
-                    MessageBoxW(hwnd,
-                        L"LitePDF v1.3.0\n\n"
-                        L"A lightweight PDF / ePub / CBZ / XPS viewer for Windows.\n\n"
-                        L"License: AGPL-3.0\n"
-                        // Source of truth: third_party/mupdf FZ_VERSION; update on bumps.
-                        L"Engine: MuPDF 1.27.2\n"
-                        L"Rendering: Direct2D",
-                        kWindowTitle, MB_ICONINFORMATION);
+                case IDM_HELP_ABOUT: {
+                    // #60: version and build come from the build identity, so
+                    // there is no version literal to keep in sync.
+                    // Named `identity`, not `id`: this case is nested inside
+                    // WM_COMMAND's outer `const int id` (the menu command id)
+                    // and shadowing it triggered C4456.
+                    const auto& identity = litepdf::core::build_identity();
+                    std::wstring text = L"LitePDF ";
+                    text += litepdf::core::ascii_to_wide(identity.display_version);
+                    text += L"\n";
+                    if (!identity.build_id.empty()) {
+                        text += L"Build: ";
+                        text += litepdf::core::ascii_to_wide(identity.build_id);
+                        text += L"\n";
+                    }
+                    text += L"\nA lightweight PDF / ePub / CBZ / XPS viewer for Windows.\n\n"
+                            L"License: AGPL-3.0\n"
+                            // Source of truth: third_party/mupdf FZ_VERSION; update on bumps.
+                            L"Engine: MuPDF 1.27.2\n"
+                            L"Rendering: Direct2D\n\n"
+                            L"Releases: https://github.com/jeffchen1981-fu/litepdf/releases";
+                    MessageBoxW(hwnd, text.c_str(), kWindowTitle, MB_ICONINFORMATION);
                     return 0;
+                }
                 case IDM_ZOOM_IN:
                     if (auto* view = active_view();
                         view && view->zoom_in()) {
@@ -2390,7 +2417,7 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
     // area. Important for Phase 6 FindBar, which floats over the canvas
     // and would otherwise be clobbered by the frame's background paint.
     hwnd_ = CreateWindowExW(
-        0, kWindowClassName, kWindowTitle,
+        0, kWindowClassName, title_base().c_str(),
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768,
         nullptr, menu, hInstance, this);

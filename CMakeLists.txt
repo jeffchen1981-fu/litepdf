@@ -38,9 +38,28 @@ include(CompilerFlags)
 # --- MuPDF via ExternalProject_Add on mupdf.sln ---------------------------
 include(ImportMuPDF)  # defines litepdf::mupdf INTERFACE target
 
+# --- Build identity (#60) -------------------------------------------------
+# Runs on every build (no OUTPUT => always out of date). The script rewrites
+# the header only when a fact changed, so an unchanged commit recompiles
+# nothing and a new commit recompiles only src/core/Version.cpp.
+find_package(Git QUIET)
+set(LITEPDF_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+add_custom_target(litepdf_build_id
+    COMMAND "${CMAKE_COMMAND}"
+            "-DGIT_EXECUTABLE=${GIT_EXECUTABLE}"
+            "-DSRC=${CMAKE_CURRENT_SOURCE_DIR}"
+            "-DOUT=${LITEPDF_GENERATED_DIR}/litepdf_build_facts.h"
+            "-DVERSION=${PROJECT_VERSION}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CollectBuildFacts.cmake"
+    # BYPRODUCTS lets single-config generators (Ninja) see who writes the header.
+    BYPRODUCTS "${LITEPDF_GENERATED_DIR}/litepdf_build_facts.h"
+    COMMENT "Collecting build identity from git"
+    VERBATIM)
+
 # --- core library ---------------------------------------------------------
 add_library(litepdf_core STATIC
     src/core/Document.cpp
+    src/core/Version.cpp           # #60 build identity
     src/core/EscrowContext.cpp     # #61
     src/core/MuPDFRoot.cpp         # #61
     src/core/DocumentView.cpp
@@ -86,6 +105,10 @@ add_library(litepdf_core STATIC
 litepdf_apply_flags(litepdf_core)
 
 target_include_directories(litepdf_core PUBLIC src)
+
+# #60: only src/core/Version.cpp includes the generated facts header.
+target_include_directories(litepdf_core PRIVATE "${LITEPDF_GENERATED_DIR}")
+add_dependencies(litepdf_core litepdf_build_id)
 
 target_link_libraries(litepdf_core PRIVATE
     litepdf::mupdf
@@ -172,6 +195,25 @@ if(BUILD_TESTING)
                          "${CMAKE_SOURCE_DIR}/scripts/check-benchmark-regression.ps1" -SelfTest)
         set_tests_properties(benchmark_selftest PROPERTIES
             WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+        # #60: proves the version-sync gate's artifact assertions can fail.
+        add_test(NAME version_sync_selftest
+                 COMMAND "${LITEPDF_PWSH}" -NoProfile -File
+                         "${CMAKE_SOURCE_DIR}/scripts/check-version-sync.ps1" -SelfTest)
+        set_tests_properties(version_sync_selftest PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+        # #60: the build-time git fact collector, against throwaway repos.
+        if(GIT_FOUND)
+            add_test(NAME version_script_selftest
+                     COMMAND "${LITEPDF_PWSH}" -NoProfile -File
+                             "${CMAKE_SOURCE_DIR}/scripts/test-collect-build-facts.ps1"
+                             -CMake "${CMAKE_COMMAND}" -Git "${GIT_EXECUTABLE}")
+            set_tests_properties(version_script_selftest PROPERTIES
+                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+        else()
+            message(WARNING "git not found; version_script_selftest not registered.")
+        endif()
     else()
         message(WARNING "No PowerShell interpreter found; benchmark_selftest not registered.")
     endif()

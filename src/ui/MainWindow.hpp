@@ -123,7 +123,7 @@ private:
     // Tab-close handler registered with TabManager (from middle-click).
     void on_tab_close_request(int index);
 
-    // Rewrite window title based on the active tab (or reset to "LitePDF").
+    // Rewrite window title based on the active tab (or reset to the bare title; dev builds add "<version>-dev").
     void update_window_title();
 
     // WM_COPYDATA handler for single-instance IPC (see app/SingleInstance.hpp).
