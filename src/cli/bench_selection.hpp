@@ -35,9 +35,14 @@
 //     while acquire_first, right behind it, did not. warm_file_cache removes
 //     those waits. That matches the GUI's case for a press (the render worker
 //     has read the page), but NOT always a search scan, which can reach pages
-//     nothing has read. Not everything is explained: one run on an already
-//     warm file still showed off-CPU scan_first spikes on 23 late pages, on
-//     performance cores, and an immediate re-run showed none.
+//     nothing has read. A warm cache did not remove every spike: before
+//     prefer_performance_cores, 4 of 5 full runs over the warm HTML-spec PDF
+//     still showed off-CPU scan_first spikes (on 102, 87, 23 and 3 pages; the
+//     87-page run spent most of its length on efficiency cores, so it mixes
+//     in the effect below), and the fifth showed none. The 3 full runs since
+//     showed none. The likeliest reason is that the EcoQoS opt-out removed
+//     these too, as Windows both places low-QoS threads on efficiency cores
+//     and deprioritizes them -- unproven: no ETW trace was taken.
 //   - A hybrid CPU's efficiency cores run this work about half as fast (an
 //     i7-12700 pinned to them: 49-63 ms against 26-36 ms on its performance
 //     cores, same pages). Runs started from a background shell sometimes spent

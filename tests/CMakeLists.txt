@@ -86,6 +86,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_mupdf_root.cpp           # #66 MuPDFRoot::of foreign lock table
     unit/test_cli_bench_selection.cpp  # #73 --bench-selection harness
     unit/test_version.cpp              # #60 build identity
+    unit/test_cli_args.cpp             # #100 strict CLI argument parsing
     # The CLI helpers under test are compiled straight into the test binary
     # (they are not part of litepdf_core). All are MuPDF-header-free and
     # resolve their fz_* calls through the litepdf::mupdf dependency that
@@ -93,6 +94,7 @@ target_sources(litepdf_unit_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/src/cli/render_to_ppm.cpp"
     "${CMAKE_SOURCE_DIR}/src/cli/bench_iteration.cpp"
     "${CMAKE_SOURCE_DIR}/src/cli/bench_selection.cpp"
+    "${CMAKE_SOURCE_DIR}/src/cli/cli_args.cpp"
 )
 target_link_libraries(litepdf_unit_tests PRIVATE litepdf_core)
 # MuPDF's include path, for the tests that reach src/core's internal headers
