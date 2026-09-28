@@ -171,6 +171,7 @@ endif()
 # --- litepdf-cli (console demo / benchmark harness) -----------------------
 add_executable(litepdf-cli
     src/cli/main.cpp
+    src/cli/cli_args.cpp
     src/cli/render_to_ppm.cpp
     src/cli/bench_iteration.cpp
     src/cli/bench_selection.cpp)

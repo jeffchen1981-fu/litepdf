@@ -12,6 +12,7 @@
 
 #include "cli/bench_iteration.hpp"
 #include "cli/bench_selection.hpp"
+#include "cli/cli_args.hpp"
 #include "cli/render_to_ppm.hpp"
 #include "core/Document.hpp"
 #include "core/Version.hpp"
@@ -20,7 +21,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -247,76 +247,19 @@ int main(int argc, char* argv[]) {
         return 2;
     }
 
-    const char* path = argv[1];
-    int render_page = -1;
-    bool benchmark = false;
-    int iterations = 5;
-    bool iterations_set = false;
-    bool json = false;
-    bool bench_selection = false;
-    int selection_page = -1;   // 0-based; -1 = every page
-    for (int i = 2; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--render") == 0 && i + 1 < argc) {
-            render_page = std::atoi(argv[++i]);
-        } else if (std::strcmp(argv[i], "--benchmark") == 0) {
-            benchmark = true;
-        } else if (std::strcmp(argv[i], "--iterations") == 0 && i + 1 < argc) {
-            iterations = std::atoi(argv[++i]);
-            iterations_set = true;
-        } else if (std::strcmp(argv[i], "--json") == 0) {
-            json = true;
-        } else if (std::strcmp(argv[i], "--bench-selection") == 0) {
-            bench_selection = true;
-        } else if (std::strcmp(argv[i], "--page") == 0) {
-            // A missing value is an error, not "every page": that would turn a
-            // typo into a whole-document run, minutes long on a big file.
-            if (i + 1 >= argc) {
-                std::fprintf(stderr, "--page needs a page number\n");
-                return 2;
-            }
-            selection_page = std::atoi(argv[++i]) - 1;   // 1-based on the command line
-            if (selection_page < 0) {
-                std::fprintf(stderr, "--page must be >= 1\n");
-                return 2;
-            }
-        }
+    litepdf::cli::CliOptions opt;
+    if (const auto usage_error = litepdf::cli::parse_cli_args(argc, argv, opt)) {
+        std::fprintf(stderr, "%s\n", usage_error->c_str());
+        return 2;
     }
+    const char* path = opt.path;
+    const int render_page = opt.render_page;
 
-    if (bench_selection) {
-        if (benchmark || render_page >= 0 || json) {
-            std::fprintf(stderr,
-                "--bench-selection excludes --benchmark, --render and --json\n");
-            return 2;
-        }
-        // Most samples are one sub-millisecond call, so take more than --benchmark's 5.
-        if (!iterations_set) iterations = 25;
-        if (iterations < 1) {
-            std::fprintf(stderr, "--iterations must be >= 1\n");
-            return 2;
-        }
-        return run_selection_benchmark(path, selection_page, iterations);
+    if (opt.bench_selection) {
+        return run_selection_benchmark(path, opt.selection_page, opt.iterations);
     }
-    if (selection_page >= 0) {
-        std::fprintf(stderr, "--page is only valid with --bench-selection\n");
-        return 2;
-    }
-
-    if (benchmark && render_page >= 0) {
-        std::fprintf(stderr, "--benchmark and --render are mutually exclusive\n");
-        return 2;
-    }
-    // --iterations / --json are only meaningful with --benchmark (spec §3.1).
-    if (!benchmark && (json || iterations_set)) {
-        std::fprintf(stderr, "--iterations/--json are only valid with --benchmark "
-                             "(--iterations also with --bench-selection)\n");
-        return 2;
-    }
-    if (benchmark && iterations < 1) {
-        std::fprintf(stderr, "--iterations must be >= 1\n");
-        return 2;
-    }
-    if (benchmark) {
-        return run_benchmark(path, iterations, json);
+    if (opt.benchmark) {
+        return run_benchmark(path, opt.iterations, opt.json);
     }
 
     litepdf::core::Document doc;
