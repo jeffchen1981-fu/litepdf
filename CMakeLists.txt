@@ -51,6 +51,8 @@ add_custom_target(litepdf_build_id
             "-DOUT=${LITEPDF_GENERATED_DIR}/litepdf_build_facts.h"
             "-DVERSION=${PROJECT_VERSION}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CollectBuildFacts.cmake"
+    # BYPRODUCTS lets single-config generators (Ninja) see who writes the header.
+    BYPRODUCTS "${LITEPDF_GENERATED_DIR}/litepdf_build_facts.h"
     COMMENT "Collecting build identity from git"
     VERBATIM)
 

@@ -134,6 +134,13 @@ try {
     Check ($f["FACT_DESCRIBE"] -eq "") "J: non-v tag is not described"
     Check ($f["FACT_SHORT_SHA"] -ne "") "J: sha still recorded"
 
+    # K: a CJK-named source directory (a Chinese Windows user name) must not
+    # crash the collector. Built from a code point so this file stays ASCII.
+    $cjk = New-Repo ("repo-" + [char]0x9673)
+    $f = Get-Facts $cjk $Git
+    Check ($f["FACT_TOPLEVEL_MATCH"] -eq "1") "K: CJK path resolves and matches"
+    Check ($f["FACT_SHORT_SHA"] -ne "") "K: CJK path records the sha"
+
     # H: an unchanged state leaves the header untouched (no rebuild).
     $stable = Join-Path $work "stable.h"
     Invoke-Collector $repo $Git $stable
