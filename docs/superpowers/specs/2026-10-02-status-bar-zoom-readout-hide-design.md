@@ -43,12 +43,18 @@ A pure function, no `<windows.h>`:
 std::wstring format_zoom_pct(float pct);
 ```
 
-- Rounds `pct * 100` to the nearest integer, halves away from zero
-  (`std::lround` semantics): `0.125f` → `13%`.
-- Returns an empty string when `pct` is non-finite, when the rounded value is
-  `<= 0`, or when `pct * 100` exceeds 99999 (checked on the float, before the
-  conversion, so no out-of-range conversion is ever performed).
-- No clamp inside that range: the value is shown as it is.
+The rules, in this order, on `p = pct * 100.0f`:
+
+1. `p` is not finite → empty. This also catches a finite `pct` whose product
+   overflows to an infinity, in either sign.
+2. `p < 0.5f` → empty (zero, negatives, and anything that would round to 0).
+3. `p >= 9999.5f` → empty. The label is sized for four digits (§2.3); a value
+   that cannot be shown whole is not shown.
+4. Otherwise the nearest integer, halves away from zero (`std::lround`
+   semantics), followed by `%`: `0.125f` → `13%`.
+
+Rules 1–3 run before the conversion, so `std::lround` only ever sees a value in
+`[0.5, 9999.5)`. Inside that range there is no clamp.
 
 The domain is wider than the preset ladder, which is why this is specified.
 `fit_percentage` (`core/detail/ZoomMath.hpp:34-42`) is unbounded above — a wide
@@ -76,8 +82,8 @@ there is a visible gap before the readout. Accepted: closing it means measuring
 text, which the fixed-offset layout deliberately avoids.
 
 Width: the plan measures `9999%` at 9 pt Segoe UI with `GetTextExtentPoint32W`
-and sets the constant to that extent plus one padding step, in DIP. A longer
-string is clipped by the control, not wrapped.
+and sets the constant to that extent plus one padding step, in DIP. `9999%` is
+the longest string the formatter can return (§2.2), so nothing is ever clipped.
 
 The label is a `STATIC` with `SS_LEFT | SS_CENTERIMAGE`, created like the existing
 one. It needs no colour code of its own: the `WM_CTLCOLORSTATIC` arm's final
@@ -133,8 +139,10 @@ arm (`PdfCanvas.cpp:1127`), before the null-pixmap check and before
 superseded and failed completions alike. `MainWindow` wires it to
 `refresh_zoom_readout()`.
 
-**Call site 2 — the end of `MainWindow::kick_render`,** after `apply_viewport()`
-has run on both branches (`MainWindow.cpp:361`, `378`). This makes the readout
+**Call site 2 — inside `MainWindow::kick_render`, once on each branch,**
+immediately after that branch's `apply_viewport()` (`MainWindow.cpp:361` and
+`378`). The spread branch returns early at `:375`, so a single call at the end of
+the function would never run in two-page mode. This makes the readout
 synchronous for everything that goes through `kick_render` — the zoom commands,
 window resize, pane toggles, tab switch, session restore, the §3 toggle — so the
 readout and the page box change in the same message. Call site 1 then covers what
@@ -240,8 +248,10 @@ writing to the hidden children for the same reason.
 - `on_layout` skips `set_bounds` while the bar is hidden. The three readers of the
   status height (`MainWindow.cpp:444`, `581`, `1185`) need no change: they read
   `height_px()` only.
-- The `WM_INITMENUPOPUP` View arm (`MainWindow.cpp:1501`) sets the checkmark from
-  `status_bar_->visible()`.
+- The checkmark is set from `status_bar_->visible()` **inside** the existing
+  `popup_owns(popup, IDM_VIEW_INVERT)` block (`MainWindow.cpp:1501-1512`), before
+  its `return 0`. A separate arm after it would be unreachable; one before it
+  would skip the Invert and Two-Page checkmarks.
 - With the bar hidden there is no keyboard route to a page number; #48 (Ctrl+G)
   does not exist yet. Accepted: the reader chose to hide it.
 
@@ -268,8 +278,8 @@ with `ctest --test-dir build -C Release`.
 
 - `format_zoom_pct`: `1.0f` → `100%`; `0.25f` → `25%`; `8.0f` → `800%`;
   `1.374f` → `137%`; `1.375f` → `138%`; `0.125f` → `13%` (the tie rule);
-  `38.4f` → `3840%`; `999.0f` → `99900%`; `1000.5f`, `1e30f`, `0.0f`, a negative
-  value, `0.004f`, NaN and infinity → empty.
+  `38.4f` → `3840%`; `99.0f` → `9900%`; `100.0f`, `1e30f`, `FLT_MAX`,
+  `-FLT_MAX`, `0.0f`, `-1.0f`, `0.004f`, NaN and both infinities → empty.
 - `status_bar_child_rects`: both existing tests pass the fifth argument and pin
   the four zoom fields — including the tiny-bar test, whose point is that every
   field is pinned on the fallback branch. The existing edit and label
@@ -285,7 +295,10 @@ the control's own pixels. The plan reads
   session restore.
 - After a zoom command, a tab switch and a resize, the text is already correct
   when the command returns — before any completion is pumped. This is the check
-  that fails if call site 2 is missing.
+  that fails if call site 2 is missing. Run it in single-page **and** in
+  two-page mode: the two branches of `kick_render` carry separate calls.
+- With and without a document: toggle Status Bar, reopen View, and all three
+  checkmarks (Status Bar, Invert Colors, Two-Page Spread) are correct.
 - Ctrl+wheel updates the text. This is the check that fails if call site 1 is
   missing.
 - Zoom In at 800% leaves the readout at `800%`.
@@ -353,3 +366,12 @@ rules (§2.2), the second comment in `MainMenu.rc.h` (§3.3), and checks that ca
 fail for each call site (§4). The synchronous call at the end of `kick_render`
 was added in response to the round-1 observation that a tab switch would
 otherwise show the previous tab's zoom until its first completion.
+
+Lens 3 ran against `e3a755c`, `terra@medium` then `luna@max`, on the spec plus a
+pre-extracted evidence bundle. Both reported the four-digit label width against a
+five-digit formatter range (§2.2, §2.3) and the spread branch's early return in
+`kick_render` (§2.5). `luna@max` alone reported the overflow of a finite
+negative input past the formatter's guard (§2.2) and the checkmark's position
+relative to the View arm's `return 0` (§3.3). All four were anchor-verified and
+adopted. Both also restated that the completion hook's position has no failing
+check; §4 already records that as review-only, and it stays so.
