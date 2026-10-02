@@ -4,7 +4,7 @@
 
 **Goal:** Show the current zoom percentage in the status bar, and let the reader hide the status bar from the View menu.
 
-**Architecture:** A third child (`STATIC`) in `ui::StatusBar` shows text from a pure formatter in `StatusBarMath.hpp`. `MainWindow::refresh_zoom_readout()` pushes the active view's live percentage and is called from two places: each branch of `kick_render`, and a new `PdfCanvas` callback fired at the entry of the render-completion message arm. Hiding is `ShowWindow(SW_HIDE)` plus a flag that makes `StatusBar::height_px()` return 0, so the existing layout code gives the strip back without changes of its own.
+**Architecture:** A third child (`STATIC`) in `ui::StatusBar` shows text from a pure formatter in `StatusBarMath.hpp`. `MainWindow::refresh_zoom_readout()` pushes the active view's live percentage and is called from two places: each branch of `kick_render`, and a new `PdfCanvas` callback fired at the entry of the render-completion message arm. Hiding is `ShowWindow(SW_HIDE)` plus a flag that makes `StatusBar::height_px()` return 0, so the three places that read the status height give the strip back unchanged; `on_layout` only learns to skip positioning a hidden bar.
 
 **Tech Stack:** C++20, Win32 (`msctls_statusbar32`, `STATIC`, `EDIT`), Direct2D canvas, Catch2 unit tests, PowerShell 5.1 GUI driver.
 
@@ -17,7 +17,8 @@
 - `cmake` / `ctest` on PATH are the wrong ones. Always use
   `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe` and `ctest.exe` in the same directory.
 - Run `ctest` and the unit-test exe from the repo root `C:\Users\User\projects\litepdf` (fixtures resolve from there).
-- Baseline before Task 1: `ctest --test-dir build -C Release` = 398/398 at `d5cba03`. Re-measure it; do not quote it.
+- **Line numbers in this plan are as of commit `8cf6cc2`**, before any task ran. Earlier tasks insert lines, so by the time you reach a file the numbers may be a few lines off. Always locate an edit by the quoted text or the named function; treat the number as a hint.
+- Test count: `ctest --test-dir build -C Release` was 398/398 at `d5cba03`. Task 1 adds six test cases and no other task adds any, so every task after Task 1 expects 404/404. If the number you see differs, stop and find out why before going on.
 - Catch2 `TEST_CASE` names are ASCII and start with the subsystem: `StatusBarMath ...`. Tag `[statusbar]`.
 - All code, comments and commit messages in English. Commit messages end with
   `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
@@ -63,7 +64,7 @@ Push-Location C:\Users\User\projects\litepdf
 Pop-Location
 ```
 
-Expected: `100% tests passed`. Write down the total; later steps expect it to grow by the tests added here.
+Expected: `100% tests passed, 0 tests failed out of 398`. If the total is not 398, stop: the Global Constraints' 404 for later tasks assumes it.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -211,7 +212,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 - [ ] **Step 1: Update the two existing tests so they fail to compile**
 
-In `tests/unit/test_status_bar_math.cpp`, replace the test at line 61 with:
+In `tests/unit/test_status_bar_math.cpp`, replace the whole existing test case named `StatusBarMath status_bar_child_rects centers children and lays them left to right` with:
 
 ```cpp
 TEST_CASE("StatusBarMath status_bar_child_rects centers children and lays them left to right",
@@ -235,7 +236,7 @@ TEST_CASE("StatusBarMath status_bar_child_rects centers children and lays them l
 }
 ```
 
-and the test at line 75 with:
+and the whole existing test case named `StatusBarMath status_bar_child_rects degrades safely on a tiny bar` with:
 
 ```cpp
 TEST_CASE("StatusBarMath status_bar_child_rects degrades safely on a tiny bar",
@@ -274,7 +275,8 @@ Expected: compile error, `'status_bar_child_rects': function does not take 5 arg
 
 - [ ] **Step 3: Implement the geometry**
 
-In `src/ui/detail/StatusBarMath.hpp`, replace lines 50-75 (the struct, its comment and the function) with:
+In `src/ui/detail/StatusBarMath.hpp`, replace everything from the comment line
+`// Pixel geometry of the two children inside the bar's client rect.` through the closing `}` of `status_bar_child_rects` (the line after `return r;`) — the struct, both comments and the function — with:
 
 ```cpp
 // Pixel geometry of the three children inside the bar's client rect.
@@ -471,7 +473,7 @@ and in the same comment block change `The "/ N" STATIC wants to be transparent` 
 
 - [ ] **Step 4: Create the control**
 
-In the `StatusBar::StatusBar` constructor, after the label's `WM_SETFONT` call and before `impl_->measure();` (line 566) add:
+In the `StatusBar::StatusBar` constructor, after the label's `WM_SETFONT` call and before `impl_->measure();` (line 567) add:
 
 ```cpp
 
@@ -648,7 +650,7 @@ Expected: both builds succeed; `100% tests passed`.
 
 - [ ] **Step 11: Smoke — the label shows a percentage**
 
-Close any running LitePDF first (the app is single-instance). Save as `build/gui-check/smoke-readout.ps1` and run it with `powershell -ExecutionPolicy Bypass -File build\gui-check\smoke-readout.ps1`:
+Close any running LitePDF first (the app is single-instance). Create the folder with `New-Item -ItemType Directory -Force C:\Users\User\projects\litepdf\build\gui-check`, save the script as `build/gui-check/smoke-readout.ps1` and run it with `powershell -ExecutionPolicy Bypass -File build\gui-check\smoke-readout.ps1`:
 
 ```powershell
 #Requires -Version 5.1
@@ -695,7 +697,12 @@ try {
     if ($hit.Count -ne 1) { throw "expected exactly one percentage label, got $($hit.Count)" }
     'PASS readout = ' + $hit[0]
 } finally {
-    if (-not $p.HasExited) { [void][SmokeW]::PostMessageW($p.MainWindowHandle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero); [void]$p.WaitForExit(5000) }
+    # The app writes session.json as it exits, so it must be gone before the
+    # backup is copied back.
+    if (-not $p.HasExited) {
+        [void][SmokeW]::PostMessageW($p.MainWindowHandle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+        if (-not $p.WaitForExit(5000)) { $p.Kill(); [void]$p.WaitForExit(5000) }
+    }
     if ($had) { Copy-Item $backup $session -Force } elseif (Test-Path $session) { Remove-Item $session -Force }
 }
 ```
@@ -988,6 +995,7 @@ Run from the repo root in Git Bash:
 cd /c/Users/User/projects/litepdf
 test -z "$(git status --short)" || { echo "working tree not clean"; exit 1; }
 mkdir -p build/gui-check
+rm -f build/gui-check/site1off-probe.exe build/gui-check/normal-probe.exe
 python - <<'EOF'
 import io
 p = "src/ui/MainWindow.cpp"
@@ -996,15 +1004,16 @@ old = "canvas_->set_on_completion_arrived([this] { refresh_zoom_readout(); });"
 assert s.count(old) == 1, s.count(old)
 io.open(p, "w", encoding="utf-8", newline="").write(s.replace(old, "/* site1off probe */"))
 EOF
-"/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe" --build build --target litepdf --config Release
-cp build/Release/litepdf.exe build/gui-check/site1off-probe.exe
+"/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe" --build build --target litepdf --config Release \
+  && cp build/Release/litepdf.exe build/gui-check/site1off-probe.exe \
+  || echo "MUTANT BUILD FAILED - no site1off-probe.exe was made"
 git checkout -- src/ui/MainWindow.cpp
 test -z "$(git status --short)" && echo "source restored"
 "/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe" --build build --target litepdf --config Release
 cp build/Release/litepdf.exe build/gui-check/normal-probe.exe
 ```
 
-Expected: `source restored`, two builds succeed, two exes in `build/gui-check/`.
+Expected: `source restored`, two builds succeed, no `MUTANT BUILD FAILED` line, two exes in `build/gui-check/`. The source is restored whether or not the mutant build succeeded. If `python` is not found, use `py -3` in its place.
 
 - [ ] **Step 2: Write the driver**
 
@@ -1222,13 +1231,18 @@ try {
     Add-Check '10 opening the outline pane changes the readout' (($o -match $pct) -and ($o -ne $fit)) "$fit -> $o"
     $o2 = Send-AndRead 40013 $o
     Add-Check '11 closing the outline pane restores the fit value' ($o2 -eq $fit) "$o2 vs $fit"
+    $th = Send-AndRead 40060 $fit
+    Add-Check '11a opening the thumbnail pane changes the readout' (($th -match $pct) -and ($th -ne $fit)) "$fit -> $th"
+    $th2 = Send-AndRead 40060 $th
+    Add-Check '11b closing the thumbnail pane restores the fit value' ($th2 -eq $fit) "$th2 vs $fit"
 
     # --- 6. second tab: page turn, tab switch, two-page mode -----------------
     Start-Process $Exe -ArgumentList ('"{0}"' -f $spread) | Out-Null
     [void](Wait-Until { [SbW]::Title($script:Main) -like '*spread-unequal*' } 6000)
     Start-Sleep -Milliseconds 800
     $t2 = Get-Zoom
-    Add-Check '12 the new tab shows its own percentage' ($t2 -match $pct) $t2
+    # Page 1 here is 420 pt wide against simple.pdf's 595 pt, so the fits differ.
+    Add-Check '12 the new tab shows its own percentage' (($t2 -match $pct) -and ($t2 -ne $fit)) "$fit -> $t2"
     [void][SbW]::PostMessageW($script:Canvas, 0x0100, [IntPtr]0x22, [IntPtr]::Zero)   # PgDn
     [void](Wait-Until { (Get-Zoom) -ne $t2 } 1500)
     $pg = Get-Zoom
@@ -1249,16 +1263,34 @@ try {
     $single = Send-AndRead 40012 $t2z
     $dual = Send-AndRead 40062 $single
     Add-Check '16 Two-Page Spread changes the readout' (($dual -match $pct) -and ($dual -ne $single)) "$single -> $dual"
+    Add-Check '16a Two-Page Spread is checked, Status Bar still checked' ((Test-Checked 40062) -and (Test-Checked 40064)) ''
     $dz = Send-AndRead 40010 $dual
     Add-Check '17 Zoom In in two-page mode changes the readout' (($dz -match $pct) -and ($dz -ne $dual)) "$dual -> $dz"
     $dr = Send-AndRead 40012 $dz
     Add-Check '18 Reset in two-page mode returns to the spread fit' ($dr -eq $dual) "$dr vs $dual"
-    $back = Send-AndRead 40062 $dr
+    # Resize and tab switch again, this time through kick_render's spread branch.
+    [void][SbW]::SetWindowPos($script:Main, [IntPtr]::Zero, 0, 0, ($ww - 240), $wh, 0x0006)
+    [void](Wait-Until { (Get-Zoom) -ne $dual } 3000)
+    $dn = Get-Zoom
+    Add-Check '18a two-page mode: a narrower window changes the readout' (($dn -match $pct) -and ($dn -ne $dual)) "$dual -> $dn"
+    [void][SbW]::SetWindowPos($script:Main, [IntPtr]::Zero, 0, 0, $ww, $wh, 0x0006)
+    [void](Wait-Until { (Get-Zoom) -eq $dual } 3000)
+    Add-Check '18b two-page mode: the original width restores the spread fit' ((Get-Zoom) -eq $dual) (Get-Zoom)
+    Send-Cmd 40033
+    [void](Wait-Until { (Get-Zoom) -eq $fit } 3000)
+    Add-Check '18c leaving a two-page tab shows tab 1''s zoom' ((Get-Zoom) -eq $fit) "$(Get-Zoom) vs $fit"
+    Send-Cmd 40034
+    [void](Wait-Until { (Get-Zoom) -eq $dual } 3000)
+    Add-Check '18d returning to the two-page tab shows the spread fit' ((Get-Zoom) -eq $dual) "$(Get-Zoom) vs $dual"
+    $back = Send-AndRead 40062 $dual
     Add-Check '19 leaving two-page mode restores the single-page fit' ($back -eq $single) "$back vs $single"
+    Add-Check '19a Two-Page Spread is unchecked again' (-not (Test-Checked 40062)) ''
 
     # --- 7. minimize / restore -----------------------------------------------
     [void][SbW]::ShowWindow($script:Main, 6); Start-Sleep -Milliseconds 700
-    Add-Check '20 a minimized window never reads 0%' ((Get-Zoom) -ne '0%') ("'" + (Get-Zoom) + "'")
+    # A minimized window has a 0x0 client, the fit is exactly 0, and the
+    # formatter returns the empty string for it -- not "0%".
+    Add-Check '20 a minimized window shows an empty readout, not 0%' ((Get-Zoom) -eq '') ("'" + (Get-Zoom) + "'")
     [void][SbW]::ShowWindow($script:Main, 9)
     [void](Wait-Until { (Get-Zoom) -eq $single } 3000)
     Add-Check '21 restoring the window restores the readout' ((Get-Zoom) -eq $single) "$(Get-Zoom) vs $single"
@@ -1286,6 +1318,7 @@ try {
     # --- 9. hide / show: layout and checkmarks ------------------------------
     $br = New-Object SbW+RECT; [void][SbW]::GetWindowRect($script:Bar, [ref]$br)
     $barH = $br.Bottom - $br.Top; $ch = Get-ClientH
+    $preHide = Get-Zoom
     Add-Check '25 CONTROL shown bar: content ends above it' ((Get-ContentBottom) -eq ($ch - $barH)) "bottom=$(Get-ContentBottom) client=$ch bar=$barH"
     Add-Check '26 Status Bar is checked while shown' (Test-Checked 40064) ''
     Send-Cmd 40064; [void](Wait-Until { -not [SbW]::IsWindowVisible($script:Bar) } 2000); Start-Sleep -Milliseconds 300
@@ -1298,11 +1331,20 @@ try {
     Send-Cmd 40064; [void](Wait-Until { [SbW]::IsWindowVisible($script:Bar) } 2000); Start-Sleep -Milliseconds 300
     Add-Check '31 the toggle shows the bar again' ([SbW]::IsWindowVisible($script:Bar)) ''
     Add-Check '32 shown again: content ends above the bar' ((Get-ContentBottom) -eq ($ch - $barH)) "bottom=$(Get-ContentBottom)"
-    Add-Check '33 the readout survived the round trip' ((Get-Zoom) -match $pct) (Get-Zoom)
+    Add-Check '33 the readout is unchanged by the round trip' ((Get-Zoom) -eq $preHide) "$(Get-Zoom) vs $preHide"
+    # The readout keeps being written while the bar is hidden.
+    Send-Cmd 40064; [void](Wait-Until { -not [SbW]::IsWindowVisible($script:Bar) } 2000)
+    Send-Cmd 40010; Start-Sleep -Milliseconds 600
+    Send-Cmd 40064; [void](Wait-Until { [SbW]::IsWindowVisible($script:Bar) } 2000); Start-Sleep -Milliseconds 300
+    Add-Check '33a a zoom made while hidden shows when the bar returns' (((Get-Zoom) -match $pct) -and ((Get-Zoom) -ne $preHide)) "$preHide -> $(Get-Zoom)"
+    [void](Send-AndRead 40012 (Get-Zoom))
 
     # --- 10. results panel + hidden bar --------------------------------------
     Send-Cmd 40045; Start-Sleep -Milliseconds 600
-    Add-Check '34 CONTROL results panel ends above the shown bar' ((Get-ContentBottom) -eq ($ch - $barH)) "bottom=$(Get-ContentBottom)"
+    $panel = [IntPtr]::Zero
+    foreach ($h in [SbW]::Kids($script:Main)) { if ([SbW]::Cls($h) -eq 'LitePDFResultsPanel') { $panel = $h } }
+    $panelUp = ([int64]$panel -ne 0) -and [SbW]::IsWindowVisible($panel)
+    Add-Check '34 CONTROL the results panel is open and ends above the shown bar' ($panelUp -and ((Get-RectIn $panel).Bottom -eq ($ch - $barH))) "open=$panelUp bottom=$(Get-ContentBottom)"
     Send-Cmd 40064; Start-Sleep -Milliseconds 500
     Add-Check '35 results panel reaches the bottom when the bar is hidden' ((Get-ContentBottom) -eq $ch) "bottom=$(Get-ContentBottom)"
     Send-Cmd 40064; Start-Sleep -Milliseconds 500
@@ -1319,13 +1361,24 @@ try {
     Send-Cmd 40064; Start-Sleep -Milliseconds 500
 
     # --- 12. no document ------------------------------------------------------
-    Send-Cmd 40030; Start-Sleep -Milliseconds 500
+    # Tab 2 is active. Closing it leaves tab 1, whose readout is the fit value;
+    # that is deliberately the last text shown before the bar goes empty.
+    Send-Cmd 40030
+    [void](Wait-Until { (Get-Zoom) -eq $fit } 3000)
+    Add-Check '37a closing tab 2 shows tab 1''s zoom' ((Get-Zoom) -eq $fit) "$(Get-Zoom) vs $fit"
     Send-Cmd 40030; Start-Sleep -Milliseconds 700
     Add-Check '38 closing the last tab clears the readout' ((Get-Zoom) -eq '') ("'" + (Get-Zoom) + "'")
     Send-Cmd 40064; [void](Wait-Until { -not [SbW]::IsWindowVisible($script:Bar) } 2000)
     Add-Check '39 the toggle works with no document' ((-not [SbW]::IsWindowVisible($script:Bar)) -and (-not (Test-Checked 40064))) ''
+    Add-Check '39a no document: Invert and Two-Page are unchecked' ((-not (Test-Checked 40061)) -and (-not (Test-Checked 40062))) ''
     Send-Cmd 40064; [void](Wait-Until { [SbW]::IsWindowVisible($script:Bar) } 2000)
     Add-Check '40 and shows the bar again with no document' ([SbW]::IsWindowVisible($script:Bar) -and (Test-Checked 40064)) ''
+    # Reopen the same document at the same window size: the readout is the same
+    # text it showed last. If set_empty() forgot to clear the remembered text,
+    # set_zoom() would see "unchanged" and leave the label blank.
+    Start-Process $Exe -ArgumentList ('"{0}"' -f $simple) | Out-Null
+    [void](Wait-Until { (Get-Zoom) -eq $fit } 6000)
+    Add-Check '41 reopening a document after the empty state shows its zoom' ((Get-Zoom) -eq $fit) "'$(Get-Zoom)' vs $fit"
 } finally {
     if (-not $proc.HasExited) {
         [void][SbW]::PostMessageW($script:Main, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
@@ -1346,7 +1399,9 @@ if ($failed.Count -gt 0) { exit 1 }
 powershell -ExecutionPolicy Bypass -File C:\Users\User\projects\litepdf\build\gui-check\status-bar.ps1 -Exe C:\Users\User\projects\litepdf\build\gui-check\normal-probe.exe -Mode normal
 ```
 
-Expected: `normal: 40 checks, 0 failed`.
+Expected: the last line reads `normal: 52 checks, 0 failed`.
+
+Two things that look like product failures and are not. Checks named "changes the readout" compare text: if a fit happens to round to the ladder rung the next step lands on (a fit of 124.6% shows `125%`, and Zoom In then goes to 125%), the text does not change. Resize the window by a few pixels in the driver's `SetWindowPos` width and re-run. And check 03 renders `simple.pdf` at 800%, which on a 200% display is a very large bitmap (#49); if the app is slow to answer there, raise the waits rather than dropping the check.
 
 If a `CONTROL` check fails, the run is invalid, not a product failure: fix the driver or the environment (monitor asleep, another window on top, a leftover instance) and re-run. If any other check fails, stop and use superpowers:systematic-debugging; do not edit the check to make it pass.
 
@@ -1356,13 +1411,122 @@ If a `CONTROL` check fails, the run is invalid, not a product failure: fix the d
 powershell -ExecutionPolicy Bypass -File C:\Users\User\projects\litepdf\build\gui-check\status-bar.ps1 -Exe C:\Users\User\projects\litepdf\build\gui-check\site1off-probe.exe -Mode site1off
 ```
 
-Expected: `site1off: 40 checks, 0 failed`, with checks 06 and 13 reading `MUTANT ... stale`.
+Expected: `site1off: 52 checks, 0 failed`, with checks 06 and 13 reading `MUTANT ... stale`.
 
-What this proves: with the canvas callback gone, every `kick_render` path (02-05, 07-11, 14-21) still updates the readout, in single-page and two-page mode, so call site 2 is present on both branches. Checks 06 and 13 going stale show that those two paths depend on call site 1 — which the normal run's 06 and 13 show is working.
+What this proves: with the canvas callback gone, every `kick_render` path (02-05, 07-11b, 14-21) still updates the readout, in single-page and two-page mode, so call site 2 is present on both branches. Checks 06 and 13 going stale show that those two paths depend on call site 1 — which the normal run's 06 and 13 show is working.
 
 If mutant check 06 or 13 reports the readout **changed**, the mutant was not built correctly (the callback is still wired) or another path refreshes the readout that the spec does not know about. Investigate before continuing.
 
-- [ ] **Step 5: Confirm the tree is clean**
+- [ ] **Step 5: The toggle re-fits the page (FitPage, through session restore)**
+
+The driver above never leaves FitWidth, and FitWidth ignores the canvas height, so nothing in it fails if `on_toggle_status_bar` forgets its `kick_render`. FitPage does depend on the height, and the only way into FitPage is a restored session. This script writes a FitPage session, lets the app restore it, and toggles the bar.
+
+Save as `build/gui-check/fitpage.ps1`:
+
+```powershell
+#Requires -Version 5.1
+# #59: hiding the status bar must re-fit a FitPage document.
+[CmdletBinding()]
+param([Parameter(Mandatory = $true)][string]$Exe)
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
+Add-Type @'
+using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;
+public static class FpW {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr p, EnumProc cb, IntPtr l);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="SendMessageW")] static extern IntPtr SendText(IntPtr h, uint m, IntPtr w, StringBuilder l);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindowW(string cls, string title);
+  [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  public static uint Pid(IntPtr h) { uint pid; GetWindowThreadProcessId(h, out pid); return pid; }
+  public static string Readout(IntPtr main) {
+    string found = "";
+    EnumChildWindows(main, (h, l) => {
+      var c = new StringBuilder(64); GetClassNameW(h, c, 64);
+      if (c.ToString() == "Static") {
+        var t = new StringBuilder(256); SendText(h, 0x000D, (IntPtr)256, t);
+        if (t.ToString().EndsWith("%")) found = t.ToString();
+      }
+      return true; }, IntPtr.Zero);
+    return found;
+  }
+}
+'@
+$repo   = 'C:\Users\User\projects\litepdf'
+$simple = Join-Path $repo 'tests\fixtures\simple.pdf'
+if (Get-Process | Where-Object { $_.Name -eq 'litepdf' -or $_.Name -like '*-probe' }) { throw 'A LitePDF instance is already running. Close it first.' }
+$dir     = Join-Path $env:LOCALAPPDATA 'LitePDF'
+$session = Join-Path $dir 'session.json'
+$marker  = Join-Path $dir 'running.lock'
+$bakS = Join-Path $env:TEMP 'litepdf-session-fitpage.bak'
+$bakM = Join-Path $env:TEMP 'litepdf-marker-fitpage.bak'
+$hadS = Test-Path $session; $hadM = Test-Path $marker
+if ($hadS) { Copy-Item $session $bakS -Force }
+if ($hadM) { Copy-Item $marker $bakM -Force }
+New-Item -ItemType Directory -Force $dir | Out-Null
+$jsonPath = $simple.Replace('\', '\\')
+$json = '{"version":2,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"' + $jsonPath + '","page":0,"zoom_mode":"fit_page","zoom_scale":1}]}'
+[System.IO.File]::WriteAllText($session, $json, (New-Object System.Text.UTF8Encoding($false)))
+if (-not $hadM) { [System.IO.File]::WriteAllText($marker, '') }   # the abnormal-exit marker makes the app offer a restore
+Remove-Item Env:\LITEPDF_NO_RESTORE -ErrorAction SilentlyContinue
+function Wait-For([scriptblock]$Cond, [int]$Ms) {
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt $Ms) { if (& $Cond) { return $true }; Start-Sleep -Milliseconds 100 }
+    return $false
+}
+$fail = 0
+function Say([string]$Name, [bool]$Ok, [string]$Detail) {
+    $tag = 'FAIL'; if ($Ok) { $tag = 'PASS' } else { $script:fail++ }
+    Write-Host "$tag  $Name  [$Detail]"
+}
+$proc = Start-Process $Exe -PassThru
+try {
+    # The restore prompt is a MessageBox titled "LitePDF" owned by this process.
+    $dlg = [IntPtr]::Zero
+    $gotDlg = Wait-For { $script:dlg = [FpW]::FindWindowW('#32770', 'LitePDF'); ([int64]$script:dlg -ne 0) -and ([FpW]::Pid($script:dlg) -eq [uint32]$proc.Id) } 8000
+    Say 'F1 CONTROL the restore prompt appeared' $gotDlg ''
+    if (-not $gotDlg) { throw 'no restore prompt: the marker or session.json was not accepted - invalid run' }
+    [void][FpW]::PostMessageW($dlg, 0x0111, [IntPtr]6, [IntPtr]::Zero)   # IDYES
+    $main = [IntPtr]::Zero
+    [void](Wait-For { $proc.Refresh(); $script:main = $proc.MainWindowHandle; ([int64]$script:main -ne 0) -and ([FpW]::Readout($script:main) -match '^\d+%$') } 8000)
+    $shown = [FpW]::Readout($main)
+    Say 'F2 CONTROL the restored document shows a percentage' ($shown -match '^\d+%$') $shown
+    [void][FpW]::PostMessageW($main, 0x0111, [IntPtr]40064, [IntPtr]::Zero)
+    [void](Wait-For { [FpW]::Readout($script:main) -ne $shown } 3000)
+    $hidden = [FpW]::Readout($main)
+    # A portrait page in the default window is limited by height in FitPage, so
+    # a taller canvas means a larger fit. The label is still written while the
+    # bar is hidden.
+    Say 'F3 hiding the bar re-fits the page (FitPage percentage grows)' (($hidden -match '^\d+%$') -and ([int]$hidden.TrimEnd('%') -gt [int]$shown.TrimEnd('%'))) "$shown -> $hidden"
+    [void][FpW]::PostMessageW($main, 0x0111, [IntPtr]40064, [IntPtr]::Zero)
+    [void](Wait-For { [FpW]::Readout($script:main) -eq $shown } 3000)
+    Say 'F4 showing the bar restores the original fit' ([FpW]::Readout($main) -eq $shown) "$([FpW]::Readout($main)) vs $shown"
+} finally {
+    if (-not $proc.HasExited) {
+        $proc.Refresh()
+        if ([int64]$proc.MainWindowHandle -ne 0) { [void][FpW]::PostMessageW($proc.MainWindowHandle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }
+        if (-not $proc.WaitForExit(5000)) { $proc.Kill(); [void]$proc.WaitForExit(5000) }
+    }
+    if ($hadS) { Copy-Item $bakS $session -Force } elseif (Test-Path $session) { Remove-Item $session -Force }
+    if ($hadM) { Copy-Item $bakM $marker -Force } elseif (Test-Path $marker) { Remove-Item $marker -Force }
+}
+Write-Host "fitpage: $fail failed"
+if ($fail -gt 0) { exit 1 }
+```
+
+Run it:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\Users\User\projects\litepdf\build\gui-check\fitpage.ps1 -Exe C:\Users\User\projects\litepdf\build\gui-check\normal-probe.exe
+```
+
+Expected: four `PASS` lines and `fitpage: 0 failed`.
+
+If F1 fails, the run is invalid, not a product failure: read `maybe_offer_restore` in `src/ui/MainWindow.cpp` and the marker path in `src/app/AppPaths.cpp` to see what the app needs before it offers a restore, fix the script, and re-run. If F3 reports the percentage unchanged, `on_toggle_status_bar` is not re-rendering.
+
+- [ ] **Step 6: Confirm the tree is clean**
 
 ```bash
 cd /c/Users/User/projects/litepdf && git status --short
@@ -1370,11 +1534,12 @@ cd /c/Users/User/projects/litepdf && git status --short
 
 Expected: no output. `build/` is ignored; nothing from this task is committed.
 
-- [ ] **Step 6: Record the result**
+- [ ] **Step 7: Record the result**
 
-Append both summary lines and any deviations to the PR description draft in Task 7. Not covered by this driver, and why:
+Write the three summary lines (`normal: ...`, `site1off: ...`, `fitpage: ...`) and any deviation from the expected output to `build/gui-check/results.txt`, and include them in your report. Not covered by these scripts, and why:
 
-- Session restore updating the readout: restore goes through `kick_render`, the path checks 02-21 exercise; the restore prompt only appears after an abnormal exit.
+- Session restore of a Custom zoom updating the readout: restore goes through `kick_render`, the path checks 02-21 exercise. It is on the user's list in Task 7.
+- `page_box_has_focus()` returning false while hidden, the skipped `set_bounds`, and `set_zoom` skipping an unchanged text: none is observable from outside once check 37 passes. Pinned by review.
 - Drag-resize flicker, the font after a DPI change, the repaint after a theme switch, a DPI change while hidden: these need a person or an OS setting change. They are Task 7's checklist.
 - The results splitter's drag clamp with the bar hidden: it reads `height_px()`, which is unchanged code fed a value check 28 already proves is 0.
 - The callback's position ahead of the null check: no fixture produces a failed render (`corrupt.pdf` fails at open). Pinned by the comment at the call site and by review.
@@ -1388,7 +1553,7 @@ Append both summary lines and any deviations to the PR description draft in Task
 - Modify: `README.md:45`
 
 **Interfaces:**
-- Consumes: the finished feature; Task 6's two summary lines.
+- Consumes: the finished feature. Task 6's results are in `build/gui-check/results.txt` (untracked); this task does not need them.
 - Produces: the branch ready for the PR gate.
 
 - [ ] **Step 1: CHANGELOG**
@@ -1406,11 +1571,13 @@ In `CHANGELOG.md`, under `## [Unreleased]` → `### Added`, add at the top of th
 
 - [ ] **Step 2: README**
 
-In `README.md`, change line 45 to:
+In `README.md`, change the line that starts `- **Page indicator**` (line 45) to:
 
 ```markdown
-- **Page indicator** — status bar showing the current page and page count, with a box you can type a page into (v1.3.0), and the current zoom percentage; View → Status Bar hides it
+- **Page indicator** — status bar showing the current page and page count, with a box you can type a page into (v1.3.0). It also shows the current zoom percentage, and View → Status Bar hides it (unreleased)
 ```
+
+The `(unreleased)` suffix is the convention the neighbouring lines use for features after v1.3.0.
 
 - [ ] **Step 3: Full verification**
 
@@ -1424,7 +1591,7 @@ Pop-Location
 powershell -ExecutionPolicy Bypass -File C:\Users\User\projects\litepdf\scripts\smoke-test.ps1 -ExpectDev
 ```
 
-Expected: the build succeeds; `100% tests passed` with the Task 1 baseline plus six; the smoke test exits 0.
+Expected: the build succeeds; `100% tests passed, 0 tests failed out of 404`; the smoke test exits 0.
 
 - [ ] **Step 4: Commit**
 
