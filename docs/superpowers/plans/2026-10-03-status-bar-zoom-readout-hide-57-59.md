@@ -685,6 +685,10 @@ $session = Join-Path $env:LOCALAPPDATA 'LitePDF\session.json'
 $backup  = Join-Path $env:TEMP 'litepdf-session-smoke.bak'
 $had = Test-Path $session
 if ($had) { Copy-Item $session $backup -Force }
+# The app deletes running.lock on a clean exit. If the user had one (their last
+# real session crashed), put it back so they still get their restore prompt.
+$marker = Join-Path $env:LOCALAPPDATA 'LitePDF\running.lock'
+$hadMarker = Test-Path $marker
 $p = Start-Process $exe -ArgumentList ('"{0}"' -f $pdf) -PassThru
 try {
     $main = [IntPtr]::Zero
@@ -704,6 +708,7 @@ try {
         if (-not $p.WaitForExit(5000)) { $p.Kill(); [void]$p.WaitForExit(5000) }
     }
     if ($had) { Copy-Item $backup $session -Force } elseif (Test-Path $session) { Remove-Item $session -Force }
+    if ($hadMarker -and -not (Test-Path $marker)) { [System.IO.File]::WriteAllText($marker, 'running') }
 }
 ```
 
@@ -989,11 +994,13 @@ Preconditions: close every running LitePDF, including an installed copy. Do not 
 
 - [ ] **Step 1: Build the mutant exe, then restore the source**
 
-Run from the repo root in Git Bash:
+Save as `build/gui-check/make-probes.sh` (create `build/gui-check` first) and run it with `bash build/gui-check/make-probes.sh`. It is a script file so that the `trap` and the `exit` are scoped to it:
 
 ```bash
 cd /c/Users/User/projects/litepdf
 test -z "$(git status --short)" || { echo "working tree not clean"; exit 1; }
+# Whatever happens below -- a failed build, Ctrl+C -- the source is put back.
+trap 'git checkout -- src/ui/MainWindow.cpp' EXIT INT TERM
 mkdir -p build/gui-check
 rm -f build/gui-check/site1off-probe.exe build/gui-check/normal-probe.exe
 python - <<'EOF'
@@ -1008,7 +1015,8 @@ EOF
   && cp build/Release/litepdf.exe build/gui-check/site1off-probe.exe \
   || echo "MUTANT BUILD FAILED - no site1off-probe.exe was made"
 git checkout -- src/ui/MainWindow.cpp
-test -z "$(git status --short)" && echo "source restored"
+test -z "$(git status --short)" || { echo "SOURCE NOT RESTORED - stop and fix by hand"; exit 1; }
+echo "source restored"
 "/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe" --build build --target litepdf --config Release
 cp build/Release/litepdf.exe build/gui-check/normal-probe.exe
 ```
@@ -1172,6 +1180,10 @@ $session = Join-Path $env:LOCALAPPDATA 'LitePDF\session.json'
 $backup  = Join-Path $env:TEMP 'litepdf-session-guicheck.bak'
 $hadSession = Test-Path $session
 if ($hadSession) { Copy-Item $session $backup -Force }
+# The app deletes running.lock on a clean exit. If the user had one (their last
+# real session crashed), put it back so they still get their restore prompt.
+$marker = Join-Path $env:LOCALAPPDATA 'LitePDF\running.lock'
+$hadMarker = Test-Path $marker
 
 $proc = Start-Process $Exe -ArgumentList ('"{0}"' -f $simple) -PassThru
 try {
@@ -1345,8 +1357,32 @@ try {
     foreach ($h in [SbW]::Kids($script:Main)) { if ([SbW]::Cls($h) -eq 'LitePDFResultsPanel') { $panel = $h } }
     $panelUp = ([int64]$panel -ne 0) -and [SbW]::IsWindowVisible($panel)
     Add-Check '34 CONTROL the results panel is open and ends above the shown bar' ($panelUp -and ((Get-RectIn $panel).Bottom -eq ($ch - $barH))) "open=$panelUp bottom=$(Get-ContentBottom)"
+    # Drag the results splitter with a posted press / move / release. The app
+    # converts the cursor to a panel height and subtracts the status bar's
+    # height, so the splitter lands on the cursor only if that height is right:
+    # the real height while shown, 0 while hidden. A wrong value shows up as an
+    # offset of one bar height (22 DIP), well outside the 12 px tolerance.
+    $split = [IntPtr]::Zero
+    foreach ($h in [SbW]::Kids($script:Main)) { if ([SbW]::Cls($h) -eq 'LitePDFSplitter') { $split = $h } }
+    function Move-Splitter([int]$TargetY) {
+        $top = (Get-RectIn $split).Top
+        $down = [IntPtr]((2 -shl 16) -bor 10)
+        $dy = $TargetY - $top
+        $to = [IntPtr]([int64](($dy -band 0xFFFF) * 65536) -bor 10)
+        [void][SbW]::PostMessageW($split, 0x0201, [IntPtr]1, $down)
+        [void][SbW]::PostMessageW($split, 0x0200, [IntPtr]1, $to)
+        [void][SbW]::PostMessageW($split, 0x0202, [IntPtr]0, $to)
+        Start-Sleep -Milliseconds 400
+        return (Get-RectIn $split).Top
+    }
+    $y1 = (Get-RectIn $split).Top - 60
+    $t1 = Move-Splitter $y1
+    Add-Check '34a CONTROL shown bar: the splitter follows a posted drag' ([Math]::Abs($t1 - $y1) -le 12) "target=$y1 landed=$t1"
     Send-Cmd 40064; Start-Sleep -Milliseconds 500
     Add-Check '35 results panel reaches the bottom when the bar is hidden' ((Get-ContentBottom) -eq $ch) "bottom=$(Get-ContentBottom)"
+    $y2 = (Get-RectIn $split).Top - 60
+    $t2s = Move-Splitter $y2
+    Add-Check '35a hidden bar: the splitter still lands on the cursor' ([Math]::Abs($t2s - $y2) -le 12) "target=$y2 landed=$t2s"
     Send-Cmd 40064; Start-Sleep -Milliseconds 500
     Send-Cmd 40046; Start-Sleep -Milliseconds 500   # F6: hide the results panel
 
@@ -1382,9 +1418,10 @@ try {
 } finally {
     if (-not $proc.HasExited) {
         [void][SbW]::PostMessageW($script:Main, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
-        if (-not $proc.WaitForExit(5000)) { $proc.Kill() }
+        if (-not $proc.WaitForExit(5000)) { $proc.Kill(); [void]$proc.WaitForExit(5000) }
     }
     if ($hadSession) { Copy-Item $backup $session -Force } elseif (Test-Path $session) { Remove-Item $session -Force }
+    if ($hadMarker -and -not (Test-Path $marker)) { [System.IO.File]::WriteAllText($marker, 'running') }
 }
 
 $failed = @($script:Results | Where-Object { $_ -like 'FAIL*' })
@@ -1399,7 +1436,7 @@ if ($failed.Count -gt 0) { exit 1 }
 powershell -ExecutionPolicy Bypass -File C:\Users\User\projects\litepdf\build\gui-check\status-bar.ps1 -Exe C:\Users\User\projects\litepdf\build\gui-check\normal-probe.exe -Mode normal
 ```
 
-Expected: the last line reads `normal: 52 checks, 0 failed`.
+Expected: the last line reads `normal: 54 checks, 0 failed`.
 
 Two things that look like product failures and are not. Checks named "changes the readout" compare text: if a fit happens to round to the ladder rung the next step lands on (a fit of 124.6% shows `125%`, and Zoom In then goes to 125%), the text does not change. Resize the window by a few pixels in the driver's `SetWindowPos` width and re-run. And check 03 renders `simple.pdf` at 800%, which on a 200% display is a very large bitmap (#49); if the app is slow to answer there, raise the waits rather than dropping the check.
 
@@ -1411,7 +1448,7 @@ If a `CONTROL` check fails, the run is invalid, not a product failure: fix the d
 powershell -ExecutionPolicy Bypass -File C:\Users\User\projects\litepdf\build\gui-check\status-bar.ps1 -Exe C:\Users\User\projects\litepdf\build\gui-check\site1off-probe.exe -Mode site1off
 ```
 
-Expected: `site1off: 52 checks, 0 failed`, with checks 06 and 13 reading `MUTANT ... stale`.
+Expected: `site1off: 54 checks, 0 failed`, with checks 06 and 13 reading `MUTANT ... stale`.
 
 What this proves: with the canvas callback gone, every `kick_render` path (02-05, 07-11b, 14-21) still updates the readout, in single-page and two-page mode, so call site 2 is present on both branches. Checks 06 and 13 going stale show that those two paths depend on call site 1 — which the normal run's 06 and 13 show is working.
 
@@ -1465,11 +1502,8 @@ $bakM = Join-Path $env:TEMP 'litepdf-marker-fitpage.bak'
 $hadS = Test-Path $session; $hadM = Test-Path $marker
 if ($hadS) { Copy-Item $session $bakS -Force }
 if ($hadM) { Copy-Item $marker $bakM -Force }
-New-Item -ItemType Directory -Force $dir | Out-Null
 $jsonPath = $simple.Replace('\', '\\')
 $json = '{"version":2,"window":{"flags":0,"show":1,"x":0,"y":0,"w":0,"h":0},"active":0,"tabs":[{"path":"' + $jsonPath + '","page":0,"zoom_mode":"fit_page","zoom_scale":1}]}'
-[System.IO.File]::WriteAllText($session, $json, (New-Object System.Text.UTF8Encoding($false)))
-if (-not $hadM) { [System.IO.File]::WriteAllText($marker, '') }   # the abnormal-exit marker makes the app offer a restore
 Remove-Item Env:\LITEPDF_NO_RESTORE -ErrorAction SilentlyContinue
 function Wait-For([scriptblock]$Cond, [int]$Ms) {
     $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -1481,8 +1515,15 @@ function Say([string]$Name, [bool]$Ok, [string]$Detail) {
     $tag = 'FAIL'; if ($Ok) { $tag = 'PASS' } else { $script:fail++ }
     Write-Host "$tag  $Name  [$Detail]"
 }
-$proc = Start-Process $Exe -PassThru
+$proc = $null
 try {
+    # Nothing touches the user's files before this point, so every failure
+    # from here on goes through the finally block that puts them back.
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    [System.IO.File]::WriteAllText($session, $json, (New-Object System.Text.UTF8Encoding($false)))
+    # The abnormal-exit marker is what makes the app offer a restore.
+    if (-not $hadM) { [System.IO.File]::WriteAllText($marker, 'running') }
+    $proc = Start-Process $Exe -PassThru
     # The restore prompt is a MessageBox titled "LitePDF" owned by this process.
     $dlg = [IntPtr]::Zero
     $gotDlg = Wait-For { $script:dlg = [FpW]::FindWindowW('#32770', 'LitePDF'); ([int64]$script:dlg -ne 0) -and ([FpW]::Pid($script:dlg) -eq [uint32]$proc.Id) } 8000
@@ -1504,7 +1545,7 @@ try {
     [void](Wait-For { [FpW]::Readout($script:main) -eq $shown } 3000)
     Say 'F4 showing the bar restores the original fit' ([FpW]::Readout($main) -eq $shown) "$([FpW]::Readout($main)) vs $shown"
 } finally {
-    if (-not $proc.HasExited) {
+    if ($proc -ne $null -and -not $proc.HasExited) {
         $proc.Refresh()
         if ([int64]$proc.MainWindowHandle -ne 0) { [void][FpW]::PostMessageW($proc.MainWindowHandle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }
         if (-not $proc.WaitForExit(5000)) { $proc.Kill(); [void]$proc.WaitForExit(5000) }
@@ -1541,7 +1582,6 @@ Write the three summary lines (`normal: ...`, `site1off: ...`, `fitpage: ...`) a
 - Session restore of a Custom zoom updating the readout: restore goes through `kick_render`, the path checks 02-21 exercise. It is on the user's list in Task 7.
 - `page_box_has_focus()` returning false while hidden, the skipped `set_bounds`, and `set_zoom` skipping an unchanged text: none is observable from outside once check 37 passes. Pinned by review.
 - Drag-resize flicker, the font after a DPI change, the repaint after a theme switch, a DPI change while hidden: these need a person or an OS setting change. They are Task 7's checklist.
-- The results splitter's drag clamp with the bar hidden: it reads `height_px()`, which is unchanged code fed a value check 28 already proves is 0.
 - The callback's position ahead of the null check: no fixture produces a failed render (`corrupt.pdf` fails at open). Pinned by the comment at the call site and by review.
 
 ---
