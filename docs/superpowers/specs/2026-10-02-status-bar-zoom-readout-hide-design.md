@@ -293,10 +293,14 @@ the control's own pixels. The plan reads
   in FitWidth, F4/F5, the two-page toggle, a fit-mode page turn in
   `spread-unequal.pdf`, a tab switch between documents at different zooms, and
   session restore.
-- After a zoom command, a tab switch and a resize, the text is already correct
-  when the command returns — before any completion is pumped. This is the check
-  that fails if call site 2 is missing. Run it in single-page **and** in
-  two-page mode: the two branches of `kick_render` carry separate calls.
+- Call site 2 is proved with a mutant, not by timing: a probe exe built with
+  call site 1 left unwired must still update the readout after a zoom command, a
+  tab switch and a resize, in single-page **and** in two-page mode (the two
+  branches of `kick_render` carry separate calls). "Before any completion is
+  pumped" cannot be observed from another process — a cache hit can complete
+  between two of the driver's calls. The same mutant must leave the readout
+  stale after Ctrl+wheel and after a PgDn page turn, which is the negative
+  control.
 - With and without a document: toggle Status Bar, reopen View, and all three
   checkmarks (Status Bar, Invert Colors, Two-Page Spread) are correct.
 - Ctrl+wheel updates the text. This is the check that fails if call site 1 is
