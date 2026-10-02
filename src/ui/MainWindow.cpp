@@ -1520,10 +1520,12 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // positional test would have run the View arm against Edit, leaving
             // the View checkmarks silently stale.
 
-            // (Phase 8 T3/T4) View popup: reflect Invert Colors and Two-Page
-            // Spread state on each show. The flags are per-tab (D9), so the
-            // checkmark is read off active_view(). When no tab is open, both
-            // default to unchecked.
+            // (Phase 8 T3/T4) View popup: reflect Invert Colors, Two-Page
+            // Spread and Status Bar (#59) state on each show. The first two
+            // flags are per-tab (D9), so their checkmarks are read off
+            // active_view(); when no tab is open, both default to unchecked.
+            // Status Bar is window-level and is checked whenever the bar is
+            // visible, tab or no tab.
             if (popup_owns(popup, IDM_VIEW_INVERT)) {
                 auto* v = active_view();
                 const bool invert_on = v && v->invert_colors();

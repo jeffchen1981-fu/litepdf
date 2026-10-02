@@ -263,7 +263,7 @@ struct StatusBar::Impl {
     // across that strip -- which it can do only because the bar has no
     // WS_CLIPCHILDREN. Invalidating the bar alone is not obviously enough
     // either, since a parent's invalid region does not propagate to children.
-    // Invalidate both and rely on the documented order: within one update
+    // Invalidate all three and rely on the documented order: within one update
     // cycle a parent paints before its children.
     //
     // The case that fails if this is wrong is a SHRINKING label -- "/ 128"
@@ -272,7 +272,7 @@ struct StatusBar::Impl {
     // transition; if stale glyphs survive it, the fallback is to give the
     // label an opaque background brush instead of transparency (one line in
     // status_bar_subclass), accepting a possible slight mismatch against a
-    // themed bar. Do not "fix" it by deleting either Invalidate call.
+    // themed bar. Do not "fix" it by deleting any of the Invalidate calls.
     void repaint() {
         if (hwnd)  InvalidateRect(hwnd, nullptr, TRUE);
         if (label) InvalidateRect(label, nullptr, FALSE);
@@ -315,12 +315,12 @@ struct StatusBar::Impl {
 // -----------------------------------------------------------------------------
 // Status bar subclass -- background brushes for the children.
 //
-// The "/ N" and zoom STATICs want to be transparent so it paints over the themed bar
-// instead of a grey rectangle: NULL_BRUSH plus TRANSPARENT bkmode means it
-// draws text and erases nothing, so the bar underneath must repaint first.
-// set_page() invalidates the whole bar with fErase for that reason, and the bar
-// is deliberately NOT created with WS_CLIPCHILDREN so the erase reaches under
-// the label.
+// The "/ N" and zoom STATICs want to be transparent so they paint over the
+// themed bar instead of a grey rectangle: NULL_BRUSH plus TRANSPARENT bkmode
+// means they draw text and erase nothing, so the bar underneath must repaint
+// first. set_page() invalidates the whole bar with fErase for that reason, and
+// the bar is deliberately NOT created with WS_CLIPCHILDREN so the erase reaches
+// under the labels.
 //
 // The page box must NOT get that treatment, and this is the trap: Windows
 // routes a DISABLED (or read-only) EDIT's background query to
