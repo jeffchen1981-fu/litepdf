@@ -107,6 +107,10 @@ int dp(int dip, UINT dpi) {
 constexpr int kPadDip    = 4;
 constexpr int kEditWDip  = 52;
 constexpr int kLabelWDip = 96;
+// "9999%" -- the longest string format_zoom_pct returns -- measures 41 px in
+// 9 pt Segoe UI at 96 DPI (TextRenderer.MeasureText, NoPadding). Plus one
+// padding step.
+constexpr int kZoomWDip  = 45;
 
 constexpr UINT_PTR kIdEdit         = 1;
 constexpr UINT_PTR kIdLabel        = 2;
@@ -223,7 +227,7 @@ struct StatusBar::Impl {
         GetClientRect(hwnd, &rc);
         const auto r = detail::status_bar_child_rects(
             rc.bottom - rc.top, dp(kPadDip, dpi),
-            dp(kEditWDip, dpi), dp(kLabelWDip, dpi));
+            dp(kEditWDip, dpi), dp(kLabelWDip, dpi), dp(kZoomWDip, dpi));
         if (edit) {
             SetWindowPos(edit, nullptr, r.edit_x, r.edit_y, r.edit_w, r.edit_h,
                          SWP_NOZORDER | SWP_NOACTIVATE);

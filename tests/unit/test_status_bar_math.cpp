@@ -65,7 +65,8 @@ TEST_CASE("StatusBarMath parse_page_input rejects everything when there is no do
 TEST_CASE("StatusBarMath status_bar_child_rects centers children and lays them left to right",
           "[statusbar]") {
     const auto r = status_bar_child_rects(/*bar_h=*/24, /*pad_px=*/4,
-                                          /*edit_w_px=*/48, /*label_w_px=*/72);
+                                          /*edit_w_px=*/48, /*label_w_px=*/72,
+                                          /*zoom_w_px=*/40);
     REQUIRE(r.edit_h  == 16);
     REQUIRE(r.edit_y  == 4);
     REQUIRE(r.edit_x  == 4);
@@ -74,6 +75,11 @@ TEST_CASE("StatusBarMath status_bar_child_rects centers children and lays them l
     REQUIRE(r.label_y == r.edit_y);
     REQUIRE(r.label_h == r.edit_h);
     REQUIRE(r.label_w == 72);
+    // The zoom readout: one padding step right of the "/ N" label's rectangle.
+    REQUIRE(r.zoom_x  == 4 + 48 + 4 + 72 + 4);
+    REQUIRE(r.zoom_y  == r.edit_y);
+    REQUIRE(r.zoom_h  == r.edit_h);
+    REQUIRE(r.zoom_w  == 40);
 }
 
 TEST_CASE("StatusBarMath status_bar_child_rects degrades safely on a tiny bar",
@@ -84,7 +90,8 @@ TEST_CASE("StatusBarMath status_bar_child_rects degrades safely on a tiny bar",
     // silently returns e.g. edit_h == 0 for an ordinary 24 px bar -- or drops
     // the fallback entirely -- cannot still pass this test.
     const auto r = status_bar_child_rects(/*bar_h=*/4, /*pad_px=*/4,
-                                          /*edit_w_px=*/48, /*label_w_px=*/72);
+                                          /*edit_w_px=*/48, /*label_w_px=*/72,
+                                          /*zoom_w_px=*/40);
     REQUIRE(r.edit_x   == 4);
     REQUIRE(r.edit_y   == 0);
     REQUIRE(r.edit_w   == 48);
@@ -93,6 +100,10 @@ TEST_CASE("StatusBarMath status_bar_child_rects degrades safely on a tiny bar",
     REQUIRE(r.label_y  == 0);
     REQUIRE(r.label_w  == 72);
     REQUIRE(r.label_h  == 4);
+    REQUIRE(r.zoom_x   == 132);
+    REQUIRE(r.zoom_y   == 0);
+    REQUIRE(r.zoom_w   == 40);
+    REQUIRE(r.zoom_h   == 4);
 }
 
 TEST_CASE("StatusBarMath should_overwrite_page_box allows overwrite when unfocused",
