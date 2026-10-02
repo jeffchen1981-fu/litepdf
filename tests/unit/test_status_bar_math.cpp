@@ -132,6 +132,7 @@ TEST_CASE("StatusBarMath format_zoom_pct shows fit values above the ladder",
     // fit_percentage is unbounded above; only set_zoom_pct clamps.
     REQUIRE(format_zoom_pct(38.4f) == L"3840%");
     REQUIRE(format_zoom_pct(99.0f) == L"9900%");
+    REQUIRE(format_zoom_pct(99.99f) == L"9999%");
 }
 
 TEST_CASE("StatusBarMath format_zoom_pct is empty above four digits", "[statusbar]") {
@@ -139,7 +140,9 @@ TEST_CASE("StatusBarMath format_zoom_pct is empty above four digits", "[statusba
     // not shown.
     REQUIRE(format_zoom_pct(100.0f).empty());
     REQUIRE(format_zoom_pct(1e30f).empty());
-    REQUIRE(format_zoom_pct(std::numeric_limits<float>::max()).empty());
+    // volatile keeps the overflow at run time; a constant argument trips C4756.
+    volatile float huge = std::numeric_limits<float>::max();
+    REQUIRE(format_zoom_pct(huge).empty());
 }
 
 TEST_CASE("StatusBarMath format_zoom_pct is empty for zero and negatives",
@@ -149,7 +152,9 @@ TEST_CASE("StatusBarMath format_zoom_pct is empty for zero and negatives",
     REQUIRE(format_zoom_pct(0.004f).empty());   // would round to 0
     REQUIRE(format_zoom_pct(-1.0f).empty());
     // Finite input, but pct * 100 overflows to -infinity.
-    REQUIRE(format_zoom_pct(-std::numeric_limits<float>::max()).empty());
+    // volatile keeps the overflow at run time; a constant argument trips C4756.
+    volatile float huge = std::numeric_limits<float>::max();
+    REQUIRE(format_zoom_pct(-huge).empty());
 }
 
 TEST_CASE("StatusBarMath format_zoom_pct is empty for non-finite input",
