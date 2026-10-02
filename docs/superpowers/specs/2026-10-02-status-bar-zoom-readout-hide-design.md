@@ -43,9 +43,12 @@ A pure function, no `<windows.h>`:
 std::wstring format_zoom_pct(float pct);
 ```
 
-- Rounds `pct * 100` to the nearest integer.
-- Returns an empty string when `pct` is non-finite or rounds to `<= 0`.
-- No upper clamp: the value is shown as it is.
+- Rounds `pct * 100` to the nearest integer, halves away from zero
+  (`std::lround` semantics): `0.125f` → `13%`.
+- Returns an empty string when `pct` is non-finite, when the rounded value is
+  `<= 0`, or when `pct * 100` exceeds 99999 (checked on the float, before the
+  conversion, so no out-of-range conversion is ever performed).
+- No clamp inside that range: the value is shown as it is.
 
 The domain is wider than the preset ladder, which is why this is specified.
 `fit_percentage` (`core/detail/ZoomMath.hpp:34-42`) is unbounded above — a wide
@@ -55,20 +58,45 @@ drives it to exactly 0 through the unguarded `WM_SIZE` arm
 
 ### 2.3 Layout
 
-`status_bar_child_rects` gains a third rectangle and a width parameter for it:
-the zoom label sits one padding step right of the `/ N` label, same `y` and
-height as the other two children. Width: 56 DIP as a starting value, to be
-confirmed against `9999%` at 9 pt Segoe UI in the GUI check; a wider string is
-clipped by the control, not wrapped.
+`StatusBarChildRects` gains `zoom_x / zoom_y / zoom_w / zoom_h`, and
+`status_bar_child_rects` gains a **required fifth parameter, last**:
+
+```cpp
+status_bar_child_rects(int bar_h, int pad_px, int edit_w_px, int label_w_px,
+                       int zoom_w_px)
+```
+
+No default value. All three existing call sites are updated: `StatusBar.cpp:224`
+and the two tests at `test_status_bar_math.cpp:63` and `:82`.
+
+The zoom rectangle starts one padding step right of the `/ N` label's
+rectangle, with the same `y` and height as the other two children. The `/ N`
+rectangle is a fixed 96 DIP (`kLabelWDip`), so with a short count such as `/ 12`
+there is a visible gap before the readout. Accepted: closing it means measuring
+text, which the fixed-offset layout deliberately avoids.
+
+Width: the plan measures `9999%` at 9 pt Segoe UI with `GetTextExtentPoint32W`
+and sets the constant to that extent plus one padding step, in DIP. A longer
+string is clipped by the control, not wrapped.
 
 The label is a `STATIC` with `SS_LEFT | SS_CENTERIMAGE`, created like the existing
 one. It needs no colour code of its own: the `WM_CTLCOLORSTATIC` arm's final
 branch (`StatusBar.cpp:368-376`) already serves every child that is not the page
 box, in High Contrast and in both palettes.
 
-`Impl::repaint()` invalidates the new label as well as the bar and the existing
-label. The label paints transparently, so a shrinking string (`137%` → `25%`)
-depends on the bar erasing underneath it, exactly as `/ 128` → `/ 2` does today.
+Every place that names the existing label by hand gains the new one:
+
+- `update_dpi` (`StatusBar.cpp:599-606`) sends it `WM_SETFONT`. Missing this
+  leaves the label holding the old font handle after the function deletes it.
+- `Impl::relayout()` positions it.
+- `Impl::repaint()` invalidates it. The label paints transparently, so a
+  shrinking string (`137%` → `25%`) depends on the bar erasing underneath it,
+  exactly as `/ 128` → `/ 2` does today.
+- The theme arm (`StatusBar.cpp:406-408`) invalidates it.
+
+Comments that count "the two children" (`StatusBarMath.hpp:50`,
+`StatusBar.cpp:295`) and the note in `DocumentView.hpp:88-89` that nothing
+surfaces a percentage are brought up to date.
 
 ### 2.4 `StatusBar` API
 
@@ -82,20 +110,39 @@ void set_zoom(float pct);
 
 ### 2.5 Update path
 
-One hook, not one per zoom source.
-
-`PdfCanvas` gains an owner callback, same shape as `set_on_page_changed`:
+One helper, two call sites, instead of one hook per zoom source.
 
 ```cpp
-using RenderSettledCb = std::function<void()>;
-void set_on_render_settled(RenderSettledCb cb);
+// MainWindow: push the active view's live percentage to the status bar.
+// No-op without a status bar or without an active view (the empty state is
+// set_empty()'s job).
+void refresh_zoom_readout();
+```
+
+**Call site 1 — every completion message.** `PdfCanvas` gains an owner callback,
+same shape as `set_on_page_changed`:
+
+```cpp
+using CompletionArrivedCb = std::function<void()>;
+void set_on_completion_arrived(CompletionArrivedCb cb);
 ```
 
 It fires at the **entry** of the `WM_USER_RENDER_DONE` / `WM_USER_RENDER_DONE_RIGHT`
 arm (`PdfCanvas.cpp:1127`), before the null-pixmap check and before
-`accept_completion`. `MainWindow` responds by reading
-`active_view()->zoom_pct()` and calling `status_bar_->set_zoom()`; with no active
-view it does nothing (the empty state is `set_empty()`'s job).
+`accept_completion`. The name says what it is: it fires for accepted, stale,
+superseded and failed completions alike. `MainWindow` wires it to
+`refresh_zoom_readout()`.
+
+**Call site 2 — the end of `MainWindow::kick_render`,** after `apply_viewport()`
+has run on both branches (`MainWindow.cpp:361`, `378`). This makes the readout
+synchronous for everything that goes through `kick_render` — the zoom commands,
+window resize, pane toggles, tab switch, session restore, the §3 toggle — so the
+readout and the page box change in the same message. Call site 1 then covers what
+`kick_render` does not: Ctrl+wheel and the canvas's own page turns
+(`resubmit_current_page`, `navigate_to_page`).
+
+The existing `set_on_zoom_changed` is not reused: it fires only for Ctrl+wheel
+and means "persist the session" (`MainWindow.cpp:1296`).
 
 **Why the entry, not after acceptance.** The readout is a function of live state,
 not of the pixmap. `accept_completion` exists to keep stale pixmaps off the
@@ -107,27 +154,37 @@ indicators would disagree. Reading live state on every completion — accepted,
 stale, superseded or null — is always correct and at worst redundant, and the
 text comparison in `set_zoom` makes the redundant case free.
 
-**Why not `next_render_seq()`.** All three submission sites pass through it, but
-each calls it before `apply_viewport()` (`MainWindow.cpp:343` vs `361/378`,
-`PdfCanvas.cpp:1325` vs `1336`, `1669` vs `1691`), so the value read there is the
-old one.
+**Why not `next_render_seq()` as the single hook.** All three submission sites
+pass through it, but on the paths where a fit is re-derived it runs before
+`apply_viewport()` (`MainWindow.cpp:343` vs `361/378`; the spread branches at
+`PdfCanvas.cpp:1325` vs `1336` and `1669` vs `1691`), so a resize or pane toggle
+would read the old value there. On other paths the percentage is already written
+by then (a zoom step, or `change_current_page` at `PdfCanvas.cpp:1665`). A hook
+that is right on some paths and stale on others is worse than none.
 
 **Coverage.** Every write to the percentage is followed by a submission from the
-same UI handler, and every submission produces a completion message, cache hits
-included (`RenderEngine.cpp:120-131`). That covers Zoom In/Out/Reset, Ctrl+wheel,
-window resize, the F4/F5 pane toggles, the two-page toggle, fit-mode page
-turns, tab switches, session restore, and the status-bar toggle in §3.
+same UI handler: Zoom In/Out/Reset, Ctrl+wheel, window resize, the F4/F5 pane
+toggles, the two-page toggle, fit-mode page turns, tab switches, session restore,
+and the status-bar toggle in §3. A submission normally produces a completion
+message, cache hits included (`RenderEngine.cpp:120-131`).
 
-**Not covered, and not a readout defect.** The results-panel paths
-(`on_toggle_results`, `on_cross_tab_find`, `MainWindow.cpp:2215-2251`) call
-`on_layout()` without `kick_render`, so they change the canvas height without
-re-deriving a fit. The percentage does not change there either, so the readout
-stays truthful; the missing re-fit is a pre-existing gap visible only in FitPage
-and is left to its own issue (§6).
+**Accepted costs.**
 
-**Accepted cost.** The readout updates when the first completion message for the
-new state arrives, not at the keystroke. In spread mode the hook fires twice per
-batch; the second call is a no-op.
+- On the two canvas-only paths the readout updates when the first completion
+  message arrives, not at the input.
+- A completion that is never posted — an escrow clone, allocation or
+  `PostMessageW` failure in `post_render_done_impl` (`PdfCanvas.cpp:146-167`) —
+  leaves the readout stale on those two paths until the next render. This is the
+  exposure the canvas already documents for `wheel_flip_seq`.
+- In spread mode call site 1 fires twice per batch; the second is a no-op.
+
+**Not covered, and not a readout defect.** Five paths call `on_layout()` without
+`kick_render`: `on_cross_tab_find` and `on_toggle_results`
+(`MainWindow.cpp:2215-2251`), `on_results_close` (`:2344-2354`), and the two
+splitter drags (`:1185-1188`, `:1238-1250`). They resize the canvas without
+re-deriving a fit, so the percentage does not change and the readout stays
+truthful. The missing re-fit is pre-existing — the left-dock splitter drag shows
+it in FitWidth, the default mode — and is left to its own issue (§6).
 
 ## 3. Hiding the status bar (#59)
 
@@ -170,9 +227,10 @@ writing to the hidden children for the same reason.
 
 ### 3.3 `MainWindow`
 
-- `IDM_VIEW_STATUS_BAR = 40064`. The "Next free ID: 40064" comment in
-  `resources/MainMenu.rc.h` is rewritten to 40065, with the reservation now
-  40065–40070.
+- `IDM_VIEW_STATUS_BAR = 40064`, with its `MENUITEM` in `resources/litepdf.rc.in`
+  and a `WM_COMMAND` case. Both comments in `resources/MainMenu.rc.h` that name
+  the reservation are rewritten: line 69 ("Next free ID: 40064" → 40065, range
+  40065–40070) and line 71 ("leaving the 40064-40070 reservation alone").
 - New `on_toggle_status_bar()`, modelled on `toggle_outline`
   (`MainWindow.cpp:621-626`): flip visibility, `on_layout()`, then
   `kick_render(current_page)` when a view is active. **The re-render is required.**
@@ -209,19 +267,33 @@ with `ctest --test-dir build -C Release`.
 **Unit (`tests/unit/test_status_bar_math.cpp`), written before the code:**
 
 - `format_zoom_pct`: `1.0f` → `100%`; `0.25f` → `25%`; `8.0f` → `800%`;
-  `1.374f` → `137%`; `1.375f` → `138%`; `38.4f` → `3840%`; `0.0f`, a negative
+  `1.374f` → `137%`; `1.375f` → `138%`; `0.125f` → `13%` (the tie rule);
+  `38.4f` → `3840%`; `999.0f` → `99900%`; `1000.5f`, `1e30f`, `0.0f`, a negative
   value, `0.004f`, NaN and infinity → empty.
-- `status_bar_child_rects`: the zoom rectangle starts one padding step right of
-  the label's right edge, shares `y` and height with the other two, and has the
-  requested width; the existing edit and label rectangles are unchanged.
+- `status_bar_child_rects`: both existing tests pass the fifth argument and pin
+  the four zoom fields — including the tiny-bar test, whose point is that every
+  field is pinned on the fallback branch. The existing edit and label
+  expectations are unchanged.
 
-**GUI checks (scripted smoke where the existing driver reaches, otherwise manual):**
+**GUI checks.** Text is read from the label with `WM_GETTEXT`; paint is checked on
+the control's own pixels. The plan reads
+`reference_litepdf_scripted_gui_smoke` before choosing the driver for each.
 
-- Readout tracks Ctrl+`=` / Ctrl+`-` / Ctrl+0, Ctrl+wheel, a window resize in
-  FitWidth, F4/F5, the two-page toggle, a tab switch between documents at
-  different zooms, and session restore.
+- Readout text tracks Ctrl+`=` / Ctrl+`-` / Ctrl+0, Ctrl+wheel, a window resize
+  in FitWidth, F4/F5, the two-page toggle, a fit-mode page turn in
+  `spread-unequal.pdf`, a tab switch between documents at different zooms, and
+  session restore.
+- After a zoom command, a tab switch and a resize, the text is already correct
+  when the command returns — before any completion is pumped. This is the check
+  that fails if call site 2 is missing.
+- Ctrl+wheel updates the text. This is the check that fails if call site 1 is
+  missing.
 - Zoom In at 800% leaves the readout at `800%`.
-- `137%` → `25%` leaves no stale glyphs; `9999%` fits the label unclipped.
+- `137%` → `25%` leaves no stale glyphs.
+- A drag-resize in FitWidth does not make the bar flicker visibly.
+- After moving the window to a monitor at a different scale, the zoom label uses
+  the same font as the `/ N` label.
+- After a light/dark switch the zoom label repaints in the new colours.
 - Closing the last tab clears the readout; minimize and restore never shows `0%`.
 - View › Status Bar hides the bar, the canvas takes the strip, and the page
   re-fits; toggling again restores both. Works with no document open. The
@@ -233,13 +305,21 @@ with `ctest --test-dir build -C Release`.
 - With the results panel open, hiding the bar extends the panel to the window
   bottom and the splitter drag clamp follows.
 
+**Not testable from outside.** No listed check distinguishes call site 1 at the
+arm's entry from the same call placed after `accept_completion`: the two differ
+only when a render fails on a canvas-only path, and no fixture is known to
+contain a page that opens but fails to render (`corrupt.pdf` has not been
+checked for this). The placement is pinned by code review and by a comment at
+the call site stating why it precedes the null check. If the plan finds a
+fixture that produces a null completion, it adds the check.
+
 ## 5. Risks
 
 1. **The completion-arm hook** sits in the code #35 and PR-A2 hardened. It is one
    callback invocation ahead of all existing logic, reads no completion state and
    changes none of the arm's control flow.
-2. **A re-entrant owner callback.** `MainWindow`'s handler only writes status-bar
-   text; it must not submit renders or change the view from inside the hook.
+2. **A re-entrant owner callback.** `refresh_zoom_readout()` only writes
+   status-bar text; it must not submit renders or change the view.
 3. Binary size: one `STATIC`, one menu item, one small function. Negligible
    against the 19,000,000-byte ceiling.
 4. Shipped behaviour changes, so the PR runs the risk-tiered review stack before
@@ -249,8 +329,8 @@ with `ctest --test-dir build -C Release`.
 
 An editable zoom box. Fit Width / Fit Page menu items. A mode name in the
 readout. Persisting the bar's visibility. An accelerator for the toggle.
-Full-screen mode (#54). Ctrl+G (#48). Re-fitting after the results panel opens or
-closes (§2.5).
+Full-screen mode (#54). Ctrl+G (#48). Re-fitting after a splitter drag or after
+the results panel opens or closes (§2.5).
 
 ## 7. Provenance
 
@@ -262,3 +342,14 @@ hiding (§3.2), and the corrected persistence rationale (§3.4). One reviewer
 premise was not tested by experiment — that a zero-height `SetWindowPos` makes
 `msctls_statusbar32` re-dock at full height — and the design does not depend on
 it, since the bar is hidden with `ShowWindow`.
+
+The spec gate ran Full tier. Round 1 (Opus and Sonnet, against `81eab06`) found
+no blocking defect and eight points, all anchor-verified and adopted: the new
+label in `update_dpi` and the theme arm (§2.3), the explicit
+`status_bar_child_rects` signature and test updates (§2.3, §4), the corrected
+`next_render_seq()` rationale and the never-posted completion as an accepted
+cost (§2.5), the full list of layout-only paths (§2.5), the tie and overflow
+rules (§2.2), the second comment in `MainMenu.rc.h` (§3.3), and checks that can
+fail for each call site (§4). The synchronous call at the end of `kick_render`
+was added in response to the round-1 observation that a tab switch would
+otherwise show the previous tab's zoom until its first completion.
