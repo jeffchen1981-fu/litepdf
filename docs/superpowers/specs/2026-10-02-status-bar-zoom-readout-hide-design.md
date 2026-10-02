@@ -363,7 +363,7 @@ label in `update_dpi` and the theme arm (§2.3), the explicit
 `next_render_seq()` rationale and the never-posted completion as an accepted
 cost (§2.5), the full list of layout-only paths (§2.5), the tie and overflow
 rules (§2.2), the second comment in `MainMenu.rc.h` (§3.3), and checks that can
-fail for each call site (§4). The synchronous call at the end of `kick_render`
+fail for each call site (§4). The synchronous call in `kick_render`
 was added in response to the round-1 observation that a tab switch would
 otherwise show the previous tab's zoom until its first completion.
 
