@@ -85,8 +85,7 @@ public:
     // User-facing magnification. 1.0 means ONE PDF POINT MAPS TO ONE DIP -- the
     // conventional 96-dpi screen ratio browsers also call 100%. It is not
     // physical actual size: a PDF point is 1/72 inch, so 1.0 renders at 0.75x
-    // ruler size. Nothing surfaces a numeric percentage today; this is the
-    // definition an eventual readout must be built on.
+    // ruler size. The status bar shows it as a percentage (#57).
     float zoom_pct() const noexcept;
 
     // Point -> PIXEL factor handed to MuPDF (fz_scale) and used as part of the

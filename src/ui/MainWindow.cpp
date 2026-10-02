@@ -359,6 +359,8 @@ void MainWindow::kick_render(int page) {
         // snap must leave the reader's scroll position alone.
         canvas_->change_current_page(left);
         canvas_->apply_viewport();
+        // #57: this branch returns early, so it carries its own refresh.
+        refresh_zoom_readout();
 
         view->request_render(left,
             [target, epoch, left, seq](fz_pixmap* p, fz_context* worker_ctx) {
@@ -376,11 +378,19 @@ void MainWindow::kick_render(int page) {
     }
 
     canvas_->apply_viewport();
+    // #57: the fit is re-derived by now, so the readout changes in the same
+    // message as the command that caused it.
+    refresh_zoom_readout();
 
     view->request_render_with_prefetch(page,
         [target, epoch, page, seq](fz_pixmap* p, fz_context* worker_ctx) {
             PdfCanvas::post_render_done(target, p, worker_ctx, epoch, page, seq);
         });
+}
+
+void MainWindow::refresh_zoom_readout() {
+    if (!status_bar_) return;
+    if (auto* v = active_view()) status_bar_->set_zoom(v->zoom_pct());
 }
 
 void MainWindow::navigate_click(int page) {
@@ -1294,6 +1304,10 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // Ctrl+wheel zoom lives in the canvas; persist it like menu zoom so
             // a wheel-zoom-only change survives a crash/force-kill (debounced).
             canvas_->set_on_zoom_changed([this] { schedule_session_save(); });
+            // #57: kick_render covers the commands that go through it. This
+            // covers the two paths that do not: Ctrl+wheel and the canvas's
+            // own page turns.
+            canvas_->set_on_completion_arrived([this] { refresh_zoom_readout(); });
 
             DragAcceptFiles(hwnd, TRUE);
             return 0;

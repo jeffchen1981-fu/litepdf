@@ -206,6 +206,15 @@ public:
     using ZoomChangedCb = std::function<void()>;
     void set_on_zoom_changed(ZoomChangedCb cb);
 
+    // #57: fires for EVERY render-completion message the canvas receives --
+    // accepted, stale, superseded and failed alike -- before the canvas looks
+    // at the message. The owner uses it to refresh anything derived from the
+    // view's live state rather than from the pixmap (the zoom readout). The
+    // callback must not submit renders or change the view. Pass nullptr to
+    // clear.
+    using CompletionArrivedCb = std::function<void()>;
+    void set_on_completion_arrived(CompletionArrivedCb cb);
+
     // Page-change entry point for external callers (MainWindow's
     // outline-navigate and cross-tab search-results paths). Wraps
     // `view->set_current_page(idx)` and fires the page-change observer

@@ -321,6 +321,8 @@ struct PdfCanvas::Impl {
     PdfCanvas::PageChangedCb      on_page_changed;
     // Fired after a successful Ctrl+wheel zoom so the owner can persist it.
     PdfCanvas::ZoomChangedCb      on_zoom_changed;
+    // Fired at the entry of the render-completion arm (#57).
+    PdfCanvas::CompletionArrivedCb on_completion_arrived;
 };
 
 void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
@@ -425,6 +427,11 @@ void PdfCanvas::set_on_page_changed(PageChangedCb cb) {
 void PdfCanvas::set_on_zoom_changed(ZoomChangedCb cb) {
     if (!impl_) return;
     impl_->on_zoom_changed = std::move(cb);
+}
+
+void PdfCanvas::set_on_completion_arrived(CompletionArrivedCb cb) {
+    if (!impl_) return;
+    impl_->on_completion_arrived = std::move(cb);
 }
 
 bool PdfCanvas::change_current_page(int idx) {
@@ -1126,6 +1133,15 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             return 0;
         case WM_USER_RENDER_DONE:
         case WM_USER_RENDER_DONE_RIGHT: {
+            // #57: BEFORE the null check and before accept_completion, on
+            // purpose. The owner refreshes the zoom readout from the view's
+            // live percentage, not from this pixmap, so a failed or stale
+            // completion is as good a moment as an accepted one -- and a
+            // fit-mode page turn has already changed the percentage by the
+            // time its render fails. Moving this below either early return
+            // would leave the readout disagreeing with the page box.
+            if (impl_->on_completion_arrived) impl_->on_completion_arrived();
+
             const bool is_right = (msg == WM_USER_RENDER_DONE_RIGHT);
             auto* pix  = reinterpret_cast<fz_pixmap*>(w);
             auto* meta = reinterpret_cast<RenderMeta*>(l);

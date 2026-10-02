@@ -68,6 +68,13 @@ private:
     void open_tab_async(std::filesystem::path path);
     void kick_render(int page);  // recompute zoom, submit render, post to canvas
 
+    // #57: push the active view's live zoom percentage to the status bar.
+    // No-op without a status bar or an active view (the empty state is
+    // StatusBar::set_empty's job). Writes text only -- it must never submit a
+    // render or change the view, because the canvas calls it from inside its
+    // render-completion arm.
+    void refresh_zoom_readout();
+
     // Navigate to `page` from a click (outline entry, thumbnail). Fires the
     // page-change observer, anchors the new page at its top, and renders --
     // but only anchors when the VIEW actually moves. In spread mode a click on

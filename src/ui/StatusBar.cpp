@@ -114,6 +114,7 @@ constexpr int kZoomWDip  = 45;
 
 constexpr UINT_PTR kIdEdit         = 1;
 constexpr UINT_PTR kIdLabel        = 2;
+constexpr UINT_PTR kIdZoom         = 3;
 constexpr UINT_PTR kEditSubclassId = 1;
 constexpr UINT_PTR kBarSubclassId  = 2;
 
@@ -133,6 +134,7 @@ struct StatusBar::Impl {
     HWND hwnd  = nullptr;
     HWND edit  = nullptr;
     HWND label = nullptr;
+    HWND zoom  = nullptr;
     UINT dpi   = 96;
     int  height_px = 0;
 
@@ -145,6 +147,10 @@ struct StatusBar::Impl {
     // text to tell "the reader is typing" from "nobody has touched it" --
     // see detail::should_overwrite_page_box.
     std::wstring last_written;
+
+    // The text the zoom readout currently shows. set_zoom compares against it
+    // so an unchanged percentage costs neither a SetWindowText nor a repaint.
+    std::wstring zoom_text;
 
     unique_hfont font { nullptr, &DeleteObject };
 
@@ -237,12 +243,18 @@ struct StatusBar::Impl {
                          r.label_w, r.label_h,
                          SWP_NOZORDER | SWP_NOACTIVATE);
         }
+        if (zoom) {
+            SetWindowPos(zoom, nullptr, r.zoom_x, r.zoom_y,
+                         r.zoom_w, r.zoom_h,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
     }
 
-    // Repaint after any text change. BOTH windows must be invalidated, and
-    // that is the whole reason this is a function rather than one line.
+    // Repaint after any text change. The bar AND each transparent label must
+    // be invalidated, and that is the whole reason this is a function rather
+    // than one line.
     //
-    // The label erases nothing (NULL_BRUSH + TRANSPARENT bkmode), so the only
+    // A label erases nothing (NULL_BRUSH + TRANSPARENT bkmode), so the only
     // thing that can clear its old pixels is the BAR painting its background
     // across that strip -- which it can do only because the bar has no
     // WS_CLIPCHILDREN. Invalidating the bar alone is not obviously enough
@@ -260,6 +272,7 @@ struct StatusBar::Impl {
     void repaint() {
         if (hwnd)  InvalidateRect(hwnd, nullptr, TRUE);
         if (label) InvalidateRect(label, nullptr, FALSE);
+        if (zoom)  InvalidateRect(zoom, nullptr, FALSE);
     }
 
     // Re-measure the control's natural height for the current font.
@@ -296,9 +309,9 @@ struct StatusBar::Impl {
 };
 
 // -----------------------------------------------------------------------------
-// Status bar subclass -- background brushes for the two children.
+// Status bar subclass -- background brushes for the children.
 //
-// The "/ N" STATIC wants to be transparent so it paints over the themed bar
+// The "/ N" and zoom STATICs want to be transparent so it paints over the themed bar
 // instead of a grey rectangle: NULL_BRUSH plus TRANSPARENT bkmode means it
 // draws text and erases nothing, so the bar underneath must repaint first.
 // set_page() invalidates the whole bar with fErase for that reason, and the bar
@@ -410,6 +423,7 @@ LRESULT CALLBACK status_bar_subclass(HWND hwnd, UINT msg, WPARAM w,
                     InvalidateRect(hwnd, nullptr, TRUE);
                     if (impl->edit)  InvalidateRect(impl->edit, nullptr, TRUE);
                     if (impl->label) InvalidateRect(impl->label, nullptr, FALSE);
+                    if (impl->zoom)  InvalidateRect(impl->zoom, nullptr, FALSE);
                 }
             }
             break;
@@ -568,6 +582,16 @@ StatusBar::StatusBar(HINSTANCE hInstance, HWND parent)
                  reinterpret_cast<WPARAM>(impl_->font.get()),
                  MAKELPARAM(TRUE, 0));
 
+    // #57: the zoom readout. Read-only, so a plain STATIC like the label.
+    impl_->zoom = CreateWindowExW(
+        0, L"STATIC", L"",
+        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
+        0, 0, 0, 0,
+        impl_->hwnd, reinterpret_cast<HMENU>(kIdZoom), hInstance, nullptr);
+    SendMessageW(impl_->zoom, WM_SETFONT,
+                 reinterpret_cast<WPARAM>(impl_->font.get()),
+                 MAKELPARAM(TRUE, 0));
+
     impl_->measure();
     set_empty();
 }
@@ -597,7 +621,7 @@ void StatusBar::update_dpi(UINT dpi) {
     impl_->dpi = dpi;
     // Keep the old font alive until every WM_SETFONT below has landed.
     // Reassigning impl_->font directly would run the old HFONT's deleter
-    // during the assignment, leaving all three windows pointing at a freed
+    // during the assignment, leaving all four windows pointing at a freed
     // GDI handle for the duration of the sends. old_font dies at the end of
     // this function, after nobody references it any more.
     auto old_font = std::move(impl_->font);
@@ -606,6 +630,7 @@ void StatusBar::update_dpi(UINT dpi) {
     SendMessageW(impl_->hwnd, WM_SETFONT, f, MAKELPARAM(TRUE, 0));
     if (impl_->edit)  SendMessageW(impl_->edit,  WM_SETFONT, f, MAKELPARAM(TRUE, 0));
     if (impl_->label) SendMessageW(impl_->label, WM_SETFONT, f, MAKELPARAM(TRUE, 0));
+    if (impl_->zoom)  SendMessageW(impl_->zoom,  WM_SETFONT, f, MAKELPARAM(TRUE, 0));
     impl_->measure();
     impl_->relayout();
 }
@@ -655,6 +680,17 @@ void StatusBar::set_empty() {
         EnableWindow(impl_->edit, FALSE);
     }
     if (impl_->label) SetWindowTextW(impl_->label, L"");
+    if (impl_->zoom)  SetWindowTextW(impl_->zoom, L"");
+    impl_->zoom_text.clear();
+    impl_->repaint();
+}
+
+void StatusBar::set_zoom(float pct) {
+    if (!impl_ || !impl_->zoom) return;
+    std::wstring text = detail::format_zoom_pct(pct);
+    if (text == impl_->zoom_text) return;
+    SetWindowTextW(impl_->zoom, text.c_str());
+    impl_->zoom_text = std::move(text);
     impl_->repaint();
 }
 

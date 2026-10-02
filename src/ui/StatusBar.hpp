@@ -1,7 +1,8 @@
 #pragma once
 
 // ui::StatusBar -- PR-B: a msctls_statusbar32 docked at the bottom of
-// MainWindow, hosting the page indicator and the go-to-page input.
+// MainWindow, hosting the page indicator, the go-to-page input and the zoom
+// readout (#57).
 //
 // Single part, children at fixed offsets -- no SB_SETPARTS. MainWindow owns
 // positioning: it asks for height_px() in on_layout, reserves that much at the
@@ -73,7 +74,12 @@ public:
     // the reader is in the middle of typing.
     void set_page(int page_index, int page_count);
 
-    // No document (last tab closed): clear both children and disable the box.
+    // Show the magnification (#57). `pct` is DocumentView::zoom_pct(): 1.0 is
+    // "100%". Skips the write and the repaint when the formatted text has not
+    // changed, so callers may call it on every render completion.
+    void set_zoom(float pct);
+
+    // No document (last tab closed): clear all three children and disable the box.
     void set_empty();
 
     // True while the page box holds the keyboard focus.
