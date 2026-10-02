@@ -137,6 +137,10 @@ struct StatusBar::Impl {
     HWND zoom  = nullptr;
     UINT dpi   = 96;
     int  height_px = 0;
+    // #59. height_px above is the MEASURED height and is never zeroed:
+    // update_dpi() re-measures a hidden bar too, and StatusBar::height_px()
+    // gates on this flag instead.
+    bool visible = true;
 
     // 0-based current page and the document's page count. -1 / 0 means "no
     // document"; set_empty() restores that state.
@@ -605,7 +609,29 @@ StatusBar::~StatusBar() {
 
 HWND StatusBar::hwnd() const { return impl_ ? impl_->hwnd : nullptr; }
 
-int StatusBar::height_px() const { return impl_ ? impl_->height_px : 0; }
+int StatusBar::height_px() const {
+    return (impl_ && impl_->visible) ? impl_->height_px : 0;
+}
+
+void StatusBar::set_visible(bool visible) {
+    if (!impl_ || !impl_->hwnd) return;
+    if (visible == impl_->visible) return;
+    if (!visible) {
+        // Hand the keyboard back BEFORE hiding. ShowWindow(SW_HIDE) does not
+        // move the focus off a child, so the caret would stay in a box nobody
+        // can see and digits typed next would go into it. Same order as
+        // set_empty(), which does it before EnableWindow(FALSE).
+        if (GetFocus() == impl_->edit && impl_->on_focus_out) {
+            impl_->on_focus_out();
+        }
+        ShowWindow(impl_->hwnd, SW_HIDE);
+    } else {
+        ShowWindow(impl_->hwnd, SW_SHOWNA);
+    }
+    impl_->visible = visible;
+}
+
+bool StatusBar::visible() const { return impl_ && impl_->visible; }
 
 void StatusBar::set_bounds(const RECT& bounds) {
     if (!impl_ || !impl_->hwnd) return;
@@ -695,7 +721,10 @@ void StatusBar::set_zoom(float pct) {
 }
 
 bool StatusBar::page_box_has_focus() const {
-    return impl_ && impl_->edit && GetFocus() == impl_->edit;
+    // visible first, for the reason ResultsPanel::has_focus() gives: hiding a
+    // window does not move the focus off its children, so a hidden box must
+    // not claim ESC.
+    return impl_ && impl_->visible && impl_->edit && GetFocus() == impl_->edit;
 }
 
 void StatusBar::set_on_goto(OnGoto cb) {

@@ -59,9 +59,18 @@ public:
 
     HWND hwnd() const;
 
-    // Natural height at the current DPI, in pixels. Measured from the control
-    // itself at construction and re-measured by update_dpi().
+    // Natural height at the current DPI, in pixels -- or 0 while the bar is
+    // hidden, which is what makes MainWindow's layout give the strip back.
+    // Measured from the control itself at construction and re-measured by
+    // update_dpi().
     int height_px() const;
+
+    // #59: show or hide the whole bar. Hiding hands the keyboard back first if
+    // the page box holds it. The measured height is kept while hidden, so a
+    // DPI change in between cannot bring back a reserved strip. The owner
+    // re-runs its layout afterwards.
+    void set_visible(bool visible);
+    bool visible() const;
 
     // Position the bar in parent-client coordinates and re-lay the children.
     void set_bounds(const RECT& bounds);
@@ -82,7 +91,7 @@ public:
     // No document (last tab closed): clear all three children and disable the box.
     void set_empty();
 
-    // True while the page box holds the keyboard focus.
+    // True while the page box holds the keyboard focus AND the bar is visible.
     //
     // MainWindow needs this because ESC is a BARE ACCELERATOR in this app
     // (`{ FVIRTKEY, VK_ESCAPE, IDM_FIND_CLOSE }`), and TranslateAcceleratorW
