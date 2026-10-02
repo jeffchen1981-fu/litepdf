@@ -5,7 +5,9 @@
 // decision surface of the status bar is unit-testable without a window, the
 // same split ScrollMath/CompletionMath/SplitterMath use.
 
+#include <cmath>
 #include <optional>
+#include <string>
 #include <string_view>
 
 namespace litepdf::ui::detail {
@@ -87,6 +89,24 @@ inline bool should_overwrite_page_box(bool box_has_focus,
                                       std::wstring_view last_written) noexcept {
     if (!box_has_focus) return true;
     return current_text == last_written;
+}
+
+// Text for the zoom readout: "137%" for 1.37f, empty when there is nothing
+// displayable.
+//
+// `pct` is DocumentView::zoom_pct(), whose domain is wider than the preset
+// ladder: a fit mode derives it from the viewport with no upper bound, and a
+// minimized window drives it to exactly 0. The three guards run BEFORE the
+// conversion, in this order, so std::lround only ever sees [0.5, 9999.5):
+//   1. non-finite product  (NaN, an infinity, or a finite pct that overflows)
+//   2. below 0.5           (zero, negatives, anything that would print "0%")
+//   3. 9999.5 and above    (the label is sized for four digits)
+inline std::wstring format_zoom_pct(float pct) {
+    const float p = pct * 100.0f;
+    if (!std::isfinite(p)) return {};
+    if (p < 0.5f) return {};
+    if (p >= 9999.5f) return {};
+    return std::to_wstring(std::lround(p)) + L"%";
 }
 
 }  // namespace litepdf::ui::detail

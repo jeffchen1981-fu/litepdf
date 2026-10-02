@@ -2,8 +2,12 @@
 // and the rule that decides whether a page change may overwrite the box.
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
+#include <limits>
+
 #include "ui/detail/StatusBarMath.hpp"
 
+using litepdf::ui::detail::format_zoom_pct;
 using litepdf::ui::detail::parse_page_input;
 using litepdf::ui::detail::should_overwrite_page_box;
 using litepdf::ui::detail::status_bar_child_rects;
@@ -106,4 +110,51 @@ TEST_CASE("StatusBarMath should_overwrite_page_box refuses to clobber typing",
     // A wheel flip while the reader is mid-keystroke must not eat the digits.
     REQUIRE_FALSE(should_overwrite_page_box(true, L"12", L"7"));
     REQUIRE_FALSE(should_overwrite_page_box(true, L"", L"7"));
+}
+
+TEST_CASE("StatusBarMath format_zoom_pct formats ladder values", "[statusbar]") {
+    REQUIRE(format_zoom_pct(1.0f)  == L"100%");
+    REQUIRE(format_zoom_pct(0.25f) == L"25%");
+    REQUIRE(format_zoom_pct(8.0f)  == L"800%");
+}
+
+TEST_CASE("StatusBarMath format_zoom_pct rounds to nearest, halves away from zero",
+          "[statusbar]") {
+    REQUIRE(format_zoom_pct(1.374f) == L"137%");
+    REQUIRE(format_zoom_pct(1.375f) == L"138%");
+    // The tie rule: 12.5 is exact in float, so this separates round-half-away
+    // (13) from round-half-to-even (12).
+    REQUIRE(format_zoom_pct(0.125f) == L"13%");
+}
+
+TEST_CASE("StatusBarMath format_zoom_pct shows fit values above the ladder",
+          "[statusbar]") {
+    // fit_percentage is unbounded above; only set_zoom_pct clamps.
+    REQUIRE(format_zoom_pct(38.4f) == L"3840%");
+    REQUIRE(format_zoom_pct(99.0f) == L"9900%");
+}
+
+TEST_CASE("StatusBarMath format_zoom_pct is empty above four digits", "[statusbar]") {
+    // The label is sized for "9999%". A value that cannot be shown whole is
+    // not shown.
+    REQUIRE(format_zoom_pct(100.0f).empty());
+    REQUIRE(format_zoom_pct(1e30f).empty());
+    REQUIRE(format_zoom_pct(std::numeric_limits<float>::max()).empty());
+}
+
+TEST_CASE("StatusBarMath format_zoom_pct is empty for zero and negatives",
+          "[statusbar]") {
+    // A minimized window drives the fit percentage to exactly 0.
+    REQUIRE(format_zoom_pct(0.0f).empty());
+    REQUIRE(format_zoom_pct(0.004f).empty());   // would round to 0
+    REQUIRE(format_zoom_pct(-1.0f).empty());
+    // Finite input, but pct * 100 overflows to -infinity.
+    REQUIRE(format_zoom_pct(-std::numeric_limits<float>::max()).empty());
+}
+
+TEST_CASE("StatusBarMath format_zoom_pct is empty for non-finite input",
+          "[statusbar]") {
+    REQUIRE(format_zoom_pct(std::numeric_limits<float>::quiet_NaN()).empty());
+    REQUIRE(format_zoom_pct(std::numeric_limits<float>::infinity()).empty());
+    REQUIRE(format_zoom_pct(-std::numeric_limits<float>::infinity()).empty());
 }
