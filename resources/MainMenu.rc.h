@@ -66,9 +66,12 @@
 // Phase 8.5: Print support.
 #define IDM_FILE_PRINT       40063   // Ctrl+P
 
-// Next free ID: 40064. Reserve 40064-40070 for future Phase 8.x cleanups.
+// #59: status bar toggle. Takes the first id of the old 40064-40070 reservation.
+#define IDM_VIEW_STATUS_BAR  40064   // View > Status Bar (no accelerator)
 
-// #52: text selection. A fresh block, leaving the 40064-40070 reservation alone.
+// Next free ID: 40065. Reserve 40065-40070 for future Phase 8.x cleanups.
+
+// #52: text selection. A fresh block, leaving the 40065-40070 reservation alone.
 #define IDM_EDIT_COPY        40071   // Ctrl+C
 #define IDM_EDIT_SELECT_ALL  40072   // Ctrl+A
 

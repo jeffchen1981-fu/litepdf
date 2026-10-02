@@ -88,6 +88,7 @@ private:
     int clamp_results_panel_height(int h) const;
     void toggle_outline();               // F5 handler
     void toggle_thumbs();                // F4 handler (Phase 7 Task 8)
+    void on_toggle_status_bar();         // IDM_VIEW_STATUS_BAR (#59)
     void on_outline_navigate(int page);  // callback from OutlinePane
 
     // Phase 7 Task 8: which left-dock pane (if any) is currently

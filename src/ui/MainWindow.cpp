@@ -453,7 +453,7 @@ void MainWindow::on_layout() {
     // depend on this, not one -- see (b) and the splitter drag clamp.
     const int status_h = status_bar_ ? status_bar_->height_px() : 0;
     const int layout_h = std::max(0, h - status_h);
-    if (status_bar_ && status_bar_->hwnd()) {
+    if (status_bar_ && status_bar_->hwnd() && status_bar_->visible()) {
         RECT sb = { 0, layout_h, w, h };
         status_bar_->set_bounds(sb);
     }
@@ -633,6 +633,18 @@ void MainWindow::toggle_outline() {
     // on_tab_switch's outgoing-snapshot writes outline_visible back into
     // the active Tab when the user switches away -- that's the single
     // source of truth, so we don't write it here.
+    if (auto* view = active_view()) kick_render(view->current_page());
+}
+
+void MainWindow::on_toggle_status_bar() {
+    // #59: window-level state, so no active_view() gate -- the toggle works
+    // with no document open.
+    if (!status_bar_) return;
+    status_bar_->set_visible(!status_bar_->visible());
+    on_layout();
+    // The canvas just changed height. Its own WM_SIZE resubmits only when the
+    // render target has to be recreated, so without this a fit mode would keep
+    // the fit it derived for the old height.
     if (auto* view = active_view()) kick_render(view->current_page());
 }
 
@@ -1522,6 +1534,13 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 CheckMenuItem(popup, IDM_VIEW_DUAL_PAGE,
                               MF_BYCOMMAND
                               | (dual_on ? MF_CHECKED : MF_UNCHECKED));
+                // #59: window-level, so not read off active_view(). It must
+                // sit inside this block: the block returns, so an arm after it
+                // would never run.
+                const bool bar_on = status_bar_ && status_bar_->visible();
+                CheckMenuItem(popup, IDM_VIEW_STATUS_BAR,
+                              MF_BYCOMMAND
+                              | (bar_on ? MF_CHECKED : MF_UNCHECKED));
                 return 0;
             }
             // #52 Edit popup. TranslateAcceleratorW sends WM_INITMENUPOPUP
@@ -1631,6 +1650,9 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     return 0;
                 case IDM_VIEW_THUMBS:
                     toggle_thumbs();
+                    return 0;
+                case IDM_VIEW_STATUS_BAR:
+                    on_toggle_status_bar();
                     return 0;
                 case IDM_VIEW_INVERT: {
                     // Phase 8 D7/D9: per-tab Invert Colors toggle. Flips
