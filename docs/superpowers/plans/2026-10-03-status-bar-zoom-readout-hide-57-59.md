@@ -328,9 +328,10 @@ inline StatusBarChildRects status_bar_child_rects(int bar_h, int pad_px,
 In `src/ui/StatusBar.cpp`, after `constexpr int kLabelWDip = 96;` (line 109) add:
 
 ```cpp
-// "9999%" -- the longest string format_zoom_pct returns -- measures 41 px in
-// 9 pt Segoe UI at 96 DPI (TextRenderer.MeasureText, NoPadding). Plus one
-// padding step.
+// "9999%" -- the longest string format_zoom_pct returns -- measures 34 px with
+// GetTextExtentPoint32W in this bar's font (9 pt Segoe UI) at 96 DPI, 55 at
+// 144 and 72 at 192. 45 DIP is deliberately roomier than that extent plus one
+// padding step (38), so font hinting at an odd scale cannot clip the last digit.
 constexpr int kZoomWDip  = 45;
 ```
 
