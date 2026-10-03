@@ -1,7 +1,8 @@
 #pragma once
 
 // ui::StatusBar -- PR-B: a msctls_statusbar32 docked at the bottom of
-// MainWindow, hosting the page indicator and the go-to-page input.
+// MainWindow, hosting the page indicator, the go-to-page input and the zoom
+// readout (#57).
 //
 // Single part, children at fixed offsets -- no SB_SETPARTS. MainWindow owns
 // positioning: it asks for height_px() in on_layout, reserves that much at the
@@ -58,9 +59,18 @@ public:
 
     HWND hwnd() const;
 
-    // Natural height at the current DPI, in pixels. Measured from the control
-    // itself at construction and re-measured by update_dpi().
+    // Natural height at the current DPI, in pixels -- or 0 while the bar is
+    // hidden, which is what makes MainWindow's layout give the strip back.
+    // Measured from the control itself at construction and re-measured by
+    // update_dpi().
     int height_px() const;
+
+    // #59: show or hide the whole bar. Hiding hands the keyboard back first if
+    // the page box holds it. The measured height is kept while hidden, so a
+    // DPI change in between cannot bring back a reserved strip. The owner
+    // re-runs its layout afterwards.
+    void set_visible(bool visible);
+    bool visible() const;
 
     // Position the bar in parent-client coordinates and re-lay the children.
     void set_bounds(const RECT& bounds);
@@ -73,10 +83,15 @@ public:
     // the reader is in the middle of typing.
     void set_page(int page_index, int page_count);
 
-    // No document (last tab closed): clear both children and disable the box.
+    // Show the magnification (#57). `pct` is DocumentView::zoom_pct(): 1.0 is
+    // "100%". Skips the write and the repaint when the formatted text has not
+    // changed, so callers may call it on every render completion.
+    void set_zoom(float pct);
+
+    // No document (last tab closed): clear all three children and disable the box.
     void set_empty();
 
-    // True while the page box holds the keyboard focus.
+    // True while the page box holds the keyboard focus AND the bar is visible.
     //
     // MainWindow needs this because ESC is a BARE ACCELERATOR in this app
     // (`{ FVIRTKEY, VK_ESCAPE, IDM_FIND_CLOSE }`), and TranslateAcceleratorW

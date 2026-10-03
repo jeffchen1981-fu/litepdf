@@ -107,9 +107,15 @@ int dp(int dip, UINT dpi) {
 constexpr int kPadDip    = 4;
 constexpr int kEditWDip  = 52;
 constexpr int kLabelWDip = 96;
+// "9999%" -- the longest string format_zoom_pct returns -- measures 34 px with
+// GetTextExtentPoint32W in this bar's font (9 pt Segoe UI) at 96 DPI, 55 at
+// 144 and 72 at 192. 45 DIP is deliberately roomier than that extent plus one
+// padding step (38), so font hinting at an odd scale cannot clip the last digit.
+constexpr int kZoomWDip  = 45;
 
 constexpr UINT_PTR kIdEdit         = 1;
 constexpr UINT_PTR kIdLabel        = 2;
+constexpr UINT_PTR kIdZoom         = 3;
 constexpr UINT_PTR kEditSubclassId = 1;
 constexpr UINT_PTR kBarSubclassId  = 2;
 
@@ -129,8 +135,13 @@ struct StatusBar::Impl {
     HWND hwnd  = nullptr;
     HWND edit  = nullptr;
     HWND label = nullptr;
+    HWND zoom  = nullptr;
     UINT dpi   = 96;
     int  height_px = 0;
+    // #59. height_px above is the MEASURED height and is never zeroed:
+    // update_dpi() re-measures a hidden bar too, and StatusBar::height_px()
+    // gates on this flag instead.
+    bool visible = true;
 
     // 0-based current page and the document's page count. -1 / 0 means "no
     // document"; set_empty() restores that state.
@@ -141,6 +152,10 @@ struct StatusBar::Impl {
     // text to tell "the reader is typing" from "nobody has touched it" --
     // see detail::should_overwrite_page_box.
     std::wstring last_written;
+
+    // The text the zoom readout currently shows. set_zoom compares against it
+    // so an unchanged percentage costs neither a SetWindowText nor a repaint.
+    std::wstring zoom_text;
 
     unique_hfont font { nullptr, &DeleteObject };
 
@@ -223,7 +238,7 @@ struct StatusBar::Impl {
         GetClientRect(hwnd, &rc);
         const auto r = detail::status_bar_child_rects(
             rc.bottom - rc.top, dp(kPadDip, dpi),
-            dp(kEditWDip, dpi), dp(kLabelWDip, dpi));
+            dp(kEditWDip, dpi), dp(kLabelWDip, dpi), dp(kZoomWDip, dpi));
         if (edit) {
             SetWindowPos(edit, nullptr, r.edit_x, r.edit_y, r.edit_w, r.edit_h,
                          SWP_NOZORDER | SWP_NOACTIVATE);
@@ -233,17 +248,23 @@ struct StatusBar::Impl {
                          r.label_w, r.label_h,
                          SWP_NOZORDER | SWP_NOACTIVATE);
         }
+        if (zoom) {
+            SetWindowPos(zoom, nullptr, r.zoom_x, r.zoom_y,
+                         r.zoom_w, r.zoom_h,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
     }
 
-    // Repaint after any text change. BOTH windows must be invalidated, and
-    // that is the whole reason this is a function rather than one line.
+    // Repaint after any text change. The bar AND each transparent label must
+    // be invalidated, and that is the whole reason this is a function rather
+    // than one line.
     //
-    // The label erases nothing (NULL_BRUSH + TRANSPARENT bkmode), so the only
+    // A label erases nothing (NULL_BRUSH + TRANSPARENT bkmode), so the only
     // thing that can clear its old pixels is the BAR painting its background
     // across that strip -- which it can do only because the bar has no
     // WS_CLIPCHILDREN. Invalidating the bar alone is not obviously enough
     // either, since a parent's invalid region does not propagate to children.
-    // Invalidate both and rely on the documented order: within one update
+    // Invalidate all three and rely on the documented order: within one update
     // cycle a parent paints before its children.
     //
     // The case that fails if this is wrong is a SHRINKING label -- "/ 128"
@@ -252,10 +273,11 @@ struct StatusBar::Impl {
     // transition; if stale glyphs survive it, the fallback is to give the
     // label an opaque background brush instead of transparency (one line in
     // status_bar_subclass), accepting a possible slight mismatch against a
-    // themed bar. Do not "fix" it by deleting either Invalidate call.
+    // themed bar. Do not "fix" it by deleting any of the Invalidate calls.
     void repaint() {
         if (hwnd)  InvalidateRect(hwnd, nullptr, TRUE);
         if (label) InvalidateRect(label, nullptr, FALSE);
+        if (zoom)  InvalidateRect(zoom, nullptr, FALSE);
     }
 
     // Re-measure the control's natural height for the current font.
@@ -292,14 +314,14 @@ struct StatusBar::Impl {
 };
 
 // -----------------------------------------------------------------------------
-// Status bar subclass -- background brushes for the two children.
+// Status bar subclass -- background brushes for the children.
 //
-// The "/ N" STATIC wants to be transparent so it paints over the themed bar
-// instead of a grey rectangle: NULL_BRUSH plus TRANSPARENT bkmode means it
-// draws text and erases nothing, so the bar underneath must repaint first.
-// set_page() invalidates the whole bar with fErase for that reason, and the bar
-// is deliberately NOT created with WS_CLIPCHILDREN so the erase reaches under
-// the label.
+// The "/ N" and zoom STATICs want to be transparent so they paint over the
+// themed bar instead of a grey rectangle: NULL_BRUSH plus TRANSPARENT bkmode
+// means they draw text and erase nothing, so the bar underneath must repaint
+// first. set_page() invalidates the whole bar with fErase for that reason, and
+// the bar is deliberately NOT created with WS_CLIPCHILDREN so the erase reaches
+// under the labels.
 //
 // The page box must NOT get that treatment, and this is the trap: Windows
 // routes a DISABLED (or read-only) EDIT's background query to
@@ -406,6 +428,7 @@ LRESULT CALLBACK status_bar_subclass(HWND hwnd, UINT msg, WPARAM w,
                     InvalidateRect(hwnd, nullptr, TRUE);
                     if (impl->edit)  InvalidateRect(impl->edit, nullptr, TRUE);
                     if (impl->label) InvalidateRect(impl->label, nullptr, FALSE);
+                    if (impl->zoom)  InvalidateRect(impl->zoom, nullptr, FALSE);
                 }
             }
             break;
@@ -564,6 +587,16 @@ StatusBar::StatusBar(HINSTANCE hInstance, HWND parent)
                  reinterpret_cast<WPARAM>(impl_->font.get()),
                  MAKELPARAM(TRUE, 0));
 
+    // #57: the zoom readout. Read-only, so a plain STATIC like the label.
+    impl_->zoom = CreateWindowExW(
+        0, L"STATIC", L"",
+        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
+        0, 0, 0, 0,
+        impl_->hwnd, reinterpret_cast<HMENU>(kIdZoom), hInstance, nullptr);
+    SendMessageW(impl_->zoom, WM_SETFONT,
+                 reinterpret_cast<WPARAM>(impl_->font.get()),
+                 MAKELPARAM(TRUE, 0));
+
     impl_->measure();
     set_empty();
 }
@@ -577,7 +610,29 @@ StatusBar::~StatusBar() {
 
 HWND StatusBar::hwnd() const { return impl_ ? impl_->hwnd : nullptr; }
 
-int StatusBar::height_px() const { return impl_ ? impl_->height_px : 0; }
+int StatusBar::height_px() const {
+    return (impl_ && impl_->visible) ? impl_->height_px : 0;
+}
+
+void StatusBar::set_visible(bool visible) {
+    if (!impl_ || !impl_->hwnd) return;
+    if (visible == impl_->visible) return;
+    if (!visible) {
+        // Hand the keyboard back BEFORE hiding. ShowWindow(SW_HIDE) does not
+        // move the focus off a child, so the caret would stay in a box nobody
+        // can see and digits typed next would go into it. Same order as
+        // set_empty(), which does it before EnableWindow(FALSE).
+        if (GetFocus() == impl_->edit && impl_->on_focus_out) {
+            impl_->on_focus_out();
+        }
+        ShowWindow(impl_->hwnd, SW_HIDE);
+    } else {
+        ShowWindow(impl_->hwnd, SW_SHOWNA);
+    }
+    impl_->visible = visible;
+}
+
+bool StatusBar::visible() const { return impl_ && impl_->visible; }
 
 void StatusBar::set_bounds(const RECT& bounds) {
     if (!impl_ || !impl_->hwnd) return;
@@ -593,7 +648,7 @@ void StatusBar::update_dpi(UINT dpi) {
     impl_->dpi = dpi;
     // Keep the old font alive until every WM_SETFONT below has landed.
     // Reassigning impl_->font directly would run the old HFONT's deleter
-    // during the assignment, leaving all three windows pointing at a freed
+    // during the assignment, leaving all four windows pointing at a freed
     // GDI handle for the duration of the sends. old_font dies at the end of
     // this function, after nobody references it any more.
     auto old_font = std::move(impl_->font);
@@ -602,6 +657,7 @@ void StatusBar::update_dpi(UINT dpi) {
     SendMessageW(impl_->hwnd, WM_SETFONT, f, MAKELPARAM(TRUE, 0));
     if (impl_->edit)  SendMessageW(impl_->edit,  WM_SETFONT, f, MAKELPARAM(TRUE, 0));
     if (impl_->label) SendMessageW(impl_->label, WM_SETFONT, f, MAKELPARAM(TRUE, 0));
+    if (impl_->zoom)  SendMessageW(impl_->zoom,  WM_SETFONT, f, MAKELPARAM(TRUE, 0));
     impl_->measure();
     impl_->relayout();
 }
@@ -651,11 +707,25 @@ void StatusBar::set_empty() {
         EnableWindow(impl_->edit, FALSE);
     }
     if (impl_->label) SetWindowTextW(impl_->label, L"");
+    if (impl_->zoom)  SetWindowTextW(impl_->zoom, L"");
+    impl_->zoom_text.clear();
+    impl_->repaint();
+}
+
+void StatusBar::set_zoom(float pct) {
+    if (!impl_ || !impl_->zoom) return;
+    std::wstring text = detail::format_zoom_pct(pct);
+    if (text == impl_->zoom_text) return;
+    SetWindowTextW(impl_->zoom, text.c_str());
+    impl_->zoom_text = std::move(text);
     impl_->repaint();
 }
 
 bool StatusBar::page_box_has_focus() const {
-    return impl_ && impl_->edit && GetFocus() == impl_->edit;
+    // visible first, for the reason ResultsPanel::has_focus() gives: hiding a
+    // window does not move the focus off its children, so a hidden box must
+    // not claim ESC.
+    return impl_ && impl_->visible && impl_->edit && GetFocus() == impl_->edit;
 }
 
 void StatusBar::set_on_goto(OnGoto cb) {

@@ -68,6 +68,13 @@ private:
     void open_tab_async(std::filesystem::path path);
     void kick_render(int page);  // recompute zoom, submit render, post to canvas
 
+    // #57: push the active view's live zoom percentage to the status bar.
+    // No-op without a status bar or an active view (the empty state is
+    // StatusBar::set_empty's job). Writes text only -- it must never submit a
+    // render or change the view, because the canvas calls it from inside its
+    // render-completion arm.
+    void refresh_zoom_readout();
+
     // Navigate to `page` from a click (outline entry, thumbnail). Fires the
     // page-change observer, anchors the new page at its top, and renders --
     // but only anchors when the VIEW actually moves. In spread mode a click on
@@ -81,6 +88,7 @@ private:
     int clamp_results_panel_height(int h) const;
     void toggle_outline();               // F5 handler
     void toggle_thumbs();                // F4 handler (Phase 7 Task 8)
+    void on_toggle_status_bar();         // IDM_VIEW_STATUS_BAR (#59)
     void on_outline_navigate(int page);  // callback from OutlinePane
 
     // Phase 7 Task 8: which left-dock pane (if any) is currently

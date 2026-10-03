@@ -72,6 +72,7 @@ IDM_MAIN_MENU MENU
         MENUITEM "Toggle &Thumbnails\tF4", IDM_VIEW_THUMBS
         MENUITEM "&Invert Colors\tCtrl+Shift+I", IDM_VIEW_INVERT
         MENUITEM "&Two-Page Spread\tCtrl+Shift+D", IDM_VIEW_DUAL_PAGE
+        MENUITEM "Status &Bar", IDM_VIEW_STATUS_BAR
         MENUITEM SEPARATOR
         MENUITEM "Zoom &In\tCtrl+=",  IDM_ZOOM_IN
         MENUITEM "Zoom &Out\tCtrl+-", IDM_ZOOM_OUT

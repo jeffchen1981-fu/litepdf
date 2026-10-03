@@ -10,6 +10,12 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
 
 ### Added
 
+- Zoom readout (#57). The status bar shows the current zoom as a percentage,
+  next to the page count. It follows every zoom change: the View menu, Ctrl+wheel,
+  resizing the window, opening a side pane, and switching tabs.
+- View → Status Bar hides or shows the status bar (#59). The setting applies to
+  the window and is not remembered: the bar is shown again the next time
+  LitePDF starts. While it is hidden there is no page box to type a page into.
 - The running build is identifiable (#60). Development builds name their version
   in the title bar (`LitePDF 1.3.0-dev — file.pdf`); release builds are unchanged.
   Help → About shows the build (for example `Build: v1.3.0-18-gf7b1ed6`) and

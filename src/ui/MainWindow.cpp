@@ -359,6 +359,8 @@ void MainWindow::kick_render(int page) {
         // snap must leave the reader's scroll position alone.
         canvas_->change_current_page(left);
         canvas_->apply_viewport();
+        // #57: this branch returns early, so it carries its own refresh.
+        refresh_zoom_readout();
 
         view->request_render(left,
             [target, epoch, left, seq](fz_pixmap* p, fz_context* worker_ctx) {
@@ -376,11 +378,24 @@ void MainWindow::kick_render(int page) {
     }
 
     canvas_->apply_viewport();
+    // #57: the fit is re-derived by now, so the readout changes in the same
+    // message as the command that caused it.
+    refresh_zoom_readout();
 
     view->request_render_with_prefetch(page,
         [target, epoch, page, seq](fz_pixmap* p, fz_context* worker_ctx) {
             PdfCanvas::post_render_done(target, p, worker_ctx, epoch, page, seq);
         });
+}
+
+void MainWindow::refresh_zoom_readout() {
+    if (!status_bar_) return;
+    auto* v = active_view();
+    if (!v) return;
+    // A document with no pages has nothing to magnify: DocumentView reports
+    // 1.0 for it, but the page box beside the readout is empty, so the readout
+    // is too. 0 formats as the empty string.
+    status_bar_->set_zoom(v->page_count() > 0 ? v->zoom_pct() : 0.0f);
 }
 
 void MainWindow::navigate_click(int page) {
@@ -443,7 +458,7 @@ void MainWindow::on_layout() {
     // depend on this, not one -- see (b) and the splitter drag clamp.
     const int status_h = status_bar_ ? status_bar_->height_px() : 0;
     const int layout_h = std::max(0, h - status_h);
-    if (status_bar_ && status_bar_->hwnd()) {
+    if (status_bar_ && status_bar_->hwnd() && status_bar_->visible()) {
         RECT sb = { 0, layout_h, w, h };
         status_bar_->set_bounds(sb);
     }
@@ -623,6 +638,18 @@ void MainWindow::toggle_outline() {
     // on_tab_switch's outgoing-snapshot writes outline_visible back into
     // the active Tab when the user switches away -- that's the single
     // source of truth, so we don't write it here.
+    if (auto* view = active_view()) kick_render(view->current_page());
+}
+
+void MainWindow::on_toggle_status_bar() {
+    // #59: window-level state, so no active_view() gate -- the toggle works
+    // with no document open.
+    if (!status_bar_) return;
+    status_bar_->set_visible(!status_bar_->visible());
+    on_layout();
+    // The canvas just changed height. Its own WM_SIZE resubmits only when the
+    // render target has to be recreated, so without this a fit mode would keep
+    // the fit it derived for the old height.
     if (auto* view = active_view()) kick_render(view->current_page());
 }
 
@@ -1294,6 +1321,10 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // Ctrl+wheel zoom lives in the canvas; persist it like menu zoom so
             // a wheel-zoom-only change survives a crash/force-kill (debounced).
             canvas_->set_on_zoom_changed([this] { schedule_session_save(); });
+            // #57: kick_render covers the commands that go through it. This
+            // covers the two paths that do not: Ctrl+wheel and the canvas's
+            // own page turns.
+            canvas_->set_on_completion_arrived([this] { refresh_zoom_readout(); });
 
             DragAcceptFiles(hwnd, TRUE);
             return 0;
@@ -1494,10 +1525,12 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // positional test would have run the View arm against Edit, leaving
             // the View checkmarks silently stale.
 
-            // (Phase 8 T3/T4) View popup: reflect Invert Colors and Two-Page
-            // Spread state on each show. The flags are per-tab (D9), so the
-            // checkmark is read off active_view(). When no tab is open, both
-            // default to unchecked.
+            // (Phase 8 T3/T4) View popup: reflect Invert Colors, Two-Page
+            // Spread and Status Bar (#59) state on each show. The first two
+            // flags are per-tab (D9), so their checkmarks are read off
+            // active_view(); when no tab is open, both default to unchecked.
+            // Status Bar is window-level and is checked whenever the bar is
+            // visible, tab or no tab.
             if (popup_owns(popup, IDM_VIEW_INVERT)) {
                 auto* v = active_view();
                 const bool invert_on = v && v->invert_colors();
@@ -1508,6 +1541,13 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 CheckMenuItem(popup, IDM_VIEW_DUAL_PAGE,
                               MF_BYCOMMAND
                               | (dual_on ? MF_CHECKED : MF_UNCHECKED));
+                // #59: window-level, so not read off active_view(). It must
+                // sit inside this block: the block returns, so an arm after it
+                // would never run.
+                const bool bar_on = status_bar_ && status_bar_->visible();
+                CheckMenuItem(popup, IDM_VIEW_STATUS_BAR,
+                              MF_BYCOMMAND
+                              | (bar_on ? MF_CHECKED : MF_UNCHECKED));
                 return 0;
             }
             // #52 Edit popup. TranslateAcceleratorW sends WM_INITMENUPOPUP
@@ -1617,6 +1657,9 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     return 0;
                 case IDM_VIEW_THUMBS:
                     toggle_thumbs();
+                    return 0;
+                case IDM_VIEW_STATUS_BAR:
+                    on_toggle_status_bar();
                     return 0;
                 case IDM_VIEW_INVERT: {
                     // Phase 8 D7/D9: per-tab Invert Colors toggle. Flips

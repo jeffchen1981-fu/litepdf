@@ -5,7 +5,9 @@
 // decision surface of the status bar is unit-testable without a window, the
 // same split ScrollMath/CompletionMath/SplitterMath use.
 
+#include <cmath>
 #include <optional>
+#include <string>
 #include <string_view>
 
 namespace litepdf::ui::detail {
@@ -47,18 +49,25 @@ inline std::optional<int> parse_page_input(std::wstring_view text,
     return static_cast<int>(value) - 1;
 }
 
-// Pixel geometry of the two children inside the bar's client rect.
+// Pixel geometry of the three children inside the bar's client rect.
 struct StatusBarChildRects {
     int edit_x = 0, edit_y = 0, edit_w = 0, edit_h = 0;
     int label_x = 0, label_y = 0, label_w = 0, label_h = 0;
+    int zoom_x = 0, zoom_y = 0, zoom_w = 0, zoom_h = 0;
 };
 
-// Lay the page box and the "/ N" label out left to right with a uniform
-// padding, both vertically centred in a bar `bar_h` pixels tall. Callers pass
-// pixel values already scaled for DPI, so this stays pure arithmetic.
+// Lay the page box, the "/ N" label and the zoom readout out left to right
+// with a uniform padding, all vertically centred in a bar `bar_h` pixels tall.
+// Callers pass pixel values already scaled for DPI, so this stays pure
+// arithmetic.
+//
+// The readout starts after the label's RECTANGLE, not after its text: the
+// label is a fixed width, so a short "/ 12" leaves a gap. Closing it would
+// mean measuring text, which this fixed-offset layout deliberately avoids.
 inline StatusBarChildRects status_bar_child_rects(int bar_h, int pad_px,
                                                   int edit_w_px,
-                                                  int label_w_px) noexcept {
+                                                  int label_w_px,
+                                                  int zoom_w_px) noexcept {
     const int ctrl_h = (bar_h > 2 * pad_px) ? (bar_h - 2 * pad_px) : bar_h;
     const int y      = (bar_h - ctrl_h) / 2;
 
@@ -71,6 +80,10 @@ inline StatusBarChildRects status_bar_child_rects(int bar_h, int pad_px,
     r.label_y = r.edit_y;
     r.label_w = label_w_px;
     r.label_h = r.edit_h;
+    r.zoom_x  = r.label_x + label_w_px + pad_px;
+    r.zoom_y  = r.edit_y;
+    r.zoom_w  = zoom_w_px;
+    r.zoom_h  = r.edit_h;
     return r;
 }
 
@@ -87,6 +100,24 @@ inline bool should_overwrite_page_box(bool box_has_focus,
                                       std::wstring_view last_written) noexcept {
     if (!box_has_focus) return true;
     return current_text == last_written;
+}
+
+// Text for the zoom readout: "137%" for 1.37f, empty when there is nothing
+// displayable.
+//
+// `pct` is DocumentView::zoom_pct(), whose domain is wider than the preset
+// ladder: a fit mode derives it from the viewport with no upper bound, and a
+// minimized window drives it to exactly 0. The three guards run BEFORE the
+// conversion, in this order, so std::lround only ever sees [0.5, 9999.5):
+//   1. non-finite product  (NaN, an infinity, or a finite pct that overflows)
+//   2. below 0.5           (zero, negatives, anything that would print "0%")
+//   3. 9999.5 and above    (the label is sized for four digits)
+inline std::wstring format_zoom_pct(float pct) {
+    const float p = pct * 100.0f;
+    if (!std::isfinite(p)) return {};
+    if (p < 0.5f) return {};
+    if (p >= 9999.5f) return {};
+    return std::to_wstring(std::lround(p)) + L"%";
 }
 
 }  // namespace litepdf::ui::detail
