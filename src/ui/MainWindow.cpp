@@ -390,7 +390,12 @@ void MainWindow::kick_render(int page) {
 
 void MainWindow::refresh_zoom_readout() {
     if (!status_bar_) return;
-    if (auto* v = active_view()) status_bar_->set_zoom(v->zoom_pct());
+    auto* v = active_view();
+    if (!v) return;
+    // A document with no pages has nothing to magnify: DocumentView reports
+    // 1.0 for it, but the page box beside the readout is empty, so the readout
+    // is too. 0 formats as the empty string.
+    status_bar_->set_zoom(v->page_count() > 0 ? v->zoom_pct() : 0.0f);
 }
 
 void MainWindow::navigate_click(int page) {
