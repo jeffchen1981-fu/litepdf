@@ -188,8 +188,12 @@ Oracles a separate process can actually read:
 - **Selection:** `SendMessageW(box, EM_GETSEL, 0, 0)` with both parameters
   zero, reading the packed return value (`LOWORD` = start, `HIWORD` = end). Full
   range is `start == 0 && end == GetWindowTextLength(box)`.
-- **Gray state:** send `WM_INITMENUPOPUP` for the View popup, then
-  `GetMenuState(viewPopup, 40065, MF_BYCOMMAND)`.
+- **Menu state (gray and checkmark):** every read is `SendMessageW(main,
+  WM_INITMENUPOPUP, viewPopup, 1)` immediately followed by
+  `GetMenuState(viewPopup, id, MF_BYCOMMAND)`. The View arm writes both states
+  only while handling `WM_INITMENUPOPUP`, and a posted `WM_COMMAND` never
+  triggers it, so a read without the send returns whatever the last menu
+  opening left.
 - **Bar visibility:** `IsWindowVisible` on the status bar.
 
 Input: **one** real `SendInput` Ctrl+G (case 1) to prove the accelerator
@@ -213,8 +217,7 @@ Cases (normal exe unless stated):
    the same sequence must give `start == end == 0`, which proves the case can
    fail and that the re-select line is what passes it.
 4. Bar hidden (post `IDM_VIEW_STATUS_BAR`), Ctrl+G → bar visible, focus is the
-   box, full selection, and `GetMenuState(viewPopup, 40064)` reports
-   `MF_CHECKED`.
+   box, full selection, and the menu-state read of 40064 reports `MF_CHECKED`.
 5. No document, bar **hidden** first (post `IDM_VIEW_STATUS_BAR`), then post
    40065 → bar still hidden, focus unchanged; View popup reports 40065 GRAYED.
    Negative control: the same sequence with a document open shows the bar, and
