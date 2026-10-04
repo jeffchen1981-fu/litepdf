@@ -3,10 +3,13 @@
 All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Each
-release also has a matching `vX.Y.Z-phaseN[.M]` git tag corresponding to a
-phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepdf-roadmap.md).
+release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
+`vX.Y.Z-phaseN[.M]`, after a phase in
+[docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepdf-roadmap.md).
 
 ## [Unreleased]
+
+## [1.4.0] — 2026-10-03 — Text selection, panning, and sideways scrolling
 
 ### Added
 
@@ -51,6 +54,13 @@ phase in [docs/plans/2026-04-15-litepdf-roadmap.md](docs/plans/2026-04-15-litepd
   tab's page, in the moment before the new one finishes rendering.
 - The tab strip is dark in dark mode. The area beside and around the tabs, and a
   thin frame around each tab, stayed light grey (#86).
+- The column header of the search results list is dark in dark mode. It stayed
+  white, both when LitePDF started in dark mode and after switching to it (#84).
+- Switching Windows between light and dark mode while LitePDF is running now
+  reaches the find bar, the search results panel and the pane dividers. They
+  did not follow the switch and kept their previous colours (#51).
+- Escape closes the search results panel when the panel has the keyboard. It
+  used to close the find bar instead and leave the panel open (#47).
 - High Contrast themes are followed by the tab strip, the find bar, the search
   results panel and the pane dividers, not only the status bar. They switch to
   the system's contrast colours at startup and when High Contrast is turned on
@@ -517,7 +527,7 @@ and Phase 12 (release hardening: crash-safe session restore).
 
 [Compare initial commit…0.0.1-phase0](https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.1-phase0)
 
-[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.4.0...HEAD
 [0.0.12-phase10]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.12-phase10
 [0.0.11-phase9]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.11-phase9
 [0.0.10-phase8.5]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.10-phase8.5
