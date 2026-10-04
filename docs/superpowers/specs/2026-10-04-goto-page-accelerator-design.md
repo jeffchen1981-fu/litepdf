@@ -200,14 +200,26 @@ Input: **one** real `SendInput` Ctrl+G (case 1) to prove the accelerator
 binding. Every other Ctrl+G is a posted `WM_COMMAND 40065`, and ESC is a posted
 `WM_COMMAND 40047` (`IDM_FIND_CLOSE`): the ESC binding is not under test here.
 
-Two exes, built the way the #57/#59 plan builds its probes
-(`build/gui-check/make-probes.sh`: patch, build, copy, restore the source under
-a `trap`): `normal-probe.exe` is the real build; `noresel-probe.exe` is a mutant
-with §5.2's re-select line removed. The mutant is case 3's negative control.
+Two exes, from a **new** `build/gui-check/make-probes-48.sh` written on the
+pattern of the #57/#59 script (that script patches `MainWindow.cpp` for a
+different mutant and cannot be reused as is). It must: patch
+`src/ui/StatusBar.cpp`, build, copy to `noresel-probe.exe`, restore
+`StatusBar.cpp` under a `trap` on `EXIT INT TERM` (so a failed or interrupted
+mutant build still leaves the source clean), then build and copy
+`normal-probe.exe`. `git diff --quiet -- src/ui/StatusBar.cpp` must succeed
+after the script, pass or fail.
+
+The mutant removes **exactly one** call: the `EM_SETSEL 0,-1` that §5.2 adds
+in `set_page`'s focused-overwrite branch, after `force_revert()`. The
+`EM_SETSEL` inside `focus_page_box()` stays. The patch matches by the
+surrounding `force_revert()` context, not by the call text alone, since the
+same call appears twice. The mutant is case 3's negative control.
 
 Cases (normal exe unless stated):
 
-1. Document open, bar visible, Ctrl+G via `SendInput` → focus is the box, full
+1. Document open, bar visible. Bring LitePDF to the foreground first
+   (`SetForegroundWindow`, then assert `GetForegroundWindow() == main`), or the
+   input goes elsewhere. Ctrl+G via `SendInput` → focus is the box, full
    selection.
 2. Collapse the selection from the driver (`EM_SETSEL 1,1`) and assert it
    collapsed; post 40065 → full selection again. Without the collapse this case
@@ -224,9 +236,12 @@ Cases (normal exe unless stated):
    the popup reports 40065 enabled. Hiding the bar first is what makes this case
    fail if §5.3's guard is deleted: with the bar visible, a disabled box refuses
    focus on its own.
-6. Ctrl+G, then type one digit different from the current page (`WM_CHAR`), then
-   ESC → focus returns to the canvas and the box shows the current page again.
-   Without the typed digit the revert would be unobservable.
+6. Ctrl+G; record the box text; `SendMessageW(box, WM_CHAR, digit, 1)` with a
+   digit that differs from the current page, sent to the **box's HWND**, and
+   assert `GetWindowTextW(box)` changed; then post ESC → focus returns to the
+   canvas and the box text equals the recorded text again. Without the typed
+   digit, and without the assert that it landed, the revert would be
+   unobservable.
 
 ## 7. User-facing docs
 
