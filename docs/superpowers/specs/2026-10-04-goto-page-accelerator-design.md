@@ -35,10 +35,18 @@ the bare-accelerator ESC routing. The cost is out of proportion to the gap.
 
 ## 3. Command, key and menu
 
-- `resources/MainMenu.rc.h`:
-  `#define IDM_VIEW_GOTO_PAGE   40065   // Ctrl+G`.
-  The "Next free ID" comment moves to **40066**, reserving 40066-40070. Every
-  block that consumes ids rewrites that marker; this one does too.
+- `resources/MainMenu.rc.h`, following #59's precedent (it took the first id of
+  the reservation it sat in front of and rewrote the marker after it):
+  - a `// #48: go-to-page accelerator.` block with
+    `#define IDM_VIEW_GOTO_PAGE   40065   // Ctrl+G`, placed after
+    `IDM_VIEW_STATUS_BAR` and before the marker;
+  - the marker (today line 72, `Next free ID: 40065`) becomes
+    `// Next free ID: 40066. Reserve 40066-40070 for future Phase 8.x cleanups.`;
+  - the #52 comment (today line 74) that quotes the range becomes
+    `leaving the 40066-40070 reservation alone`.
+
+  The older `Next free ID: 40048` marker (line 56) is stale, but it is not this
+  change's to fix.
 - Accelerator table (`MainWindow.cpp`, the `accels[]` array):
   `{ FCONTROL | FVIRTKEY, 'G', IDM_VIEW_GOTO_PAGE }`. No existing entry uses
   `'G'`, and the standard EDIT control has no Ctrl+G behaviour of its own, so the
@@ -96,12 +104,16 @@ Status Bar; the keyboard route to hide it again is Alt+V, B.
 
 Two new members:
 
-- `bool page_box_enabled() const` — `impl_->page_count > 0`. Read from the
-  state `set_page` / `set_empty` maintain, **not** `IsWindowEnabled`, so it
-  cannot drift from `set_empty`'s intent. Independent of visibility.
-- `void focus_page_box()` — `SetFocus(edit)` then `SendMessageW(edit, EM_SETSEL,
-  0, -1)`. That order: selecting before focusing invites the EDIT's own
-  focus handling to move the selection.
+- `bool page_box_enabled() const` — `impl_->edit && impl_->page_count > 0`.
+  Read from the state `set_page` / `set_empty` maintain, **not**
+  `IsWindowEnabled`, so it cannot drift from `set_empty`'s intent. Independent
+  of visibility. The `edit` test covers a failed `msctls_statusbar32` creation:
+  the constructor returns early with `edit == nullptr`, yet later `set_page`
+  calls still set `page_count`.
+- `void focus_page_box()` — no-op unless `page_box_enabled()`; otherwise
+  `SetFocus(edit)` then `SendMessageW(edit, EM_SETSEL, 0, -1)`. That order:
+  selecting before focusing invites the EDIT's own focus handling to move the
+  selection.
 
 Visibility stays `MainWindow`'s job, because showing the bar requires a re-layout.
 
@@ -121,15 +133,21 @@ keystroke replaces it" is the correct state.
 
 This also changes the click entry path: a box entered by mouse that sees a page
 change now ends up fully selected rather than with the caret at 0. That is the
-better behaviour for an untouched value and is accepted deliberately.
+better behaviour for an untouched value and is accepted deliberately. The fix
+does not know how the box was entered, so §6.2 case 3 covers both paths.
 
 ### 5.3 `MainWindow`
 
 - **`WM_COMMAND`, `IDM_VIEW_GOTO_PAGE`:**
   1. `if (!status_bar_ || !status_bar_->page_box_enabled()) return 0;` —
-     **required, not redundant.** A mouse-opened View popup keeps dispatching
-     messages, so a second-instance open or a last-tab close can change the state
-     between the menu's enable check and the click.
+     **required, not redundant.** The GRAYED state protects only the routes that
+     go through `WM_INITMENUPOPUP` (the accelerator and the menu). A posted or
+     synthetic `WM_COMMAND` skips it, and §6.2 case 5 posts exactly that. The
+     state can also change under an open menu: a mouse-opened View popup keeps
+     dispatching messages, so a second instance can open a 0-page document
+     (`WM_COPYDATA` → `open_tab_async`) between the enable check and the click.
+     Without the guard, step 2 would show a hidden bar for a box that cannot
+     take focus.
   2. If `!status_bar_->visible()`, call a new
      `MainWindow::set_status_bar_visible(bool)`. That is today's body of
      `on_toggle_status_bar()` (`set_visible`, `on_layout()`, `kick_render` of the
@@ -167,33 +185,67 @@ Oracles a separate process can actually read:
 
 - **Focus:** `GetGUIThreadInfo(tid).hwndFocus`. Not `GetFocus()`, which returns
   NULL for a window on another thread's queue.
-- **Selection:** `SendMessageW(box, EM_GETSEL)`; full range is
-  `start == 0 && end == text length`.
+- **Selection:** `SendMessageW(box, EM_GETSEL, 0, 0)` with both parameters
+  zero, reading the packed return value (`LOWORD` = start, `HIWORD` = end). Full
+  range is `start == 0 && end == GetWindowTextLength(box)`.
 - **Gray state:** send `WM_INITMENUPOPUP` for the View popup, then
   `GetMenuState(viewPopup, 40065, MF_BYCOMMAND)`.
 - **Bar visibility:** `IsWindowVisible` on the status bar.
 
-Input: **one** real `SendInput` Ctrl+G to prove the accelerator binding; every
-other case posts `WM_COMMAND 40065`.
+Input: **one** real `SendInput` Ctrl+G (case 1) to prove the accelerator
+binding. Every other Ctrl+G is a posted `WM_COMMAND 40065`, and ESC is a posted
+`WM_COMMAND 40047` (`IDM_FIND_CLOSE`): the ESC binding is not under test here.
 
-Cases:
+Two exes, built the way the #57/#59 plan builds its probes
+(`build/gui-check/make-probes.sh`: patch, build, copy, restore the source under
+a `trap`): `normal-probe.exe` is the real build; `noresel-probe.exe` is a mutant
+with §5.2's re-select line removed. The mutant is case 3's negative control.
+
+Cases (normal exe unless stated):
 
 1. Document open, bar visible, Ctrl+G via `SendInput` → focus is the box, full
    selection.
-2. Ctrl+G again while focused → still full selection.
-3. **§5.2 regression:** two documents open; Ctrl+G; post `WM_COMMAND IDM_TAB_NEXT`
-   → box still focused, full selection. Negative control on the pre-change
-   binary, which has no Ctrl+G: click the box with `SendInput`, send
-   `EM_SETSEL 0,-1` from the driver, confirm the full range, post
-   `IDM_TAB_NEXT`, and record `start == end == 0`. That proves the case can
-   fail.
+2. Collapse the selection from the driver (`EM_SETSEL 1,1`) and assert it
+   collapsed; post 40065 → full selection again. Without the collapse this case
+   could not fail.
+3. **§5.2 regression:** two documents open; Ctrl+G; post `WM_COMMAND
+   IDM_TAB_NEXT` → box still focused, full selection. On `noresel-probe.exe`
+   the same sequence must give `start == end == 0`, which proves the case can
+   fail and that the re-select line is what passes it.
 4. Bar hidden (post `IDM_VIEW_STATUS_BAR`), Ctrl+G → bar visible, focus is the
-   box, full selection.
-5. No document → `WM_COMMAND 40065` leaves focus where it was; View popup reports
-   40065 GRAYED. Negative control: with a document open it reports enabled.
-6. ESC after Ctrl+G → focus returns to the canvas, box shows the current page.
+   box, full selection, and `GetMenuState(viewPopup, 40064)` reports
+   `MF_CHECKED`.
+5. No document, bar **hidden** first (post `IDM_VIEW_STATUS_BAR`), then post
+   40065 → bar still hidden, focus unchanged; View popup reports 40065 GRAYED.
+   Negative control: the same sequence with a document open shows the bar, and
+   the popup reports 40065 enabled. Hiding the bar first is what makes this case
+   fail if §5.3's guard is deleted: with the bar visible, a disabled box refuses
+   focus on its own.
+6. Ctrl+G, then type one digit different from the current page (`WM_CHAR`), then
+   ESC → focus returns to the canvas and the box shows the current page again.
+   Without the typed digit the revert would be unobservable.
 
-## 7. Out of scope
+## 7. User-facing docs
+
+Same PR, as #57/#59 did:
+
+- `README.md`, Keyboard shortcuts table: a `Ctrl+G | Go to page (focus the page
+  box)` row, after the Ctrl+0 row.
+- `README.md`, the Page indicator feature line (today line 45): add that Ctrl+G
+  jumps to the box.
+- `CHANGELOG.md`, `## [Unreleased]` → `### Added`: Ctrl+G and View → Go to Page
+  (#48), including that it shows a hidden status bar. The 1.4.0 entry's "While
+  it is hidden there is no page box to type a page into" stays as it is: it was
+  true of that release.
+
+This reverses an acceptance recorded in
+`2026-10-02-status-bar-zoom-readout-hide-design.md` §3.3 ("With the bar hidden
+there is no keyboard route to a page number; #48 (Ctrl+G) does not exist yet.
+Accepted: the reader chose to hide it."). That spec is a record of its own
+decision and is not edited; this section is the note that the decision no
+longer holds.
+
+## 8. Out of scope
 
 - Tab navigation into or out of the box.
 - A Go-to-Page dialog.
