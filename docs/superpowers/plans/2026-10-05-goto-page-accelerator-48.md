@@ -18,7 +18,7 @@
   `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe` and `ctest.exe` in the same directory.
 - Run `ctest` from **PowerShell**, from the repo root `C:\Users\User\projects\litepdf` (from Git Bash two `version_script_selftest` cases fail spuriously).
 - **Line numbers in this plan are as of commit `01e80f9`**, before any task ran. Locate every edit by the quoted text or the named function; treat a number as a hint.
-- No task adds or removes a unit test. Task 1 records the `ctest` count; every later `ctest` run must show that same count, all passing.
+- No task adds or removes a unit test. Task 1 writes the `ctest` count to `build/gui-check/ctest-baseline-48.txt`; every later `ctest` run must show that same count, all passing.
 - Command ids: `IDM_VIEW_STATUS_BAR 40064`, `IDM_VIEW_GOTO_PAGE 40065` (new), `IDM_TAB_NEXT 40031`, `IDM_TAB_CLOSE 40030`, `IDM_FIND_CLOSE 40047`.
 - All code, comments and commit messages in English. Commit messages end with
   `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
@@ -49,7 +49,7 @@
 
 **Interfaces:**
 - Consumes: the current branch, whose `src/` is identical to `main` @ `7c1bde1`.
-- Produces: `build/gui-check/goto-page.ps1 -Exe <path> -Mode normal|noresel`, which prints one `PASS`/`FAIL` line per check and a summary `"<mode>: 16 checks, <n> failed"`, exiting 1 if any check failed. Tasks 2 and 3 run it by path. The ctest count recorded in Step 1.
+- Produces: `build/gui-check/goto-page.ps1 -Exe <path> -Mode normal|noresel`, which prints one `PASS`/`FAIL` line per check and a summary `"<mode>: 16 checks, <n> failed"`, exiting 1 if any check failed. Tasks 2 and 3 run it by path. `build/gui-check/ctest-baseline-48.txt`, holding the ctest count from Step 1, which Tasks 2 and 4 compare against.
 
 - [ ] **Step 1: Record the test baseline**
 
@@ -64,7 +64,14 @@ Push-Location C:\Users\User\projects\litepdf
 Pop-Location
 ```
 
-Expected: the build succeeds and `100% tests passed, 0 tests failed out of N`. Write N down; it is the count every later task must reproduce. (It was 404 registered at `7c1bde1`; trust what you see, not this number.)
+Expected: the build succeeds and `100% tests passed, 0 tests failed out of N`. (It was 404 registered at `7c1bde1`; trust what you see, not this number.) Record N where later tasks can read it:
+
+```powershell
+New-Item -ItemType Directory -Force C:\Users\User\projects\litepdf\build\gui-check | Out-Null
+Set-Content -Encoding ascii C:\Users\User\projects\litepdf\build\gui-check\ctest-baseline-48.txt '<N>'
+```
+
+Replace `<N>` with the number. Report N in your task summary too.
 
 - [ ] **Step 2: Write the driver**
 
@@ -355,7 +362,7 @@ The driver is untracked under `build/`. `git status --short` must print nothing.
 - Modify: `resources/litepdf.rc.in:77-79`
 
 **Interfaces:**
-- Consumes: Task 1's driver at `build/gui-check/goto-page.ps1` and its recorded ctest count.
+- Consumes: Task 1's driver at `build/gui-check/goto-page.ps1` and the ctest count in `build/gui-check/ctest-baseline-48.txt`.
 - Produces: `bool litepdf::ui::StatusBar::page_box_enabled() const`, `void litepdf::ui::StatusBar::focus_page_box()`, `void litepdf::ui::MainWindow::set_status_bar_visible(bool visible)`, `void litepdf::ui::MainWindow::on_goto_page()`, `#define IDM_VIEW_GOTO_PAGE 40065`. In `StatusBar::set_page` the line `if (focused) SendMessageW(impl_->edit, EM_SETSEL, 0, -1);`, which Task 3's mutant removes by exact text.
 
 - [ ] **Step 1: Command id**
@@ -624,7 +631,7 @@ Push-Location C:\Users\User\projects\litepdf
 Pop-Location
 ```
 
-Expected: the build succeeds with no new warning from the edited files (a local that shadows an outer name, C4456, is the usual one in `WM_COMMAND`), and `100% tests passed` with the same count Task 1 recorded.
+Expected: the build succeeds with no new warning from the edited files (a local that shadows an outer name, C4456, is the usual one in `WM_COMMAND`), and `100% tests passed` with the count in `build/gui-check/ctest-baseline-48.txt` (`Get-Content` it). A different count means a test was added or lost: stop and find out why.
 
 - [ ] **Step 12: Green run**
 
@@ -669,7 +676,10 @@ test -z "$(git status --short)" || { echo "working tree not clean"; exit 1; }
 trap 'git checkout -- src/ui/StatusBar.cpp' EXIT INT TERM
 mkdir -p build/gui-check
 rm -f build/gui-check/noresel-probe.exe build/gui-check/normal-probe.exe
-python - <<'EOF'
+# Fail closed at every step: a failed patch must never fall through to a build
+# of the UNPATCHED source copied as noresel-probe.exe -- a fake mutant that
+# passes check 08 for the wrong reason.
+python - <<'EOF' || { echo "PATCH FAILED - no mutant was built"; exit 1; }
 import io
 p = "src/ui/StatusBar.cpp"
 s = io.open(p, encoding="utf-8", newline="").read()
@@ -687,7 +697,7 @@ print("mutant patched")
 EOF
 "/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe" --build build --target litepdf --config Release \
   && cp build/Release/litepdf.exe build/gui-check/noresel-probe.exe \
-  || echo "MUTANT BUILD FAILED - no noresel-probe.exe was made"
+  || { echo "MUTANT BUILD FAILED - no noresel-probe.exe was made"; exit 1; }
 git checkout -- src/ui/StatusBar.cpp
 git diff --quiet -- src/ui/StatusBar.cpp || { echo "SOURCE NOT RESTORED - stop and fix by hand"; exit 1; }
 test -z "$(git status --short)" || { echo "SOURCE NOT RESTORED - stop and fix by hand"; exit 1; }
@@ -705,7 +715,7 @@ echo "source restored"
 bash build/gui-check/make-probes-48.sh
 ```
 
-Expected: `mutant patched`, `source restored`, two builds succeed, no `MUTANT BUILD FAILED` line, and `build/gui-check/` holds `noresel-probe.exe` and `normal-probe.exe`. If `python` is not found, use `py -3`. Afterwards `git status --short` prints nothing.
+Expected: `mutant patched`, `source restored`, two builds succeed, exit code 0, no `PATCH FAILED` / `MUTANT BUILD FAILED` / `NORMAL BUILD FAILED` line, and `build/gui-check/` holds `noresel-probe.exe` and `normal-probe.exe`. Any of those lines means the script stopped with the source already restored by the `trap`; fix the cause and rerun rather than using whatever exes are left. If `python` is not found, use `py -3`. Afterwards `git status --short` prints nothing.
 
 - [ ] **Step 3: Run the real build**
 
@@ -810,7 +820,7 @@ Pop-Location
 powershell -ExecutionPolicy Bypass -File C:\Users\User\projects\litepdf\scripts\smoke-test.ps1 -ExpectDev
 ```
 
-Expected: the build succeeds; `100% tests passed` with Task 1's count; the smoke test exits 0.
+Expected: the build succeeds; `100% tests passed` with the count in `build/gui-check/ctest-baseline-48.txt`; the smoke test exits 0.
 
 - [ ] **Step 5: Commit**
 
