@@ -42,7 +42,7 @@ Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab i
 - **CJK rendering** — Chinese / Japanese / Korean text renders from your installed Windows fonts (no bundled CJK font), keeping `litepdf.exe` ~7 MB (v1.2.0)
 - **Zoom** — Zoom In / Out / Reset actually change what you see, at the right resolution on high-DPI displays (Ctrl+= / Ctrl+- / Ctrl+0, v1.3.0)
 - **Mouse-wheel scrolling** — scrolls within a page and turns the page at the edge, honouring your system's lines-per-notch setting; Ctrl+wheel zooms (v1.3.0). Shift+wheel, a tilt wheel or a sideways touchpad swipe scrolls a zoomed-in page left and right (v1.4.0)
-- **Page indicator** — status bar showing the current page and page count, with a box you can type a page into (v1.3.0). It also shows the current zoom percentage, and View → Status Bar hides it (v1.4.0)
+- **Page indicator** — status bar showing the current page and page count, with a box you can type a page into (v1.3.0). It also shows the current zoom percentage, and View → Status Bar hides it (v1.4.0). Ctrl+G (View → Go to Page) puts the cursor in the box, showing the bar if it is hidden (unreleased)
 - **Text selection and copy** — drag to select, double-click for a word, triple-click for a line; Ctrl+C copies and Ctrl+A selects the page (v1.4.0)
 - **Hand-tool panning** — middle-drag, or hold Space and drag, to move a zoomed-in page (v1.4.0)
 - **MRU** — recent files in File menu, persisted across runs
@@ -68,6 +68,7 @@ Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab i
 | Ctrl+Shift+D       | Two-page spread (per tab)           |
 | Ctrl+= / Ctrl+-    | Zoom in / out                       |
 | Ctrl+0             | Reset zoom                          |
+| Ctrl+G             | Go to page (focus the page box)     |
 | PgDn / PgUp        | Next / previous page (or pair in spread mode) |
 | Arrow keys         | Pan a zoomed-in page                |
 | Space + drag       | Pan a zoomed-in page (middle-drag also pans) |
