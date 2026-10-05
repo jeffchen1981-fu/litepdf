@@ -138,6 +138,9 @@ struct StatusBar::Impl {
     HWND zoom  = nullptr;
     UINT dpi   = 96;
     int  height_px = 0;
+    // #113: the page box's window height for the current font -- see
+    // page_box_height(). Re-measured with height_px; 0 means "unknown".
+    int  edit_h_px = 0;
     // #59. height_px above is the MEASURED height and is never zeroed:
     // update_dpi() re-measures a hidden bar too, and StatusBar::height_px()
     // gates on this flag instead.
@@ -238,7 +241,8 @@ struct StatusBar::Impl {
         GetClientRect(hwnd, &rc);
         const auto r = detail::status_bar_child_rects(
             rc.bottom - rc.top, dp(kPadDip, dpi),
-            dp(kEditWDip, dpi), dp(kLabelWDip, dpi), dp(kZoomWDip, dpi));
+            dp(kEditWDip, dpi), edit_h_px, dp(kLabelWDip, dpi),
+            dp(kZoomWDip, dpi));
         if (edit) {
             SetWindowPos(edit, nullptr, r.edit_x, r.edit_y, r.edit_w, r.edit_h,
                          SWP_NOZORDER | SWP_NOACTIVATE);
@@ -296,6 +300,30 @@ struct StatusBar::Impl {
         // Guard the degenerate case so on_layout can never reserve a negative
         // strip -- 22 DIP is the classic status bar height at 100%.
         height_px = (measured > 0) ? measured : dp(22, dpi);
+        edit_h_px = page_box_height();
+    }
+
+    // #113: one line of the bar's font plus the box's frame. A single-line
+    // EDIT draws its line from the top of its client area and clips the rest,
+    // so a box sized from the padding alone cut the bottom off every digit.
+    // The frame comes from AdjustWindowRectExForDpi on the box's real styles
+    // rather than a hard-coded WS_EX_CLIENTEDGE width. Returns 0 on any
+    // failure, which status_bar_child_rects treats as "use the padded strip".
+    int page_box_height() const {
+        if (!edit || !font) return 0;
+        HDC dc = GetDC(edit);
+        if (!dc) return 0;
+        const HGDIOBJ old = SelectObject(dc, font.get());
+        TEXTMETRICW tm = {};
+        const BOOL got = GetTextMetricsW(dc, &tm);
+        SelectObject(dc, old);
+        ReleaseDC(edit, dc);
+        if (!got || tm.tmHeight <= 0) return 0;
+        RECT r = { 0, 0, 0, tm.tmHeight };
+        const auto style    = static_cast<DWORD>(GetWindowLongPtrW(edit, GWL_STYLE));
+        const auto ex_style = static_cast<DWORD>(GetWindowLongPtrW(edit, GWL_EXSTYLE));
+        if (!AdjustWindowRectExForDpi(&r, style, FALSE, ex_style, dpi)) return 0;
+        return r.bottom - r.top;
     }
 
     // Commit whatever is in the box.

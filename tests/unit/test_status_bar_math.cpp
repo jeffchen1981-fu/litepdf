@@ -65,21 +65,72 @@ TEST_CASE("StatusBarMath parse_page_input rejects everything when there is no do
 TEST_CASE("StatusBarMath status_bar_child_rects centers children and lays them left to right",
           "[statusbar]") {
     const auto r = status_bar_child_rects(/*bar_h=*/24, /*pad_px=*/4,
-                                          /*edit_w_px=*/48, /*label_w_px=*/72,
-                                          /*zoom_w_px=*/40);
+                                          /*edit_w_px=*/48, /*edit_h_px=*/16,
+                                          /*label_w_px=*/72, /*zoom_w_px=*/40);
     REQUIRE(r.edit_h  == 16);
     REQUIRE(r.edit_y  == 4);
     REQUIRE(r.edit_x  == 4);
     REQUIRE(r.edit_w  == 48);
     REQUIRE(r.label_x == 4 + 48 + 4);
-    REQUIRE(r.label_y == r.edit_y);
-    REQUIRE(r.label_h == r.edit_h);
+    REQUIRE(r.label_y == 4);
+    REQUIRE(r.label_h == 16);
     REQUIRE(r.label_w == 72);
     // The zoom readout: one padding step right of the "/ N" label's rectangle.
     REQUIRE(r.zoom_x  == 4 + 48 + 4 + 72 + 4);
-    REQUIRE(r.zoom_y  == r.edit_y);
-    REQUIRE(r.zoom_h  == r.edit_h);
+    REQUIRE(r.zoom_y  == r.label_y);
+    REQUIRE(r.zoom_h  == r.label_h);
     REQUIRE(r.zoom_w  == 40);
+}
+
+TEST_CASE("StatusBarMath status_bar_child_rects sizes the page box from its font, not the padding",
+          "[statusbar]") {
+    // #113, the numbers measured on the real bar. At 96 DPI the bar is 22 px
+    // and the padding 4, which left the box 14 px tall -- a 10 px client area
+    // under a 15 px line of 9 pt Segoe UI, so the EDIT clipped the bottom of
+    // every digit. The box must take the height its font needs (line 15 +
+    // frame 4 = 19) and sit centred, while the labels keep the padded strip.
+    const auto r96 = status_bar_child_rects(/*bar_h=*/22, /*pad_px=*/4,
+                                            /*edit_w_px=*/52, /*edit_h_px=*/19,
+                                            /*label_w_px=*/96, /*zoom_w_px=*/45);
+    REQUIRE(r96.edit_h  == 19);
+    REQUIRE(r96.edit_y  == 1);   // (22 - 19) / 2, the odd pixel goes below
+    REQUIRE(r96.label_y == 4);
+    REQUIRE(r96.label_h == 14);
+    REQUIRE(r96.zoom_y  == 4);
+    REQUIRE(r96.zoom_h  == 14);
+
+    // 192 DPI: bar 44, padding 8, line 32 + frame 4.
+    const auto r192 = status_bar_child_rects(/*bar_h=*/44, /*pad_px=*/8,
+                                             /*edit_w_px=*/104, /*edit_h_px=*/36,
+                                             /*label_w_px=*/192, /*zoom_w_px=*/90);
+    REQUIRE(r192.edit_h  == 36);
+    REQUIRE(r192.edit_y  == 4);
+    REQUIRE(r192.label_y == 8);
+    REQUIRE(r192.label_h == 28);
+}
+
+TEST_CASE("StatusBarMath status_bar_child_rects never lets the page box overhang the bar",
+          "[statusbar]") {
+    // A box taller than the bar would be cut by the bar's own client edge;
+    // clamp to the bar rather than hang off it.
+    const auto r = status_bar_child_rects(/*bar_h=*/16, /*pad_px=*/4,
+                                          /*edit_w_px=*/48, /*edit_h_px=*/30,
+                                          /*label_w_px=*/72, /*zoom_w_px=*/40);
+    REQUIRE(r.edit_h == 16);
+    REQUIRE(r.edit_y == 0);
+}
+
+TEST_CASE("StatusBarMath status_bar_child_rects falls back to the padded strip without a font height",
+          "[statusbar]") {
+    // edit_h_px <= 0 means the caller could not measure the font; the box then
+    // gets the same padded strip as the labels -- the pre-#113 layout.
+    for (const int unknown : {0, -5}) {
+        const auto r = status_bar_child_rects(/*bar_h=*/24, /*pad_px=*/4,
+                                              /*edit_w_px=*/48, unknown,
+                                              /*label_w_px=*/72, /*zoom_w_px=*/40);
+        REQUIRE(r.edit_h == 16);
+        REQUIRE(r.edit_y == 4);
+    }
 }
 
 TEST_CASE("StatusBarMath status_bar_child_rects degrades safely on a tiny bar",
@@ -90,8 +141,8 @@ TEST_CASE("StatusBarMath status_bar_child_rects degrades safely on a tiny bar",
     // silently returns e.g. edit_h == 0 for an ordinary 24 px bar -- or drops
     // the fallback entirely -- cannot still pass this test.
     const auto r = status_bar_child_rects(/*bar_h=*/4, /*pad_px=*/4,
-                                          /*edit_w_px=*/48, /*label_w_px=*/72,
-                                          /*zoom_w_px=*/40);
+                                          /*edit_w_px=*/48, /*edit_h_px=*/19,
+                                          /*label_w_px=*/72, /*zoom_w_px=*/40);
     REQUIRE(r.edit_x   == 4);
     REQUIRE(r.edit_y   == 0);
     REQUIRE(r.edit_w   == 48);
