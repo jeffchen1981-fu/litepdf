@@ -9,6 +9,12 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+### Added
+
+- Ctrl+G and View → Go to Page put the cursor in the status bar's page box with
+  the page number selected, so typing a number and pressing Enter goes there
+  (#48). If the status bar is hidden, Ctrl+G shows it. Esc returns to the page.
+
 ## [1.4.0] — 2026-10-03 — Text selection, panning, and sideways scrolling
 
 ### Added

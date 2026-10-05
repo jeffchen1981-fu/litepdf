@@ -89,6 +89,10 @@ private:
     void toggle_outline();               // F5 handler
     void toggle_thumbs();                // F4 handler (Phase 7 Task 8)
     void on_toggle_status_bar();         // IDM_VIEW_STATUS_BAR (#59)
+    // Show or hide the status bar and re-fit the canvas to the new height.
+    // The toggle calls it, and so does Ctrl+G on a hidden bar (#48).
+    void set_status_bar_visible(bool visible);
+    void on_goto_page();                 // IDM_VIEW_GOTO_PAGE (#48)
     void on_outline_navigate(int page);  // callback from OutlinePane
 
     // Phase 7 Task 8: which left-dock pane (if any) is currently
