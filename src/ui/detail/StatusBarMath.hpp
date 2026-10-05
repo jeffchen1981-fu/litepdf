@@ -66,7 +66,7 @@ struct StatusBarChildRects {
 // The page box cannot do that (#113): a single-line EDIT draws its line from
 // the top of its client area and clips whatever does not fit, and the padded
 // strip is SHORTER than one line of the bar's own font -- at 96 DPI a 10 px
-// client area under a 15 px line, so the bottom third of every digit was cut.
+// client area under a 15 px line, so the bottom rows of every digit were cut.
 // So the box takes `edit_h_px`, the window height its font needs (line height
 // plus frame, measured by the caller), centred on the same axis as the labels.
 // It is clamped to the bar so it can never overhang it; `edit_h_px <= 0`
@@ -101,6 +101,21 @@ inline StatusBarChildRects status_bar_child_rects(int bar_h, int pad_px,
     r.zoom_w  = zoom_w_px;
     r.zoom_h  = r.label_h;
     return r;
+}
+
+// The SB_SETMINHEIGHT argument that keeps the page box inside the border the
+// bar draws around its part (#113). That border is a dark line at y = 2 and a
+// light one on the bar's last row, at every DPI. At 96 DPI the bar's natural
+// 22 px leaves 18 rows between them, too few for the 19 px box, which then sat
+// across the top line. The 4 px is measured, not derived: asking for box + 4
+// gives a 25 px bar with the box at y = 3, just inside the top line, and two
+// clear rows above the bottom one. At 192 DPI the natural 44 px already holds
+// a 36 px box at y = 4, so the minimum (40) changes nothing there.
+// `edit_h_px <= 0` (box not measured) asks for no minimum.
+inline int status_bar_min_drawing_height(int edit_h_px) noexcept {
+    constexpr int kPartBorderPx = 4;
+    if (edit_h_px <= 0) return 0;
+    return edit_h_px + kPartBorderPx;
 }
 
 // May an incoming page change rewrite the text in the box?

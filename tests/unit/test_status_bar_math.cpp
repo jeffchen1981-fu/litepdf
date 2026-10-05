@@ -10,6 +10,7 @@
 using litepdf::ui::detail::format_zoom_pct;
 using litepdf::ui::detail::parse_page_input;
 using litepdf::ui::detail::should_overwrite_page_box;
+using litepdf::ui::detail::status_bar_min_drawing_height;
 using litepdf::ui::detail::status_bar_child_rects;
 
 TEST_CASE("StatusBarMath parse_page_input accepts an in-range 1-based page", "[statusbar]") {
@@ -131,6 +132,18 @@ TEST_CASE("StatusBarMath status_bar_child_rects falls back to the padded strip w
         REQUIRE(r.edit_h == 16);
         REQUIRE(r.edit_y == 4);
     }
+}
+
+TEST_CASE("StatusBarMath status_bar_min_drawing_height keeps the box inside the part border",
+          "[statusbar]") {
+    // #113: at 96 DPI the bar's natural 22 px left 18 rows inside its part
+    // border, too few for the 19 px box, which then sat across the top line.
+    // The minimum asks for the box plus the measured 4 px of border.
+    REQUIRE(status_bar_min_drawing_height(19) == 23);
+    REQUIRE(status_bar_min_drawing_height(36) == 40);
+    // No measured box: no minimum, the bar keeps its natural height.
+    REQUIRE(status_bar_min_drawing_height(0)  == 0);
+    REQUIRE(status_bar_min_drawing_height(-3) == 0);
 }
 
 TEST_CASE("StatusBarMath status_bar_child_rects degrades safely on a tiny bar",

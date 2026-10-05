@@ -139,7 +139,7 @@ struct StatusBar::Impl {
     UINT dpi   = 96;
     int  height_px = 0;
     // #113: the page box's window height for the current font -- see
-    // page_box_height(). Re-measured with height_px; 0 means "unknown".
+    // page_box_height(). Re-measured in measure(); 0 means "unknown".
     int  edit_h_px = 0;
     // #59. height_px above is the MEASURED height and is never zeroed:
     // update_dpi() re-measures a hidden bar too, and StatusBar::height_px()
@@ -287,6 +287,12 @@ struct StatusBar::Impl {
     // Re-measure the control's natural height for the current font.
     void measure() {
         if (!hwnd) return;
+        // #113: measure the box first, so the bar can be told how tall it must
+        // be to hold it before it computes its own height below.
+        edit_h_px = page_box_height();
+        SendMessageW(hwnd, SB_SETMINHEIGHT,
+                     static_cast<WPARAM>(detail::status_bar_min_drawing_height(edit_h_px)),
+                     0);
         // A status bar computes its own height only when it PROCESSES WM_SIZE.
         // The window is created 0x0, so without this the GetWindowRect below
         // would read 0 every time and the fallback would be the only answer
@@ -300,7 +306,6 @@ struct StatusBar::Impl {
         // Guard the degenerate case so on_layout can never reserve a negative
         // strip -- 22 DIP is the classic status bar height at 100%.
         height_px = (measured > 0) ? measured : dp(22, dpi);
-        edit_h_px = page_box_height();
     }
 
     // #113: one line of the bar's font plus the box's frame. A single-line
@@ -314,6 +319,10 @@ struct StatusBar::Impl {
         HDC dc = GetDC(edit);
         if (!dc) return 0;
         const HGDIOBJ old = SelectObject(dc, font.get());
+        if (!old || old == HGDI_ERROR) {
+            ReleaseDC(edit, dc);
+            return 0;
+        }
         TEXTMETRICW tm = {};
         const BOOL got = GetTextMetricsW(dc, &tm);
         SelectObject(dc, old);
