@@ -681,6 +681,13 @@ void StatusBar::set_page(int page_index, int page_count) {
         if (detail::should_overwrite_page_box(focused, impl_->edit_text(),
                                               impl_->last_written)) {
             impl_->force_revert();
+            // #48: SetWindowTextW drops a focused EDIT's selection to (0,0)
+            // even when the text is unchanged, so a page change after Ctrl+G
+            // (a tab switch, a wheel notch over the canvas) would turn "type to
+            // replace" into "type to prepend". The reader has not touched the
+            // text, so the next keystroke should replace it -- whether the box
+            // was entered by Ctrl+G or by a click.
+            if (focused) SendMessageW(impl_->edit, EM_SETSEL, 0, -1);
         }
     }
     if (impl_->label) {
@@ -726,6 +733,20 @@ bool StatusBar::page_box_has_focus() const {
     // window does not move the focus off its children, so a hidden box must
     // not claim ESC.
     return impl_ && impl_->visible && impl_->edit && GetFocus() == impl_->edit;
+}
+
+bool StatusBar::page_box_enabled() const {
+    // `edit` too: if the status bar control failed to create, the constructor
+    // returned with no box, yet set_page() still records page_count.
+    return impl_ && impl_->edit && impl_->page_count > 0;
+}
+
+void StatusBar::focus_page_box() {
+    if (!page_box_enabled()) return;
+    // Focus first, then select: the EDIT's own focus handling could move a
+    // selection made before it had the focus.
+    SetFocus(impl_->edit);
+    SendMessageW(impl_->edit, EM_SETSEL, 0, -1);
 }
 
 void StatusBar::set_on_goto(OnGoto cb) {

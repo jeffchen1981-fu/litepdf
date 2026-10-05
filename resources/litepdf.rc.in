@@ -77,6 +77,8 @@ IDM_MAIN_MENU MENU
         MENUITEM "Zoom &In\tCtrl+=",  IDM_ZOOM_IN
         MENUITEM "Zoom &Out\tCtrl+-", IDM_ZOOM_OUT
         MENUITEM "&Reset Zoom\tCtrl+0", IDM_ZOOM_RESET
+        MENUITEM SEPARATOR
+        MENUITEM "&Go to Page...\tCtrl+G", IDM_VIEW_GOTO_PAGE
     }
     POPUP "&Help"
     {

@@ -645,12 +645,33 @@ void MainWindow::on_toggle_status_bar() {
     // #59: window-level state, so no active_view() gate -- the toggle works
     // with no document open.
     if (!status_bar_) return;
-    status_bar_->set_visible(!status_bar_->visible());
+    set_status_bar_visible(!status_bar_->visible());
+}
+
+void MainWindow::set_status_bar_visible(bool visible) {
+    if (!status_bar_ || status_bar_->visible() == visible) return;
+    status_bar_->set_visible(visible);
     on_layout();
     // The canvas just changed height. Its own WM_SIZE resubmits only when the
     // render target has to be recreated, so without this a fit mode would keep
     // the fit it derived for the old height.
     if (auto* view = active_view()) kick_render(view->current_page());
+}
+
+void MainWindow::on_goto_page() {
+    // #48. This guard is required, not redundant. The GRAYED menu state stops
+    // only the routes that pass WM_INITMENUPOPUP (the accelerator and the
+    // menu); a posted WM_COMMAND skips it. And while a mouse-opened View popup
+    // is up, a second instance can open a 0-page document between the enable
+    // check and the click. Keep it the same expression as the View arm's
+    // EnableMenuItem for IDM_VIEW_GOTO_PAGE.
+    if (!status_bar_ || !status_bar_->page_box_enabled()) return;
+    // The box lives in the status bar, so a hidden bar is shown first and
+    // stays shown: there is no reliable hook to hide it again afterwards (the
+    // box's WM_KILLFOCUS reverts text and tells no one), and the bar's
+    // visibility is not persisted anyway.
+    if (!status_bar_->visible()) set_status_bar_visible(true);
+    status_bar_->focus_page_box();
 }
 
 void MainWindow::toggle_thumbs() {
@@ -1548,6 +1569,14 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 CheckMenuItem(popup, IDM_VIEW_STATUS_BAR,
                               MF_BYCOMMAND
                               | (bar_on ? MF_CHECKED : MF_UNCHECKED));
+                // #48: the same expression as on_goto_page()'s guard.
+                // TranslateAcceleratorW sends WM_INITMENUPOPUP before acting
+                // on Ctrl+G, and a GRAYED item swallows the key with no
+                // WM_COMMAND -- the intended outcome with no page to go to.
+                const bool can_goto = status_bar_ && status_bar_->page_box_enabled();
+                EnableMenuItem(popup, IDM_VIEW_GOTO_PAGE,
+                               MF_BYCOMMAND
+                               | (can_goto ? MF_ENABLED : MF_GRAYED));
                 return 0;
             }
             // #52 Edit popup. TranslateAcceleratorW sends WM_INITMENUPOPUP
@@ -1660,6 +1689,9 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     return 0;
                 case IDM_VIEW_STATUS_BAR:
                     on_toggle_status_bar();
+                    return 0;
+                case IDM_VIEW_GOTO_PAGE:
+                    on_goto_page();
                     return 0;
                 case IDM_VIEW_INVERT: {
                     // Phase 8 D7/D9: per-tab Invert Colors toggle. Flips
@@ -2482,6 +2514,7 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
         { FCONTROL | FVIRTKEY, VK_OEM_PLUS,  IDM_ZOOM_IN       },  // Ctrl+=
         { FCONTROL | FVIRTKEY, VK_OEM_MINUS, IDM_ZOOM_OUT      },  // Ctrl+-
         { FCONTROL | FVIRTKEY, '0',          IDM_ZOOM_RESET    },
+        { FCONTROL | FVIRTKEY, 'G',          IDM_VIEW_GOTO_PAGE },  // #48
         { FVIRTKEY,            VK_F4,        IDM_VIEW_THUMBS   },
         { FVIRTKEY,            VK_F5,        IDM_VIEW_OUTLINE  },
         // Phase 8: Tier 3 view-mode toggles. Modifier-consistent

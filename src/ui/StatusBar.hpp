@@ -100,6 +100,18 @@ public:
     // its own. The IDM_FIND_CLOSE arm in Task 5 asks this question instead.
     bool page_box_has_focus() const;
 
+    // #48: the box can take a page number -- the box exists and a document
+    // with at least one page is showing. Read from the state set_page() and
+    // set_empty() keep, not IsWindowEnabled, so it cannot drift from
+    // set_empty(). Ignores visibility: MainWindow shows a hidden bar first.
+    // MainWindow's Ctrl+G guard and the View-menu enable state both use it.
+    bool page_box_enabled() const;
+
+    // #48 (Ctrl+G): give the page box the keyboard and select all of its text,
+    // so the next digit replaces the page number. No-op unless
+    // page_box_enabled(). The caller makes sure the bar is visible.
+    void focus_page_box();
+
     void set_on_goto(OnGoto cb);
     void set_on_focus_out(OnFocusOut cb);
     void set_on_wheel(OnWheel cb);
