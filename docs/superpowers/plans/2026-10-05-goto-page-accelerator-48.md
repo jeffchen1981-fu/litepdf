@@ -107,6 +107,7 @@ public static class GpW {
   [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint tid, ref GUITHREADINFO g);
   [DllImport("user32.dll")] public static extern IntPtr GetMenu(IntPtr h);
@@ -212,13 +213,25 @@ try {
     [void](Wait-Until { [GpW]::Text($script:Edit) -eq '1' } 5000)
 
     # --- case 1: the real accelerator ---------------------------------------
-    # SendInput goes to the FOREGROUND window. A freshly started LitePDF is
-    # normally foreground; if it is not, 01 is inconclusive, not a product bug.
+    # SendInput goes to whatever window is FOREGROUND, not to a handle. Bring
+    # LitePDF to the front and send the key only once it is there: a Ctrl+G
+    # typed into another app (an editor's Go to Line) is worse than a skipped
+    # check. Win11's foreground lock can refuse SetForegroundWindow from a
+    # background process, so AppActivate on the PID is the fallback.
+    [void][GpW]::SetForegroundWindow($script:Main)
+    if (-not (Wait-Until { [GpW]::GetForegroundWindow() -eq $script:Main } 1500)) {
+        try { [void](New-Object -ComObject WScript.Shell).AppActivate($proc.Id) } catch { }
+        [void](Wait-Until { [GpW]::GetForegroundWindow() -eq $script:Main } 1500)
+    }
     $fg = ([GpW]::GetForegroundWindow() -eq $script:Main)
     Add-Check '00 CONTROL LitePDF is foreground and INPUT is 40 bytes' ($fg -and ([GpW]::InputSize() -eq 40)) ("fg=$fg size=" + [GpW]::InputSize())
-    $sent = [GpW]::CtrlG()
-    [void](Wait-Until { Test-BoxReady } 2000)
-    Add-Check '01 real Ctrl+G focuses the page box and selects all of it' (Test-BoxReady) ("sent=$sent " + (Show-Sel))
+    if ($fg) {
+        $sent = [GpW]::CtrlG()
+        [void](Wait-Until { Test-BoxReady } 2000)
+        Add-Check '01 real Ctrl+G focuses the page box and selects all of it' (Test-BoxReady) ("sent=$sent " + (Show-Sel))
+    } else {
+        Add-Check '01 real Ctrl+G focuses the page box and selects all of it' $false 'SKIPPED: LitePDF is not foreground, no key was sent'
+    }
     $view = [GpW]::GetSubMenu([GpW]::GetMenu($script:Main), 2)
     $st = Get-ViewState 40065
     $label = [GpW]::MenuText($view, 40065)
@@ -323,7 +336,7 @@ Expected: `normal: 16 checks, 10 failed`, exit code 1.
 - FAIL: 01, 02, 04, 06, 07, 08, 10, 13, 14, 15. There is no command 40065 yet, so nothing focuses the box, the menu item does not exist (`state=0xFFFFFFFF`), and ESC has no focused box to revert.
 - PASS: 00, 03, 05, 09, 11, 12 (controls, and 12 holds trivially before the feature exists).
 
-If 00 fails, the run is inconclusive: bring nothing else to the foreground and rerun. If any other check differs from the lists above, stop: the driver is wrong, and fixing it comes before any product code.
+If 00 fails, 01 reads `SKIPPED` and no key was sent: the run is inconclusive. Make sure no other window holds the foreground (close a toast, do not click anything during launch) and rerun. If any other check differs from the lists above, stop: the driver is wrong, and fixing it comes before any product code.
 
 - [ ] **Step 4: No commit**
 
@@ -679,8 +692,11 @@ git checkout -- src/ui/StatusBar.cpp
 git diff --quiet -- src/ui/StatusBar.cpp || { echo "SOURCE NOT RESTORED - stop and fix by hand"; exit 1; }
 test -z "$(git status --short)" || { echo "SOURCE NOT RESTORED - stop and fix by hand"; exit 1; }
 echo "source restored"
-"/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe" --build build --target litepdf --config Release
-cp build/Release/litepdf.exe build/gui-check/normal-probe.exe
+# Chained: if the normal build fails, build/Release/litepdf.exe is still the
+# mutant, and copying it as normal-probe.exe would fake a check-08 regression.
+"/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe" --build build --target litepdf --config Release \
+  && cp build/Release/litepdf.exe build/gui-check/normal-probe.exe \
+  || { echo "NORMAL BUILD FAILED - no normal-probe.exe was made"; exit 1; }
 ```
 
 - [ ] **Step 2: Build both exes**
