@@ -23,6 +23,11 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   on its bottom edge or lost their lowest rows. The box now takes its height
   from its font. At 100% scaling the status bar is 3 pixels taller to fit it
   (#113).
+- Fit Width and Fit Page now follow the page area when it is resized from inside
+  the window: dragging the splitter beside the outline or thumbnails, dragging
+  the search results splitter, or opening or closing the search results. Before,
+  the page kept the size it was fitted to until the next window resize, zoom or
+  page turn (#109).
 
 ## [1.4.0] — 2026-10-03 — Text selection, panning, and sideways scrolling
 
