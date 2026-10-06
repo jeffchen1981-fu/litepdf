@@ -1234,6 +1234,9 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 results_panel_height_px_ =
                     clamp_results_panel_height(new_h - status_h);
                 on_layout();
+                // #109: the canvas just changed height. Re-derive the fit on
+                // every move, the cadence WM_SIZE already accepts for drags.
+                if (auto* view = active_view()) kick_render(view->current_page());
             });
 
             // PR-B: bottom status bar. Created before the first on_layout so
@@ -1295,6 +1298,9 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     static_cast<int>(client.right) - 100);
                 left_pane_width_px_ = std::clamp(new_w, min_w, max_w);
                 on_layout();
+                // #109: the canvas just changed width, so FitWidth must be
+                // re-derived -- on every move, like the results splitter.
+                if (auto* view = active_view()) kick_render(view->current_page());
             });
 
             // Seed left_pane_width_px_ to ~250 dip — matches the prior
@@ -2300,6 +2306,8 @@ void MainWindow::on_cross_tab_find() {
     }
     results_panel_->show_and_focus_edit();
     on_layout();
+    // #109: the panel took height from the canvas; a fit mode must follow.
+    if (auto* view = active_view()) kick_render(view->current_page());
 }
 
 void MainWindow::on_toggle_results() {
@@ -2323,6 +2331,8 @@ void MainWindow::on_toggle_results() {
         results_panel_->show_and_focus_edit();
     }
     on_layout();
+    // #109: either direction changes the canvas height.
+    if (auto* view = active_view()) kick_render(view->current_page());
 }
 
 void MainWindow::on_results_query(const std::wstring& q, bool mc, bool ww,
@@ -2425,6 +2435,8 @@ void MainWindow::on_results_close() {
     // resumes immediately on Ctrl+F (I1 fix in CrossTabSearch::clear).
     if (cross_tab_) cross_tab_->clear();
     on_layout();
+    // #109: the canvas gets the panel's height back.
+    if (auto* view = active_view()) kick_render(view->current_page());
     if (canvas_) SetFocus(canvas_->hwnd());
 }
 
