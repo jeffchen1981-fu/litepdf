@@ -19,10 +19,10 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 ### Fixed
 
 - The page number in the status bar's page box is no longer cut off at the
-  bottom. The box was shorter than one line of its own text at every display
-  scale, so the digits sat on its bottom edge or lost their lowest rows. The box
-  now takes its height from its font. At 100 % scaling the status bar is 3
-  pixels taller to fit it (#113).
+  bottom. The box was shorter than one line of its own text, so the digits sat
+  on its bottom edge or lost their lowest rows. The box now takes its height
+  from its font. At 100% scaling the status bar is 3 pixels taller to fit it
+  (#113).
 
 ## [1.4.0] — 2026-10-03 — Text selection, panning, and sideways scrolling
 
