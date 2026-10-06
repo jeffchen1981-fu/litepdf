@@ -57,6 +57,15 @@ public:
         // independent (D8). Default false: existing 5-element aggregate
         // call sites keep compiling unchanged.
         bool  invert       = false;
+        // (#117) Optional caller-owned cancel flag. When set, submit() uses it
+        // as the token's flag instead of making a new one, so on_complete can
+        // read it to tell a cancelled request (flag set) from a failed render
+        // (flag clear) -- both deliver a null pixmap. cancel_all_below_priority
+        // flags only requests that are still queued, so once a worker has
+        // taken a request it cannot flag it under a failed render. cancel(token)
+        // can flag it at any time, so a caller that also cancels by token can
+        // see a failed render reported as cancelled.
+        std::shared_ptr<std::atomic<bool>> cancel_flag;
     };
 
     // Construct a RenderEngine.

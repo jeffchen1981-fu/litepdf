@@ -62,7 +62,7 @@ public:
     // the renderer (DocumentView in T8) so the destruction order can be
     // controlled: cache + renderer outlive the pane, the pane's dtor
     // cancels in-flight renders before they can post WM_USER_THUMB_READY
-    // back to a destroyed HWND.
+    // or WM_USER_THUMB_CANCELED back to a destroyed HWND.
     void set_renderer(litepdf::core::ThumbnailRenderer* renderer);
     void set_cache(litepdf::core::ThumbCache* cache);
 

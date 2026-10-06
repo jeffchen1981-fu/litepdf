@@ -5,7 +5,11 @@
 // so the main render cache (L1/L2) is never touched.
 //
 // Lifetime contract: on_done runs on a worker thread and receives an
-// HBITMAP (or nullptr on render failure); caller takes ownership.
+// HBITMAP (or nullptr when no thumb was produced); caller takes ownership.
+// A null HBITMAP comes with `canceled` = true when the request was cancelled
+// before it rendered -- by cancel_pending() or by any less-urgent cancel on
+// the shared engine, which every main-page render issues -- and false when
+// the render itself failed. Only a cancelled thumb is worth asking for again.
 // Adopts Phase 6 C1's task-drain pattern (D16): the dtor blocks until
 // every in-flight on_done has completed, so it is safe to destroy the
 // renderer (and any objects captured by on_done lambdas) right after
@@ -21,7 +25,7 @@ namespace litepdf::core {
 
 class ThumbnailRenderer {
 public:
-    using OnDone = std::function<void(HBITMAP)>;
+    using OnDone = std::function<void(HBITMAP bm, bool canceled)>;
 
     // `engine` must outlive this ThumbnailRenderer. Typically each
     // DocumentView owns one RenderEngine and one ThumbnailRenderer

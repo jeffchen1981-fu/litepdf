@@ -83,11 +83,16 @@ void ThumbnailRenderer::submit(int page, OnDone on_done) {
     req.priority     = 3;
     req.scale        = impl_->scale;
     req.bypass_cache = true;  // Task 0.5: thumb pixmaps don't touch L1/L2.
-    req.on_complete = [impl = impl_.get(), cb = std::move(on_done)]
+    // #117: our own cancel flag, so a null pixmap can be told apart: set means
+    // the request was cancelled while queued, clear means the render failed.
+    auto canceled    = std::make_shared<std::atomic<bool>>(false);
+    req.cancel_flag  = canceled;
+    req.on_complete = [impl = impl_.get(), cb = std::move(on_done), canceled]
                       (fz_pixmap* pix, fz_context* ctx) {
         HBITMAP bm = pixmap_to_hbitmap(pix, ctx);
+        const bool was_canceled = !pix && canceled->load();
         if (pix) fz_drop_pixmap(ctx, pix);
-        cb(bm);
+        cb(bm, was_canceled);
         // RAII-decrement at the end so the dtor's spin-wait observes
         // completion only after the user callback has fully run.
         impl->pending_tasks.fetch_sub(1, std::memory_order_release);
@@ -99,9 +104,9 @@ void ThumbnailRenderer::cancel_pending() {
     // Cancel any not-yet-started priority=3 thumb requests. The engine's
     // cancel_all_below_priority(p) cancels entries with priority > p
     // (lower-importance), so we pass 2 to hit our own priority=3 work.
-    // In-flight workers cooperatively observe the cancel flag at safe
-    // points; their on_complete still fires (D17, with pix=nullptr on
-    // cancel paths), so pending_tasks still decrements correctly.
+    // Only queued requests are flagged; one a worker has already taken
+    // runs to completion. A cancelled request's on_complete still fires
+    // (D17, with pix=nullptr), so pending_tasks still decrements correctly.
     impl_->engine.cancel_all_below_priority(2);
 }
 

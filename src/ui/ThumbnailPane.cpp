@@ -6,6 +6,7 @@
 #include "ui/detail/HighContrast.hpp"
 #include "ui/detail/ThemeFrame.hpp"
 #include "ui/detail/ThumbnailPalette.hpp"
+#include "ui/detail/ThumbRequests.hpp"
 
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -16,7 +17,6 @@
 #include <cwchar>
 #include <stdexcept>
 #include <string>
-#include <unordered_set>
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "dwmapi.lib")
@@ -51,10 +51,18 @@ std::atomic<UINT_PTR> g_next_parent_subclass_id{0xAB03};
 // atomically with respect to other UI-thread work.
 //
 //   wParam = page index (int)
-//   lParam = HBITMAP (may be null for cancelled/failed renders; the handler
-//            still erases the page from pending_renders_ but does NOT put a
-//            null HBITMAP into the cache)
+//   lParam = HBITMAP (may be null for a failed render; the handler still
+//            erases the page from pending_renders_ but does NOT put a null
+//            HBITMAP into the cache)
 constexpr UINT WM_USER_THUMB_READY = WM_USER + 17;
+
+// #117: the render was cancelled before it ran (wParam = page index, lParam =
+// the request id from ThumbRequests::try_start). Every
+// main-page render cancels the queued thumbs, visible rows included, so the
+// handler redraws the row to make WM_DRAWITEM ask for it again. A failed
+// render comes back as WM_USER_THUMB_READY with a null HBITMAP instead and
+// is not re-requested, so a page that never renders cannot loop.
+constexpr UINT WM_USER_THUMB_CANCELED = WM_USER + 18;
 
 // Tile geometry: matches ThumbnailModel defaults (120x160 dip) plus a small
 // margin on each edge and a single label line below the placeholder.
@@ -161,11 +169,12 @@ struct ThumbnailPane::Impl {
     PaletteBrushes brushes_;
 
     // T6: the set of pages for which a render is currently in flight (i.e.
-    // submitted to renderer_ but no WM_USER_THUMB_READY has come back yet).
-    // UI-thread-only: mutated at exactly six points (WM_DRAWITEM submit
-    // path, WM_USER_THUMB_READY handler, set_page_count, clear/hide, dtor).
+    // submitted to renderer_ but no WM_USER_THUMB_READY or
+    // WM_USER_THUMB_CANCELED has come back yet). UI-thread-only: mutated
+    // only by the WM_DRAWITEM submit path, the two result handlers,
+    // set_page_count, hide, on_dpi_changed, set_renderer, and the dtor.
     // Worker threads NEVER touch this set.
-    std::unordered_set<int> pending_renders_;
+    ThumbRequests pending_renders_;
 
     void rebuild_brushes() {
         delete_brushes();
@@ -338,9 +347,8 @@ ThumbnailPane::ThumbnailPane(HINSTANCE hInstance, HWND parent)
 ThumbnailPane::~ThumbnailPane() {
     if (impl_) {
         // pending_renders_ mutation point #6 (dtor): cancel before tearing
-        // down the HWND so any worker that has not yet PostMessageWd a
-        // WM_USER_THUMB_READY observes the cancel and produces nullptr
-        // HBITMAPs (D17). DocumentView (T8) is responsible for ordering
+        // down the HWND so any request still queued is cancelled and comes
+        // back as WM_USER_THUMB_CANCELED with no HBITMAP (D17). DocumentView (T8) is responsible for ordering
         // ~ThumbnailPane *before* ~ThumbnailRenderer so renderer_ is still
         // valid here; the renderer's own dtor then drains its workers
         // (D16) so by the time ~ThumbnailRenderer returns, no PostMessageW
@@ -724,12 +732,12 @@ LRESULT CALLBACK thumb_list_subclass_proc(HWND hwnd, UINT msg, WPARAM w,
             // T6 worker->UI bridge. Runs on UI thread (PostMessageW guarantee).
             // pending_renders_ mutation point #2: erase the page regardless
             // of HBITMAP success/null. Either the render succeeded (insert
-            // into cache) or it failed/was cancelled (D17 fires on_complete
-            // with nullptr) — in both cases the request is no longer pending,
-            // so a future WM_DRAWITEM may re-queue it if needed.
+            // into cache) or it failed (null) — in both cases the request is
+            // no longer pending, so a future WM_DRAWITEM may re-queue it if
+            // needed. A cancelled render arrives as WM_USER_THUMB_CANCELED.
             const int     page = static_cast<int>(w);
             const HBITMAP bm   = reinterpret_cast<HBITMAP>(l);
-            impl.pending_renders_.erase(page);
+            impl.pending_renders_.on_finished(page);
             if (bm) {
                 if (impl.cache) {
                     // Cache takes ownership (ThumbCache::put contract).
@@ -747,9 +755,26 @@ LRESULT CALLBACK thumb_list_subclass_proc(HWND hwnd, UINT msg, WPARAM w,
                     ListView_RedrawItems(hwnd, page, page);
                 }
             }
-            // Null bm path: cancelled / failed render. No repaint needed —
-            // the placeholder is already on screen and we'll re-queue when
-            // the row scrolls back into view.
+            // Null bm path: the render failed. No repaint — asking again
+            // would fail again. The placeholder stays, and the row is
+            // re-queued only when it is next painted for another reason.
+            return 0;
+        }
+        case WM_USER_THUMB_CANCELED: {
+            // #117: the render was cancelled while queued -- usually by a
+            // main-page render on the shared engine, not because the row
+            // left the screen. Redraw the row so WM_DRAWITEM re-queues it.
+            // A row that is off screen or a hidden pane gets no WM_DRAWITEM,
+            // so this re-asks only for tiles someone can see, and it stops
+            // once the cancels (kicks) stop. A stale notice (from before the
+            // pane cleared its pending set) while a newer request for the
+            // page is in flight changes nothing.
+            const int page = static_cast<int>(w);
+            const auto id  = static_cast<std::uint32_t>(l);
+            if (impl.pending_renders_.on_canceled(page, id) &&
+                page >= 0 && page < impl.model.page_count()) {
+                ListView_RedrawItems(hwnd, page, page);
+            }
             return 0;
         }
         case WM_SYSCOLORCHANGE:
@@ -905,8 +930,10 @@ LRESULT CALLBACK thumb_parent_subclass_proc(HWND hwnd, UINT msg, WPARAM w,
                     // callback synchronously cannot PostMessage WM_USER_THUMB_READY
                     // before we've recorded the page as in-flight (which would
                     // let the next WM_DRAWITEM iteration re-submit a duplicate).
-                    if (impl.renderer && impl.cache &&
-                        impl.pending_renders_.insert(page).second) {
+                    const auto id = (impl.renderer && impl.cache)
+                                        ? impl.pending_renders_.try_start(page)
+                                        : std::nullopt;
+                    if (id) {
                         // Capture the list HWND, NOT `self` or `&impl`. The
                         // worker thread fires the callback after the renderer's
                         // own dtor (D16) has guaranteed liveness — but the pane
@@ -918,13 +945,17 @@ LRESULT CALLBACK thumb_parent_subclass_proc(HWND hwnd, UINT msg, WPARAM w,
                         // bitmap immediately to avoid a leak.
                         HWND target = impl.list_hwnd;
                         impl.renderer->submit(page,
-                            [target, page](HBITMAP rendered) {
+                            [target, page, id = *id](HBITMAP rendered, bool canceled) {
                                 // Worker thread. Do NOT touch any pane state
                                 // here — only the message queue.
-                                if (!PostMessageW(target,
-                                                  WM_USER_THUMB_READY,
-                                                  static_cast<WPARAM>(page),
-                                                  reinterpret_cast<LPARAM>(rendered))) {
+                                const BOOL posted = canceled
+                                    ? PostMessageW(target, WM_USER_THUMB_CANCELED,
+                                                   static_cast<WPARAM>(page),
+                                                   static_cast<LPARAM>(id))
+                                    : PostMessageW(target, WM_USER_THUMB_READY,
+                                                   static_cast<WPARAM>(page),
+                                                   reinterpret_cast<LPARAM>(rendered));
+                                if (!posted) {
                                     // HWND gone (pane destroyed mid-render or
                                     // posted-message queue full). Drop the
                                     // bitmap so it does not leak. nullptr is
