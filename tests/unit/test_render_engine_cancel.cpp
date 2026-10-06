@@ -127,3 +127,58 @@ TEST_CASE("RenderEngine::cancel on empty token is a no-op", "[core][render][canc
     engine.cancel(empty_token);
     SUCCEED();
 }
+
+TEST_CASE("RenderEngine: a caller-supplied cancel flag is the one a cancel sets",
+          "[core][render][cancel]") {
+    // #117: ThumbnailRenderer hands the engine its own flag so its callback can
+    // tell a cancelled request (flag set) from a failed render (flag clear);
+    // both arrive as a null pixmap.
+    litepdf::core::Document doc;
+    REQUIRE(!doc.open("tests/fixtures/simple.pdf").has_value());
+    litepdf::core::RenderEngine engine(doc, 1);
+
+    // Gate the single worker so the flagged request waits in the queue.
+    std::mutex gate_m;
+    std::condition_variable gate_cv;
+    bool gate_entered = false;
+    engine.submit({99, 0, 1.0f, [&](fz_pixmap* p, fz_context* ctx){
+        {
+            std::lock_guard<std::mutex> g(gate_m);
+            gate_entered = true;
+            gate_cv.notify_all();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        if (p) fz_drop_pixmap(ctx, p);
+    }});
+    {
+        std::unique_lock<std::mutex> lk(gate_m);
+        gate_cv.wait(lk, [&]{ return gate_entered; });
+    }
+
+    auto flag = std::make_shared<std::atomic<bool>>(false);
+    std::atomic<int> calls{0};
+    std::atomic<int> nulls{0};
+    std::atomic<bool> flag_seen_by_callback{false};
+    litepdf::core::RenderEngine::RenderRequest req;
+    req.page_num    = 0;
+    req.priority    = 3;
+    req.scale       = 1.0f;
+    req.cancel_flag = flag;
+    req.on_complete = [&, flag](fz_pixmap* p, fz_context* ctx) {
+        ++calls;
+        if (!p) ++nulls;
+        flag_seen_by_callback = flag->load();
+        if (p) fz_drop_pixmap(ctx, p);
+    };
+    const auto tok = engine.submit(std::move(req));
+    REQUIRE(tok.canceled == flag);
+
+    // The cancel every canvas render issues before it submits.
+    engine.cancel_all_below_priority(0);
+    REQUIRE(flag->load());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    REQUIRE(calls.load() == 1);
+    REQUIRE(nulls.load() == 1);
+    REQUIRE(flag_seen_by_callback.load());
+}

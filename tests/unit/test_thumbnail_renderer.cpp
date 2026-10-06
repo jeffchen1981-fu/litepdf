@@ -21,6 +21,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include <windows.h>
 
@@ -28,7 +30,9 @@
 // PageCache goes out of scope. Mirrors test_render_engine_lifecycle.cpp.
 extern "C" {
     struct fz_context;
+    struct fz_pixmap;
     void fz_drop_context(fz_context*);
+    void fz_drop_pixmap(fz_context*, fz_pixmap*);
 }
 
 using namespace std::chrono_literals;
@@ -50,8 +54,10 @@ TEST_CASE("ThumbnailRenderer: produces HBITMAP for a real page",
 
         std::atomic<int> got{0};
         HBITMAP captured = nullptr;
-        r.submit(0, [&](HBITMAP bm) {
+        bool canceled = true;
+        r.submit(0, [&](HBITMAP bm, bool c) {
             captured = bm;
+            canceled = c;
             got.fetch_add(1, std::memory_order_release);
         });
         for (int i = 0; i < 500 && got.load(std::memory_order_acquire) == 0; ++i) {
@@ -59,6 +65,7 @@ TEST_CASE("ThumbnailRenderer: produces HBITMAP for a real page",
         }
         REQUIRE(got.load() == 1);
         REQUIRE(captured != nullptr);
+        REQUIRE_FALSE(canceled);
         DeleteObject(captured);
         // D2 invariant: thumb pass must not have polluted the main cache.
         REQUIRE(cache.get_pixmap(0, 0.15f) == nullptr);
@@ -85,7 +92,7 @@ TEST_CASE("ThumbnailRenderer: dtor drains in-flight tasks (D16 / 1A)",
         {
             ThumbnailRenderer r(eng);
             for (int i = 0; i < 3; ++i) {
-                r.submit(0, [&](HBITMAP bm) {
+                r.submit(0, [&](HBITMAP bm, bool /*canceled*/) {
                     if (bm) DeleteObject(bm);
                     completed.fetch_add(1, std::memory_order_release);
                 });
@@ -112,7 +119,7 @@ TEST_CASE("ThumbnailRenderer: cancel_pending stops not-yet-started work",
         std::atomic<int> seen{0};
         std::atomic<int> non_null_bm{0};
         for (int i = 0; i < 5; ++i) {
-            r.submit(i, [&](HBITMAP bm) {
+            r.submit(i, [&](HBITMAP bm, bool /*canceled*/) {
                 seen.fetch_add(1, std::memory_order_release);
                 if (bm) {
                     non_null_bm.fetch_add(1, std::memory_order_release);
@@ -129,6 +136,93 @@ TEST_CASE("ThumbnailRenderer: cancel_pending stops not-yet-started work",
         // through eventually and non_null_bm would be 5; this assertion
         // catches that regression.)
         REQUIRE(non_null_bm.load() < 5);
+    }
+    fz_drop_context(cache_ctx);
+}
+
+// #117: a null HBITMAP means either "cancelled before it rendered" or "the
+// render failed". The pane re-requests only the first, so on_done must say
+// which one it was.
+namespace {
+struct ThumbResult {
+    std::atomic<int> calls{0};
+    HBITMAP bm = nullptr;
+    bool canceled = false;
+    ThumbnailRenderer::OnDone callback() {
+        return [this](HBITMAP b, bool c) {
+            bm = b;
+            canceled = c;
+            calls.fetch_add(1, std::memory_order_release);
+        };
+    }
+    void wait() {
+        for (int i = 0; i < 500 && calls.load(std::memory_order_acquire) == 0; ++i) {
+            std::this_thread::sleep_for(10ms);
+        }
+    }
+};
+}  // namespace
+
+TEST_CASE("ThumbnailRenderer: a request cancelled while queued reports canceled",
+          "[thumb_renderer]") {
+    Document doc;
+    REQUIRE(!doc.open("tests/fixtures/simple.pdf").has_value());
+    fz_context* cache_ctx = doc.clone_context();
+    REQUIRE(cache_ctx);
+    {
+        PageCache cache(/*l1=*/4, /*l2=*/4, cache_ctx);
+        RenderEngine eng(doc, /*workers=*/1, &cache);
+        ThumbnailRenderer r(eng);
+
+        // Gate the single worker with a slow main-page render so the thumb
+        // request is still queued when the cancel lands.
+        std::mutex gate_m;
+        std::condition_variable gate_cv;
+        bool gate_entered = false;
+        eng.submit({0, 0, 1.0f, [&](fz_pixmap* p, fz_context* ctx) {
+            {
+                std::lock_guard<std::mutex> g(gate_m);
+                gate_entered = true;
+                gate_cv.notify_all();
+            }
+            std::this_thread::sleep_for(80ms);
+            if (p) fz_drop_pixmap(ctx, p);
+        }});
+        {
+            std::unique_lock<std::mutex> lk(gate_m);
+            gate_cv.wait(lk, [&] { return gate_entered; });
+        }
+
+        ThumbResult res;
+        r.submit(0, res.callback());
+        // What DocumentView::request_render_with_prefetch does on every kick.
+        eng.cancel_all_below_priority(0);
+        res.wait();
+        REQUIRE(res.calls.load() == 1);
+        REQUIRE(res.bm == nullptr);
+        REQUIRE(res.canceled);
+    }
+    fz_drop_context(cache_ctx);
+}
+
+TEST_CASE("ThumbnailRenderer: a failed render reports not canceled",
+          "[thumb_renderer]") {
+    Document doc;
+    REQUIRE(!doc.open("tests/fixtures/simple.pdf").has_value());
+    fz_context* cache_ctx = doc.clone_context();
+    REQUIRE(cache_ctx);
+    {
+        PageCache cache(/*l1=*/4, /*l2=*/4, cache_ctx);
+        RenderEngine eng(doc, /*workers=*/1, &cache);
+        ThumbnailRenderer r(eng);
+
+        // simple.pdf has one page: fz_load_page throws, the render fails.
+        ThumbResult res;
+        r.submit(999, res.callback());
+        res.wait();
+        REQUIRE(res.calls.load() == 1);
+        REQUIRE(res.bm == nullptr);
+        REQUIRE_FALSE(res.canceled);
     }
     fz_drop_context(cache_ctx);
 }

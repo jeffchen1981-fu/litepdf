@@ -396,7 +396,8 @@ RenderEngine::~RenderEngine() {
 RenderEngine::RenderToken RenderEngine::submit(RenderRequest req) {
     RenderToken tok;
     tok.id = impl_->next_id.fetch_add(1);
-    tok.canceled = std::make_shared<std::atomic<bool>>(false);
+    tok.canceled = req.cancel_flag ? req.cancel_flag
+                                   : std::make_shared<std::atomic<bool>>(false);
     int prio = req.priority;
     {
         std::lock_guard<std::mutex> lk(impl_->mtx);

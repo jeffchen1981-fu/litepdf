@@ -75,6 +75,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_system_fonts.cpp         # cjk-system-font-loader Task 1
     unit/test_cjk_extract_liveness.cpp  # cjk-system-font-loader Task 5
     unit/test_completion_math.cpp      # PR-A2 Task 1
+    unit/test_thumb_requests.cpp       # #117 stale cancel notices
     unit/test_page_anchor.cpp          # PR-A2 Task 2
     unit/test_scroll_math.cpp          # PR-A2 Task 7
     unit/test_status_bar_math.cpp      # PR-B Task 1

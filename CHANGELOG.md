@@ -28,6 +28,10 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   the search results splitter, or opening or closing the search results. Before,
   the page kept the size it was fitted to until the next window resize, zoom or
   page turn (#109).
+- Thumbnails no longer stay grey placeholders when the page is redrawn while
+  they are still loading. Opening the thumbnails on a document with slow pages
+  was enough to leave some of them grey until they were scrolled away and back.
+  Resizing, zooming or turning the page while they loaded did the same (#117).
 
 ## [1.4.0] — 2026-10-03 — Text selection, panning, and sideways scrolling
 

@@ -98,7 +98,7 @@ struct DocumentView::Impl {
     // Why: ThumbnailPane's dtor calls ThumbnailRenderer::cancel_pending(),
     // so the renderer must still exist when the pane is destroyed. The
     // renderer's own dtor (D16) then spin-drains its workers — by the
-    // time it returns, no PostMessageW(WM_USER_THUMB_READY) is in flight
+    // time it returns, no PostMessageW(WM_USER_THUMB_READY or _CANCELED) is in flight
     // that could target the (now-freed) pane HWND. Cache outlives the
     // renderer because in-flight render callbacks blit into the cache
     // via the pane's WM_USER_THUMB_READY handler — but since the pane is
