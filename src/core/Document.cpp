@@ -39,6 +39,12 @@ struct Document::Impl {
     bool needs_password = false;
     bool authenticated = false;
     std::filesystem::path path;
+    // Read once, when the document becomes open (open() or authenticate()),
+    // so page_count() never calls into MuPDF. fz_count_pages can throw after
+    // a successful open -- a /Count MuPDF rejects, or a reflowable layout that
+    // fails -- and page_count() runs inside window procedures (#119). Nothing
+    // re-lays-out a document, so the count cannot go stale.
+    std::size_t page_count = 0;
 
     // Phase 6 Task 3 / ship-blocker fix: serialize every method that
     // touches impl_->ctx via fz_try/fz_catch. MuPDF's exception handling
@@ -47,9 +53,9 @@ struct Document::Impl {
     // stack and crash. The MuPDFRoot lock table above covers the allocator /
     // font cache / freetype / glyph cache, but NOT the error stack.
     // SearchSession workers call page_hits() concurrently during eager
-    // all-pages scans, and UI thread calls page_count() in set_query at
-    // the same time — both race on this ctx. Holding this mutex across
-    // each fz_try ... fz_catch block serializes the error stack usage.
+    // all-pages scans while the UI thread calls page_size() and friends —
+    // both race on this ctx. Holding this mutex across each fz_try ...
+    // fz_catch block serializes the error stack usage.
     //
     // Performance impact: per-Document search parallelism drops to 1.
     // Acceptable for Phase 6 because (a) per-page search is ms-scale
@@ -160,6 +166,21 @@ void flatten_outline(fz_context* ctx,
     }
 }
 
+// Counts the pages of a document that has just become open. False when MuPDF
+// throws or answers a negative count; the caller then refuses the document.
+bool read_page_count(fz_context* ctx, fz_document* doc, std::size_t& out) {
+    int n = -1;
+    fz_try(ctx) {
+        n = fz_count_pages(ctx, doc);
+    }
+    fz_catch(ctx) {
+        return false;
+    }
+    if (n < 0) return false;
+    out = static_cast<std::size_t>(n);
+    return true;
+}
+
 } // namespace
 
 std::optional<Document::OpenError> Document::open(const std::filesystem::path& path) {
@@ -196,6 +217,10 @@ std::optional<Document::OpenError> Document::open(const std::filesystem::path& p
         return OpenError::NeedsPassword;
     }
 
+    if (!read_page_count(impl_->ctx, impl_->doc, impl_->page_count)) {
+        close();
+        return OpenError::Corrupted;
+    }
     return std::nullopt;
 }
 
@@ -213,6 +238,7 @@ void Document::close() noexcept {
     impl_->needs_password = false;
     impl_->authenticated = false;
     impl_->path.clear();
+    impl_->page_count = 0;
 }
 
 const std::filesystem::path& Document::source_path() const noexcept {
@@ -342,24 +368,23 @@ bool Document::authenticate(std::string_view password) {
     }
     SecureZeroMemory(pw.data(), pw.size());
     if (ok != 0) {
-        impl_->authenticated = true;
+        // The password was right even if the pages cannot be counted, so
+        // report it accepted and close the document: a false here would read
+        // as a wrong password and burn the user's retries. Callers check
+        // is_open() (DocumentView refuses a closed document).
+        if (read_page_count(impl_->ctx, impl_->doc, impl_->page_count)) {
+            impl_->authenticated = true;
+        } else {
+            close();
+        }
         return true;
     }
     return false;
 }
 
 std::size_t Document::page_count() const {
-    if (!impl_->doc) throw std::logic_error("page_count called on unopened document");
-    // Serialize with page_hits (worker threads). See Impl::doc_mutex.
-    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
-    int n = 0;
-    fz_try(impl_->ctx) {
-        n = fz_count_pages(impl_->ctx, impl_->doc);
-    }
-    fz_catch(impl_->ctx) {
-        throw std::runtime_error("fz_count_pages failed");
-    }
-    return static_cast<std::size_t>(n);
+    if (!is_open()) throw std::logic_error("page_count called on unopened document");
+    return impl_->page_count;
 }
 
 PageSize Document::page_size(std::size_t index) const {
@@ -459,8 +484,7 @@ std::vector<Document::PageHit> Document::page_hits(
     // Serialize access to impl_->ctx. See Impl::doc_mutex rationale.
     // Must cover the entire fz_try ... fz_catch block plus fz_load_page
     // below, since all of them push/pop frames on the per-ctx error
-    // stack. Also protects against concurrent page_count() from the UI
-    // thread's set_query path.
+    // stack.
     std::lock_guard<std::mutex> lk(impl_->doc_mutex);
 
     const std::string needle =
