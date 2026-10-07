@@ -6,6 +6,7 @@
 #include "core/SystemFonts.hpp"
 
 #include <mupdf/fitz.h>
+#include <mupdf/pdf.h>
 
 #include <algorithm>
 #include <atomic>
@@ -168,10 +169,22 @@ void flatten_outline(fz_context* ctx,
 
 // Counts the pages of a document that has just become open. False when MuPDF
 // throws or answers a negative count; the caller then refuses the document.
+//
+// A PDF's count is its /Root/Pages/Count until MuPDF first builds its page-tree
+// map, which rewrites a /Count larger than the tree to the real number of pages
+// (pdf_load_page_tree_internal, pdf-page.c). That happens on the first page
+// lookup, so look up page 0 before counting: cached any earlier, the count
+// keeps pages that do not exist (#119). The app loads page 0 right after
+// opening anyway, so this moves the work rather than adding to it.
 bool read_page_count(fz_context* ctx, fz_document* doc, std::size_t& out) {
     int n = -1;
     fz_try(ctx) {
         n = fz_count_pages(ctx, doc);
+        pdf_document* pdf = pdf_specifics(ctx, doc);
+        if (pdf && n > 0) {
+            (void)pdf_lookup_page_obj(ctx, pdf, 0);
+            n = fz_count_pages(ctx, doc);
+        }
     }
     fz_catch(ctx) {
         return false;

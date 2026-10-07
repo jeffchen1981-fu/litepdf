@@ -14,25 +14,28 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <string_view>
 
 using namespace litepdf::core;
 
 namespace {
 
 // Copies `fixture` to a temp file with its page tree's "/Count 1 " rewritten
-// to "/Count -1". Same length, so the xref offsets stay valid and MuPDF opens
-// the file without repairing it. Both fixtures keep /Pages outside any stream,
-// so the edit also works on the encrypted one (AES covers strings and streams,
-// not the dictionary's integers).
-std::filesystem::path with_negative_page_count(const char* fixture) {
+// to `count`, which must be the same length so the xref offsets stay valid and
+// MuPDF opens the file without repairing it. Both fixtures keep /Pages outside
+// any stream, so the edit also works on the encrypted one (AES covers strings
+// and streams, not the dictionary's integers).
+std::filesystem::path with_page_count(const char* fixture, std::string_view count) {
+    constexpr std::string_view original = "/Count 1 ";
+    REQUIRE(count.size() == original.size());
     std::ifstream in(fixture, std::ios::binary);
     REQUIRE(in);
     std::string bytes((std::istreambuf_iterator<char>(in)),
                       std::istreambuf_iterator<char>());
-    const auto at = bytes.find("/Count 1 ");
+    const auto at = bytes.find(original);
     REQUIRE(at != std::string::npos);
-    REQUIRE(bytes.find("/Count 1 ", at + 1) == std::string::npos);
-    bytes.replace(at, 9, "/Count -1");
+    REQUIRE(bytes.find(original, at + 1) == std::string::npos);
+    bytes.replace(at, original.size(), count);
 
     static std::atomic<unsigned> seq{0};
     const auto path = std::filesystem::temp_directory_path()
@@ -54,7 +57,7 @@ struct RemoveOnExit {
 
 TEST_CASE("Document page count: an unreadable count is refused at open as Corrupted",
           "[document][pages]") {
-    const RemoveOnExit file{with_negative_page_count("tests/fixtures/simple.pdf")};
+    const RemoveOnExit file{with_page_count("tests/fixtures/simple.pdf", "/Count -1")};
 
     Document doc;
     const auto err = doc.open(file.path);
@@ -65,7 +68,7 @@ TEST_CASE("Document page count: an unreadable count is refused at open as Corrup
 
 TEST_CASE("Document page count: an unreadable count after authentication closes the document",
           "[document][pages][password]") {
-    const RemoveOnExit file{with_negative_page_count("tests/fixtures/encrypted.pdf")};
+    const RemoveOnExit file{with_page_count("tests/fixtures/encrypted.pdf", "/Count -1")};
 
     Document doc;
     const auto err = doc.open(file.path);
@@ -86,4 +89,17 @@ TEST_CASE("Document page count: an open document answers without throwing",
     std::size_t n = 0;
     REQUIRE_NOTHROW(n = doc.page_count());
     REQUIRE(n == 1);
+}
+
+// A /Count larger than the page tree is accepted by fz_count_pages, and MuPDF
+// corrects it only when it first builds its page-tree map. Cached before that,
+// the count kept a page that does not exist, and going to it threw out of a
+// window procedure.
+TEST_CASE("Document page count: a count larger than the page tree is corrected at open",
+          "[document][pages]") {
+    const RemoveOnExit file{with_page_count("tests/fixtures/simple.pdf", "/Count 2 ")};
+
+    Document doc;
+    REQUIRE_FALSE(doc.open(file.path).has_value());
+    REQUIRE(doc.page_count() == 1);
 }
