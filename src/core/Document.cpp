@@ -43,7 +43,7 @@ struct Document::Impl {
     // so page_count() never calls into MuPDF. fz_count_pages can throw after
     // a successful open -- a /Count MuPDF rejects, or a reflowable layout that
     // fails -- and page_count() runs inside window procedures (#119). Nothing
-    // re-lays-out a document, so the count cannot go stale.
+    // in LitePDF re-lays-out a document after it opens.
     std::size_t page_count = 0;
 
     // Phase 6 Task 3 / ship-blocker fix: serialize every method that
