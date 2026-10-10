@@ -165,9 +165,10 @@ the build (no `on_text` call) if any of these holds:
 3. A priority-0 request is waiting in the queue, read under `mtx`. That render is
    newer and must not wait behind this build. If it still needs text, it carries
    its own `on_text`.
-4. The request's cancel flag is set. P0 requests are never cancelled today
-   (`cancel_all_below_priority(0)` flags only priority > 0,
-   `RenderEngine.cpp:423`), so this costs one load and guards a future caller.
+4. The request's cancel flag is set. No product caller cancels a P0 today:
+   `cancel_all_below_priority(0)` flags only priority > 0
+   (`RenderEngine.cpp:423`), and `DocumentView` discards its tokens. But
+   `RenderEngine::cancel(token)` can flag any priority, so the rule is honoured.
 
 Rules 1 and 3 are read together under **one** acquisition of `mtx`: `stopping`
 is a plain `bool` written under that lock (`RenderEngine.cpp:375-378`), so an
@@ -175,25 +176,33 @@ unlocked read would be a data race. Rule 2 is an atomic load, and rule 4 is the
 existing atomic flag.
 
 Otherwise it calls `TextPageAccess::build(ctx, wdoc, req.page_num)`. After the
-build it re-checks rule 1 (again under `mtx`) and rule 2, then calls
-`on_text(std::move(handle))` if the handle is valid. In every other case it drops the handle on the worker. That is
-safe: a `TextPage` frees its stext page through its own escrow, and no other
-thread holds this one.
+build it re-checks rules 1 (again under `mtx`), 2 and 4, then calls
+`on_text(std::move(handle))` if the handle is valid. In every other case it
+drops the handle on the worker. That is safe: a `TextPage` frees its stext page
+through its own escrow, and no other thread holds this one.
+
+The check is not atomic with the start of the build. A page change, newer P0 or
+shutdown that lands between the check and the build's first MuPDF call does not
+stop that build; the post-build re-check only discards its result. That window
+and a build already running are the same residual: one build, which cannot be
+pre-empted. (An `fz_cookie` abort could shorten it; §8.)
 
 - The text is built **after** the pixmap is posted, so the same request's
-  bitmap never arrives later than today. A newer P0 that is queued **before**
-  the build starts is never delayed by it (rule 3). A P0 queued **during** a
-  build waits for it only if the other worker is busy too. That residual is
-  bounded by one build, and §5.4 measures it.
+  bitmap never arrives later than today. A newer P0 that is queued before the
+  skip check is never delayed by the build (rule 3). A P0 queued after it waits
+  for the build only if the other worker is busy too. That residual is bounded
+  by one build, and §5.4 measures it.
 - No `on_text` call on a null pixmap. A page with no bitmap at all cannot be
   pressed (`own_bitmap()` refuses). A failed same-page re-render leaves the old
   bitmap in place, and the press then falls back to a synchronous build.
 
 ### 3.4 Posting to the UI thread (`ui::PdfCanvas`)
 
-A new message `WM_USER_TEXT_READY` (the plan picks an id that is free across
-`src/` and records the reservation beside `WM_USER_RENDER_DONE`'s in
-`MainWindow.cpp`). It carries a heap `TextMeta { Document::TextPage text;
+A new message `WM_USER_TEXT_READY = WM_USER + 5`, defined in `PdfCanvas.hpp`
+beside `WM_USER_RENDER_DONE` (+3) and `WM_USER_RENDER_DONE_RIGHT` (+4). +5 is
+unused anywhere in `src/` today; the ids in use are +1, +2, +3, +4, +10, +11,
++12, +17 and +18. `MainWindow.cpp`'s reservation comment at line 59, which today
+names only +3, is extended to name +3 to +5 as PdfCanvas's. It carries a heap `TextMeta { Document::TextPage text;
 std::uint64_t epoch; }` in LPARAM. `PdfCanvas.hpp` includes
 `core/Document.hpp`.
 
@@ -223,8 +232,13 @@ that is still correct. The page test lives in `offer_text`.
 
 `DocumentView::Impl` holds one `Document::TextPage text_slot`, at most the
 current page's text per tab. It also holds a
-`std::shared_ptr<std::atomic<int>> text_wanted`, initialised to -1. All writes
-happen on the UI thread; the worker only reads it.
+`std::shared_ptr<std::atomic<int>> text_wanted`, allocated once in the
+constructor with the value -1 and **never reassigned**: queued requests hold the
+same object. Every "`text_wanted = v`" below means
+`text_wanted->store(v, std::memory_order_relaxed)`, and the worker reads it with
+a relaxed load. Ordering beyond the value itself is not needed: the handle
+travels by `PostMessageW`, and a stale read only wastes or discards a build.
+All stores happen on the UI thread.
 
 | Member | Behaviour |
 |---|---|
@@ -301,7 +315,7 @@ question with the same cause. It is tracked outside this change (§8).
 | Rapid paging, held PgDn | Each passed-through page's P0 skips its build, because the next page's P0 is already queued (rule 3) or the page is no longer wanted (rule 2). The page the reader stops on gets its build. |
 | Same-page zoom, resize, DPI change, Invert Colors | Before the page's text has landed, each re-render carries `on_text`. Rule 3 skips every build but the last, and `offer_text` drops duplicates. After it has landed, no text request (`has_text_for` is true). |
 | Tab switch away and back | The slot survives in the tab's `DocumentView`. A handle delivered while the tab is inactive is dropped (epoch), and the page's next render requests it again. |
-| Tab close, or exit, with builds queued | `~DocumentView` sets `text_wanted = -1`, and the draining workers see `stopping`. No build runs while the UI thread joins (rules 1-2). An in-progress build finishes first, bounded by one build. |
+| Tab close, or exit, with builds queued | `~DocumentView` sets `text_wanted = -1`, and the draining workers see `stopping`. No queued build starts while the UI thread joins (rules 1-2). A build that already passed its check finishes first: one build per worker at most (§3.3). |
 | Tab closed with a `WM_USER_TEXT_READY` queued | Epoch mismatch: the handle is dropped through its own escrow; the dead view is not touched. |
 | Render failed (null pixmap) | No text build. |
 | A page with no text (CBZ, image-only) | Valid handle, `full_range` false, same as the synchronous path. |
@@ -321,8 +335,13 @@ changes. §8 records the one input class this oracle does not cover.
    two new fixtures (5.3); and the first, a middle and the last page of
    `large.pdf`, whose ~500 pages would not fit the suite's 120 s timeout. Assert
    equal `full_range` points, equal `highlight(first, last)` quads, and equal
-   `copy(first, last)` text. **Non-vacuity:** the wrong-builder mutant, which
-   builds from the L2 display list, must fail on `annot.pdf`.
+   `copy(first, last)` text. On every page of `selection.pdf`, also compare an
+   interior selection: `snap` in Chars, Words and Lines mode on the same point
+   pair, then `highlight` and `copy` of each snapped pair. Reuse the point pairs
+   the existing selection tests already pin; do not invent coordinates. The
+   whole-page range alone would not notice a difference in word or line
+   segmentation. **Non-vacuity:** the wrong-builder mutant, which builds from
+   the L2 display list, must fail on `annot.pdf`.
 2. **Gate.** `wants_text_prefetch` is false for `encrypted.pdf` after
    `authenticate`, false in spread mode, false once `has_text_for(page)`, and
    true otherwise. `Document::needed_password()` stays true after
@@ -351,7 +370,11 @@ changes. §8 records the one input class this oracle does not cover.
      queued behind it, the test calls `begin_shutdown()`, releases the latch and
      destroys the engine. B is still rendered (the queue drains), and no
      `on_text` runs.
-   - **Positive control:** the same harness with none of the three → `on_text`
+   - **Null pixmap:** two requests carrying `on_text`, neither parked: one
+     whose cancel flag is set before submit (checkpoint A), and one for a page
+     index past the end, whose render fails. Each gets `on_complete(nullptr)`
+     and no `on_text`.
+   - **Positive control:** the same harness with none of the above → `on_text`
      called once.
 
    `RenderEngine::begin_shutdown()` (new, idempotent) sets `stopping` under
@@ -379,12 +402,14 @@ count; `ctest -N` at implementation time is the reference.
 ### 5.2 Scripted GUI check
 
 An untracked driver under `build/gui-check/`, using a probe exe built in a
-throwaway worktree. The probe adds one stderr line in `DocumentView::text_for`
-(`text: slot` or `text: build`), and no product code carries a trace. Oracles:
+throwaway worktree. The probe adds stderr lines in `DocumentView::text_for`
+(`text: slot` or `text: build`) and in `offer_text` (`text: stored <page>`); no
+product code carries a trace. Oracles:
 
-- **Prefetch hit:** open `selection.pdf`, wait for the status-bar zoom readout,
-  then 500 ms. Post a left press and release to the `LitePDFPdfCanvas` HWND →
-  `text: slot`.
+- **Prefetch hit:** open `selection.pdf` and wait, with a bounded timeout, for
+  the `text: stored 0` line. Do not use a fixed sleep: a slow build would
+  correctly fall back and fail the check for nothing. Then post a left press
+  and release to the `LitePDFPdfCanvas` HWND → `text: slot`.
 - **Negative control:** post a page change and Ctrl+A back to back →
   `text: build`. `select_all` has no bitmap gate and the page change has just
   emptied the slot, so this proves the trace can say no. A press would not: it
@@ -399,7 +424,9 @@ throwaway worktree. The probe adds one stderr line in `DocumentView::text_for`
 
 One new generator, `scripts/generate-prefetch-fixtures.py`, beside the existing
 per-fixture generators, writes literal PDF objects with no reportlab dependency.
-Both files are uncompressed, so the bytes stay identical across runs.
+Both files are uncompressed, so the bytes stay identical across runs. As with
+every existing fixture, the generator is run once and both outputs are committed
+under `tests/fixtures/`; the build never runs a generator.
 
 - `type3.pdf`: one page of text drawn with a hand-written Type3 font: a few
   glyphs drawn as filled rectangles, with an `/Encoding /Differences` that maps
@@ -433,9 +460,10 @@ asserted in CI (bench machine noise).
 
 ## 7. User-facing docs
 
-`CHANGELOG.md`, `## [Unreleased]` → `### Fixed`: the first text-selection press
-or Select All on a page no longer pauses LitePDF while the page's text is read;
-it is read in the background once the page is shown (#98). README: no change,
+`CHANGELOG.md`, `## [Unreleased]` → `### Fixed`: a page's text is now read in
+the background once the page is shown, so a text-selection press or Select All
+on it no longer pauses LitePDF. A press that comes in before that background
+read has finished still reads the text on the spot, as before (#98). README: no change,
 since nothing visible or configurable changes.
 
 ## 8. Out of scope
@@ -445,6 +473,10 @@ since nothing visible or configurable changes.
   landed; the rest gets a separate issue.
 - **Render workers and password-protected documents.** Tracked separately; the
   §3.6 gate can be lifted once the workers authenticate.
+- **Aborting a build in progress.** `fz_new_stext_page_from_page_with_cookie`
+  could stop a build when a newer P0 arrives or the engine stops, which would
+  shrink §3.3's one-build residual. Add it only if §5.4 shows that residual
+  matters.
 - **Prefetching neighbour pages' text.** The P1 renders do not request it.
   Revisit only if measurement shows the first press after a page turn still
   landing before the P0 prefetch.
