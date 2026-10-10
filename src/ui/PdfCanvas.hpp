@@ -393,7 +393,10 @@ private:
     litepdf::core::SelPoint page_point_at(int x_px, int y_px, const Placement& page) const;
 
     // True when the painted content overflows the viewport on either axis --
-    // when pan_by can move anything at all.
+    // when pan_by can move anything at all, except while bitmap_is_stale(),
+    // when pan_by drops every step (#120). Deliberately NOT stale-aware: a
+    // captured pan gets no WM_SETCURSOR, so a drag begun in that window would
+    // keep the arrow after the render lands and the pan works again.
     bool can_pan() const;
 
     // WM_SETCURSOR for the client area.

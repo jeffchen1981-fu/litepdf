@@ -724,6 +724,7 @@ void PdfCanvas::on_left_button_down(bool is_double_click_message, int x_px, int 
     // space, Alt+Tab away, release it there, and a latch never sees the key-up.
     // Checked BEFORE the refusals below, which guard SELECTION -- a pan is as
     // valid in spread mode, or before this page's bitmap lands, as anywhere.
+    // (The gesture starts either way; pan_by drops its steps until then, #120.)
     if ((GetKeyState(VK_SPACE) & 0x8000) != 0) {
         // Not a click: the press counted above must not pair with the next one
         // into a double or triple click.
@@ -834,7 +835,8 @@ void PdfCanvas::on_left_button_up(int x_px, int y_px) {
 
 void PdfCanvas::begin_pan_gesture(MouseButton button, int x_px, int y_px) {
     // No bitmap, page or text handle is needed -- a pan only moves what is
-    // painted, and pan_by is a no-op until something is. So none of
+    // painted, and pan_by is a no-op until something is (or while what is
+    // painted belongs to another page or tab, #120). So none of
     // on_left_button_down's selection refusals apply, spread mode included.
     if (!impl_->view) return;
     if (!impl_->gesture.begin_pan(button, x_px, y_px)) return;

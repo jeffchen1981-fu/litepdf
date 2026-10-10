@@ -20,8 +20,9 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 - An arrow key or a hand-tool drag right after switching tabs no longer throws
   away where you were in the tab you switched to. Until that tab's page was
   drawn, the step was measured against the page of the tab you left, so a
-  zoomed-in page could jump back to its left edge or up toward its top. The step is now
-  ignored until the page is drawn, as the mouse wheel already was (#120).
+  zoomed-in page could jump back to its left edge or up toward its top. The
+  step is now ignored until the page is drawn, as the mouse wheel already was
+  (#120).
 
 ## [1.5.0] — 2026-10-07 — Go to page, and fit, thumbnail and page box fixes
 
