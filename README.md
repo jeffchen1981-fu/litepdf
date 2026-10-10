@@ -2,7 +2,7 @@
 
 A lightweight PDF / ePub / CBZ / XPS reader for Windows 11, optimized for mechanical hard drives. Single self-contained executable, no runtime dependencies.
 
-- **Status:** released — latest [`v1.5.0`](https://github.com/jeffchen1981-fu/litepdf/releases/latest)
+- **Status:** released — latest [`v1.5.1`](https://github.com/jeffchen1981-fu/litepdf/releases/latest)
 - **License:** [AGPL-3.0](LICENSE)
 - **Design:** [`docs/plans/2026-04-15-litepdf-design.md`](docs/plans/2026-04-15-litepdf-design.md)
 - **Roadmap:** [`docs/plans/2026-04-15-litepdf-roadmap.md`](docs/plans/2026-04-15-litepdf-roadmap.md)
@@ -28,7 +28,7 @@ Download the latest release from
 > The binary is the one built by the [release workflow](.github/workflows/release.yml)
 > from the tagged source.
 
-## Features (v1.5.0)
+## Features (v1.5.1)
 
 Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab independent state. Cold-start budget under 1 s on SSD; tuned for HDD-friendly I/O patterns.
 
@@ -99,7 +99,7 @@ The produced `build/Release/litepdf.exe` is a single self-contained binary.
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-416 tests at `v1.5.0`. The CI workflow (`.github/workflows/ci.yml`) runs configure + build + version-sync gate + ctest on `windows-2022` (pinned for the VS 2022 / v143 toolset) for every push and pull request.
+420 tests at `v1.5.1`. The CI workflow (`.github/workflows/ci.yml`) runs configure + build + version-sync gate + ctest on `windows-2022` (pinned for the VS 2022 / v143 toolset) for every push and pull request.
 
 The PowerShell smoke harness exercises the full app via launch-and-poll:
 
