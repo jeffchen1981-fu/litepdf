@@ -336,9 +336,10 @@ private:
 
     // True while current_bitmap belongs to another view or page than the one
     // showing. set_view and navigate_to_page keep painting the outgoing bitmap
-    // until the incoming render lands, and both wheels drop a notch until
-    // then. NOT own_bitmap(): this compares against the CANONICAL left page in
-    // spread mode, and it is false when there is no bitmap at all.
+    // until the incoming render lands, and both wheels and pan_by (the arrow
+    // keys and the hand tool, #120) drop a step until then. NOT own_bitmap():
+    // this compares against the CANONICAL left page in spread mode, and it is
+    // false when there is no bitmap at all.
     bool bitmap_is_stale() const;
 
     bool    content_extent(ContentBox& out) const;
