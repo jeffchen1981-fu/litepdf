@@ -169,9 +169,14 @@ the build (no `on_text` call) if any of these holds:
    (`cancel_all_below_priority(0)` flags only priority > 0,
    `RenderEngine.cpp:423`), so this costs one load and guards a future caller.
 
+Rules 1 and 3 are read together under **one** acquisition of `mtx`: `stopping`
+is a plain `bool` written under that lock (`RenderEngine.cpp:375-378`), so an
+unlocked read would be a data race. Rule 2 is an atomic load, and rule 4 is the
+existing atomic flag.
+
 Otherwise it calls `TextPageAccess::build(ctx, wdoc, req.page_num)`. After the
-build it re-checks rules 1 and 2, then calls `on_text(std::move(handle))` if the
-handle is valid. In every other case it drops the handle on the worker. That is
+build it re-checks rule 1 (again under `mtx`) and rule 2, then calls
+`on_text(std::move(handle))` if the handle is valid. In every other case it drops the handle on the worker. That is
 safe: a `TextPage` frees its stext page through its own escrow, and no other
 thread holds this one.
 
