@@ -17,6 +17,12 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   the file as corrupted instead. For a password-protected file the count can
   only be read after the password, so there the message says the document
   could not be opened after authentication (#119).
+- An arrow key or a hand-tool drag right after switching tabs no longer throws
+  away where you were in the tab you switched to. Until that tab's page was
+  drawn, the step was measured against the page of the tab you left, so a
+  zoomed-in page could jump back to its left edge or up toward its top. The
+  step is now ignored until the page is drawn, as the mouse wheel already was
+  (#120).
 
 ## [1.5.0] — 2026-10-07 — Go to page, and fit, thumbnail and page box fixes
 

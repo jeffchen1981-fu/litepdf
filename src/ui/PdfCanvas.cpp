@@ -724,6 +724,7 @@ void PdfCanvas::on_left_button_down(bool is_double_click_message, int x_px, int 
     // space, Alt+Tab away, release it there, and a latch never sees the key-up.
     // Checked BEFORE the refusals below, which guard SELECTION -- a pan is as
     // valid in spread mode, or before this page's bitmap lands, as anywhere.
+    // (The gesture starts either way; pan_by drops its steps until then, #120.)
     if ((GetKeyState(VK_SPACE) & 0x8000) != 0) {
         // Not a click: the press counted above must not pair with the next one
         // into a double or triple click.
@@ -834,7 +835,8 @@ void PdfCanvas::on_left_button_up(int x_px, int y_px) {
 
 void PdfCanvas::begin_pan_gesture(MouseButton button, int x_px, int y_px) {
     // No bitmap, page or text handle is needed -- a pan only moves what is
-    // painted, and pan_by is a no-op until something is. So none of
+    // painted, and pan_by is a no-op until something is (or while what is
+    // painted belongs to another page or tab, #120). So none of
     // on_left_button_down's selection refusals apply, spread mode included.
     if (!impl_->view) return;
     if (!impl_->gesture.begin_pan(button, x_px, y_px)) return;
@@ -1426,6 +1428,13 @@ bool PdfCanvas::content_extent(ContentBox& out) const {
 }
 
 LRESULT PdfCanvas::pan_by(float dx, float dy) {
+    // The bitmap on screen may still be the OUTGOING tab's or page's (#120).
+    // Right after a tab switch, clamping here would measure the incoming tab's
+    // restored pan against the outgoing page -- to 0 on both axes if that one
+    // fit -- and apply_anchor only re-clamps, so the reader's place is lost.
+    // Drop the step and keep the pan, as both wheels do. This covers both
+    // callers: the arrow keys and a hand-tool drag step.
+    if (bitmap_is_stale()) return 0;
     ContentBox box{};
     if (!content_extent(box)) return 0;
     const D2D1_SIZE_F vp = impl_->rt->GetSize();
