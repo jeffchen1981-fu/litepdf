@@ -59,7 +59,9 @@ public:
     [[nodiscard]] bool is_open() const noexcept;
     void close() noexcept;
 
-    // For encrypted documents. Returns true if password accepted.
+    // For encrypted documents. Returns true if password accepted. An accepted
+    // document whose pages cannot be counted is closed rather than reported
+    // as a wrong password, so check is_open() after a true return (#119).
     // The internal NUL-terminated copy of the password is wiped before
     // this method returns (Phase 8 D3). Callers are still responsible
     // for zeroing the buffer they own; this method only guarantees the
@@ -67,6 +69,8 @@ public:
     [[nodiscard]] bool authenticate(std::string_view password);
 
     // Metadata
+    // Read once while opening and cached, so this never calls into MuPDF and
+    // throws only std::logic_error when the document is not open (#119).
     [[nodiscard]] std::size_t page_count() const;
     [[nodiscard]] PageSize page_size(std::size_t index) const;
 
@@ -132,8 +136,8 @@ public:
     //
     // Thread-safety: SAFE to call concurrently from multiple threads on
     // the same Document instance. An internal std::mutex serializes every
-    // method that touches impl_->ctx (page_hits, page_count, page_text,
-    // page_size, outline) — MuPDF's fz_try/fz_catch uses a per-ctx error
+    // method that touches impl_->ctx (page_hits, page_text, page_size,
+    // outline) — MuPDF's fz_try/fz_catch uses a per-ctx error
     // stack that is not thread-safe, so this serialization is mandatory.
     // Consequence: per-Document search parallelism is bounded to 1;
     // cross-tab searches still parallelize across distinct Documents.

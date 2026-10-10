@@ -9,6 +9,15 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+### Fixed
+
+- Opening a damaged PDF whose page count MuPDF rejects no longer closes LitePDF.
+  Such a file opened, then the first attempt to read its page count threw an
+  error nothing caught. LitePDF now reads the count while opening and reports
+  the file as corrupted instead. For a password-protected file the count can
+  only be read after the password, so there the message says the document
+  could not be opened after authentication (#119).
+
 ## [1.5.0] — 2026-10-07 — Go to page, and fit, thumbnail and page box fixes
 
 ### Added
