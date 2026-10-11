@@ -31,6 +31,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string_view>
 
 #include <windows.h>  // HINSTANCE / HWND — Phase 7 Task 8 ensure_thumb_pane.
 
@@ -64,11 +65,19 @@ public:
     // ThreadPoolDispatcher for all tabs — see Phase 6 design §4 D5).
     // Throws std::runtime_error if `doc` is not opened (clone_context
     // returns null) or if context cloning fails (e.g. OOM).
+    // `password` is the one `doc` was authenticated with, or empty if it
+    // needed none; the render workers authenticate their own documents with
+    // it (#126) and do not keep it.
     explicit DocumentView(Document doc,
                           litepdf::app::ISearchDispatcher& dispatcher,
+                          std::string_view password = {},
                           std::size_t num_workers = 2,
                           std::size_t l1_capacity = 5,
                           std::size_t l2_capacity = 10);
+    // A worker count in the password's place would compile for a literal 0
+    // (a null pointer constant, so string_view(nullptr): undefined behaviour)
+    // and fail for any other integer. Make every integer fail.
+    DocumentView(Document, litepdf::app::ISearchDispatcher&, int) = delete;
     ~DocumentView();
 
     DocumentView(const DocumentView&)            = delete;

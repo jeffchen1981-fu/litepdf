@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <string_view>
 
 // Forward declarations — keep this header MuPDF-free (PIMPL).
 struct fz_pixmap;
@@ -80,7 +81,15 @@ public:
     //                     and will not drop it in its destructor. Passing
     //                     nullptr falls through to the direct render path
     //                     (equivalent to the pre-cache Task 7 behavior).
-    RenderEngine(Document& doc, std::size_t num_workers = 2, PageCache* cache = nullptr);
+    // @param password     The password `doc` was authenticated with, or empty
+    //                     if it needed none. Each worker's own fz_document is
+    //                     authenticated with it; without that, a PDF with a
+    //                     user password renders blank (#126). Throws
+    //                     std::runtime_error if a worker rejects it. The
+    //                     engine's NUL-terminated copy is wiped before the
+    //                     constructor returns (Phase 8 D3).
+    RenderEngine(Document& doc, std::size_t num_workers = 2, PageCache* cache = nullptr,
+                 std::string_view password = {});
     ~RenderEngine();
 
     RenderEngine(const RenderEngine&) = delete;
