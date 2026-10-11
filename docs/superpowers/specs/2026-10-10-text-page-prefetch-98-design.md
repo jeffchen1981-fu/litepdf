@@ -250,6 +250,7 @@ All stores happen on the UI thread.
 | `~DocumentView` | `text_wanted = -1` as its first statement, before the thumbnail teardown and `engine.reset()`. The engine's own `stopping` check (§3.3 rule 1) backs it up. |
 | `request_render_with_prefetch(page, cb, TextCb on_text = {})` | Iff `on_text` is given and `wants_text_prefetch(page)`: sets `text_wanted = page`, and attaches `on_text` and `text_wanted` to the P0 request. Never to P1 neighbours or thumbnails. |
 | `bool wants_text_prefetch(int page) const noexcept` | `!dual_page && !doc.needed_password() && !has_text_for(page)`. Public, for the unit tests. |
+| `int pending_text_page() const noexcept` | `text_wanted`'s current value. Test observability only. |
 
 The slot outlives a tab switch, so returning to a tab whose current page was
 already prefetched costs nothing. A handle delivered while its tab is inactive
@@ -328,17 +329,19 @@ changes. §8 records the one input class this oracle does not cover.
 
 ### 5.1 Unit tests (no HWND)
 
-1. **Equivalence oracle.** A worker-built handle (a `DocumentView` render with
-   `on_text` capturing into a promise, bounded wait) is compared with
+1. **Equivalence oracle.** A worker-built handle (a one-worker `RenderEngine`
+   render with `on_text` capturing into a promise, bounded wait) is compared with
    `Document::text_page` on: every page of `selection.pdf`, `search.pdf`,
    `simple.pdf`, `bookmarks.pdf`, the three `cjk-*.pdf`, `sample.epub` and the
-   two new fixtures (5.3); and the first, a middle and the last page of
+   two new fixtures (5.3), `sample.cbz`, and #119's `/Count`-inflated copy of
+   `simple.pdf`; and the first, a middle and the last page of
    `large.pdf`, whose ~500 pages would not fit the suite's 120 s timeout. Assert
    equal `full_range` points, equal `highlight(first, last)` quads, and equal
-   `copy(first, last)` text. On every page of `selection.pdf`, also compare an
-   interior selection: `snap` in Chars, Words and Lines mode on the same point
-   pair, then `highlight` and `copy` of each snapped pair. Reuse the point pairs
-   the existing selection tests already pin; do not invent coordinates. The
+   `copy(first, last)` text. On `selection.pdf` page 3, the page the existing
+   selection tests pin word positions on, also compare an interior selection:
+   `snap` in Chars, Words and Lines mode on the same point pair, then
+   `highlight` and `copy` of each snapped pair. Reuse those pinned words
+   (`alpha`, `beta`, `gamma`); do not invent coordinates. The
    whole-page range alone would not notice a difference in word or line
    segmentation. **Non-vacuity:** the wrong-builder mutant, which builds from
    the L2 display list, must fail on `annot.pdf`.
@@ -358,22 +361,31 @@ changes. §8 records the one input class this oracle does not cover.
      `text_for(q)` on another page must rise by one.
 4. **Share.** Dropping one of two shared handles leaves the other usable; the
    MuPDF root is released only after both are gone (`live_mupdf_roots`).
-5. **Skip rules.** One worker (`num_workers = 1`). In every case the request's
-   `on_complete` blocks on a latch, the test thread acts as the UI thread while
-   the worker is parked, then releases the latch. No case depends on timing:
-   - **Page no longer wanted:** while parked, the test calls
-     `set_current_page(other)` on the `DocumentView` → no `on_text`.
+5. **Skip rules.** At the `RenderEngine` level, one worker, with a test-owned
+   `text_wanted`. In every case the request's `on_complete` blocks on a latch,
+   the test thread acts as the UI thread while the worker is parked, then
+   releases the latch. A negative case knows the parked request's check has run
+   when a priority-1 sentinel request, submitted while parked, completes;
+   destroying the engine is never that marker, because `~RenderEngine` sets
+   `stopping`. No case depends on timing:
+   - **Page no longer wanted:** while parked, the test stores -1 into
+     `text_wanted` → no `on_text`. The view's own writes to `text_wanted`
+     (`set_current_page`, `set_dual_page`, `offer_text`, the request) are pinned
+     separately through `DocumentView::pending_text_page()`.
+   - **Cancelled after the pixmap:** while parked, the test sets the request's
+     cancel flag → no `on_text`.
    - **Newer P0 queued:** while A is parked, the test submits P0 request B →
      A gets no `on_text`; B, still wanted, gets it.
-   - **Engine stopping:** at the `RenderEngine` level, with a test-owned
-     `text_wanted`. While A is parked, with P0 request B (carrying `on_text`)
-     queued behind it, the test calls `begin_shutdown()`, releases the latch and
+   - **Engine stopping:** while A is parked, with P0 request B for the same,
+     still-wanted page (carrying `on_text`) queued behind it, the test calls `begin_shutdown()`, releases the latch and
      destroys the engine. B is still rendered (the queue drains), and no
      `on_text` runs.
-   - **Null pixmap:** two requests carrying `on_text`, neither parked: one
-     whose cancel flag is set before submit (checkpoint A), and one for a page
-     index past the end, whose render fails. Each gets `on_complete(nullptr)`
-     and no `on_text`.
+   - **Null pixmap:** a request carrying `on_text` whose cancel flag is set
+     before submit (checkpoint A) gets `on_complete(nullptr)` and no `on_text`.
+     A null pixmap at the full-render delivery site comes from a failed
+     rasterise or invert after a good page load, which no fixture produces
+     deterministically; that guard has no separate test. (A request for a page
+     past the end would not test it: `build` fails there too.)
    - **Positive control:** the same harness with none of the above → `on_text`
      called once.
 
