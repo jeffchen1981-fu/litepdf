@@ -6,6 +6,7 @@
 #include <vector>
 #include <windows.h>
 
+#include "core/Document.hpp"
 #include "core/SearchSession.hpp"
 #include "ui/detail/CompletionMath.hpp"
 #include "ui/detail/PageAnchor.hpp"
@@ -43,12 +44,16 @@ namespace litepdf::ui {
 // from a superseded view (issue #35), from a submission a newer batch has
 // superseded, from a page the user has left, and a right-slot pixmap
 // arriving while the layout is single-page.
-// Must match the reservation in MainWindow.cpp (WM_USER + 3).
+// Must match the reservation in MainWindow.cpp (WM_USER + 3 to + 5).
 inline constexpr UINT WM_USER_RENDER_DONE = WM_USER + 3;
 // (Phase 8 D10) Same payload as WM_USER_RENDER_DONE but the bitmap
 // lands in the RIGHT slot of the two-page spread layout instead of the
 // (single / left) slot. Posted by PdfCanvas::post_render_done_right.
 inline constexpr UINT WM_USER_RENDER_DONE_RIGHT = WM_USER + 4;
+// (#98) A worker-built page text for the active tab's current page. LPARAM = a
+// heap TextMeta { core::Document::TextPage text; std::uint64_t epoch; }, freed
+// by the handler; WPARAM is unused. Posted by PdfCanvas::post_text_ready.
+inline constexpr UINT WM_USER_TEXT_READY = WM_USER + 5;
 
 class PdfCanvas {
 public:
@@ -142,6 +147,15 @@ public:
                                        std::uint64_t epoch,
                                        int page,
                                        std::uint64_t seq);
+
+    // (#98) Post WM_USER_TEXT_READY for a page text the render worker built.
+    // The handle owns its MuPDF escrow, so on every failure branch (meta
+    // allocation, PostMessageW) it is simply destroyed here; the caller never
+    // frees anything. `epoch` is render_epoch() read at submit time. Returns
+    // true iff the message was posted.
+    static bool post_text_ready(HWND target,
+                                litepdf::core::Document::TextPage text,
+                                std::uint64_t epoch);
 
     // Open a new submission batch: bump the monotonic submission counter and
     // return its new value, which every request in this batch must carry.
