@@ -249,7 +249,7 @@ All stores happen on the UI thread.
 | `set_dual_page(true)` | `text_wanted = -1`. |
 | `~DocumentView` | `text_wanted = -1` as its first statement, before the thumbnail teardown and `engine.reset()`. The engine's own `stopping` check (§3.3 rule 1) backs it up. |
 | `request_render_with_prefetch(page, cb, TextCb on_text = {})` | Iff `on_text` is given and `wants_text_prefetch(page)`: sets `text_wanted = page`, and attaches `on_text` and `text_wanted` to the P0 request. Never to P1 neighbours or thumbnails. |
-| `bool wants_text_prefetch(int page) const noexcept` | `!dual_page && !doc.needed_password() && !has_text_for(page)`. Public, for the unit tests. |
+| `bool wants_text_prefetch(int page) const noexcept` | `!dual_page && !has_text_for(page)` (§3.6 addendum). Public, for the unit tests. |
 | `int pending_text_page() const noexcept` | `text_wanted`'s current value. Test observability only. |
 
 The slot outlives a tab switch, so returning to a tab whose current page was
@@ -319,7 +319,7 @@ worker's text with `Document::text_page`.
 | Press after the bitmap but before the prefetch lands | Synchronous build (today's cost); the result fills the slot; the late worker handle is dropped by `offer_text`. |
 | Ctrl+A right after a page change or open, before the page's bitmap | Synchronous build, as today. `select_all` has no bitmap gate. |
 | Second and later presses on the same page | The slot's handle; no rebuild. Today each press rebuilds warm (0.9-4 ms). |
-| Password-protected document | Never prefetched. The first press or Ctrl+A builds synchronously, as today; later ones use the slot. |
+| Password-protected document | Prefetched like any other since #126 (§3.6 addendum): the render workers authenticate their documents. |
 | Spread mode | No prefetch. Presses and Select All are already refused there. |
 | Page change | Slot dropped and `text_wanted = -1`: an in-flight build for the old page is skipped (rule 2) or its result is dropped. The new page's P0 requests text. |
 | Rapid paging, held PgDn | Each passed-through page's P0 skips its build, because the next page's P0 is already queued (rule 3) or the page is no longer wanted (rule 2). The page the reader stops on gets its build. |
@@ -354,10 +354,9 @@ changes. §8 records the one input class this oracle does not cover.
    whole-page range alone would not notice a difference in word or line
    segmentation. **Non-vacuity:** the wrong-builder mutant, which builds from
    the L2 display list, must fail on `annot.pdf`.
-2. **Gate.** `wants_text_prefetch` is false for `encrypted.pdf` after
-   `authenticate`, false in spread mode, false once `has_text_for(page)`, and
-   true otherwise. `Document::needed_password()` stays true after
-   `authenticate()` and becomes false after `close()`.
+2. **Gate.** `wants_text_prefetch` is false in spread mode, false once
+   `has_text_for(page)`, and true otherwise, including on `encrypted-text.pdf`
+   authenticated and viewed with its password (§3.6 addendum).
 3. **Slot.**
    - `offer_text` drops a handle for a page other than the current one and keeps
      an existing handle.
@@ -437,9 +436,8 @@ product code carries a trace. Oracles:
   is refused until the new page's bitmap lands (`own_bitmap()`).
 - **Correctness:** post Ctrl+A → `GetMenuState(IDM_EDIT_COPY)` enabled; post
   Ctrl+C → the clipboard text equals the unit oracle's `copy` for that page.
-- **Password gate:** `encrypted.pdf` after the password, Ctrl+A twice →
-  `text: build`, then `text: slot`. Ctrl+A is used because it does not depend
-  on whether the unauthenticated workers deliver a bitmap.
+- **Password-protected file:** a prefetch hit on a password-protected file
+  opened with its password (§3.6 addendum), checked as in "Prefetch hit" above.
 
 ### 5.3 New fixtures
 
@@ -471,8 +469,8 @@ asserted in CI (bench machine noise).
 
 1. **Builder parity.** One builder, options fixed at `{}`, never the display
    list; enforced by the equivalence oracle and its mutant (5.1-1).
-2. **Unauthenticated worker documents.** The prefetch is gated on
-   `needed_password()` (3.6, 5.1-2).
+2. **Unauthenticated worker documents.** Lifted by #126, which authenticates
+   the workers' documents (3.6 addendum, 5.1-2).
 3. **Handoff and lifetime.** A `(epoch, page)` key, a post helper that frees on
    every failure branch, a handler that never touches a dead view, and a Type3
    lifetime oracle (3.4, 5.1-6).
@@ -492,8 +490,8 @@ since nothing visible or configurable changes.
 - **Search scans' cold build under `doc_mutex`** (`page_hits`, the second half of
   #98). A press no longer waits behind a scan once the page's prefetch has
   landed; the rest gets a separate issue.
-- **Render workers and password-protected documents.** Tracked separately; the
-  §3.6 gate can be lifted once the workers authenticate.
+- **Render workers and password-protected documents.** Done by #126; see the
+  §3.6 addendum.
 - **Aborting a build in progress.** `fz_new_stext_page_from_page_with_cookie`
   could stop a build when a newer P0 arrives or the engine stops, which would
   shrink §3.3's one-build residual. Add it only if §5.4 shows that residual
