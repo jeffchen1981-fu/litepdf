@@ -24,7 +24,6 @@
 #include <strsafe.h>   // Phase 12: StringCchPrintfW (bounded) for the restore prompt
 #include <stdlib.h>
 #include <algorithm>
-#include <climits>
 #include <cwctype>
 #include <cwchar>
 #include <filesystem>
@@ -741,9 +740,10 @@ void MainWindow::on_outline_navigate(int page) {
 }
 
 void MainWindow::on_tab_switch(int new_index, int old_index) {
-    // Snapshot outgoing state. cancel_stale_renders(INT_MAX) drains
-    // the outgoing view's priority queue so workers don't continue on
-    // now-irrelevant P1/P2 prefetches. This is a performance
+    // Snapshot outgoing state. cancel_background_renders() flags the
+    // outgoing view's queued P1 prefetch and P3 thumbnails so its workers
+    // stop competing with the incoming tab for CPU. Queued P0s still run
+    // (see RenderEngine::cancel_background). This is a performance
     // optimization, not a correctness measure: the cross-tab drop
     // safety of any in-flight pixmap is guaranteed by the per-render
     // escrow ctx (see PdfCanvas::post_render_done).
@@ -764,7 +764,7 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
                     outgoing->thumb_visible = tp->visible();
                     if (tp->visible()) tp->hide();
                 }
-                outgoing->view->cancel_stale_renders(INT_MAX);
+                outgoing->view->cancel_background_renders();
             }
         }
     }

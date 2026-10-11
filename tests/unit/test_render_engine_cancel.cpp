@@ -4,6 +4,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -181,4 +183,75 @@ TEST_CASE("RenderEngine: a caller-supplied cancel flag is the one a cancel sets"
     REQUIRE(calls.load() == 1);
     REQUIRE(nulls.load() == 1);
     REQUIRE(flag_seen_by_callback.load());
+}
+
+TEST_CASE("RenderEngine::cancel_background flags queued prefetch and thumbnails, not P0",
+          "[core][render][cancel]") {
+    // A tab switch cancels the outgoing view's queued work. It used to pass
+    // INT_MAX to cancel_all_below_priority, which flags priority > INT_MAX --
+    // nothing -- so the P1 neighbour prefetch kept the workers busy.
+    litepdf::core::Document doc;
+    REQUIRE(!doc.open("tests/fixtures/simple.pdf").has_value());
+    litepdf::core::RenderEngine engine(doc, 1);
+
+    // Hold the single worker in a P0 callback until released, so the
+    // requests below stay queued for the whole cancel.
+    std::mutex gate_m;
+    std::condition_variable gate_cv;
+    bool gate_entered = false;
+    bool gate_open    = false;
+    engine.submit({0, 0, 1.0f, [&](fz_pixmap* p, fz_context* ctx){
+        std::unique_lock<std::mutex> g(gate_m);
+        gate_entered = true;
+        gate_cv.notify_all();
+        gate_cv.wait(g, [&]{ return gate_open; });
+        if (p) fz_drop_pixmap(ctx, p);
+    }});
+    {
+        std::unique_lock<std::mutex> lk(gate_m);
+        gate_cv.wait(lk, [&]{ return gate_entered; });
+    }
+
+    std::atomic<int> calls{0};
+    std::atomic<int> nulls_p1{0};
+    std::atomic<int> nulls_p3{0};
+    std::atomic<bool> p0_pixmap{false};
+    auto submit_flagged = [&](int priority, std::function<void(fz_pixmap*)> seen) {
+        auto flag = std::make_shared<std::atomic<bool>>(false);
+        litepdf::core::RenderEngine::RenderRequest req;
+        req.page_num    = 0;
+        req.priority    = priority;
+        req.scale       = 1.0f;
+        req.cancel_flag = flag;
+        req.on_complete = [&calls, seen](fz_pixmap* p, fz_context* ctx) {
+            seen(p);
+            if (p) fz_drop_pixmap(ctx, p);
+            ++calls;
+        };
+        (void)engine.submit(std::move(req));
+        return flag;
+    };
+    const auto p0 = submit_flagged(0, [&](fz_pixmap* p){ p0_pixmap = (p != nullptr); });
+    const auto p1 = submit_flagged(1, [&](fz_pixmap* p){ if (!p) ++nulls_p1; });
+    const auto p3 = submit_flagged(3, [&](fz_pixmap* p){ if (!p) ++nulls_p3; });
+
+    engine.cancel_background();
+
+    CHECK_FALSE(p0->load());
+    CHECK(p1->load());
+    CHECK(p3->load());
+
+    {
+        std::lock_guard<std::mutex> g(gate_m);
+        gate_open = true;
+    }
+    gate_cv.notify_all();
+    for (int i = 0; i < 500 && calls.load() < 3; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    // D17: a cancelled request still gets exactly one null on_complete.
+    REQUIRE(calls.load() == 3);
+    CHECK(p0_pixmap.load());
+    CHECK(nulls_p1.load() == 1);
+    CHECK(nulls_p3.load() == 1);
 }

@@ -530,6 +530,10 @@ void RenderEngine::cancel_all_below_priority(int p) {
     // leaving the heap untouched avoids any re-heapify cost.
 }
 
+void RenderEngine::cancel_background() {
+    cancel_all_below_priority(0);
+}
+
 std::size_t RenderEngine::num_workers() const noexcept { return impl_->num_workers; }
 
 std::size_t RenderEngine::pending_count() const noexcept {

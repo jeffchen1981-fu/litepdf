@@ -186,6 +186,10 @@ public:
     // Bulk cancel on rapid nav (Phase 3 Task 11 wiring).
     void cancel_stale_renders(int keep_priority_threshold);
 
+    // The tab is being left: cancel its queued P1 prefetch and P3 thumbnails
+    // (RenderEngine::cancel_background). Queued P0 renders run on.
+    void cancel_background_renders();
+
     // Phase 3 Task 11: cancel stale P1/P2 work, submit P0 for `page`
     // with the caller's callback, and submit P1 prefetch for prev/next
     // pages with drop-only callbacks. The pixmaps land in PageCache
