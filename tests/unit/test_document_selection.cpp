@@ -7,6 +7,8 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <mupdf/fitz.h>
+
 #include <cstddef>
 #include <filesystem>
 #include <string>
@@ -383,4 +385,97 @@ TEST_CASE("DocumentSelection works on a reflowable epub page",
     REQUIRE(without_whitespace(text.copy(first, last)).find("HellofromLitePDFtestePub.")
             != std::string::npos);
     require_select_all_matches_page_text(doc, 0);
+}
+
+// The two new fixtures come from scripts/generate-prefetch-fixtures.py (#98).
+
+TEST_CASE("DocumentSelection extracts Type3 text", "[core][selection]") {
+    const Document doc = open_fixture("tests/fixtures/type3.pdf");
+    const auto text = doc.text_page(0);
+    REQUIRE(text.valid());
+    SelPoint first, last;
+    REQUIRE(text.full_range(first, last));
+    REQUIRE(without_whitespace(text.copy(first, last)) == "ABBA");
+}
+
+// The decouple-then-drop path (pdf-xref.c:1989-1994, font.c:188-197) needs a
+// Type3 font to run, and no other fixture has one.
+TEST_CASE("DocumentSelection a Type3 text page outlives its Document",
+          "[core][selection]") {
+    const std::size_t roots_before = litepdf::core::detail::live_mupdf_roots();
+    Document::TextPage text;
+    litepdf::core::EscrowContext probe;
+    {
+        const Document doc = open_fixture("tests/fixtures/type3.pdf");
+        text = doc.text_page(0);
+        REQUIRE(text.valid());
+        // A bare clone reads 0 once the Document dies; the escrow keeps the
+        // family countable.
+        fz_context* tmp = doc.clone_context();
+        REQUIRE(tmp != nullptr);
+        probe = litepdf::core::EscrowContext::clone_from(tmp);
+        fz_drop_context(tmp);
+        REQUIRE(probe.valid());
+    }
+    SelPoint first, last;
+    REQUIRE(text.full_range(first, last));
+    REQUIRE(without_whitespace(text.copy(first, last)) == "ABBA");
+
+    const std::size_t contexts = litepdf::core::detail::family_context_count(probe.get());
+    text = Document::TextPage{};
+    REQUIRE(litepdf::core::detail::family_context_count(probe.get()) == contexts - 1);
+
+    probe = litepdf::core::EscrowContext{};
+    REQUIRE(litepdf::core::detail::live_mupdf_roots() == roots_before);
+}
+
+TEST_CASE("DocumentSelection skips annotation text", "[core][selection]") {
+    const Document doc = open_fixture("tests/fixtures/annot.pdf");
+    const auto text = doc.text_page(0);
+    SelPoint first, last;
+    REQUIRE(text.full_range(first, last));
+    const std::string copied = without_whitespace(text.copy(first, last));
+    REQUIRE(copied.find("Bodytext") != std::string::npos);
+    REQUIRE(copied.find("Annotation") == std::string::npos);
+}
+
+// Fixture validity: a text page built from a display list (which carries the
+// annotation) must contain the annotation text, so a builder that goes through
+// the display list is distinguishable from Document::text_page on this fixture.
+TEST_CASE("DocumentSelection the annotation fixture draws its annotation text",
+          "[core][selection]") {
+    fz_context* ctx = fz_new_context(nullptr, nullptr, FZ_STORE_DEFAULT);
+    REQUIRE(ctx != nullptr);
+    fz_document* doc = nullptr;
+    fz_page* page = nullptr;
+    fz_display_list* list = nullptr;
+    fz_stext_page* stext = nullptr;
+    fz_buffer* buf = nullptr;
+    std::string text;
+    bool ok = false;
+    fz_try(ctx) {
+        fz_register_document_handlers(ctx);
+        doc = fz_open_document(ctx, "tests/fixtures/annot.pdf");
+        page = fz_load_page(ctx, doc, 0);
+        list = fz_new_display_list_from_page(ctx, page);
+        stext = fz_new_stext_page_from_display_list(ctx, list, nullptr);
+        buf = fz_new_buffer_from_stext_page(ctx, stext);
+        unsigned char* data = nullptr;
+        const std::size_t len = fz_buffer_storage(ctx, buf, &data);
+        text.assign(reinterpret_cast<const char*>(data), len);
+        ok = true;
+    }
+    fz_always(ctx) {
+        fz_drop_buffer(ctx, buf);
+        fz_drop_stext_page(ctx, stext);
+        fz_drop_display_list(ctx, list);
+        fz_drop_page(ctx, page);
+        fz_drop_document(ctx, doc);
+    }
+    fz_catch(ctx) {
+        ok = false;
+    }
+    fz_drop_context(ctx);
+    REQUIRE(ok);
+    REQUIRE(text.find("Annotation text") != std::string::npos);
 }
