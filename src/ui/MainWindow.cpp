@@ -24,7 +24,6 @@
 #include <strsafe.h>   // Phase 12: StringCchPrintfW (bounded) for the restore prompt
 #include <stdlib.h>
 #include <algorithm>
-#include <climits>
 #include <cwctype>
 #include <cwchar>
 #include <filesystem>
