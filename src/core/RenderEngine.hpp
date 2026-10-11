@@ -24,6 +24,10 @@
 #include <optional>
 #include <string_view>
 
+// (#98) Document::TextPage is a nested class and cannot be forward-declared.
+// Document.hpp is MuPDF-free too.
+#include "core/Document.hpp"
+
 // Forward declarations — keep this header MuPDF-free (PIMPL).
 struct fz_pixmap;
 struct fz_context;
@@ -31,8 +35,6 @@ struct fz_context;
 namespace litepdf::core { class PageCache; }
 
 namespace litepdf::core {
-
-class Document;
 
 class RenderEngine {
 public:
@@ -68,6 +70,13 @@ public:
         // can flag it at any time, so a caller that also cancels by token can
         // see a failed render reported as cancelled.
         std::shared_ptr<std::atomic<bool>> cancel_flag;
+        // (#98) Called on the worker with the page's text, built on the worker's own
+        // document after on_complete has delivered a non-null pixmap. See the skip
+        // rules: not calling it is always allowed, and the UI then builds synchronously.
+        std::function<void(Document::TextPage)> on_text;
+        // (#98) The page whose text is still wanted. on_text runs only while this holds
+        // req.page_num. Owned by the DocumentView, which writes it on the UI thread.
+        std::shared_ptr<const std::atomic<int>> text_wanted;
     };
 
     // Construct a RenderEngine.
@@ -114,6 +123,18 @@ public:
 
     std::size_t num_workers() const noexcept;
     std::size_t pending_count() const noexcept;
+
+    // (#98) Sets `stopping` and wakes the workers; idempotent. The workers still
+    // drain the queue, but no longer build any request's text (skip rule 1).
+    // ~RenderEngine calls it before it joins. It is for the destructor and tests;
+    // submit() after it is a caller error: once the queue has drained the workers
+    // exit, so a later request's on_complete would never run.
+    void begin_shutdown() noexcept;
+
+    // (#98) Text builds started by the workers: incremented immediately before
+    // every build, so a test can tell a skipped build from one built and then
+    // dropped by the post-build re-check. Test observability only.
+    [[nodiscard]] std::size_t text_builds_started() const noexcept;
 
 private:
     struct Impl;

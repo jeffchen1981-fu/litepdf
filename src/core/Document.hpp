@@ -27,6 +27,8 @@ struct fz_context;
 
 namespace litepdf::core {
 
+namespace detail { struct TextPageAccess; }  // core/detail/TextPageAccess.hpp (#98)
+
 struct PageSize {
     float width_pt;
     float height_pt;
@@ -249,8 +251,9 @@ public:
     // first and last edges into the handle (warmed at acquisition, so a drag
     // never pays for the walk), and highlight() records that it has logged its
     // quad cap; two threads calling either on the same handle would race on
-    // those writes. Everything that touches a handle today runs on the UI
-    // thread.
+    // those writes. The rule covers every handle that shares one Impl (share()):
+    // they are used on one thread at a time. In practice that is the UI thread,
+    // because the render worker gives up its only handle when it posts it.
     class TextPage {
     public:
         TextPage() noexcept;
@@ -262,6 +265,11 @@ public:
 
         [[nodiscard]] bool valid() const noexcept;
         [[nodiscard]] int  page()  const noexcept;   // -1 when empty
+
+        // A second handle on the same page object (#98). The stext page and its
+        // escrow context are released when the LAST share goes. Copying stays
+        // deleted so a share is always explicit. Empty from an empty handle.
+        [[nodiscard]] TextPage share() const noexcept;
 
         // Snapped COPIES. Deliberately returns rather than taking in-out
         // references: fz_snap_selection reorders its in-out points, and writing
@@ -286,9 +294,9 @@ public:
         [[nodiscard]] std::string copy(SelPoint a, SelPoint b) const;
 
     private:
-        friend class Document;
+        friend struct detail::TextPageAccess;
         struct Impl;
-        std::unique_ptr<Impl> impl_;
+        std::shared_ptr<Impl> impl_;
     };
 
     // A handle on page `page`'s text. Empty if the document is not open (an
@@ -296,6 +304,9 @@ public:
     // out of range, or extraction or the context clone fails. Callers MUST
     // tolerate an empty handle -- a drag that cannot acquire one simply does not
     // start.
+    //
+    // The build itself is detail::TextPageAccess::build (core/detail/
+    // TextPageAccess.hpp), shared with the render worker's prefetch (#98).
     //
     // noexcept, and it takes doc_mutex: a caller that already holds the lock on
     // this thread gets an empty handle rather than the std::terminate a throw

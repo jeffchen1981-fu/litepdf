@@ -1,6 +1,7 @@
 #include "core/DocumentView.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <stdexcept>
 #include <utility>
@@ -80,6 +81,16 @@ struct DocumentView::Impl {
     bool                   dual_page     = false;  // Phase 8 D10
     std::optional<TextSelection> selection;       // #52; pure data, order-free
 
+    // (#98) At most the current page's text. Its position among the members
+    // does not matter: the handle's escrow keeps the MuPDF root alive past
+    // `doc`.
+    Document::TextPage text_slot;
+    // (#98) The page whose text is still wanted, -1 for none. Allocated once
+    // in the constructor and never reassigned: queued P0 requests hold this
+    // same object. Every write is a relaxed store on the UI thread; the
+    // worker reads it with a relaxed load (spec §3.5).
+    std::shared_ptr<std::atomic<int>> text_wanted;
+
     // Declared LAST so it destructs FIRST — see order contract above.
     // The SearchSession holds non-owning refs to `doc` and to the
     // externally-owned ISearchDispatcher; both must outlive the session.
@@ -129,6 +140,7 @@ DocumentView::DocumentView(Document doc,
                            std::size_t l2_capacity)
     : impl_(std::make_unique<Impl>()) {
     impl_->doc = std::move(doc);
+    impl_->text_wanted = std::make_shared<std::atomic<int>>(-1);   // #98
 
     // Clone the UI-thread ctx and a dedicated cache_ctx BEFORE
     // constructing cache/engine. ui_ctx stays UI-thread-exclusive (D3);
@@ -162,6 +174,10 @@ DocumentView::DocumentView(Document doc,
 
 DocumentView::~DocumentView() {
     if (!impl_) return;
+
+    // (#98) No queued text build starts from here on (skip rule 2); the
+    // engine's own `stopping` check backs this up once engine.reset() runs.
+    impl_->text_wanted->store(-1, std::memory_order_relaxed);
 
     // Phase 7 Task 8: tear the thumb trio down BEFORE engine/session so
     // the pane's cancel_in_flight (called from ~ThumbnailPane) reaches
@@ -206,6 +222,11 @@ bool DocumentView::set_current_page(int idx) {
     const int clamped = std::clamp(idx, 0, max_idx);
     if (clamped == impl_->current_page) return false;
     impl_->current_page = clamped;
+    // (#98) The slot holds only the current page's text. Dropped before
+    // set_viewport, which can throw (Document::page_size), so a throw never
+    // leaves the old page's text in the slot or its build still wanted.
+    impl_->text_slot = Document::TextPage{};
+    impl_->text_wanted->store(-1, std::memory_order_relaxed);
     // Recompute the percentage if not Custom (page size may differ per page).
     if (impl_->zm != ZoomMode::Custom) {
         set_viewport(impl_->vp_w, impl_->vp_h, impl_->dpi);
@@ -314,6 +335,8 @@ bool DocumentView::dual_page() const noexcept {
 }
 
 void DocumentView::set_dual_page(bool on) {
+    // (#98) Spread mode never prefetches text: drop any build still wanted.
+    if (on) impl_->text_wanted->store(-1, std::memory_order_relaxed);
     if (impl_->dual_page == on) return;
     impl_->dual_page = on;
     // (Phase 8 D9 addendum / D10) Drain in-flight single-page renders
@@ -342,13 +365,15 @@ void DocumentView::cancel_background_renders() {
     impl_->engine->cancel_background();
 }
 
-void DocumentView::request_render_with_prefetch(int page, RenderCb cb) {
+void DocumentView::request_render_with_prefetch(int page, RenderCb cb,
+                                                TextCb on_text) {
     // 1. Drop any pending P1/P2 from a prior nav so the queue stays
     //    short during rapid PgDn scrubbing.
     cancel_stale_renders(0);
 
     // 2. P0 — current page (user-visible). Caller's callback delivers
-    //    the pixmap to the UI thread.
+    //    the pixmap to the UI thread. (#98) It alone may also carry the
+    //    text request; the P1 neighbours below never do.
     {
         RenderEngine::RenderRequest r0;
         r0.page_num    = page;
@@ -356,6 +381,11 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb) {
         r0.scale       = render_scale();
         r0.on_complete = std::move(cb);
         r0.invert      = impl_->invert_colors;  // Phase 8 D7
+        if (on_text && wants_text_prefetch(page)) {
+            impl_->text_wanted->store(page, std::memory_order_relaxed);
+            r0.on_text     = std::move(on_text);
+            r0.text_wanted = impl_->text_wanted;
+        }
         (void)impl_->engine->submit(std::move(r0));
     }
 
@@ -384,6 +414,43 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb) {
         r1.invert      = impl_->invert_colors;  // Phase 8 D7
         (void)impl_->engine->submit(std::move(r1));
     }
+}
+
+bool DocumentView::has_text_for(int page) const noexcept {
+    return impl_->text_slot.page() == page;
+}
+
+bool DocumentView::wants_text_prefetch(int page) const noexcept {
+    // No password condition: since #126 every render worker authenticates its
+    // document with the password the tab was opened with (spec §3.6 addendum).
+    return !impl_->dual_page && !has_text_for(page);
+}
+
+void DocumentView::offer_text(Document::TextPage t) {
+    const int current = impl_->current_page;
+    // Never replaces a handle already in the slot, so a sync-built one is not
+    // churned by a late worker one. A dropped `t` goes through its own escrow.
+    if (!t.valid() || t.page() != current || has_text_for(current)) return;
+    impl_->text_slot = std::move(t);
+    impl_->text_wanted->store(-1, std::memory_order_relaxed);
+}
+
+Document::TextPage DocumentView::text_for(int page) {
+    // Shares, never moves out: the slot keeps its handle for the next press.
+    if (has_text_for(page)) return impl_->text_slot.share();
+    Document::TextPage built = impl_->doc.text_page(static_cast<std::size_t>(page));
+    // The slot holds only the current page's, and it is empty here: a full
+    // slot always holds the current page, which has_text_for just ruled out.
+    if (built.valid() && page == impl_->current_page) {
+        impl_->text_slot = std::move(built);
+        impl_->text_wanted->store(-1, std::memory_order_relaxed);
+        return impl_->text_slot.share();
+    }
+    return built;
+}
+
+int DocumentView::pending_text_page() const noexcept {
+    return impl_->text_wanted->load(std::memory_order_relaxed);
 }
 
 fz_context* DocumentView::ui_ctx() const noexcept {

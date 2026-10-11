@@ -55,7 +55,8 @@ std::wstring title_base() {
 
 constexpr UINT WM_USER_OPEN_OK       = WM_USER + 1;
 constexpr UINT WM_USER_OPEN_FAILED   = WM_USER + 2;
-// WM_USER + 3 is WM_USER_RENDER_DONE, reserved by PdfCanvas.
+// WM_USER + 3 to + 5 are WM_USER_RENDER_DONE, WM_USER_RENDER_DONE_RIGHT and
+// WM_USER_TEXT_READY, reserved by PdfCanvas.
 // Phase 8 Task 1: encrypted-PDF password handshake. Worker thread can't
 // run a modal dialog (no message pump, no parent HWND), so on
 // OpenError::NeedsPassword the worker posts this message carrying the
@@ -384,6 +385,9 @@ void MainWindow::kick_render(int page) {
     view->request_render_with_prefetch(page,
         [target, epoch, page, seq](fz_pixmap* p, fz_context* worker_ctx) {
             PdfCanvas::post_render_done(target, p, worker_ctx, epoch, page, seq);
+        },
+        [target, epoch](litepdf::core::Document::TextPage t) {
+            PdfCanvas::post_text_ready(target, std::move(t), epoch);
         });
 }
 
