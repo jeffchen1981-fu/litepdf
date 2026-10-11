@@ -112,7 +112,8 @@
   - `Impl` gains `EscrowContext escrow; fz_document* sdoc = nullptr; std::mutex scan_mtx;`. None of these go into `State` (spec §3.6).
   - The constructor clones via `doc.clone_escrow_context()` and opens `doc.source_path()` on it, using the UTF-8 conversion from `RenderEngine.cpp:368-374`. If `password` is non-empty, it authenticates a wiped NUL-terminated copy. On any failure it drops what it opened (the document on `escrow.get()`) and throws `std::runtime_error`.
   - The task lambda captures `fz_context* sctx`, `fz_document* sdoc`, `std::mutex* smtx` and the generation's `std::shared_ptr<fz_cookie>` in place of `&doc_ref` and the `atomic<int>` token. It calls `page_hits_on(sctx, sdoc, i, needle_utf8, df, cookie.get())` with `std::lock_guard(*smtx)` held.
-  - The lock lives in a block scope around that call only, opened **after** epoch check #1, so it is inside the drain `Guard`'s scope (`SearchSession.cpp:205-214`) and released before the Guard decrements `pending_tasks`. Declared ahead of the Guard, it would unlock after the decrement, and `~SearchSession` could already have destroyed the mutex. Placed after the epoch check, stale tasks never queue on it.
+  - The lock lives in a block scope around that call only, opened **after** epoch check #1, so it is inside the drain `Guard`'s scope (`SearchSession.cpp:205-214`) and released before the Guard decrements `pending_tasks`. Declared ahead of the Guard, it would unlock after the decrement, and `~SearchSession` could already have destroyed the mutex.
+  - Once the lock is held, re-check the epoch and return if it moved. A task can pass check #1 and then wait on the lock while the generation is superseded; without the re-check it would run a whole stale build, and on formats whose run ignores the cookie (spec §3.4) nothing would stop it.
   - `~SearchSession` keeps the epoch bump, `gen.abort_active()` and the `pending_tasks` spin in that order, then `fz_drop_document(escrow.get(), sdoc)`. The escrow drops its context when `Impl` dies.
   - `set_query`'s `impl_->doc.page_count()` stays on the tab Document; it takes no lock (`Document.cpp:399-402`).
   - Rewrite the stale comments: `SearchSession.hpp:7-18` (the session scans its own document under its own mutex; the tab Document's `doc_mutex` is never taken), the `GenerationAbort.hpp` header (the token is the generation's `fz_cookie`), and `SearchSession.cpp:94-103`.
@@ -142,6 +143,14 @@
     - `REQUIRE(std::filesystem::remove(copy))`.
 
     On Windows a leaked document still holds the file open, so the delete fails.
+  - `SearchSession: holds its own document open until destroyed`. This validates the oracle above and shows the session opened its own document:
+    - copy `search.pdf` to a temp path and open a `Document` on it;
+    - construct a `SearchSession` on it;
+    - `doc.close()`;
+    - `std::error_code ec; REQUIRE_FALSE(std::filesystem::remove(copy, ec));`. The session's document blocks the delete;
+    - destroy the session, then `REQUIRE(std::filesystem::remove(copy))`.
+
+    If the first `remove` succeeds, MuPDF's file open does not block deletion: stop and report it, because the leak test above would then be vacuous.
 - [ ] **Step 2: Run; expect** the no-password construction not to throw (RED: Task 2's branch skips authentication for an empty password). The file-handle case is RED for the same reason: nothing throws yet, so `REQUIRE_THROWS` fails. The context-count case may already pass; that is acceptable, because it pins the rollback.
 - [ ] **Step 3: Implement** the `fz_needs_password` branch, with the same wipe and rollback. Exception messages name the cause in English (`"SearchSession: document needs a password"` / `"SearchSession: password rejected"`).
 - [ ] **Step 4: Run** `"[search]"`, then the full suite through ctest (Global Constraints). Expected: all pass. Also run `ctest -N -R "SearchSession: "` to confirm every new case is registered by name.
@@ -152,7 +161,9 @@
 **Files:**
 - Modify: `CHANGELOG.md` (`## [Unreleased]` → `### Changed`)
 
-- [ ] **Step 1: CHANGELOG.** `## [Unreleased]` is empty today (`CHANGELOG.md:10`). Add a `### Changed` heading under it with one line, per the ship convention (perf → Changed). Claim only what T6 measures: page turns, resizes and tab switches no longer wait for a running search to finish a page; closing a tab or retyping stops the current page's text build early. Reference `(#130)`.
+- [ ] **Step 1: CHANGELOG.** `## [Unreleased]` is empty today (`CHANGELOG.md:10`). Add a `### Changed` heading under it with one line, per the ship convention (perf → Changed). Claim only what T6 measures:
+  - page turns, resizes and tab switches no longer wait for a running search to finish a page;
+  - in a PDF, closing a tab or retyping stops the current page's text build early. Reference `(#130)`.
 - [ ] **Step 2: T6 GUI probe (nothing committed).** Regenerate the spec PDF if needed: headless Edge `--print-to-pdf` of `third_party/mupdf/thirdparty/gumbo-parser/benchmarks/html5_spec.html` into the scratchpad. Read the scripted-GUI-smoke reference memory's "Read first" list before driving the app. On the `main` build and on this branch, start a search for a never-matching word, then:
   - page with PgDn in fit mode and record the page-turn latency (the `render: accepted` trace, as in #128's check);
   - press Ctrl+W mid-scan and record the tab-close time;

@@ -61,10 +61,12 @@ measured.
 1. While `doc_mutex` is held by another thread, a full scan still completes with
    the correct hit count (§6, T1).
 2. On a user-password PDF, a scan finds the same hits it finds today (§6, T2).
-3. For PDF (and XPS), closing a tab mid-scan no longer waits for a whole cold
-   build. It waits until the build's next content-stream token, which may first
-   require the font load or page load in progress to finish (§3.4). Other formats
-   keep today's behaviour.
+3. For PDF, closing a tab or retyping mid-scan no longer waits for a whole
+   cold build. MuPDF 1.27.2's PDF interpreter checks the abort before each
+   content-stream token, so the wait ends at the next token, after any font load
+   or page load already in progress (§3.4). Other formats keep today's
+   whole-build wait. XPS also polls the cookie, but no XPS fixture exists, so
+   nothing is claimed for it.
 4. No new UI-thread stall: the extra document opens off the UI thread for
    files without a password (§3.5).
 
@@ -91,7 +93,9 @@ context, and every scan task runs on that pair. Nothing else ever touches it.
   and `fz_context` keeps no thread-local state (no `thread_local`,
   `__declspec(thread)` or `_Thread_local` anywhere in MuPDF's `source/` or
   `include/`). Today's `doc_mutex` relies on the same rule. Per-tab search
-  parallelism stays at 1, as it is today.
+  parallelism stays at 1, as it is today. A task re-checks the generation
+  after taking the lock, because it may have waited there while a newer query
+  replaced its own.
 
 ### 3.2 Password
 
@@ -179,8 +183,8 @@ No race-free alternative exists short of not using the cookie, which would drop
   instruction;
 - MuPDF re-reads it through the pointer on every token, between calls the
   compiler cannot see into, so the read is not hoisted;
-- the value only ever goes 0 → 1, so a stale read delays the abort by at most
-  one more token.
+- the value only ever goes 0 → 1, so a stale read can only delay an abort,
+  never undo one.
 
 `GenerationAbort.hpp` is MuPDF-free today, and `fz_cookie` is a typedef of an
 anonymous struct, so it cannot be forward-declared. The plan decides how the
@@ -188,8 +192,11 @@ token carries the cookie: an opaque handle, or the header including
 `mupdf/fitz/device.h`. The constraint is that `SearchSession.hpp` stays
 MuPDF-free.
 
-**What the cookie bounds, and what it does not:** an abort lands at the next
-token. Some work cannot be interrupted, so a close or retype can still wait for
+**What the cookie bounds, and what it does not:** MuPDF's contract promises no
+bound. The `fz_cookie` comment says "there is no upper bound on exactly when the
+rendering will abort". The bound here is an observation of 1.27.2's PDF
+interpreter, which checks `abort` before every token (`pdf-interpret.c:1556`),
+so an abort lands at the next token there. A MuPDF upgrade must re-check it. Some work cannot be interrupted, so a close or retype can still wait for
 one such item, but no longer for the rest of the page:
 
 - a font load in progress (`pdf_load_font`, which takes no cookie and is most of
@@ -201,7 +208,8 @@ The bound holds only where MuPDF polls the cookie: PDF (`pdf-interpret.c`,
 `pdf-run.c`), XPS (`xps-common.c`) and display lists. The HTML-based formats
 (ePub, FB2) accept a cookie in `htdoc_run_page`/`epub_run_page` and never read
 it, and so do SVG and CBZ. Those formats keep today's whole-build wait on close
-or retype. Scans on them still leave `doc_mutex`, which is the issue's main
+or retype. Their scans still run on the session's own document, so they no
+longer take the tab Document's `doc_mutex` either, which is the issue's main
 point.
 
 ### 3.5 Where the extra open runs
@@ -332,6 +340,9 @@ ASCII and prefixed `SearchSession:` / `Document:`.
   reference. A second check therefore runs the throwing constructor on a temp
   copy of the fixture, closes the tab Document, and deletes the copy. On
   Windows the delete fails while a leaked document still holds the file open.
+  A companion test validates that oracle and shows the session holds its own
+  document: with the tab Document closed and a live session on a temp copy, the
+  delete fails, and after the session is destroyed it succeeds.
 - **Existing tests stay green unchanged**: `test_search_session`,
   `test_cross_tab_search`, `test_crosstab_ctrlw_race`, `test_document_view`,
   `test_page_anchor`, and every `page_hits` test (they use the wrapper), except
