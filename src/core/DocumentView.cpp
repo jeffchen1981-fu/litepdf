@@ -367,8 +367,8 @@ void DocumentView::cancel_background_renders() {
 
 void DocumentView::request_render_with_prefetch(int page, RenderCb cb,
                                                 TextCb on_text) {
-    // 1. Drop any pending P1/P2 from a prior nav so the queue stays
-    //    short during rapid PgDn scrubbing.
+    // 1. Drop any queued P1 prefetch (and P3 thumbnails) from a prior nav
+    //    so the queue stays short during rapid PgDn scrubbing.
     cancel_stale_renders(0);
 
     // 2. P0 — current page (user-visible). Caller's callback delivers
