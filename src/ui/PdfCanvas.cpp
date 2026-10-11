@@ -179,7 +179,32 @@ bool post_render_done_impl(HWND target, UINT msg, litepdf::ui::Slot slot,
     // and are freed by the branch above, which is why it is not dead code.
     return true;
 }
+
+// (#98) Heap payload of WM_USER_TEXT_READY. The handle owns its own MuPDF
+// escrow, so unlike RenderMeta there is nothing else to carry. epoch is the
+// same VIEW key RenderMeta has; the page lives inside the handle.
+struct TextMeta {
+    litepdf::core::Document::TextPage text;
+    std::uint64_t                     epoch = 0;
+};
 }  // namespace
+
+bool PdfCanvas::post_text_ready(HWND target,
+                                litepdf::core::Document::TextPage text,
+                                std::uint64_t epoch) {
+    auto* meta = new (std::nothrow) TextMeta{std::move(text), epoch};
+    if (!meta) return false;   // `text` is destroyed with the parameter
+    if (!PostMessageW(target, WM_USER_TEXT_READY, 0,
+                      reinterpret_cast<LPARAM>(meta))) {
+        // Runs at process exit, after the canvas HWND has died. The delete
+        // destroys the handle, which releases its own escrow.
+        delete meta;
+        return false;
+    }
+    // A post that succeeds but is never dispatched leaks `meta`: see the #74
+    // paragraph in post_render_done_impl.
+    return true;
+}
 
 bool PdfCanvas::post_render_done(HWND target,
                                  fz_pixmap* pix,
@@ -610,7 +635,7 @@ void PdfCanvas::select_all() {
     if (!can_select_all()) return;
     cancel_stale_gesture();
     const int page = impl_->view->current_page();
-    const auto text = impl_->view->document().text_page(static_cast<std::size_t>(page));
+    const auto text = impl_->view->text_for(page);
     litepdf::core::SelPoint first, last;
     if (!text.full_range(first, last)) return;
 
@@ -740,8 +765,7 @@ void PdfCanvas::on_left_button_down(bool is_double_click_message, int x_px, int 
     if (!single_page_placement(pl)) return;
 
     const int page = impl_->view->current_page();
-    litepdf::core::Document::TextPage text =
-        impl_->view->document().text_page(static_cast<std::size_t>(page));
+    litepdf::core::Document::TextPage text = impl_->view->text_for(page);
     if (!text.valid()) return;
 
     const litepdf::core::SelPoint pt = page_point_at(x_px, y_px, pl);
@@ -1133,6 +1157,17 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // Parent just repositioned us. Invalidate so on_paint rebuilds the rt.
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
+        case WM_USER_TEXT_READY: {
+            // Adopt first: every return below frees the meta, and a handle that
+            // is not offered is destroyed with it.
+            std::unique_ptr<TextMeta> meta(reinterpret_cast<TextMeta*>(l));
+            // The view may belong to a tab that has since closed: an epoch
+            // mismatch means it must not be touched. Nothing painted changes
+            // when a text lands, so there is no invalidate.
+            if (!impl_->view || meta->epoch != impl_->view_epoch) return 0;
+            impl_->view->offer_text(std::move(meta->text));
+            return 0;
+        }
         case WM_USER_RENDER_DONE:
         case WM_USER_RENDER_DONE_RIGHT: {
             // #57: BEFORE the null check and before accept_completion, on
@@ -1369,6 +1404,9 @@ void PdfCanvas::resubmit_current_page() {
     impl_->view->request_render_with_prefetch(page,
         [target, epoch, page, seq](fz_pixmap* p, fz_context* worker_ctx) {
             PdfCanvas::post_render_done(target, p, worker_ctx, epoch, page, seq);
+        },
+        [target, epoch](litepdf::core::Document::TextPage t) {
+            PdfCanvas::post_text_ready(target, std::move(t), epoch);
         });
 }
 
@@ -1737,6 +1775,9 @@ void PdfCanvas::navigate_to_page(int target, PageAnchor anchor) {
         [target_hwnd, epoch, page, seq](fz_pixmap* p, fz_context* worker_ctx) {
             PdfCanvas::post_render_done(target_hwnd, p, worker_ctx, epoch,
                                         page, seq);
+        },
+        [target_hwnd, epoch](litepdf::core::Document::TextPage t) {
+            PdfCanvas::post_text_ready(target_hwnd, std::move(t), epoch);
         });
 }
 
