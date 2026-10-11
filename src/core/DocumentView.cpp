@@ -338,6 +338,10 @@ void DocumentView::cancel_stale_renders(int keep_priority_threshold) {
     impl_->engine->cancel_all_below_priority(keep_priority_threshold);
 }
 
+void DocumentView::cancel_background_renders() {
+    impl_->engine->cancel_background();
+}
+
 void DocumentView::request_render_with_prefetch(int page, RenderCb cb) {
     // 1. Drop any pending P1/P2 from a prior nav so the queue stays
     //    short during rapid PgDn scrubbing.

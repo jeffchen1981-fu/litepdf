@@ -104,6 +104,12 @@ public:
     RenderToken submit(RenderRequest req);
     void cancel(const RenderToken& token);
     void cancel_all_below_priority(int priority);
+    // Flag every queued request except the P0 visible-page renders: P1
+    // neighbour prefetch and P3 thumbnails. For a view the user has left (a
+    // tab switch). P0 stays: a cancelled P0 still posts a null completion
+    // (D17), and PdfCanvas handles a null before its epoch check, so the left
+    // tab's cancel would clear the shared canvas's pending wheel flip.
+    void cancel_background();
 
     std::size_t num_workers() const noexcept;
     std::size_t pending_count() const noexcept;
