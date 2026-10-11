@@ -279,6 +279,15 @@ sync-built handle.
 Whether the render workers draw such documents correctly at all is a separate
 question with the same cause. It is tracked outside this change (§8).
 
+**Addendum (implementation).** This gate was not built. #126 (PR #127, merged
+before implementation began) made each render worker authenticate its document
+with the password the tab was opened with, which removes the cause above: a
+worker-built stext page of a password-protected document holds the page's real
+text. `wants_text_prefetch` therefore carries no password condition, and
+`Document::needed_password()` was not added. Such documents are prefetched like
+any other; the unit test builds the view with the password and compares the
+worker's text with `Document::text_page`.
+
 ### 3.7 Callers (`ui`)
 
 - The three single-page submission sites pass a text callback:

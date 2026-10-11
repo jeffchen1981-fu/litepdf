@@ -191,7 +191,41 @@ public:
     // pages with drop-only callbacks. The pixmaps land in PageCache
     // automatically at the engine level, so the next PgUp/PgDn is
     // served from cache.
-    void request_render_with_prefetch(int page, RenderCb on_current_complete);
+    //
+    // (#98) Iff `on_text` is given and wants_text_prefetch(page), the P0
+    // request (never the P1 neighbours) also asks the worker for the page's
+    // text: `on_text` then runs on the worker with the handle, which the
+    // caller posts to the UI thread for offer_text(). The worker may skip
+    // the build (spec §3.3); not getting `on_text` is always allowed.
+    using TextCb = std::function<void(Document::TextPage)>;
+    void request_render_with_prefetch(int page, RenderCb on_current_complete,
+                                      TextCb on_text = {});
+
+    // ------------------------------------------------------------------
+    // (#98) The per-tab text slot: at most one text page, the current
+    // page's (spec §3.5). Dropped on a page change; dies with the tab. A
+    // handle in the slot is never replaced. UI thread only.
+
+    // The slot holds `page`'s text.
+    [[nodiscard]] bool has_text_for(int page) const noexcept;
+
+    // A render of `page` should ask for its text: single-page mode and the
+    // slot does not hold it yet. Public for the unit tests.
+    [[nodiscard]] bool wants_text_prefetch(int page) const noexcept;
+
+    // A worker-built handle arriving on the UI thread. Kept iff it is valid,
+    // for the current page, and the slot is empty; otherwise dropped.
+    void offer_text(Document::TextPage t);
+
+    // `page`'s text for a selection press or Select All: a share of the
+    // slot's handle when it holds `page`, else a synchronous build (today's
+    // path), which fills the slot when `page` is the current page. Empty
+    // when the build fails; callers must tolerate that.
+    [[nodiscard]] Document::TextPage text_for(int page);
+
+    // The page whose text a queued P0 may still build, -1 for none. Test
+    // observability only; nothing in the product reads it.
+    [[nodiscard]] int pending_text_page() const noexcept;
 
     // UI thread's own fz_context clone (D3). Stays valid for the
     // lifetime of the DocumentView. Use for fz_drop_pixmap on refs
