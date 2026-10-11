@@ -65,19 +65,17 @@ public:
     // ThreadPoolDispatcher for all tabs — see Phase 6 design §4 D5).
     // Throws std::runtime_error if `doc` is not opened (clone_context
     // returns null) or if context cloning fails (e.g. OOM).
-    // `password` is the one `doc` was authenticated with, or empty if it
+    // `password` is the one `doc` was authenticated with, or none if it
     // needed none; the render workers authenticate their own documents with
-    // it (#126) and do not keep it.
+    // it (#126) and do not keep it. std::optional, not a bare string_view, so
+    // a worker count passed in its place fails to compile instead of a
+    // literal 0 converting to string_view(nullptr) (see RenderEngine.hpp).
     explicit DocumentView(Document doc,
                           litepdf::app::ISearchDispatcher& dispatcher,
-                          std::string_view password = {},
+                          std::optional<std::string_view> password = std::nullopt,
                           std::size_t num_workers = 2,
                           std::size_t l1_capacity = 5,
                           std::size_t l2_capacity = 10);
-    // A worker count in the password's place would compile for a literal 0
-    // (a null pointer constant, so string_view(nullptr): undefined behaviour)
-    // and fail for any other integer. Make every integer fail.
-    DocumentView(Document, litepdf::app::ISearchDispatcher&, int) = delete;
     ~DocumentView();
 
     DocumentView(const DocumentView&)            = delete;

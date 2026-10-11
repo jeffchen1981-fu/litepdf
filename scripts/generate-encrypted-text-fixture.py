@@ -12,8 +12,9 @@ the wrong key looks the same as a correct one.
 Why not AES: reportlab's 256-bit mode writes 48-byte /OE and /UE strings (it
 pads them as AES-CBC data), and MuPDF rejects anything but the 32 bytes the
 spec requires ("encryption dictionary missing owner encryption key"). The
-defect is not cipher-specific: the worker key is derived from "" whatever the
-cipher, and #126 reproduced it on AES-128 and AES-256 files too.
+defect is not cipher-specific: every revision leaves a wrong key behind after
+the blank-password attempt, and #126 reproduced it on AES-128 and AES-256 files
+too.
 
 Byte-reproducible: rl_config.invariant pins the timestamp and the document ID
 the RC4 key is derived from, and RC4 has no IV. pageCompression=0 leaves no

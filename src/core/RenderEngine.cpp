@@ -272,7 +272,7 @@ struct RenderEngine::Impl {
 };
 
 RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache,
-                           std::string_view password)
+                           std::optional<std::string_view> password)
     : impl_(std::make_unique<Impl>()) {
     if (n == 0)
         throw std::invalid_argument("RenderEngine: num_workers must be >= 1");
@@ -319,17 +319,17 @@ RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache,
     }
 
     // Each worker document must be authenticated too (#126). MuPDF tries a
-    // blank password on open, and the failed attempt still leaves a key
-    // derived from "" in the document, so an unauthenticated worker decrypts
-    // every content stream of a user-password PDF to garbage and renders the
-    // page blank. fz_authenticate_password needs a NUL-terminated copy; it is
-    // wiped on every exit from this constructor, like Document::authenticate's
-    // (Phase 8 D3).
+    // blank password on open, and the failed attempt still leaves a key in
+    // the document -- one it computed while checking "" -- so an
+    // unauthenticated worker decrypts every content stream of a user-password
+    // PDF to garbage and renders the page blank. fz_authenticate_password
+    // needs a NUL-terminated copy; it is wiped on every exit from this
+    // constructor, like Document::authenticate's (Phase 8 D3).
     struct WipeOnExit {
         std::string& s;
         ~WipeOnExit() { SecureZeroMemory(s.data(), s.size()); }
     };
-    std::string pw(password);
+    std::string pw(password.value_or(std::string_view{}));
     const WipeOnExit wipe{pw};
 
     try {

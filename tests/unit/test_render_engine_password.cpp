@@ -1,5 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
+#include "app/SearchDispatcher.hpp"
 #include "core/Document.hpp"
+#include "core/DocumentView.hpp"
+#include "core/EscrowContext.hpp"
 #include "core/RenderEngine.hpp"
 
 #include <chrono>
@@ -10,8 +13,9 @@
 #include <vector>
 
 // #126: each RenderEngine worker opens its own fz_document. MuPDF tries a blank
-// password on open, and the failed attempt leaves a key derived from "" in the
-// document, so a worker that is never authenticated decrypts every content
+// password on open, and the failed attempt leaves a wrong key in the document
+// (one computed while checking ""), so a worker that is never authenticated
+// decrypts every content
 // stream to garbage and renders an empty page. encrypted-text.pdf has a
 // non-blank user password ("test") and a page of large black text, so a
 // wrong-key render is distinguishable from a right one (encrypted.pdf's page
@@ -115,8 +119,8 @@ TEST_CASE("RenderEngine without the password renders a user-password PDF blank",
           "[core][render][password]") {
     // Negative control: proves the fixture tells a right key from a wrong one,
     // which is what makes the test above discriminating. It pins MuPDF
-    // behaviour (the failed blank-password attempt at open leaves a key
-    // derived from "" behind). If a MuPDF upgrade makes this render text,
+    // behaviour (the failed blank-password attempt at open leaves a wrong key
+    // behind). If a MuPDF upgrade makes this render text,
     // the engine no longer needs the password to render, and the test above
     // no longer proves #126 stays fixed.
     litepdf::core::Document doc;
@@ -131,8 +135,53 @@ TEST_CASE("RenderEngine without the password renders a user-password PDF blank",
 
 TEST_CASE("RenderEngine throws when a worker rejects the password",
           "[core][render][password]") {
+    // The rejection throws after every worker context is cloned and the
+    // rejecting worker's document is adopted, so the rollback must drop both.
+    // The escrow is the oracle (see the #74 test in test_document_view.cpp):
+    // it keeps the context family countable, and root + escrow == 2 once the
+    // two worker clones are gone.
     litepdf::core::Document doc;
     open_and_authenticate(doc);
+    fz_context* clone = doc.clone_context();
+    REQUIRE(clone != nullptr);
+    auto probe = litepdf::core::EscrowContext::clone_from(clone);
+    fz_drop_context(clone);
+    REQUIRE(probe.valid());
+    REQUIRE(litepdf::core::detail::family_context_count(probe.get()) == 2);
+
     REQUIRE_THROWS_AS(litepdf::core::RenderEngine(doc, 2, nullptr, "wrong"),
                       std::runtime_error);
+
+    REQUIRE(litepdf::core::detail::family_context_count(probe.get()) == 2);
+}
+
+TEST_CASE("DocumentView passes the password on to its render workers (#126)",
+          "[core][view][render][password]") {
+    // The app reaches RenderEngine only through DocumentView, so the tests
+    // above would stay green if DocumentView dropped the password. Ink is
+    // counted inside the callback, with the worker context it hands over.
+    litepdf::app::InlineDispatcher disp;
+    litepdf::core::Document doc;
+    open_and_authenticate(doc);
+    litepdf::core::DocumentView view(std::move(doc), disp, "test");
+    view.set_zoom_pct(1.0f);
+
+    std::mutex m;
+    std::condition_variable cv;
+    bool done = false;
+    std::size_t dark = 0;
+    view.request_render(0, [&](fz_pixmap* p, fz_context* ctx) {
+        const std::size_t ink = p ? count_dark_pixels(ctx, p) : 0;
+        if (p) fz_drop_pixmap(ctx, p);
+        std::lock_guard<std::mutex> g(m);
+        dark = ink;
+        done = true;
+        cv.notify_all();
+    });
+    {
+        std::unique_lock<std::mutex> lk(m);
+        REQUIRE(cv.wait_for(lk, std::chrono::seconds(10), [&] { return done; }));
+    }
+    INFO("dark pixels = " << dark);
+    CHECK(dark > kMinInk);
 }

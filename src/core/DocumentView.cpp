@@ -123,7 +123,7 @@ struct DocumentView::Impl {
 
 DocumentView::DocumentView(Document doc,
                            litepdf::app::ISearchDispatcher& dispatcher,
-                           std::string_view password,
+                           std::optional<std::string_view> password,
                            std::size_t num_workers,
                            std::size_t l1_capacity,
                            std::size_t l2_capacity)
