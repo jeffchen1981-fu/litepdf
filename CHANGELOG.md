@@ -15,8 +15,8 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 - A page's text is now read in the background once the page is shown, so a
   text-selection press or Select All on it no longer pauses LitePDF. A press
-  that comes in before that background read has finished still reads the text
-  on the spot, as before (#98).
+  or Select All that comes in before that background read has finished still
+  reads the text on the spot, as before (#98).
 
 ### Fixed
 
