@@ -10,13 +10,14 @@
 #include <cstddef>
 #include <mutex>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 // #126: each RenderEngine worker opens its own fz_document. MuPDF tries a blank
 // password on open, and the failed attempt leaves a wrong key in the document
 // (one computed while checking ""), so a worker that is never authenticated
-// decrypts every content
-// stream to garbage and renders an empty page. encrypted-text.pdf has a
+// decrypts every content stream to garbage and renders an empty page.
+// encrypted-text.pdf has a
 // non-blank user password ("test") and a page of large black text, so a
 // wrong-key render is distinguishable from a right one (encrypted.pdf's page
 // is empty and is not).
@@ -120,9 +121,9 @@ TEST_CASE("RenderEngine without the password renders a user-password PDF blank",
     // Negative control: proves the fixture tells a right key from a wrong one,
     // which is what makes the test above discriminating. It pins MuPDF
     // behaviour (the failed blank-password attempt at open leaves a wrong key
-    // behind). If a MuPDF upgrade makes this render text,
-    // the engine no longer needs the password to render, and the test above
-    // no longer proves #126 stays fixed.
+    // behind). If a MuPDF upgrade makes this render text, the engine no longer
+    // needs the password to render, and the test above no longer proves #126
+    // stays fixed.
     litepdf::core::Document doc;
     open_and_authenticate(doc);
     litepdf::core::RenderEngine engine(doc, 1);
@@ -160,16 +161,19 @@ TEST_CASE("DocumentView passes the password on to its render workers (#126)",
     // The app reaches RenderEngine only through DocumentView, so the tests
     // above would stay green if DocumentView dropped the password. Ink is
     // counted inside the callback, with the worker context it hands over.
+    // The callback's state is declared before the view: if the wait times
+    // out, ~DocumentView drains the render and still runs the callback, so
+    // its state must outlive the view (see src/cli/render_to_ppm.hpp).
+    std::mutex m;
+    std::condition_variable cv;
+    bool done = false;
+    std::size_t dark = 0;
+
     litepdf::app::InlineDispatcher disp;
     litepdf::core::Document doc;
     open_and_authenticate(doc);
     litepdf::core::DocumentView view(std::move(doc), disp, "test");
     view.set_zoom_pct(1.0f);
-
-    std::mutex m;
-    std::condition_variable cv;
-    bool done = false;
-    std::size_t dark = 0;
     view.request_render(0, [&](fz_pixmap* p, fz_context* ctx) {
         const std::size_t ink = p ? count_dark_pixels(ctx, p) : 0;
         if (p) fz_drop_pixmap(ctx, p);
