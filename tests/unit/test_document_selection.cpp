@@ -453,6 +453,13 @@ TEST_CASE("DocumentSelection the annotation fixture draws its annotation text",
     fz_buffer* buf = nullptr;
     std::string text;
     bool ok = false;
+    // Assigned in fz_try, read in fz_always / after fz_catch (project convention).
+    fz_var(doc);
+    fz_var(page);
+    fz_var(list);
+    fz_var(stext);
+    fz_var(buf);
+    fz_var(ok);
     fz_try(ctx) {
         fz_register_document_handlers(ctx);
         doc = fz_open_document(ctx, "tests/fixtures/annot.pdf");

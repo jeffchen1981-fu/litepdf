@@ -321,7 +321,8 @@ struct RenderEngine::Impl {
             if (req.on_complete) {
                 req.on_complete(pix, ctx);
                 // (#98) Text only after a non-null pixmap: pix is not read
-                // again, only tested. A failed rasterise or invert has no text.
+                // again, only tested. A failed page load, rasterise or invert
+                // has no text (pinned by "sends no text after a failed render").
                 if (pix) maybe_deliver_text(impl, req, canceled, ctx, wdoc);
             } else if (pix) {
                 // No callback supplied; we own pix — drop to avoid a leak.

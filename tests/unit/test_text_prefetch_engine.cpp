@@ -464,6 +464,34 @@ TEST_CASE("RenderEngine sends no text for a request cancelled before submit",
     CHECK(engine.text_builds_started() == 0);
 }
 
+// The full-render delivery site tests `pix` before it offers text. A page past
+// the end reaches that site with a null pixmap: fz_load_page throws, no display
+// list exists, checkpoint B does not fire (nothing is cancelled), nothing is
+// rasterised. The build counter proves the worker never started a text build.
+TEST_CASE("RenderEngine sends no text after a failed render",
+          "[core][render][text_prefetch]") {
+    Document doc = open_fixture("tests/fixtures/selection.pdf");
+    const int past_end = static_cast<int>(doc.page_count());
+    auto wanted = std::make_shared<std::atomic<int>>(past_end);
+    Probe a, s;
+    auto a_done = a.completed.get_future();
+    auto s_done = s.completed.get_future();
+
+    RenderEngine engine(doc, 1);
+    engine.submit(request(past_end, 0, a, nullptr, true, wanted));
+    // The P1 sentinel runs after A's whole iteration, text check included.
+    engine.submit(request(kWordsPage, 1, s, nullptr, false, nullptr));
+    REQUIRE(ready(a_done));
+    REQUIRE(ready(s_done));
+
+    CHECK(a.completions.load() == 1);
+    CHECK_FALSE(a.got_pixmap.load());
+    CHECK(a.text_calls.load() == 0);
+    CHECK(engine.text_builds_started() == 0);
+    // Non-vacuity: the sentinel did render, so the worker was healthy.
+    CHECK(s.got_pixmap.load());
+}
+
 TEST_CASE("TextPrefetch worker text equals Document text",
           "[core][render][text_prefetch]") {
     for (const char* path : {
