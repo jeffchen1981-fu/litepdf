@@ -2040,13 +2040,26 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // that concurrent open must NOT advance/corrupt the restore queue.
             const bool is_restore_tab = restoring_ && opened == restore_pending_path_;
 
+            // #126: the render workers open their own documents and must be
+            // authenticated with the same password, so keep the accepted one
+            // until the DocumentView is built. Wiped on every exit from this
+            // case (Phase 8 D3).
+            struct WipeOnExit {
+                std::string& s;
+                ~WipeOnExit() { SecureZeroMemory(s.data(), s.size()); }
+            };
+            std::string accepted_pw;
+            const WipeOnExit wipe_accepted{accepted_pw};
+
             auto result = litepdf::ui::try_authenticate_with_retry(
                 [parent = hwnd_, &basename](const std::wstring& status) {
                     return litepdf::ui::PasswordDialog::prompt(
                         parent, basename, status);
                 },
-                [&bundle](const std::string& pw) {
-                    return bundle->doc.authenticate(pw);
+                [&bundle, &accepted_pw](const std::string& pw) {
+                    const bool ok = bundle->doc.authenticate(pw);
+                    if (ok) accepted_pw = pw;
+                    return ok;
                 },
                 [](int failed_count) {
                     // R10: "remaining" reads less anxious than "of 3" and
@@ -2092,7 +2105,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 tab->path  = bundle->path;
                 tab->label = basename;
                 tab->view  = std::make_unique<litepdf::core::DocumentView>(
-                    std::move(bundle->doc), *search_dispatcher_);
+                    std::move(bundle->doc), *search_dispatcher_, accepted_pw);
 
                 ColdStartTimer::mark(2);  // Document fully loaded.
 

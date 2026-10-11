@@ -123,6 +123,7 @@ struct DocumentView::Impl {
 
 DocumentView::DocumentView(Document doc,
                            litepdf::app::ISearchDispatcher& dispatcher,
+                           std::optional<std::string_view> password,
                            std::size_t num_workers,
                            std::size_t l1_capacity,
                            std::size_t l2_capacity)
@@ -149,8 +150,8 @@ DocumentView::DocumentView(Document doc,
         std::make_unique<PageCache>(l1_capacity, l2_capacity, impl_->cache_ctx.get());
 
     // Engine clones its own per-worker contexts off the Document.
-    impl_->engine =
-        std::make_unique<RenderEngine>(impl_->doc, num_workers, impl_->cache.get());
+    impl_->engine = std::make_unique<RenderEngine>(
+        impl_->doc, num_workers, impl_->cache.get(), password);
 
     // Construct SearchSession LAST — it references impl_->doc (already
     // moved into place) and the caller-owned dispatcher. If this throws

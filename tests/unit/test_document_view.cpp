@@ -339,7 +339,7 @@ TEST_CASE("DocumentView drops its context clones when a member ctor throws",
         REQUIRE(probe.valid());
         REQUIRE(litepdf::core::detail::family_context_count(probe.get()) == 2);
 
-        REQUIRE_THROWS_AS(DocumentView(std::move(doc), disp, 0),
+        REQUIRE_THROWS_AS(DocumentView(std::move(doc), disp, {}, 0),
                           std::invalid_argument);
     }
 

@@ -9,6 +9,12 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+### Fixed
+
+- A PDF that needs a password to open now shows its pages after the right
+  password is entered. Its pages and thumbnails used to stay blank. PDFs that
+  open without a password were not affected (#126).
+
 ## [1.5.1] — 2026-10-10 — Damaged-PDF crash and tab-switch pan fixes
 
 ### Fixed

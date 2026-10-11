@@ -21,6 +21,9 @@
 #include <utility>
 #include <vector>
 
+// SecureZeroMemory: see Document.cpp (Phase 8 D3).
+#include <windows.h>
+
 namespace litepdf::core {
 
 struct RenderEngine::Impl {
@@ -268,7 +271,8 @@ struct RenderEngine::Impl {
     }
 };
 
-RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache)
+RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache,
+                           std::optional<std::string_view> password)
     : impl_(std::make_unique<Impl>()) {
     if (n == 0)
         throw std::invalid_argument("RenderEngine: num_workers must be >= 1");
@@ -314,6 +318,20 @@ RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache)
                                  "(is the Document open?)");
     }
 
+    // Each worker document must be authenticated too (#126). MuPDF tries a
+    // blank password on open, and the failed attempt still leaves a key in
+    // the document -- one it computed while checking "" -- so an
+    // unauthenticated worker decrypts every content stream of a user-password
+    // PDF to garbage and renders the page blank. fz_authenticate_password
+    // needs a NUL-terminated copy; it is wiped on every exit from this
+    // constructor, like Document::authenticate's (Phase 8 D3).
+    struct WipeOnExit {
+        std::string& s;
+        ~WipeOnExit() { SecureZeroMemory(s.data(), s.size()); }
+    };
+    std::string pw(password.value_or(std::string_view{}));
+    const WipeOnExit wipe{pw};
+
     try {
         impl_->worker_docs.reserve(n);
         for (std::size_t i = 0; i < n; ++i) {
@@ -330,7 +348,22 @@ RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache)
                     "RenderEngine: fz_open_document failed for worker " +
                     std::to_string(i));
             }
+            // Adopt before authenticating so the rollback below drops it.
             impl_->worker_docs.push_back(wdoc);
+            if (!pw.empty()) {
+                int ok = 0;
+                fz_try(ctx) {
+                    ok = fz_authenticate_password(ctx, wdoc, pw.c_str());
+                }
+                fz_catch(ctx) {
+                    ok = 0;
+                }
+                if (!ok) {
+                    throw std::runtime_error(
+                        "RenderEngine: worker " + std::to_string(i) +
+                        " rejected the document's password");
+                }
+            }
         }
     } catch (...) {
         // Rollback: drop any per-worker docs we already opened, each with
