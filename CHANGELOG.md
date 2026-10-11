@@ -9,17 +9,20 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
-## [1.5.2] — 2026-10-11 — Password-protected PDF and text selection fixes
+## [1.5.2] — 2026-10-11 — Password-protected PDF fix and faster text selection
+
+### Changed
+
+- A page's text is now read in the background once the page is shown, so a
+  text-selection press or Select All on it no longer pauses LitePDF. A press
+  that comes in before that background read has finished still reads the text
+  on the spot, as before (#98).
 
 ### Fixed
 
 - A PDF that needs a password to open now shows its pages after the right
   password is entered. Its pages and thumbnails used to stay blank. PDFs that
   open without a password were not affected (#126).
-- A page's text is now read in the background once the page is shown, so a
-  text-selection press or Select All on it no longer pauses LitePDF. A press
-  that comes in before that background read has finished still reads the text
-  on the spot, as before (#98).
 
 ## [1.5.1] — 2026-10-10 — Damaged-PDF crash and tab-switch pan fixes
 
