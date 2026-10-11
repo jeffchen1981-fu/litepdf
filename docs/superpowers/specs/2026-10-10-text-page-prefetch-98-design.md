@@ -261,6 +261,8 @@ escrow keeps the MuPDF root alive past the Document.
 
 ### 3.6 Password-protected documents are not prefetched
 
+*Superseded before implementation by #126 — see the addendum at the end of this section. The original design is kept for the record.*
+
 The worker documents are never authenticated: `fz_open_document` at
 `RenderEngine.cpp:323`, and the only `fz_authenticate_password` call in `src/`
 is in `Document::authenticate`. MuPDF tries a blank password at open
@@ -390,10 +392,14 @@ changes. §8 records the one input class this oracle does not cover.
      `on_text` runs.
    - **Null pixmap:** a request carrying `on_text` whose cancel flag is set
      before submit (checkpoint A) gets `on_complete(nullptr)` and no `on_text`.
-     A null pixmap at the full-render delivery site comes from a failed
-     rasterise or invert after a good page load, which no fixture produces
-     deterministically; that guard has no separate test. (A request for a page
-     past the end would not test it: `build` fails there too.)
+     A null pixmap at the full-render delivery site also comes from a failed
+     page load, and a request for a page past the end produces exactly that
+     (`fz_load_page` throws, no display list, no raster, `on_complete(nullptr)`).
+     That is a valid test of the guard because the build counter, not the
+     delivered text, is the oracle: a request with `on_text`, `text_wanted`
+     holding the past-the-end page and a P1 sentinel behind it must leave
+     `text_builds_started() == 0`; without the `pix` test the worker would start
+     a build (which then fails) and the counter reads 1.
    - **Positive control:** the same harness with none of the above → `on_text`
      called once.
 

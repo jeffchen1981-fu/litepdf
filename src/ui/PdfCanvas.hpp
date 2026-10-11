@@ -44,7 +44,7 @@ namespace litepdf::ui {
 // from a superseded view (issue #35), from a submission a newer batch has
 // superseded, from a page the user has left, and a right-slot pixmap
 // arriving while the layout is single-page.
-// Must match the reservation in MainWindow.cpp (WM_USER + 3).
+// Must match the reservation in MainWindow.cpp (WM_USER + 3 to + 5).
 inline constexpr UINT WM_USER_RENDER_DONE = WM_USER + 3;
 // (Phase 8 D10) Same payload as WM_USER_RENDER_DONE but the bitmap
 // lands in the RIGHT slot of the two-page spread layout instead of the

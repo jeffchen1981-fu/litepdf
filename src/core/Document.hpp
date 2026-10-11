@@ -294,7 +294,6 @@ public:
         [[nodiscard]] std::string copy(SelPoint a, SelPoint b) const;
 
     private:
-        friend class Document;
         friend struct detail::TextPageAccess;
         struct Impl;
         std::shared_ptr<Impl> impl_;

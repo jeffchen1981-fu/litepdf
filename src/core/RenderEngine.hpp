@@ -119,7 +119,9 @@ public:
 
     // (#98) Sets `stopping` and wakes the workers; idempotent. The workers still
     // drain the queue, but no longer build any request's text (skip rule 1).
-    // ~RenderEngine calls it before it joins.
+    // ~RenderEngine calls it before it joins. It is for the destructor and tests;
+    // submit() after it is a caller error: once the queue has drained the workers
+    // exit, so a later request's on_complete would never run.
     void begin_shutdown() noexcept;
 
     // (#98) Text builds started by the workers: incremented immediately before
