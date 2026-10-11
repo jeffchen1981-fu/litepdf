@@ -130,6 +130,15 @@ void SearchSession::set_query(std::wstring q, Flags f) {
     // freshly cleared list.
     std::uint64_t ep = 0;
     {
+        // Test seam (see set_after_reset_hook). Declared before the lock so
+        // it fires on scope exit right AFTER the mutex is released: nothing
+        // can sit between the unlock and the hook, so the seam's regression
+        // test also catches a bump moved out of this block.
+        struct AfterReset {
+            const std::function<void()>& hook;
+            ~AfterReset() { if (hook) hook(); }
+        } after_reset{impl_->after_reset_hook};
+
         std::lock_guard<std::mutex> g(st.m);
         st.query           = std::move(q);
         st.flags           = f;
@@ -138,7 +147,6 @@ void SearchSession::set_query(std::wstring q, Flags f) {
         st.pages_remaining = 0;
         ep = st.epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
     }
-    if (impl_->after_reset_hook) impl_->after_reset_hook();
 
     // Start a new abort generation: this flips the PREVIOUS generation's
     // token so a worker still inside page_hits() for the old query bails
@@ -254,7 +262,9 @@ void SearchSession::set_query(std::wstring q, Flags f) {
         // submit throws (e.g. bad_alloc on the queue push), the task never
         // reached a worker and will never decrement, so take its count
         // back — otherwise ~SearchSession would spin forever. The tasks
-        // not yet built are simply never counted.
+        // not yet built are simply never counted. This generation is left
+        // partial (pages_remaining never reaches 0, so scan_complete()
+        // stays false) until the next set_query resets it.
         st.pending_tasks.fetch_add(1, std::memory_order_acq_rel);
         try {
             impl_->dispatcher.submit(std::move(t));

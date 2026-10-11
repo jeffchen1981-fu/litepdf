@@ -10,10 +10,12 @@
 //   p6: 1 dolor
 // Totals: Lorem=15, dolor=3.
 //
-// InlineDispatcher runs tasks synchronously on submit(), so after
-// set_query() returns every page has already been scanned and
-// scan_complete() is true. Exercising the worker-thread path is the
-// job of the ThreadPoolDispatcher integration tests in later phases.
+// Most cases use InlineDispatcher, which runs tasks synchronously on
+// submit(), so after set_query() returns every page has already been
+// scanned and scan_complete() is true. One case drives a real
+// ThreadPoolDispatcher; the cases at the end use dispatcher doubles
+// (DeferredDispatcher, ThrowingDispatcher) to pin down a task interleaving
+// or a submit failure deterministically.
 
 #include "app/SearchDispatcher.hpp"
 #include "core/Document.hpp"
