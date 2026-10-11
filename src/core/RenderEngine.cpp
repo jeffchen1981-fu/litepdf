@@ -1,6 +1,7 @@
 #include "core/RenderEngine.hpp"
 #include "core/Document.hpp"
 #include "core/PageCache.hpp"
+#include "core/detail/TextPageAccess.hpp"
 
 // RenderEngine is the only TU that includes <mupdf/fitz.h> publicly; the
 // header stays MuPDF-free so UI code can consume it without the MuPDF
@@ -69,6 +70,57 @@ struct RenderEngine::Impl {
     std::vector<QueuedRequest> q;
     std::size_t next_seq = 1;  // guarded by mtx (submit holds it anyway)
     std::atomic<std::size_t> next_id{1};
+    // (#98) Bumped immediately before every TextPageAccess::build call in
+    // maybe_deliver_text. Test observability only (text_builds_started()).
+    std::atomic<std::size_t> text_builds{0};
+
+    // (#98) Called after on_complete has delivered a NON-NULL pixmap for `req`.
+    // Builds the page's text on this worker's own context and document -- no
+    // doc_mutex: nothing else touches them -- and hands it to on_text, unless a
+    // skip rule holds (spec §3.3). Not calling on_text is always allowed: the UI
+    // then builds the text synchronously.
+    //   1. stopping: the engine is being destroyed; the queue still drains, so
+    //      without this every queued build would run while the UI thread joins.
+    //   2. text_wanted no longer holds req.page_num.
+    //   3. a priority-0 request is waiting: it is newer and must not wait
+    //      behind this build. If it needs text, it carries its own on_text.
+    //   4. the request's cancel flag is set.
+    // Rules 1 and 3 are read under ONE acquisition of mtx (`stopping` is a plain
+    // bool). After the build, rules 1, 2 and 4 are checked again and a stale
+    // result is dropped here; that drop is safe, because the handle frees its
+    // stext page through its own escrow. The check is not atomic with the start
+    // of the build: a change that lands in between costs one build that cannot
+    // be pre-empted (spec §3.3 residual).
+    static void maybe_deliver_text(Impl* impl, const RenderRequest& req,
+                                   const std::shared_ptr<std::atomic<bool>>& canceled,
+                                   fz_context* ctx, fz_document* wdoc) {
+        if (!req.on_text) return;
+        {
+            std::lock_guard<std::mutex> lk(impl->mtx);
+            if (impl->stopping) return;
+            // q is heap-ordered, not sorted; any entry may be a P0.
+            for (const auto& entry : impl->q) {
+                if (entry.priority == 0 && !(entry.canceled && entry.canceled->load()))
+                    return;
+            }
+        }
+        const auto still_wanted = [&req, &canceled] {
+            return req.text_wanted
+                && req.text_wanted->load(std::memory_order_relaxed) == req.page_num
+                && !(canceled && canceled->load());
+        };
+        if (!still_wanted()) return;
+
+        impl->text_builds.fetch_add(1);
+        auto text = detail::TextPageAccess::build(ctx, wdoc, req.page_num);
+
+        {
+            std::lock_guard<std::mutex> lk(impl->mtx);
+            if (impl->stopping) return;
+        }
+        if (!still_wanted()) return;
+        if (text.valid()) req.on_text(std::move(text));
+    }
 
     // Graceful shutdown: predicate wakes on stopping || !q.empty(); we only
     // return when stopping AND queue is empty, so in-flight queued requests
@@ -128,8 +180,13 @@ struct RenderEngine::Impl {
                         fz_drop_pixmap(ctx, cached);
                         continue;
                     }
-                    if (req.on_complete) req.on_complete(cached, ctx);
-                    else fz_drop_pixmap(ctx, cached);
+                    if (req.on_complete) {
+                        req.on_complete(cached, ctx);
+                        // (#98) cached is non-null here.
+                        maybe_deliver_text(impl, req, canceled, ctx, wdoc);
+                    } else {
+                        fz_drop_pixmap(ctx, cached);
+                    }
                     continue;  // skip MuPDF work entirely
                 }
             }
@@ -263,6 +320,9 @@ struct RenderEngine::Impl {
             // Ownership of pix transfers to the callback per D2.
             if (req.on_complete) {
                 req.on_complete(pix, ctx);
+                // (#98) Text only after a non-null pixmap: pix is not read
+                // again, only tested. A failed rasterise or invert has no text.
+                if (pix) maybe_deliver_text(impl, req, canceled, ctx, wdoc);
             } else if (pix) {
                 // No callback supplied; we own pix — drop to avoid a leak.
                 fz_drop_pixmap(ctx, pix);
@@ -403,13 +463,21 @@ RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache,
     }
 }
 
+void RenderEngine::begin_shutdown() noexcept {
+    {
+        std::lock_guard<std::mutex> lk(impl_->mtx);
+        impl_->stopping = true;
+    }
+    impl_->cv.notify_all();
+}
+
+std::size_t RenderEngine::text_builds_started() const noexcept {
+    return impl_->text_builds.load();
+}
+
 RenderEngine::~RenderEngine() {
     if (impl_) {
-        {
-            std::lock_guard<std::mutex> lk(impl_->mtx);
-            impl_->stopping = true;
-        }
-        impl_->cv.notify_all();
+        begin_shutdown();
         for (auto& t : impl_->workers) {
             if (t.joinable()) t.join();
         }
