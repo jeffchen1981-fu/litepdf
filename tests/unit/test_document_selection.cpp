@@ -479,3 +479,42 @@ TEST_CASE("DocumentSelection the annotation fixture draws its annotation text",
     REQUIRE(ok);
     REQUIRE(text.find("Annotation text") != std::string::npos);
 }
+
+// A share is a second handle on the SAME page object (#98): dropping either one
+// leaves the other fully usable, and the page's escrow context goes only with
+// the last.
+TEST_CASE("DocumentSelection a shared text page survives dropping the other handle",
+          "[core][selection]") {
+    const Document doc = open_selection_fixture();
+    Document::TextPage a = doc.text_page(kWords);
+    REQUIRE(a.valid());
+    Document::TextPage b = a.share();
+    REQUIRE(b.valid());
+    REQUIRE(b.page() == a.page());
+
+    SelPoint first, last;
+    REQUIRE(a.full_range(first, last));
+    const std::string expected = a.copy(first, last);
+    REQUIRE_FALSE(expected.empty());
+
+    fz_context* tmp = doc.clone_context();
+    REQUIRE(tmp != nullptr);
+    litepdf::core::EscrowContext probe = litepdf::core::EscrowContext::clone_from(tmp);
+    fz_drop_context(tmp);
+    REQUIRE(probe.valid());
+
+    const std::size_t contexts = litepdf::core::detail::family_context_count(probe.get());
+    a = Document::TextPage{};
+    REQUIRE(litepdf::core::detail::family_context_count(probe.get()) == contexts);
+    REQUIRE(b.valid());
+    SelPoint bfirst, blast;
+    REQUIRE(b.full_range(bfirst, blast));
+    REQUIRE(b.copy(bfirst, blast) == expected);
+
+    b = Document::TextPage{};
+    REQUIRE(litepdf::core::detail::family_context_count(probe.get()) == contexts - 1);
+
+    REQUIRE_FALSE(Document::TextPage{}.share().valid());
+
+    probe = litepdf::core::EscrowContext{};
+}

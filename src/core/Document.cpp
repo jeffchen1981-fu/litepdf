@@ -2,6 +2,7 @@
 
 #include "core/MuPDFRoot.hpp"
 #include "core/EscrowContext.hpp"
+#include "core/detail/TextPageAccess.hpp"
 #include "core/SearchQuery.hpp"
 #include "core/SystemFonts.hpp"
 
@@ -627,32 +628,6 @@ std::vector<Document::OutlineEntry> Document::outline() const {
 // Text selection (#52)
 // ----------------------------------------------------------------------
 
-struct Document::TextPage::Impl {
-    // The destructor body drops `stext` THROUGH `escrow`. Members are destroyed
-    // only after the body has run, so the escrow is alive for that drop; the
-    // escrow itself then drops its context before releasing the lock table.
-    // Net order: stext page -> escrow context -> lock table (spec §3.3).
-    EscrowContext  escrow;
-    fz_stext_page* stext = nullptr;
-    int            page  = -1;
-    // The page's first and last character edges. Invariant for the handle's
-    // life -- the stext page never changes -- so it is computed once at
-    // acquisition instead of per WM_MOUSEMOVE: snap() consults it on every
-    // word or line drag move, and the walk is over every character on the page.
-    bool           has_range  = false;
-    SelPoint       range_first{};
-    SelPoint       range_last{};
-    // highlight() runs on every drag move; log its quad cap once per handle.
-    bool           quad_cap_logged = false;
-
-    Impl() = default;
-    ~Impl() {
-        if (stext) fz_drop_stext_page(escrow.get(), stext);
-    }
-    Impl(const Impl&)            = delete;
-    Impl& operator=(const Impl&) = delete;
-};
-
 namespace {
 
 constexpr int kSelectionQuadsInitial = 256;
@@ -694,6 +669,12 @@ bool Document::TextPage::valid() const noexcept {
 
 int Document::TextPage::page() const noexcept {
     return valid() ? impl_->page : -1;
+}
+
+Document::TextPage Document::TextPage::share() const noexcept {
+    TextPage out;
+    out.impl_ = impl_;   // shared_ptr copy: never throws
+    return out;
 }
 
 bool Document::TextPage::full_range(SelPoint& first, SelPoint& last) const noexcept {
@@ -820,48 +801,28 @@ std::string Document::TextPage::copy(SelPoint a, SelPoint b) const {
     return out;
 }
 
-Document::TextPage Document::text_page(std::size_t index) const noexcept {
-    TextPage result;
-    if (!is_open() || index >= static_cast<std::size_t>(INT_MAX)) return result;
+Document::TextPage detail::TextPageAccess::build(fz_context* ctx, fz_document* doc,
+                                                 int index) noexcept {
+    Document::TextPage result;
+    if (!ctx || !doc || index < 0) return result;
 
-    std::unique_ptr<TextPage::Impl> handle;
+    std::shared_ptr<Document::TextPage::Impl> handle;
     try {
-        handle = std::make_unique<TextPage::Impl>();
+        handle = std::make_shared<Document::TextPage::Impl>();
     } catch (...) {
         return result;
     }
 
-    // Only ACQUISITION serialises with the other users of this Document's
-    // context: building the stext page loads a page from impl_->doc. Everything
-    // afterwards runs on the handle's escrow, lock-free (spec §3.2).
-    //
-    // Taken through a deferred unique_lock rather than a lock_guard because this
-    // function is noexcept: std::mutex::lock() throws std::system_error when the
-    // calling thread already holds the mutex (MSVC raises
-    // resource_deadlock_would_occur), and a throw out of a noexcept function is
-    // std::terminate, not the empty handle this contract promises. No caller
-    // holds doc_mutex today -- and none may: the empty handle is SILENT in every
-    // configuration this project can build (all of them define NDEBUG; Debug
-    // does not link against the Release-only MuPDF libs), so a re-entrant caller
-    // would just see a selection that never starts (#70).
-    std::unique_lock<std::mutex> lk(impl_->doc_mutex, std::defer_lock);
-    try {
-        lk.lock();
-    } catch (...) {
-        return result;
-    }
-
-    handle->escrow = EscrowContext::clone_from(impl_->ctx);
+    handle->escrow = EscrowContext::clone_from(ctx);
     if (!handle->escrow.valid()) return result;
 
-    fz_context*    ctx   = impl_->ctx;
     fz_page*       page  = nullptr;
     fz_stext_page* stext = nullptr;
     fz_var(page);
     fz_var(stext);
     fz_try(ctx) {
-        if (static_cast<int>(index) < fz_count_pages(ctx, impl_->doc)) {
-            page = fz_load_page(ctx, impl_->doc, static_cast<int>(index));
+        if (index < fz_count_pages(ctx, doc)) {
+            page = fz_load_page(ctx, doc, index);
             // Pinned to default options, the same as page_text. Two flags must
             // NOT be added (spec §3.1): FZ_STEXT_COLLECT_STRUCTURE nests text
             // under struct blocks the selection walkers skip, and
@@ -882,13 +843,39 @@ Document::TextPage Document::text_page(std::size_t index) const noexcept {
     if (!stext) return result;
 
     handle->stext = stext;
-    handle->page  = static_cast<int>(index);
+    handle->page  = index;
     result.impl_  = std::move(handle);
     // Warm the cached range on the acquisition that already costs a page walk,
     // so no drag move pays for it.
     SelPoint warm_first, warm_last;
     (void)result.full_range(warm_first, warm_last);
     return result;
+}
+
+Document::TextPage Document::text_page(std::size_t index) const noexcept {
+    if (!is_open() || index >= static_cast<std::size_t>(INT_MAX)) return TextPage{};
+
+    // Only ACQUISITION serialises with the other users of this Document's
+    // context: building the stext page loads a page from impl_->doc. Everything
+    // afterwards runs on the handle's escrow, lock-free (spec §3.2).
+    //
+    // Taken through a deferred unique_lock rather than a lock_guard because this
+    // function is noexcept: std::mutex::lock() throws std::system_error when the
+    // calling thread already holds the mutex (MSVC raises
+    // resource_deadlock_would_occur), and a throw out of a noexcept function is
+    // std::terminate, not the empty handle this contract promises. No caller
+    // holds doc_mutex today -- and none may: the empty handle is SILENT in every
+    // configuration this project can build (all of them define NDEBUG; Debug
+    // does not link against the Release-only MuPDF libs), so a re-entrant caller
+    // would just see a selection that never starts (#70).
+    std::unique_lock<std::mutex> lk(impl_->doc_mutex, std::defer_lock);
+    try {
+        lk.lock();
+    } catch (...) {
+        return TextPage{};
+    }
+
+    return detail::TextPageAccess::build(impl_->ctx, impl_->doc, static_cast<int>(index));
 }
 
 } // namespace litepdf::core
