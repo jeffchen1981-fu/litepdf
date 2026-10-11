@@ -22,12 +22,29 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
+#include <cstddef>
 #include <filesystem>
+#include <functional>
+#include <future>
 #include <memory>
+#include <new>
 #include <thread>
+#include <utility>
+#include <vector>
 
 using namespace litepdf::core;
 using namespace litepdf::app;
+
+namespace litepdf::core {
+
+// Friend of SearchSession: reaches the private after-reset test seam.
+struct SearchSessionTestAccess {
+    static void set_after_reset_hook(SearchSession& s, std::function<void()> hook) {
+        s.set_after_reset_hook(std::move(hook));
+    }
+};
+
+}  // namespace litepdf::core
 
 namespace {
 
@@ -205,4 +222,130 @@ TEST_CASE("SearchSession: destruct while holding state is safe",
         // weak-ptr guard in the ThreadPoolDispatcher path in principle.
     }
     SUCCEED("destruct during/after scan is safe");
+}
+
+namespace {
+
+// Queues every submitted task without running it, so a test decides when
+// (and inside which window) each one runs. run() honours the weak-state
+// gate the real dispatchers apply.
+class DeferredDispatcher final : public ISearchDispatcher {
+public:
+    void submit(Task t) override { tasks_.push_back(std::move(t)); }
+
+    void run(std::size_t i) {
+        Task t = std::move(tasks_.at(i));
+        if (!t.state_weak.expired() && t.run) t.run();
+    }
+
+    // Runs every task not yet run, including ones submitted meanwhile.
+    void run_all() {
+        for (std::size_t i = 0; i < tasks_.size(); ++i) run(i);
+    }
+
+private:
+    std::vector<Task> tasks_;
+};
+
+// Runs tasks inline like InlineDispatcher, but submit() throws bad_alloc on
+// call number `fail_on` (1-based) -- as ThreadPoolDispatcher::submit's queue
+// push can -- without running that task.
+class ThrowingDispatcher final : public ISearchDispatcher {
+public:
+    explicit ThrowingDispatcher(int fail_on) : fail_on_(fail_on) {}
+
+    void submit(Task t) override {
+        if (++calls_ == fail_on_) throw std::bad_alloc();
+        if (!t.state_weak.expired() && t.run) t.run();
+    }
+
+private:
+    int fail_on_;
+    int calls_ = 0;
+};
+
+}  // namespace
+
+// A worker of the superseded generation that takes the state mutex right
+// after set_query() cleared the hit list must see the new epoch and drop its
+// results. Before the fix the epoch was bumped only after the mutex was
+// released, so such a worker appended its stale page-0 Lorem hits (12) to
+// the freshly cleared list and they leaked into the next query's results.
+TEST_CASE("SearchSession: superseded worker cannot append hits after a retype",
+          "[search][session]") {
+    Document doc = open_search_fixture();
+    DeferredDispatcher d;
+    SearchSession s(doc, d);
+
+    s.set_query(L"Lorem", SearchSession::Flags{});  // tasks 0..6, none run
+    bool fired = false;
+    SearchSessionTestAccess::set_after_reset_hook(s, [&] {
+        if (fired) return;
+        fired = true;
+        d.run(0);  // Lorem page 0, landing between reset and submit
+    });
+    s.set_query(L"dolor", SearchSession::Flags{});
+    // CHECK, not REQUIRE: the queued tasks must still drain below, or
+    // ~SearchSession would spin on them.
+    CHECK(fired);
+    CHECK(s.hit_count() == 0);
+
+    d.run_all();  // stale Lorem tasks drop; dolor scans all 7 pages
+    REQUIRE(s.scan_complete());
+    REQUIRE(s.hit_count() == 3);  // dolor only: p1, p3, p6
+}
+
+TEST_CASE("SearchSession: superseded worker cannot append hits after a clear",
+          "[search][session]") {
+    Document doc = open_search_fixture();
+    DeferredDispatcher d;
+    SearchSession s(doc, d);
+
+    s.set_query(L"Lorem", SearchSession::Flags{});
+    bool fired = false;
+    SearchSessionTestAccess::set_after_reset_hook(s, [&] {
+        if (fired) return;
+        fired = true;
+        d.run(0);
+    });
+    s.clear();
+    CHECK(fired);
+    CHECK(s.hit_count() == 0);
+
+    d.run_all();  // drain the remaining stale tasks before ~SearchSession
+    REQUIRE(s.hit_count() == 0);
+}
+
+// If submit() throws part-way through a generation, the tasks never handed
+// to the dispatcher must not be counted as pending: ~SearchSession spins
+// until that counter reaches zero, so before the fix it never returned.
+// The destructor runs on a helper thread so a regression fails the test
+// instead of hanging the suite; on timeout the session is deliberately
+// leaked (the spinning thread still references it).
+TEST_CASE("SearchSession: destructor returns after a dispatcher submit throws",
+          "[search][session][threads]") {
+    auto doc = std::make_unique<Document>(open_search_fixture());
+    auto d   = std::make_unique<ThrowingDispatcher>(3);  // tasks 1-2 run, 3 throws
+    auto s   = std::make_unique<SearchSession>(*doc, *d);
+
+    REQUIRE_THROWS_AS(s->set_query(L"Lorem", SearchSession::Flags{}),
+                      std::bad_alloc);
+
+    auto              destroyed = std::make_shared<std::promise<void>>();
+    std::future<void> done      = destroyed->get_future();
+    SearchSession*    raw       = s.release();
+    std::thread t([raw, destroyed] {
+        delete raw;
+        destroyed->set_value();
+    });
+    if (done.wait_for(std::chrono::seconds(5)) == std::future_status::ready) {
+        t.join();
+        SUCCEED("~SearchSession returned");
+    } else {
+        // Keep everything the spinning destructor can reach alive forever.
+        t.detach();
+        (void)doc.release();
+        (void)d.release();
+        FAIL("~SearchSession still spinning 5 s after a submit throw");
+    }
 }

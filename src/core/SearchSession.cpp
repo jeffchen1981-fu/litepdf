@@ -54,6 +54,8 @@ struct SearchSession::Impl {
     // dtor); each generation's tasks capture their own token by value, so
     // workers never touch this object. See GenerationAbort.hpp.
     GenerationAbort                         gen;
+    // Test seam; see SearchSession::set_after_reset_hook. UI thread only.
+    std::function<void()>                   after_reset_hook;
 
     Impl(const Document& d, litepdf::app::ISearchDispatcher& disp)
         : doc(d), dispatcher(disp), state(std::make_shared<State>()) {}
@@ -121,6 +123,12 @@ SearchSession::~SearchSession() {
 void SearchSession::set_query(std::wstring q, Flags f) {
     auto& st = *impl_->state;
 
+    // Bump the epoch in the SAME critical section that clears the hits. A
+    // superseded task re-checks the epoch under st.m before appending, so
+    // it must never be able to take the mutex between the clear and the
+    // bump -- it would see its own epoch and append stale hits to the
+    // freshly cleared list.
+    std::uint64_t ep = 0;
     {
         std::lock_guard<std::mutex> g(st.m);
         st.query           = std::move(q);
@@ -128,12 +136,9 @@ void SearchSession::set_query(std::wstring q, Flags f) {
         st.hits.clear();
         st.cursor          = 0;
         st.pages_remaining = 0;
+        ep = st.epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
     }
-
-    // Bump the epoch AFTER clearing so in-flight tasks observe the new
-    // value and skip appending to the now-empty hit list.
-    const std::uint64_t ep =
-        st.epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+    if (impl_->after_reset_hook) impl_->after_reset_hook();
 
     // Start a new abort generation: this flips the PREVIOUS generation's
     // token so a worker still inside page_hits() for the old query bails
@@ -147,7 +152,7 @@ void SearchSession::set_query(std::wstring q, Flags f) {
     // immediately (pages_remaining already zeroed above). This early return
     // MUST stay below begin_generation() above: clearing the query still has
     // to abort the prior generation's in-flight worker, so do not hoist this
-    // check above line 144.
+    // check above the begin_generation() call.
     OnUpdate cb_snapshot;
     {
         std::lock_guard<std::mutex> g(st.m);
@@ -179,15 +184,6 @@ void SearchSession::set_query(std::wstring q, Flags f) {
     const Document&              doc_ref      = impl_->doc;
     const std::string            needle_utf8  = utf16_to_utf8(state_strong->query);
     const Flags                  captured_flags = f;
-
-    // Arm the drain counter BEFORE submitting. fetch_add (not store)
-    // because a prior generation's tasks may still be in-flight — they
-    // decrement via their own scope guards, so we must not clobber their
-    // contribution by overwriting. The counter transiently reflects
-    // "sum of in-flight across all generations", which is exactly what
-    // ~SearchSession wants to drain down to zero.
-    st.pending_tasks.fetch_add(static_cast<int>(pages),
-                               std::memory_order_acq_rel);
 
     // Priority: all tasks at P2 in v1. Phase 6.x optimization will use
     // set_reference_page() to bump nearby pages to P0/P1.
@@ -248,8 +244,29 @@ void SearchSession::set_query(std::wstring q, Flags f) {
             }
             if (cb) cb();
         };
-        impl_->dispatcher.submit(std::move(t));
+        // Arm the drain counter per task, BEFORE its submit (the task may
+        // run and decrement before submit returns). fetch_add (not store)
+        // because a prior generation's tasks may still be in-flight — they
+        // decrement via their own scope guards, so we must not clobber
+        // their contribution by overwriting. The counter transiently
+        // reflects "sum of in-flight across all generations", which is
+        // exactly what ~SearchSession wants to drain down to zero. If
+        // submit throws (e.g. bad_alloc on the queue push), the task never
+        // reached a worker and will never decrement, so take its count
+        // back — otherwise ~SearchSession would spin forever. The tasks
+        // not yet built are simply never counted.
+        st.pending_tasks.fetch_add(1, std::memory_order_acq_rel);
+        try {
+            impl_->dispatcher.submit(std::move(t));
+        } catch (...) {
+            st.pending_tasks.fetch_sub(1, std::memory_order_acq_rel);
+            throw;
+        }
     }
+}
+
+void SearchSession::set_after_reset_hook(std::function<void()> hook) {
+    impl_->after_reset_hook = std::move(hook);
 }
 
 void SearchSession::clear() {
