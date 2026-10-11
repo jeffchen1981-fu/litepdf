@@ -114,9 +114,11 @@ it to `RenderEngine`. It passes the same value to `SearchSession`.
 
 The body of `Document::page_hits` moves into a helper in `Document.cpp` that
 takes a context, a document and a cookie, and takes no lock. `Document::page_hits`
-stays as a wrapper that takes `doc_mutex` and calls the helper. `litepdf-cli
---bench-selection` (`bench_selection.cpp:80`) and the existing `page_hits` tests
-use the wrapper. Scan tasks call the helper under the session mutex with the
+stays as a wrapper that takes `doc_mutex` and calls the helper with no cookie.
+Its `std::atomic<int>* abort_flag` parameter is removed, because once scans use
+the helper its only remaining user is one leg of a test, which moves to the
+cookie test (§6, T3). `litepdf-cli --bench-selection` (`bench_selection.cpp:80`)
+and the existing `page_hits` tests use the wrapper. Scan tasks call the helper under the session mutex with the
 session's pair. The helper is exposed through the narrowest surface that lets
 `SearchSession.cpp` call it; the plan picks the exact form.
 
@@ -210,7 +212,7 @@ loads them only for its own rare calls.
 
 | File | Change |
 |---|---|
-| `src/core/Document.hpp/.cpp` | `page_hits` body moves into a lock-free helper with a cookie; the wrapper keeps the old signature; new `EscrowContext` accessor; the `doc_mutex` comments (`Document.cpp:51-67`, `Document.hpp:139-146`) are rewritten: search no longer contends |
+| `src/core/Document.hpp/.cpp` | `page_hits` body moves into a lock-free helper with a cookie; the wrapper loses its abort parameter (§3.3); new `EscrowContext` accessor; the `doc_mutex` comments (`Document.cpp:51-67`, `Document.hpp:139-146`) are rewritten: search no longer contends |
 | `src/core/SearchSession.hpp/.cpp` | password parameter; own context, document and mutex; tasks call the helper; generation token carries the cookie |
 | `src/core/GenerationAbort.hpp` | token type (§3.4) |
 | `src/core/DocumentView.cpp` | pass the password to `SearchSession` |
@@ -282,8 +284,9 @@ ASCII and prefixed `SearchSession:` / `Document:`.
   unchanged.
 - **Existing tests stay green unchanged**: `test_search_session`,
   `test_cross_tab_search`, `test_crosstab_ctrlw_race`, `test_document_view`,
-  `test_page_anchor`, `test_generation_abort`, and every `page_hits` test (they
-  use the wrapper). The default `password = std::nullopt` keeps every existing
+  `test_page_anchor`, and every `page_hits` test (they use the wrapper), except
+  that `page_hits abort_flag + leak stress` loses its pre-aborted leg to T3.
+  `test_generation_abort` changes with the token type (T4). The default `password = std::nullopt` keeps every existing
   `SearchSession(doc, dispatcher)` call compiling, and every fixture they use is
   unencrypted.
 - **T6 — GUI probe (nothing committed).** On the spec PDF, start a search for a
