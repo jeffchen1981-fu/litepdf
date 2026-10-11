@@ -61,9 +61,10 @@ measured.
 1. While `doc_mutex` is held by another thread, a full scan still completes with
    the correct hit count (§6, T1).
 2. On a user-password PDF, a scan finds the same hits it finds today (§6, T2).
-3. Closing a tab mid-scan no longer waits for a whole cold build; it waits at
-   most until the build's next content-stream token or the end of the font load
-   in progress (§3.4).
+3. For PDF (and XPS), closing a tab mid-scan no longer waits for a whole cold
+   build. It waits until the build's next content-stream token, which may first
+   require the font load or page load in progress to finish (§3.4). Other formats
+   keep today's behaviour.
 4. No new UI-thread stall: the extra document opens off the UI thread for
    files without a password (§3.5).
 
@@ -107,6 +108,12 @@ attempt at open leaves a key behind, and every content stream decrypts to
 garbage (#126). The scan would report zero hits on every page, silently.
 Throwing makes a missing pass-through fail when the tab opens.
 
+`fz_needs_password` is called once, right after the open and before any
+`fz_authenticate_password`, and never after one. `pdf_needs_password`
+re-runs a blank-password authentication (`pdf-crypt.c:826-833`). On an
+already-authenticated document, that failed attempt resets the access and key
+(`:803`), which undoes the authentication.
+
 `DocumentView` already receives the password (`DocumentView.hpp:75`) and passes
 it to `RenderEngine`. It passes the same value to `SearchSession`.
 
@@ -115,10 +122,13 @@ it to `RenderEngine`. It passes the same value to `SearchSession`.
 The body of `Document::page_hits` moves into a helper in `Document.cpp` that
 takes a context, a document and a cookie, and takes no lock. `Document::page_hits`
 stays as a wrapper that takes `doc_mutex` and calls the helper with no cookie.
-Its `std::atomic<int>* abort_flag` parameter is removed, because once scans use
-the helper its only remaining user is one leg of a test, which moves to the
-cookie test (§6, T3). `litepdf-cli --bench-selection` (`bench_selection.cpp:80`)
-and the existing `page_hits` tests use the wrapper. Scan tasks call the helper under the session mutex with the
+Its `std::atomic<int>* abort_flag` parameter is removed. Once scans use the
+helper, the only non-null use left is one leg of a test, which moves to the
+cookie test (§6, T3). The callers that pass `nullptr` drop the argument:
+`bench_selection.cpp:80` and five calls in `test_document_search.cpp`. The
+wrapper keeps today's guard for an unopened document or an empty needle.
+`litepdf-cli --bench-selection` and the existing `page_hits` tests use the
+wrapper. Scan tasks call the helper under the session mutex with the
 session's pair. The helper is exposed through the narrowest surface that lets
 `SearchSession.cpp` call it; the plan picks the exact form.
 
@@ -157,9 +167,20 @@ token carries the cookie: an opaque handle, or the header including
 MuPDF-free.
 
 **What the cookie bounds, and what it does not:** an abort lands at the next
-token. A font load in progress (`pdf_load_font`, most of the cold cost in §1.1)
-is not interruptible, so a close or retype can still wait for one font load,
-but no longer for the rest of the page.
+token. Some work cannot be interrupted, so a close or retype can still wait for
+one such item, but no longer for the rest of the page:
+
+- a font load in progress (`pdf_load_font`, which takes no cookie and is most of
+  the cold cost in §1.1);
+- `fz_load_page` itself;
+- a single large token, such as an inline image.
+
+The bound holds only where MuPDF polls the cookie: PDF (`pdf-interpret.c`,
+`pdf-run.c`), XPS (`xps-common.c`) and display lists. The HTML-based formats
+(ePub, FB2) accept a cookie in `htdoc_run_page`/`epub_run_page` and never read
+it, and so do SVG and CBZ. Those formats keep today's whole-build wait on close
+or retype. Scans on them still leave `doc_mutex`, which is the issue's main
+point.
 
 ### 3.5 Where the extra open runs
 
@@ -169,7 +190,9 @@ neither `MainWindow` construction site overrides it).
 
 - **Files without a password:** `DocumentView`, and therefore the session, is
   built on the open worker thread (`MainWindow.cpp:241`, `:296`). The UI thread
-  does not see the cost.
+  does not see the cost, but the tab appears one open later
+  (`WM_USER_OPEN_OK` is posted after construction, `MainWindow.cpp:309`).
+  Accepted: one open, bounded below.
 - **Files with a password:** `DocumentView` is built on the UI thread after the
   password dialog (`MainWindow.cpp:2111`), which already opens the two render
   worker documents there. This adds a third open. Accepted: password-protected
@@ -212,7 +235,9 @@ loads them only for its own rare calls.
 
 | File | Change |
 |---|---|
-| `src/core/Document.hpp/.cpp` | `page_hits` body moves into a lock-free helper with a cookie; the wrapper loses its abort parameter (§3.3); new `EscrowContext` accessor; the `doc_mutex` comments (`Document.cpp:51-67`, `Document.hpp:139-146`) are rewritten: search no longer contends |
+| `src/core/Document.hpp/.cpp` | `page_hits` body moves into a lock-free helper with a cookie; the wrapper loses its abort parameter (§3.3); new `EscrowContext` accessor; every `doc_mutex` comment that names search workers or `page_hits` is rewritten (`Document.cpp:51-67, 275-276, 407-408, 431-432, 607-608`, `Document.hpp:139-146, 216-220`): search no longer contends |
+| `src/cli/bench_selection.cpp` | drop the `nullptr` abort argument (`:80`) |
+| `src/core/EscrowContext.hpp` | the `clone_from` caller list (`:49-50`) names the new accessor |
 | `src/core/SearchSession.hpp/.cpp` | password parameter; own context, document and mutex; tasks call the helper; generation token carries the cookie |
 | `src/core/GenerationAbort.hpp` | token type (§3.4) |
 | `src/core/DocumentView.cpp` | pass the password to `SearchSession` |
@@ -265,7 +290,7 @@ ASCII and prefixed `SearchSession:` / `Document:`.
     it either: same-thread re-entry of `doc_mutex` throws on MSVC.
 - **T2 — password.** Open and authenticate `encrypted-text.pdf`. A session built
   with the password finds `ENCRYPTED` exactly 8 times
-  (`scripts/generate-encrypted-text-fixture.py:63-64` draws 8 lines). A session
+  (`scripts/generate-encrypted-text-fixture.py:63-65` draws 8 lines). A session
   built without it throws. This pins §3.2's fail-loud branch, and the
   exact count rules out the garbage-decrypt mode, which yields 0.
 - **T3 — the cookie reaches the build.** Call the helper directly on a page
@@ -281,11 +306,15 @@ ASCII and prefixed `SearchSession:` / `Document:`.
 - **T5 — constructor failure leaks no context.** Using the ctor-unwind leak
   oracle (`detail::family_context_count` before and after), a session whose
   constructor throws (T2's missing password) leaves the family's context count
-  unchanged.
+  unchanged. The count cannot see a leaked `fz_document`, which holds no context
+  reference. A second check therefore runs the throwing constructor on a temp
+  copy of the fixture, closes the tab Document, and deletes the copy. On
+  Windows the delete fails while a leaked document still holds the file open.
 - **Existing tests stay green unchanged**: `test_search_session`,
   `test_cross_tab_search`, `test_crosstab_ctrlw_race`, `test_document_view`,
   `test_page_anchor`, and every `page_hits` test (they use the wrapper), except
-  that `page_hits abort_flag + leak stress` loses its pre-aborted leg to T3.
+  that every call drops its `nullptr` abort argument and `page_hits abort_flag +
+  leak stress` loses its pre-aborted leg to T3.
   `test_generation_abort` changes with the token type (T4). The default `password = std::nullopt` keeps every existing
   `SearchSession(doc, dispatcher)` call compiling, and every fixture they use is
   unencrypted.
