@@ -190,7 +190,7 @@ public:
     // (RenderEngine::cancel_background). Queued P0 renders run on.
     void cancel_background_renders();
 
-    // Phase 3 Task 11: cancel stale P1/P2 work, submit P0 for `page`
+    // Phase 3 Task 11: cancel queued P1/P3 work, submit P0 for `page`
     // with the caller's callback, and submit P1 prefetch for prev/next
     // pages with drop-only callbacks. The pixmaps land in PageCache
     // automatically at the engine level, so the next PgUp/PgDn is

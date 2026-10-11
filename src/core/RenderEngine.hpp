@@ -45,7 +45,11 @@ public:
 
     struct RenderRequest {
         int   page_num  = 0;
-        int   priority  = 0;     // 0 = highest; 1 = adjacent; 2 = prefetch
+        // Lower runs first. In use: 0 = visible page (DocumentView; the CLI
+        // tools too), 1 = prev/next page prefetch, 3 = thumbnail
+        // (ThumbnailRenderer). No production caller submits 2; search's P2 is
+        // on SearchDispatcher, a separate queue.
+        int   priority  = 0;
         float scale     = 1.0f;  // 1.0 = 72 dpi
         std::function<void(fz_pixmap*, fz_context*)> on_complete;
         // (Phase 7) when true, this request neither reads from nor populates
