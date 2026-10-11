@@ -155,10 +155,32 @@ token from `GenerationAbort`:
   (`~SearchSession`) set `abort` to 1 with an interlocked store and never reset
   it. That matches MuPDF's contract: once the application sets `abort`, it may
   not change it again (`device.h`, the `fz_cookie` comment);
-- the match loop reads the same `abort` field in place of the `atomic<int>`.
-  MuPDF reads the field with plain loads, which it documents as unsynchronized
-  by design. The interlocked store is the most the writer side can add under
-  C++17 (`cmake/CompilerFlags.cmake:5`), since `std::atomic_ref` needs C++20.
+- the match loop reads the same `abort` field in place of the `atomic<int>`,
+  with an interlocked read (`_InterlockedCompareExchange(&abort, 0, 0)`).
+  `std::atomic_ref` would be the portable form, but it needs C++20, and the
+  project is C++17 (`cmake/CompilerFlags.cmake:5`).
+
+**Accepted: MuPDF's read of `abort` is a formal data race.** Our writes and our
+read are interlocked, but MuPDF reads the field with plain loads
+(`pdf-interpret.c:1558`, `pdf-run.c:291, 318, 601`). Under the C++ (and C11)
+memory model, a plain read concurrent with another thread's write is a data
+race. This is MuPDF's defined API, not a misuse:
+
+- the `fz_cookie` comment (`device.h:440-445`) describes it as intended for an
+  application where "another thread wants to … abort a job", with
+  communication "unsynchronized without locking";
+- MuPDF's own code writes `abort = 1` from a controlling thread the same way
+  (`source/tools/muraster.c:719`, `platform/java/jni/cookie.c:59`).
+
+No race-free alternative exists short of not using the cookie, which would drop
+§3.4 altogether. The practical exposure on this toolchain (MSVC, x64) is small:
+
+- the field is an aligned 32-bit `int`, so a load or store is a single
+  instruction;
+- MuPDF re-reads it through the pointer on every token, between calls the
+  compiler cannot see into, so the read is not hoisted;
+- the value only ever goes 0 → 1, so a stale read delays the abort by at most
+  one more token.
 
 `GenerationAbort.hpp` is MuPDF-free today, and `fz_cookie` is a typedef of an
 anonymous struct, so it cannot be forward-declared. The plan decides how the

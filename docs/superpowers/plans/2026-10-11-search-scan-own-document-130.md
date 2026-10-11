@@ -47,7 +47,7 @@
 **Interfaces:**
 - Produces, in `src/core/detail/PageHitsAccess.hpp` (includes `core/Document.hpp`, `<mupdf/fitz.h>`, `<intrin.h>`; namespace `litepdf::core::detail`):
   - `void request_abort(fz_cookie& c) noexcept;`: `_InterlockedExchange` on `c.abort` (with `static_assert(sizeof(long) == sizeof(int))`); inline.
-  - `bool abort_requested(const fz_cookie& c) noexcept;`: a `volatile` read of `c.abort`; inline.
+  - `bool abort_requested(fz_cookie& c) noexcept;`: an interlocked read, `_InterlockedCompareExchange(reinterpret_cast<volatile long*>(&c.abort), 0, 0) != 0`; inline. It takes a non-const reference because the intrinsic needs a writable address. MuPDF's own read stays plain; spec §3.4 records that as an accepted, vendor-defined data race.
   - `std::vector<Document::PageHit> page_hits_on(fz_context* ctx, fz_document* doc, std::size_t page, std::string_view needle_utf8, Document::SearchFlags flags, fz_cookie* cookie);`: defined in `Document.cpp`. It takes no lock (the caller serialises `ctx`/`doc`), and `cookie` may be null.
 - Produces, in `Document`:
   - `[[nodiscard]] std::vector<PageHit> page_hits(std::size_t page, std::string_view needle_utf8, SearchFlags flags) const;`: the `std::atomic<int>* abort_flag` parameter is **removed**. It keeps today's `if (!is_open() || needle_utf8.empty()) return {};` guard (`Document.cpp:496`) before taking `doc_mutex`, then calls `page_hits_on(impl_->ctx, impl_->doc, …, nullptr)`. The helper itself returns `{}` on a null `ctx` or `doc`, or an empty needle.
@@ -74,7 +74,7 @@
   - `Document.cpp:51-67`, `:275-276`, `:407-408`, `:431-432`, `:607-608`;
   - `Document.hpp:139-146` (drop the "SearchSession workers rely on this guarantee" line) and `:216-220`.
 
-  Check with `rg -n "page_hits|search worker" src/core/Document.cpp src/core/Document.hpp`: the only remaining hits are the function itself and its declaration.
+  Check with `rg -n -i "search worker|SearchSession worker" src/core/Document.cpp src/core/Document.hpp`: it prints nothing. Then `rg -n "page_hits" src/core/Document.cpp src/core/Document.hpp`: every hit is the wrapper's or the helper's declaration, definition or call, and none is a comment about `doc_mutex`.
 - [ ] **Step 4: Run** `build\tests\Release\litepdf_unit_tests.exe "[document][search]"` and the four new cases by name. Expected: all pass, including the unchanged `page_hits: page 0 has 12 Lorem hits`.
 - [ ] **Step 5: CLI.** Build `litepdf-cli` too (`--target litepdf-cli`). Expected: it compiles with the `bench_selection.cpp:80` edit.
 - [ ] **Step 6: Interim call site.** `SearchSession.cpp:219` calls `doc_ref.page_hits(i, needle_utf8, df)` without the token. Until Task 2, a superseded generation stops only between pages (epoch check). Leave `GenerationAbort` untouched. Run `"[search]"`; expected: all pass.
