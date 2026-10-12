@@ -166,10 +166,11 @@ DocumentView::DocumentView(Document doc,
         impl_->doc, num_workers, impl_->cache.get(), password);
 
     // Construct SearchSession LAST — it references impl_->doc (already
-    // moved into place) and the caller-owned dispatcher. If this throws
-    // (shouldn't, current ctor is noexcept-ish), earlier members RAII-
-    // unwind correctly via Impl's declaration order.
-    impl_->session = std::make_unique<SearchSession>(impl_->doc, dispatcher);
+    // moved into place) and the caller-owned dispatcher, and opens its own
+    // document on a cloned context, authenticated with the same password
+    // as the render workers (#130). If it throws (clone, open or password
+    // failure), earlier members RAII-unwind via Impl's declaration order.
+    impl_->session = std::make_unique<SearchSession>(impl_->doc, dispatcher, password);
 }
 
 DocumentView::~DocumentView() {
@@ -191,9 +192,11 @@ DocumentView::~DocumentView() {
     impl_->thumb_cache.reset();
 
     // Session first — drops the strong ref to its shared_ptr<State>.
-    // Any in-flight worker task keeps its own shared_ptr alive until it
-    // completes; the task's captured `const Document&` stays valid
-    // because impl_->doc is destroyed LAST (below, via Impl unwinding).
+    // ~SearchSession drains every in-flight task first; the tasks use only
+    // the session's own context and document, not impl_->doc. impl_->doc
+    // must still be destroyed AFTER the session (below, via Impl
+    // unwinding): the session holds a `const Document&` for page_count()
+    // and query_compiles() on the UI thread.
     impl_->session.reset();
     // Engine next — ensures no worker is mid-access to cache or contexts.
     impl_->engine.reset();

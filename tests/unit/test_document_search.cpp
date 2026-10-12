@@ -14,7 +14,6 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <atomic>
 #include <filesystem>
 #include <string>
 
@@ -91,14 +90,14 @@ TEST_CASE("page_hits: quads lie in PDF coord space", "[document][search]") {
 
 TEST_CASE("page_hits parity: ignore-case literal count", "[document][search]") {
     Document d; REQUIRE_FALSE(d.open("tests/fixtures/search.pdf").has_value());
-    auto h = d.page_hits(0, "lorem", {false, false, false}, nullptr);
+    auto h = d.page_hits(0, "lorem", {false, false, false});
     REQUIRE(h.size() == 12);   // search.pdf page 0 "Lorem" count (fixture header)
 }
 
 TEST_CASE("page_hits honors match_case", "[document][search]") {
     Document d; REQUIRE_FALSE(d.open("tests/fixtures/search.pdf").has_value());
-    auto ci = d.page_hits(0, "Lorem", {false, false, false}, nullptr);
-    auto cs = d.page_hits(0, "lorem", {true,  false, false}, nullptr);
+    auto ci = d.page_hits(0, "Lorem", {false, false, false});
+    auto cs = d.page_hits(0, "lorem", {true,  false, false});
     REQUIRE(ci.size() == 12);  // same count as the ignore-case parity case
     REQUIRE(cs.size() == 0);   // lowercase needle, capitalized text
 }
@@ -116,14 +115,11 @@ TEST_CASE("query_compiles rejects bad regex", "[document][search]") {
     REQUIRE(d.query_compiles("", {false, false, true}));
 }
 
-TEST_CASE("page_hits abort_flag + leak stress", "[document][search]") {
+TEST_CASE("Document: page_hits leak stress", "[document][search]") {
     Document d; REQUIRE_FALSE(d.open("tests/fixtures/large.pdf").has_value());
-    std::atomic<int> stop{1};
-    REQUIRE(d.page_hits(0, "the", {false, false, false}, &stop).size() == 0);  // pre-aborted
     for (int i = 0; i < 200; ++i) {
-        std::atomic<int> s{0};
-        (void)d.page_hits(0, "the", {false, false, false}, &s);
-        (void)d.page_hits(0, "foo(", {false, false, true}, nullptr);  // throws -> caught -> empty
+        (void)d.page_hits(0, "the", {false, false, false});
+        (void)d.page_hits(0, "foo(", {false, false, true});  // throws -> caught -> empty
     }
-    REQUIRE(d.page_hits(0, "the", {false, false, false}, nullptr).size() > 0);  // still works
+    REQUIRE(d.page_hits(0, "the", {false, false, false}).size() > 0);  // still works
 }

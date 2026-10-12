@@ -16,15 +16,18 @@
 //   3. PageCache destructed third — drops any pixmaps / display lists
 //      still in L1/L2 using the cache fz_context.
 //   4. UI-thread fz_context dropped fourth.
-//   5. Document cleaned up last via unique_ptr — in-flight search
-//      workers capture `const Document&` by reference; Document must
-//      outlive those tasks. Since the SearchDispatcher is owned ABOVE
-//      DocumentView (in MainWindow) and outlives every tab, any task
-//      still running after DocumentView destruction keeps a
-//      shared_ptr<State> alive but also needs Document alive — that is
-//      guaranteed by declaring SearchSession AFTER Document in Impl so
-//      it destructs FIRST, and by having the dispatcher outlive all
-//      DocumentViews (enforced at the MainWindow level).
+//   5. Document cleaned up last via unique_ptr — SearchSession keeps a
+//      `const Document&` (page_count() and query_compiles() on the UI
+//      thread), so Document must outlive the session. In-flight search
+//      tasks do not touch Document (#130): they use only the session's
+//      own context, document and mutex, and ~SearchSession drains them
+//      before dropping those. Because ~SearchSession drains every task,
+//      nothing of the session's is left running on the dispatcher once
+//      the session is gone; the dispatcher (owned above DocumentView, in
+//      MainWindow, and outliving every tab) only has to outlive the
+//      session. Document outliving the session is guaranteed by
+//      declaring SearchSession AFTER Document in Impl so it destructs
+//      FIRST.
 
 #include <cstddef>
 #include <filesystem>
@@ -66,8 +69,10 @@ public:
     // Throws std::runtime_error if `doc` is not opened (clone_context
     // returns null) or if context cloning fails (e.g. OOM).
     // `password` is the one `doc` was authenticated with, or none if it
-    // needed none; the render workers authenticate their own documents with
-    // it (#126) and do not keep it. std::optional, not a bare string_view, so
+    // needed none; the render workers (#126) and the search session (#130)
+    // authenticate their own documents with it and do not keep it. Also
+    // throws std::runtime_error if one of them fails to open or
+    // authenticate its document. std::optional, not a bare string_view, so
     // a worker count passed in its place fails to compile instead of a
     // literal 0 converting to string_view(nullptr) (see RenderEngine.hpp).
     explicit DocumentView(Document doc,

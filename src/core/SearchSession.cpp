@@ -1,14 +1,21 @@
 #include "core/SearchSession.hpp"
 
+#include "core/EscrowContext.hpp"
 #include "core/GenerationAbort.hpp"
+#include "core/detail/PageHitsAccess.hpp"
 
-#include <windows.h>  // WideCharToMultiByte for UTF-16 -> UTF-8
+#include <mupdf/fitz.h>
+
+#include <windows.h>  // WideCharToMultiByte, SecureZeroMemory
 
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <iterator>
 #include <mutex>
+#include <stdexcept>
+#include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 
@@ -36,10 +43,9 @@ struct SearchSession::Impl {
         // set_query() and decremented by an RAII scope guard at the top
         // of each task lambda so every early-return path (stale-epoch
         // skip, MuPDF throw, normal completion) decrements exactly once.
-        // ~SearchSession spins on this counter so no worker is ever
-        // mid-call on doc_ref after the session dtor returns — which
-        // closes the critical UAF window where SearchSession destructs
-        // before Document in DocumentView::Impl's member order.
+        // ~SearchSession spins on this counter so no worker is still
+        // using the session's own document, context or scan mutex (all
+        // in Impl) when the dtor drops them.
         std::atomic<int>         pending_tasks{0};
         std::vector<Hit>         hits;
         std::size_t              cursor = 0;
@@ -50,12 +56,25 @@ struct SearchSession::Impl {
     const Document&                         doc;
     litepdf::app::ISearchDispatcher&        dispatcher;
     std::shared_ptr<State>                  state;
-    // Per-generation abort tokens. Mutated only on the UI thread (set_query /
-    // dtor); each generation's tasks capture their own token by value, so
+    // Per-generation cookies. Mutated only on the UI thread (set_query /
+    // dtor); each generation's tasks capture their own cookie by value, so
     // workers never touch this object. See GenerationAbort.hpp.
     GenerationAbort                         gen;
     // Test seam; see SearchSession::set_after_reset_hook. UI thread only.
     std::function<void()>                   after_reset_hook;
+
+    // The session's own context and document (#130): every scan runs on this
+    // pair, never on the tab Document's, so a scan never takes doc_mutex.
+    // scan_mtx serialises the dispatcher's workers on it (MuPDF allows one
+    // document on several threads only if the uses never overlap). Tasks
+    // capture raw pointers to these; ~SearchSession drains every task before
+    // it drops them. They stay out of State on purpose: a task's State
+    // reference can be the last one and die on a worker after the Document
+    // has gone (the #61 shape, spec §3.6). ~SearchSession drops sdoc
+    // explicitly; `escrow` then drops its context when Impl dies.
+    EscrowContext                           escrow;
+    fz_document*                            sdoc = nullptr;
+    std::mutex                              scan_mtx;
 
     Impl(const Document& d, litepdf::app::ISearchDispatcher& disp)
         : doc(d), dispatcher(disp), state(std::make_shared<State>()) {}
@@ -85,23 +104,123 @@ std::string utf16_to_utf8(const std::wstring& ws) {
 // ctor / dtor
 // ---------------------------------------------------------------------------
 SearchSession::SearchSession(const Document& doc,
-                             litepdf::app::ISearchDispatcher& disp)
-    : impl_(std::make_unique<Impl>(doc, disp)) {}
+                             litepdf::app::ISearchDispatcher& disp,
+                             std::optional<std::string_view> password)
+    : impl_(std::make_unique<Impl>(doc, disp)) {
+    // Everything is acquired into locals and moved into Impl only once the
+    // whole open has succeeded, so a throw below leaves Impl empty: the
+    // local `escrow` drops the context, after the document (if any) was
+    // dropped on it. An encrypted Document that is not authenticated counts
+    // as not open, so it yields an empty escrow too.
+    EscrowContext escrow = doc.clone_escrow_context();
+    if (!escrow.valid()) {
+        throw std::runtime_error("SearchSession: could not clone the Document's "
+                                 "context (is the Document open?)");
+    }
+    fz_context* ctx = escrow.get();
+
+    // fz_open_document takes UTF-8; path::u8string() is UTF-8 on MSVC, where
+    // path::string() would be the ANSI code page. Same conversion as
+    // RenderEngine's worker documents and Document::open.
+#if defined(__cpp_lib_char8_t) && __cpp_lib_char8_t >= 201907L
+    const auto path_u8 = doc.source_path().u8string();
+    const std::string path_str(reinterpret_cast<const char*>(path_u8.data()),
+                               path_u8.size());
+#else
+    const std::string path_str = doc.source_path().u8string();
+#endif
+    if (path_str.empty()) {
+        throw std::runtime_error("SearchSession: Document has no source path "
+                                 "(is the Document open?)");
+    }
+
+    // fz_authenticate_password needs a NUL-terminated copy; it is wiped on
+    // every exit from this constructor (Phase 8 D3), like RenderEngine's.
+    struct WipeOnExit {
+        std::string& s;
+        ~WipeOnExit() { SecureZeroMemory(s.data(), s.size()); }
+    };
+    std::string pw(password.value_or(std::string_view{}));
+    const WipeOnExit wipe{pw};
+
+    fz_document* sdoc = nullptr;
+    fz_var(sdoc);
+    fz_try(ctx) {
+        sdoc = fz_open_document(ctx, path_str.c_str());
+    }
+    fz_catch(ctx) {
+        sdoc = nullptr;
+    }
+    if (!sdoc) {
+        throw std::runtime_error("SearchSession: fz_open_document failed");
+    }
+
+    // Ask once, right after the open and BEFORE any authentication, and never
+    // again after a successful one: pdf_needs_password re-runs a blank
+    // pdf_authenticate_password (pdf-crypt.c:826-833), and that failed blank
+    // attempt resets the document's access and key (:803), de-authenticating
+    // it. An encrypted document scanned without its key decrypts every
+    // content stream to garbage and reports 0 hits, so a missing, empty or
+    // wrong password must fail here rather than scan.
+    int needs = 0;
+    bool query_failed = false;
+    fz_var(needs);
+    fz_var(query_failed);
+    fz_try(ctx) {
+        needs = fz_needs_password(ctx, sdoc);
+    }
+    fz_catch(ctx) {
+        query_failed = true;
+    }
+    if (query_failed) {
+        // Rollback: drop the document on the context it was opened on,
+        // before that context (the local escrow) goes.
+        fz_drop_document(ctx, sdoc);
+        throw std::runtime_error(
+            "SearchSession: could not tell whether the document needs a password");
+    }
+
+    if (needs) {
+        // Attempted whenever a password is needed, even an empty one, so the
+        // document itself is what refuses (spec §3.2).
+        int ok = 0;
+        fz_var(ok);
+        fz_try(ctx) {
+            ok = fz_authenticate_password(ctx, sdoc, pw.c_str());
+        }
+        fz_catch(ctx) {
+            ok = 0;
+        }
+        if (!ok) {
+            // Rollback, as above.
+            fz_drop_document(ctx, sdoc);
+            throw std::runtime_error(pw.empty()
+                ? "SearchSession: document needs a password"
+                : "SearchSession: password rejected");
+        }
+    }
+
+    // Commit; neither step can throw.
+    impl_->escrow = std::move(escrow);
+    impl_->sdoc   = sdoc;
+}
 
 SearchSession::~SearchSession() {
-    // Drain any in-flight task before letting Document (which outlives
-    // this session only briefly — it's the LAST member of
-    // DocumentView::Impl) go out of scope under the caller's destructor.
+    // Drain every in-flight task before dropping the session's own document
+    // and context, which those tasks use through raw pointers.
     //
     // Step 1: bump epoch so queued-but-not-yet-running tasks observe the
-    // new generation and return without calling doc_ref.page_hits().
+    // new generation and return without scanning -- including one already
+    // waiting on scan_mtx, which re-checks the epoch once it holds it.
     // They still pay one scope-guard decrement each, which is what lets
     // the drain loop below terminate.
     auto& st = *impl_->state;
     st.epoch.fetch_add(1, std::memory_order_acq_rel);
-    // Also abort the active generation's token so any task already inside
-    // page_hits() bails mid-page (its incremental search loop polls the
-    // token each iteration) instead of scanning the whole page first.
+    // Also abort the active generation's cookie so a task already building a
+    // page's text stops at MuPDF's next cookie poll (before every content-
+    // stream token in a PDF) and its match loop returns at once, instead of
+    // finishing the page first. Formats whose build ignores the cookie
+    // (ePub, FB2, SVG, CBZ) still finish the one page in progress (§3.4).
     impl_->gen.abort_active();
 
     // Step 2: spin-wait until every submitted task has executed its
@@ -114,6 +233,13 @@ SearchSession::~SearchSession() {
     // epoch-checks. In practice this is microseconds.
     while (st.pending_tasks.load(std::memory_order_acquire) > 0) {
         std::this_thread::yield();
+    }
+
+    // Step 3: no task can still be using the pair. Drop the document on its
+    // own context; `escrow` drops the context when Impl dies, after this.
+    if (impl_->sdoc) {
+        fz_drop_document(impl_->escrow.get(), impl_->sdoc);
+        impl_->sdoc = nullptr;
     }
 }
 
@@ -148,13 +274,14 @@ void SearchSession::set_query(std::wstring q, Flags f) {
         ep = st.epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
     }
 
-    // Start a new abort generation: this flips the PREVIOUS generation's
-    // token so a worker still inside page_hits() for the old query bails
-    // mid-page, and mints a fresh token (value 0) that this generation's
-    // tasks capture. (A single shared flag couldn't do this — resetting it
-    // to 0 here would strand the old in-flight worker.) Empty-query clears
-    // also abort prior in-flight work, which is the desired behavior.
-    std::shared_ptr<std::atomic<int>> abort_token = impl_->gen.begin_generation();
+    // Start a new abort generation: this sets the PREVIOUS generation's
+    // cookie `abort`, so a worker still building a page for the old query
+    // stops at MuPDF's next poll, and mints a fresh cookie that this
+    // generation's tasks share. (One shared cookie couldn't do this: MuPDF
+    // forbids resetting `abort`, and this generation needs it at 0.)
+    // Empty-query clears also abort prior in-flight work, which is the
+    // desired behavior.
+    std::shared_ptr<fz_cookie> cookie = impl_->gen.begin_generation();
 
     // Empty query: treat as "cleared" — no tasks, scan_complete=true
     // immediately (pages_remaining already zeroed above). This early return
@@ -189,7 +316,11 @@ void SearchSession::set_query(std::wstring q, Flags f) {
     // thread is mid-execution when the session is destroyed. The
     // dispatcher itself holds a weak_ptr for the runnability gate.
     std::shared_ptr<Impl::State> state_strong = impl_->state;
-    const Document&              doc_ref      = impl_->doc;
+    // The session's own pair and its mutex (#130). Raw pointers into Impl:
+    // ~SearchSession drains every task before it drops them.
+    fz_context*                  sctx         = impl_->escrow.get();
+    fz_document*                 sdoc         = impl_->sdoc;
+    std::mutex*                  smtx         = &impl_->scan_mtx;
     const std::string            needle_utf8  = utf16_to_utf8(state_strong->query);
     const Flags                  captured_flags = f;
 
@@ -200,12 +331,14 @@ void SearchSession::set_query(std::wstring q, Flags f) {
         t.state_weak = std::weak_ptr<void>(
             std::static_pointer_cast<void>(state_strong));
         t.priority = 2;
-        t.run = [state_strong, &doc_ref, i, needle_utf8, captured_flags, ep,
-                 abort_token]() {
+        t.run = [state_strong, sctx, sdoc, smtx, i, needle_utf8, captured_flags,
+                 ep, cookie]() {
             // RAII drain guard: always decrement pending_tasks on return,
-            // whether we hit the stale-epoch fast exit below, MuPDF
-            // throws out of page_hits, or we complete normally. This is
-            // what makes ~SearchSession's spin-wait terminate.
+            // whether we hit a stale-epoch exit below, a throw escapes the
+            // scan, or we complete normally. This is what makes
+            // ~SearchSession's spin-wait terminate. Declared first, so it
+            // runs last: the scan lock below is already released when the
+            // decrement lets ~SearchSession destroy the mutex.
             struct Guard {
                 std::shared_ptr<Impl::State> s;
                 ~Guard() {
@@ -220,8 +353,22 @@ void SearchSession::set_query(std::wstring q, Flags f) {
             Document::SearchFlags df{ captured_flags.match_case,
                                       captured_flags.whole_word,
                                       captured_flags.regex };
-            auto raw_hits = doc_ref.page_hits(i, needle_utf8, df,
-                                              abort_token.get());
+            std::vector<Document::PageHit> raw_hits;
+            {
+                // One task at a time on the session's pair. Scoped to the
+                // scan alone and opened after check #1, so it lives inside
+                // the Guard's lifetime and unlocks before pending_tasks drops.
+                std::lock_guard<std::mutex> scan_lock(*smtx);
+                // Epoch check #1b: this task may have waited here while a
+                // newer query superseded it. Without this re-check it would
+                // run a whole stale build -- and on a format whose build
+                // ignores the cookie (spec §3.4) nothing would cut it short.
+                if (state_strong->epoch.load(std::memory_order_acquire) != ep) {
+                    return;
+                }
+                raw_hits = detail::page_hits_on(sctx, sdoc, i, needle_utf8, df,
+                                                cookie.get());
+            }
 
             // Epoch check #2: we were busy in MuPDF; the user may have
             // typed more characters in the meantime. Drop stale results.

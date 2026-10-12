@@ -2,6 +2,7 @@
 
 #include "core/MuPDFRoot.hpp"
 #include "core/EscrowContext.hpp"
+#include "core/detail/PageHitsAccess.hpp"
 #include "core/detail/TextPageAccess.hpp"
 #include "core/SearchQuery.hpp"
 #include "core/SystemFonts.hpp"
@@ -48,23 +49,18 @@ struct Document::Impl {
     // in LitePDF re-lays-out a document after it opens.
     std::size_t page_count = 0;
 
-    // Phase 6 Task 3 / ship-blocker fix: serialize every method that
-    // touches impl_->ctx via fz_try/fz_catch. MuPDF's exception handling
-    // uses a per-fz_context setjmp/longjmp error stack that is NOT
-    // thread-safe — two threads in fz_try on the same ctx corrupt the
-    // stack and crash. The MuPDFRoot lock table above covers the allocator /
-    // font cache / freetype / glyph cache, but NOT the error stack.
-    // SearchSession workers call page_hits() concurrently during eager
-    // all-pages scans while the UI thread calls page_size() and friends —
-    // both race on this ctx. Holding this mutex across each fz_try ...
-    // fz_catch block serializes the error stack usage.
+    // Serializes every method that touches impl_->ctx via fz_try/fz_catch.
+    // MuPDF's exception handling uses a per-fz_context setjmp/longjmp error
+    // stack that is NOT thread-safe — two threads in fz_try on the same ctx
+    // corrupt the stack and crash. The MuPDFRoot lock table above covers the
+    // allocator / font cache / freetype / glyph cache, but NOT the error
+    // stack. Holding this mutex across each fz_try ... fz_catch block
+    // serializes the error stack usage.
     //
-    // Performance impact: per-Document search parallelism drops to 1.
-    // Acceptable for Phase 6 because (a) per-page search is ms-scale
-    // and the 2-worker SearchDispatcher was already a soft serializer
-    // for cross-document work, (b) cross-tab searches span multiple
-    // Document instances and therefore multiple doc_mutexes, preserving
-    // tab-level parallelism which §5.4 actually promises.
+    // It guards this Document's own context and document only. Search scans
+    // run on a session-owned document and context, under the session's own
+    // lock, so they never take this one (#130); render workers likewise use
+    // their own documents. In practice only the UI thread takes it.
     mutable std::mutex doc_mutex;
 
     Impl() : root(detail::MuPDFRoot::create()) {
@@ -273,7 +269,7 @@ bool Document::with_rendered_page(
     // Use this Document's own fz_context + fz_document so authentication
     // (encrypted PDFs, Phase 8) and reflowable layout state (ePub, CBZ)
     // are preserved. Cloning would lose both. doc_mutex serializes with
-    // search workers et al per the Impl comment.
+    // every other user of this context; see the Impl comment.
     std::lock_guard<std::mutex> lk(impl_->doc_mutex);
 
     fz_context*  ctx  = impl_->ctx;
@@ -405,7 +401,7 @@ PageSize Document::page_size(std::size_t index) const {
     if (!impl_->doc) throw std::logic_error("page_size called on unopened document");
 
     // Defense in depth: protect impl_->ctx error stack from any concurrent
-    // worker call (page_hits). See Impl::doc_mutex.
+    // call into this Document's context. See Impl::doc_mutex.
     std::lock_guard<std::mutex> lk(impl_->doc_mutex);
     fz_page* page = nullptr;
     fz_rect bounds = {};
@@ -428,8 +424,8 @@ PageSize Document::page_size(std::size_t index) const {
 std::string Document::page_text(std::size_t index) const {
     if (!impl_->doc) throw std::logic_error("page_text called on unopened document");
 
-    // Defense in depth: serialize with any concurrent page_hits() call
-    // from a worker thread. See Impl::doc_mutex.
+    // Defense in depth: serialize with any concurrent call into this
+    // Document's context. See Impl::doc_mutex.
     std::lock_guard<std::mutex> lk(impl_->doc_mutex);
     fz_page*       page  = nullptr;
     fz_stext_page* stext = nullptr;
@@ -486,45 +482,41 @@ fz_context* Document::clone_context() const {
     return fz_clone_context(impl_->ctx);
 }
 
-std::vector<Document::PageHit> Document::page_hits(
-    std::size_t page,
-    std::string_view needle_utf8,
-    SearchFlags flags,
-    std::atomic<int>* abort_flag) const
+std::vector<Document::PageHit> detail::page_hits_on(
+    fz_context* ctx, fz_document* doc, std::size_t page,
+    std::string_view needle_utf8, Document::SearchFlags flags, fz_cookie* cookie)
 {
-    std::vector<PageHit> out;
-    if (!is_open() || needle_utf8.empty()) return out;
-
-    // Serialize access to impl_->ctx. See Impl::doc_mutex rationale.
-    // Must cover the entire fz_try ... fz_catch block plus fz_load_page
-    // below, since all of them push/pop frames on the per-ctx error
-    // stack.
-    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
+    std::vector<Document::PageHit> out;
+    if (!ctx || !doc || needle_utf8.empty()) return out;
 
     const std::string needle =
         build_search_needle(needle_utf8, flags.whole_word, flags.regex);
     const auto options = static_cast<fz_search_options>(
         search_options_value(flags.match_case, flags.regex || flags.whole_word));
 
-    fz_context* ctx = impl_->ctx;
+    fz_page* fzpage = nullptr;
     fz_stext_page* stext = nullptr;
     fz_search* search = nullptr;
     constexpr int kMaxQuads = 256;
     fz_quad quads[kMaxQuads] = {};
     int n = 0;
     bool fed = false;
-    // fed is modified inside fz_try; fz_var it too so its value is well-defined
-    // on the (POSIX setjmp/longjmp) exception path — MSVC SEH is unaffected.
-    fz_var(stext); fz_var(search); fz_var(n); fz_var(fed);
+    // Each of these is modified inside fz_try; fz_var them so their values are
+    // well-defined on the (setjmp/longjmp) exception path that fz_always and
+    // fz_catch read them on (context.h).
+    fz_var(fzpage); fz_var(stext); fz_var(search); fz_var(n); fz_var(fed);
 
     fz_try(ctx) {
         fz_stext_options so = { FZ_STEXT_DEHYPHENATE };   // match legacy fz_search_page
-        stext = fz_new_stext_page_from_page_number(ctx, impl_->doc,
-                                                   static_cast<int>(page), &so);
+        fzpage = fz_load_page(ctx, doc, static_cast<int>(page));
+        // An abort set during the build stops it early WITHOUT throwing and
+        // leaves a partial page; the match loop's abort check below runs before
+        // anything searches it (spec §3.4).
+        stext = fz_new_stext_page_from_page_with_cookie(ctx, fzpage, &so, cookie);
         search = fz_new_search(ctx);
         fz_search_set_options(ctx, search, options, needle.c_str());  // throws on bad regex
         for (;;) {
-            if (abort_flag && abort_flag->load() != 0) break;        // mid-page cancel
+            if (cookie && abort_requested(*cookie)) break;            // mid-page cancel
             fz_search_result r = fz_search_forwards(ctx, search);
             if (r.reason == FZ_SEARCH_MORE_INPUT) {
                 // Single page: feed it once (search keeps its OWN ref); later
@@ -546,6 +538,7 @@ std::vector<Document::PageHit> Document::page_hits(
     fz_always(ctx) {
         if (search) fz_drop_search(ctx, search);     // releases the fed (kept) ref
         if (stext)  fz_drop_stext_page(ctx, stext);  // releases our own ref
+        if (fzpage) fz_drop_page(ctx, fzpage);
     }
     fz_catch(ctx) {
         std::fprintf(stderr, "litepdf: page_hits failed on page %zu: %s\n",
@@ -566,7 +559,7 @@ std::vector<Document::PageHit> Document::page_hits(
 
     out.reserve(static_cast<std::size_t>(n));
     for (int i = 0; i < n; ++i) {
-        PageHit h{};
+        Document::PageHit h{};
         h.ul_x = quads[i].ul.x; h.ul_y = quads[i].ul.y;
         h.ur_x = quads[i].ur.x; h.ur_y = quads[i].ur.y;
         h.ll_x = quads[i].ll.x; h.ll_y = quads[i].ll.y;
@@ -577,6 +570,28 @@ std::vector<Document::PageHit> Document::page_hits(
         out.push_back(std::move(h));
     }
     return out;
+}
+
+std::vector<Document::PageHit> Document::page_hits(
+    std::size_t page,
+    std::string_view needle_utf8,
+    SearchFlags flags) const
+{
+    if (!is_open() || needle_utf8.empty()) return {};
+
+    // Serialize access to impl_->ctx. See Impl::doc_mutex rationale.
+    // Must cover the whole helper, since every MuPDF call in it pushes and
+    // pops frames on the per-ctx error stack.
+    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
+    return detail::page_hits_on(impl_->ctx, impl_->doc, page, needle_utf8, flags,
+                                nullptr);
+}
+
+EscrowContext Document::clone_escrow_context() const {
+    if (!is_open()) return EscrowContext{};
+    // No doc_mutex: fz_clone_context locks through the family's lock table
+    // (see clone_context()).
+    return EscrowContext::clone_from(impl_->ctx);
 }
 
 bool Document::query_compiles(std::string_view needle_utf8, SearchFlags flags) const {
@@ -604,8 +619,8 @@ std::vector<Document::OutlineEntry> Document::outline() const {
     std::vector<OutlineEntry> result;
     if (!impl_->doc) return result;
 
-    // Defense in depth: serialize with page_hits() worker calls.
-    // See Impl::doc_mutex.
+    // Defense in depth: serialize with any concurrent call into this
+    // Document's context. See Impl::doc_mutex.
     std::lock_guard<std::mutex> lk(impl_->doc_mutex);
     fz_outline* root = nullptr;
     fz_try(impl_->ctx) {
