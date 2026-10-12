@@ -18,9 +18,11 @@
 //   release     snap() + highlight() + copy() -- commit_live_selection.
 //   select all  text_page() + full_range() + highlight() + copy().
 //   search      one Document::page_hits call for a needle that never matches,
-//               so the scan walks the whole page: how long a search scan holds
-//               doc_mutex on this page, i.e. how long a press can wait behind
-//               it (spec R4). Reported cold and warm.
+//               so the scan walks the whole page: the per-page cost a search
+//               scan pays, cold and warm. A scan now runs on the session's own
+//               document (#130), off the tab's doc_mutex, so this is no longer
+//               how long a press can wait; it is timed through the locking
+//               Document::page_hits wrapper (spec R4).
 //
 // Not a gate: timings are machine-dependent and nothing asserts on their size.
 // The point is to put a number on the cost before deciding whether anything
@@ -66,8 +68,8 @@ struct SelectionPageTiming {
     std::size_t quads = 0;   // highlight quads for the whole page's text
 
     // One sample each, on Documents freshly opened for this page. scan_first:
-    // a search scan's first visit to the page -- the lock hold a press can
-    // wait behind; it also pays any process-wide first use (SystemFonts'
+    // a search scan's first visit to the page -- its cold per-page cost; it
+    // also pays any process-wide first use (SystemFonts'
     // DirectWrite lookup for a non-embedded font), as the render worker does
     // in the GUI before anyone can press. acquire_first: then a second fresh
     // Document's first acquisition -- the first press in a tab that has not

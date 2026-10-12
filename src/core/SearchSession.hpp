@@ -1,8 +1,9 @@
 #pragma once
 
 // core::SearchSession — per-tab search state: query, flags, hit cache,
-// cursor. Pure logic, no Win32, no threads. Background search work is
-// delegated to an ISearchDispatcher. See Phase 6 design §4 D1.
+// cursor. The scan itself runs on an ISearchDispatcher's worker threads,
+// against a MuPDF document the session opens for itself. See Phase 6 design
+// §4 D1.
 //
 // Thread-safety:
 //   - Public API is single-threaded (UI thread).

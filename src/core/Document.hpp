@@ -92,8 +92,9 @@ public:
     // ------------------------------------------------------------------
     // Search (Phase 6)
     // ------------------------------------------------------------------
-    // Stateless per-page search. Callers (core::SearchSession, Task 5)
-    // drive the cursor/cache and epoch-based cancellation on top of this.
+    // Stateless per-page search. core::SearchSession drives the cursor/cache
+    // and epoch-based cancellation on top of the same per-page search, run on
+    // its own document (see page_hits below).
     //
     // Search options. On MuPDF 1.27.2 all three are honored via the
     // incremental fz_search matcher; see SearchQuery.hpp for the

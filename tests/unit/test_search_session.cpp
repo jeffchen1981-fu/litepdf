@@ -12,8 +12,9 @@
 //
 // Most cases use InlineDispatcher, which runs tasks synchronously on
 // submit(), so after set_query() returns every page has already been
-// scanned and scan_complete() is true. One case drives a real
-// ThreadPoolDispatcher; the cases at the end use dispatcher doubles
+// scanned and scan_complete() is true. Two cases drive a real
+// ThreadPoolDispatcher (rapid retype; a scan completing while doc_mutex is
+// held); the cases at the end use dispatcher doubles
 // (DeferredDispatcher, ThrowingDispatcher) to pin down a task interleaving
 // or a submit failure deterministically.
 

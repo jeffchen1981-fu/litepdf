@@ -159,7 +159,8 @@ bool bench_selection_page(const std::filesystem::path& path, const Document& sha
     const auto index = static_cast<std::size_t>(page);
 
     // Two Documents that have never built any page: the first stands in for a
-    // search scan's first visit, the second for a tab's first press.
+    // search scan's first visit (a session's own document, cold), the second
+    // for a tab's first press.
     Document scanner, fresh;
     if (scanner.open(path) || fresh.open(path)) {
         std::fprintf(stderr, "bench-selection: cannot open %s\n", path.string().c_str());

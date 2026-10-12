@@ -192,9 +192,11 @@ DocumentView::~DocumentView() {
     impl_->thumb_cache.reset();
 
     // Session first — drops the strong ref to its shared_ptr<State>.
-    // Any in-flight worker task keeps its own shared_ptr alive until it
-    // completes; the task's captured `const Document&` stays valid
-    // because impl_->doc is destroyed LAST (below, via Impl unwinding).
+    // ~SearchSession drains every in-flight task first; the tasks use only
+    // the session's own context and document, not impl_->doc. impl_->doc
+    // must still be destroyed AFTER the session (below, via Impl
+    // unwinding): the session holds a `const Document&` for page_count()
+    // and query_compiles() on the UI thread, and cloned its context from it.
     impl_->session.reset();
     // Engine next — ensures no worker is mid-access to cache or contexts.
     impl_->engine.reset();
