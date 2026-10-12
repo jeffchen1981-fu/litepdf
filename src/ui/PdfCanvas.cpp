@@ -508,9 +508,9 @@ void PdfCanvas::set_current_hit(std::optional<litepdf::core::SearchSession::Hit>
 
 void PdfCanvas::on_search_hits_changed() {
     if (!impl_ || !hwnd_) return;
-    // No render target: the last on_paint could not create one and drew
-    // nothing, so painted_hits says nothing about the screen. Invalidate as
-    // before #135 -- each paint retries create_render_target.
+    // No render target (not painted yet, discarded, or the last on_paint could
+    // not create one): painted_hits says nothing about the screen. Invalidate
+    // as before #135 -- each paint retries create_render_target.
     if (!impl_->rt) {
         InvalidateRect(hwnd_, nullptr, FALSE);
         return;
