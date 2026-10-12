@@ -77,7 +77,7 @@ std::size_t release(const Document::TextPage& text, SelPoint anchor, SelPoint ex
 constexpr const char* kNeverMatches = "\x7Fqz\x7F";
 
 std::size_t scan(const Document& doc, std::size_t index) {
-    return doc.page_hits(index, kNeverMatches, Document::SearchFlags{}, nullptr).size();
+    return doc.page_hits(index, kNeverMatches, Document::SearchFlags{}).size();
 }
 
 // One entry per core and processor group: the core's processors there, and

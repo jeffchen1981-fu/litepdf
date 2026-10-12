@@ -220,8 +220,7 @@ void SearchSession::set_query(std::wstring q, Flags f) {
             Document::SearchFlags df{ captured_flags.match_case,
                                       captured_flags.whole_word,
                                       captured_flags.regex };
-            auto raw_hits = doc_ref.page_hits(i, needle_utf8, df,
-                                              abort_token.get());
+            auto raw_hits = doc_ref.page_hits(i, needle_utf8, df);
 
             // Epoch check #2: we were busy in MuPDF; the user may have
             // typed more characters in the meantime. Drop stale results.

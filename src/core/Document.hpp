@@ -15,6 +15,7 @@
 #include <string_view>
 #include <vector>
 
+#include "core/EscrowContext.hpp"
 #include "core/TextSelection.hpp"
 
 // Forward-declare fz_context so this header can expose clone_context() without
@@ -128,27 +129,20 @@ public:
     //                    translation). An invalid regex throws inside MuPDF,
     //                    is caught, and yields an empty result — callers
     //                    pre-validate via query_compiles().
-    // @param abort_flag  Honored on MuPDF 1.27.2: checked at the top of every
-    //                    iteration of the incremental search loop, giving
-    //                    prompt mid-page cancellation. A non-zero value before
-    //                    or during the search yields whatever hits were already
-    //                    collected (empty if cancelled before the first match).
-    //                    Cross-page cancellation remains SearchSession's
-    //                    responsibility (epoch bump).
+    //
+    // Not cancellable. The body is detail::page_hits_on (core/detail/
+    // PageHitsAccess.hpp), which a search scan calls with a cookie on its own
+    // context and document (#130).
     //
     // Thread-safety: SAFE to call concurrently from multiple threads on
-    // the same Document instance. An internal std::mutex serializes every
-    // method that touches impl_->ctx (page_hits, page_text, page_size,
-    // outline) — MuPDF's fz_try/fz_catch uses a per-ctx error
-    // stack that is not thread-safe, so this serialization is mandatory.
-    // Consequence: per-Document search parallelism is bounded to 1;
-    // cross-tab searches still parallelize across distinct Documents.
-    // SearchSession workers (Phase 6 Task 5) rely on this guarantee.
+    // the same Document instance. An internal std::mutex serializes this
+    // method with every other one that touches this Document's context —
+    // MuPDF's fz_try/fz_catch uses a per-ctx error stack that is not
+    // thread-safe, so this serialization is mandatory.
     [[nodiscard]] std::vector<PageHit> page_hits(
         std::size_t page,
         std::string_view needle_utf8,
-        SearchFlags flags,
-        std::atomic<int>* abort_flag = nullptr) const;
+        SearchFlags flags) const;
 
     // One-shot validity check: compiles the regex/whole-word needle under
     // `flags`. Returns false iff the pattern fails to compile. Empty needle or
@@ -186,6 +180,15 @@ public:
     // in progress.
     [[nodiscard]] fz_context* clone_context() const;
 
+    // An EscrowContext cloned from this Document's context: the context a
+    // search session opens its own document on (#130). Unlike a bare
+    // clone_context(), it may outlive this Document.
+    //
+    // Empty if the Document is not open or the clone fails (out of memory).
+    // Takes no doc_mutex: the clone locks through the family's lock table, as
+    // clone_context() does.
+    [[nodiscard]] EscrowContext clone_escrow_context() const;
+
     // Returns the path that was last successfully passed to open(). If the
     // document is not open (or was never opened), returns a reference to an
     // empty path. RenderEngine workers use this to re-open the file on their
@@ -216,8 +219,9 @@ public:
     // Thread-safety: SAFE concurrently with other Document methods on
     // the same instance -- internal doc_mutex serializes all callers.
     // Holds the mutex for the entire render duration (~50-300ms at
-    // print DPI). RenderEngine worker threads hitting this Document
-    // will block; acceptable because print is a rare modal operation.
+    // print DPI). Any other call into this Document's own context waits
+    // for it; acceptable because print is a rare modal operation. Render
+    // workers and search scans run on their own documents and do not wait.
     [[nodiscard]] bool with_rendered_page(
         std::size_t page_idx,
         float scale_x_px_per_pt,
