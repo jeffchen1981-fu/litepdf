@@ -9,6 +9,13 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+### Changed
+
+- Turning pages while a search is still running no longer waits for the
+  search to finish reading a page. The search now reads its own copy of the
+  document, which on a 750-page PDF used 15 to 18 MB more memory per tab
+  (#130).
+
 ### Fixed
 
 - Typing quickly in the find bar, or clearing it, could leave matches from
