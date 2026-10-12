@@ -9,6 +9,8 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+## [1.5.3] — 2026-10-12 — Smoother page turns during search, and a find bar fix
+
 ### Changed
 
 - Turning pages while a search is still running no longer waits for the
@@ -20,7 +22,7 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 - Typing quickly in the find bar, or clearing it, could leave matches from
   the earlier search behind, so the match count was too high and Next/Previous
-  stepped onto words the current search does not contain.
+  stepped onto words the current search does not contain (#133).
 
 ## [1.5.2] — 2026-10-11 — Password-protected PDF fix and faster text selection
 
@@ -598,7 +600,7 @@ and Phase 12 (release hardening: crash-safe session restore).
 
 [Compare initial commit…0.0.1-phase0](https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.1-phase0)
 
-[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.5.2...HEAD
+[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.5.3...HEAD
 [0.0.12-phase10]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.12-phase10
 [0.0.11-phase9]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.11-phase9
 [0.0.10-phase8.5]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.10-phase8.5
