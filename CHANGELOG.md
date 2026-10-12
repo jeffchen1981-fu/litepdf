@@ -28,8 +28,9 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 ### Fixed
 
 - Find Next and Find Previous could visit matches on the same line out of
-  order when a search had more than about 30 matches. They now keep the order
-  the page lists them in, normally left to right (#139).
+  order in a search with more than about 30 matches, depending on the order
+  in which the search finished reading its pages. They now keep the order the
+  page lists them in, normally left to right (#139).
 
 ## [1.5.3] — 2026-10-12 — Smoother page turns during search, and a find bar fix
 
@@ -623,7 +624,7 @@ and Phase 12 (release hardening: crash-safe session restore).
 
 [Compare initial commit…0.0.1-phase0](https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.1-phase0)
 
-[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.5.3...HEAD
+[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.5.4...HEAD
 [0.0.12-phase10]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.12-phase10
 [0.0.11-phase9]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.11-phase9
 [0.0.10-phase8.5]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.10-phase8.5
