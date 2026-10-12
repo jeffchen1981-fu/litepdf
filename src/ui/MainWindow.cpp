@@ -66,9 +66,9 @@ constexpr UINT WM_USER_OPEN_FAILED   = WM_USER + 2;
 constexpr UINT WM_USER_PASSWORD_PROMPT = WM_USER + 12;
 // Phase 6 Task 10: per-tab SearchSession on_update() observer fires on a
 // worker thread and PostMessage-marshals to this message on the UI thread.
-// Posted once per completed page scan (plus a final post when
-// scan_complete flips). Cheap — handler just reads hit_count/scan_complete
-// and refreshes the counter + invalidates the canvas.
+// Fired once per completed page scan, but at most one is ever queued (#135,
+// make_search_update_poster). The handler refreshes the counter and repaints
+// the canvas only if the hit overlay changed.
 constexpr UINT WM_USER_SEARCH_UPDATE = WM_USER + 10;
 // Phase 6 Tasks 11-14: CrossTabSearch aggregation observer fires on a
 // worker thread as each per-tab SearchSession's page scan completes.
@@ -1945,10 +1945,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // worker callback fires after MainWindow destruction, in
             // which case PostMessage to a dead hwnd is a silent no-op.
             if (t && t->view) {
-                HWND target = hwnd_;
-                t->view->search().set_on_update([target]() {
-                    PostMessageW(target, WM_USER_SEARCH_UPDATE, 0, 0);
-                });
+                t->view->search().set_on_update(make_search_update_poster());
             }
 
             const int new_index = tabs_->add_tab(std::move(t));
@@ -2113,10 +2110,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
 
                 ColdStartTimer::mark(2);  // Document fully loaded.
 
-                HWND target = hwnd_;
-                tab->view->search().set_on_update([target]() {
-                    PostMessageW(target, WM_USER_SEARCH_UPDATE, 0, 0);
-                });
+                tab->view->search().set_on_update(make_search_update_poster());
                 (void)tabs_->add_tab(std::move(tab));
                 // Phase 12: an authenticated tab is a restore success terminal
                 // (restore_on_tab_ready also re-checks the path correlation).
@@ -2301,11 +2295,32 @@ void MainWindow::update_find_counter() {
     find_bar_->set_counter(buf);
 }
 
+litepdf::core::SearchSession::OnUpdate MainWindow::make_search_update_poster() {
+    // Runs on a worker thread. Captures the HWND and the gate by value, never
+    // `this`: the lambda can outlive the window, and a PostMessageW to a dead
+    // HWND just fails (which reopens the gate, harmlessly).
+    return [target = hwnd_, gate = search_update_gate_]() {
+        if (!gate->claim()) return;
+        if (PostMessageW(target, WM_USER_SEARCH_UPDATE, 0, 0)) return;
+        // While our claim held the gate, another worker's update may have
+        // found it closed and posted nothing, relying on our message. Reopen
+        // and post once more so that update still reaches the UI. A second
+        // failure gives up: the window is gone, or its queue (10,000 posted
+        // messages) is still full -- then the update waits for the next one.
+        gate->post_failed();
+        if (gate->claim() && !PostMessageW(target, WM_USER_SEARCH_UPDATE, 0, 0)) {
+            gate->post_failed();
+        }
+    };
+}
+
 void MainWindow::on_search_update_posted() {
+    // Reopen the gate BEFORE reading any session state: an update claimed
+    // before this line is covered by the reads below, one after it posts anew.
+    search_update_gate_->release();
     update_find_counter();
-    if (canvas_) {
-        InvalidateRect(canvas_->hwnd(), nullptr, FALSE);
-    }
+    // Not a plain invalidate: every tab's scan posts here once per page (#135).
+    if (canvas_) canvas_->on_search_hits_changed();
 }
 
 // ---------------- Phase 6 Tasks 11-14: cross-tab search --------------

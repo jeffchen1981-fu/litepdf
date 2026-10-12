@@ -20,6 +20,7 @@
 #include "ui/StatusBar.hpp"
 #include "ui/TabManager.hpp"
 #include "ui/VerticalSplitter.hpp"
+#include "ui/detail/PostCoalescer.hpp"
 
 namespace litepdf::app { class ThreadPoolDispatcher; }
 namespace litepdf::core { class DocumentView; }
@@ -116,6 +117,9 @@ private:
     void update_find_counter();           // read SearchSession -> set_counter
     void update_canvas_hits_source();     // rebind canvas HitsFn to active view
     void on_search_update_posted();       // WM_USER_SEARCH_UPDATE handler
+    // The SearchSession observer every tab installs: posts WM_USER_SEARCH_UPDATE
+    // through search_update_gate_, so at most one is ever queued (#135).
+    litepdf::core::SearchSession::OnUpdate make_search_update_poster();
 
     // Phase 6 Tasks 11-14: cross-tab search + bottom results panel.
     void on_cross_tab_find();                        // IDM_CROSS_TAB_FIND (Ctrl+Shift+F)
@@ -207,6 +211,11 @@ private:
     // path uses it to position the left pane + the splitter.
     int                           left_pane_width_px_ = 0;
     std::wstring                  last_find_query_;
+    // #135: one gate for every tab's search updates -- the handler reads only
+    // the active view, so one queued message covers them all. Shared with the
+    // posters, which run on worker threads and may outlive this window.
+    std::shared_ptr<PostCoalescer> search_update_gate_ =
+        std::make_shared<PostCoalescer>();
     // TODO(phase-6.x): preserve match-case across find-bar reopens once
     // FindBar::show_or_focus grows a second arg. For now each reopen
     // inherits whatever checkbox state the bar keeps internally.

@@ -198,6 +198,14 @@ public:
     // yellow. Pass std::nullopt to clear current highlight.
     void set_current_hit(std::optional<litepdf::core::SearchSession::Hit> h);
 
+    // #135: a search session reported new hits. Repaints only when the hit
+    // overlay would now draw something other than what the last paint drew --
+    // a scan reports once per page, from every tab, and nearly all of those
+    // leave the painted page untouched. The find bar's own query changes and
+    // its close still invalidate directly; a cross-tab search's set_query on the
+    // active tab repaints through the first update that follows it.
+    void on_search_hits_changed();
+
     // --- Phase 7 Task 7: page-change observer ---
     //
     // Fires whenever the canvas's tracked current-page changes — covers
@@ -367,6 +375,12 @@ private:
     // Where on_paint draws the single-page bitmap, in canvas DIPs. False when
     // there is no bitmap or render target yet.
     bool single_page_placement(Placement& out) const;
+
+    // The search hits on_paint draws over the page right now: empty in spread
+    // mode, over another view's or page's bitmap, before the render target
+    // exists, or with no hits source. on_paint and on_search_hits_changed both
+    // ask this, so the two cannot disagree about what is on screen.
+    std::vector<litepdf::core::SearchSession::Hit> overlay_hits() const;
 
     // The selection on_paint draws, or null.
     const litepdf::core::TextSelection* painted_selection() const noexcept;

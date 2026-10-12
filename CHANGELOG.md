@@ -9,6 +9,14 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+### Changed
+
+- Page turns and other keys respond faster while a search is running. The
+  page was being redrawn every time the search finished reading a page, even
+  when nothing on screen had changed, and key presses had to wait behind those
+  redraws. On a 750-page PDF a page turn during a search now usually waits
+  about as long as with no search running (#135).
+
 ## [1.5.3] — 2026-10-12 — Smoother page turns during search, and a find bar fix
 
 ### Changed
