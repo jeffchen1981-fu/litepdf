@@ -2303,9 +2303,8 @@ void MainWindow::update_find_counter() {
 
 void MainWindow::on_search_update_posted() {
     update_find_counter();
-    if (canvas_) {
-        InvalidateRect(canvas_->hwnd(), nullptr, FALSE);
-    }
+    // Not a plain invalidate: every tab's scan posts here once per page (#135).
+    if (canvas_) canvas_->on_search_hits_changed();
 }
 
 // ---------------- Phase 6 Tasks 11-14: cross-tab search --------------

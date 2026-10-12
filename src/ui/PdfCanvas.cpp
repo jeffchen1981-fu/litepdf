@@ -7,6 +7,7 @@
 #include "ui/ColdStartTimer.hpp"
 #include "ui/Clipboard.hpp"
 #include "ui/PdfCanvasLayout.hpp"
+#include "ui/detail/HitOverlay.hpp"
 #include "ui/detail/ViewportMath.hpp"
 #include "ui/detail/SelectionDrag.hpp"
 
@@ -325,6 +326,9 @@ struct PdfCanvas::Impl {
     // overlay". current_hit is std::nullopt when no hit is selected.
     PdfCanvas::HitsFn             hits_fn;
     std::optional<litepdf::core::SearchSession::Hit> current_hit;
+    // #135: the hits the last paint drew -- overlay_hits() as of that paint --
+    // so on_search_hits_changed can tell whether another paint would differ.
+    std::vector<litepdf::core::SearchSession::Hit> painted_hits;
 
     // (Phase 8 D7) chrome polarity. Default off (light); flipped on
     // Ctrl+Shift+I via the active view's set_invert_colors handler.
@@ -502,6 +506,15 @@ void PdfCanvas::set_current_hit(std::optional<litepdf::core::SearchSession::Hit>
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
+void PdfCanvas::on_search_hits_changed() {
+    if (!impl_ || !hwnd_) return;
+    // Each repaint blocks the UI thread in EndDraw until the next vsync, and a
+    // scan reports every page it finishes -- one repaint each kept the UI
+    // thread in EndDraw most of the time and queued input behind it (#135).
+    if (same_overlay(overlay_hits(), impl_->painted_hits)) return;
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
 void PdfCanvas::set_invert_chrome(bool on) {
     if (!impl_ || impl_->invert_chrome == on) return;
     impl_->invert_chrome = on;
@@ -611,6 +624,18 @@ bool PdfCanvas::single_page_placement(Placement& out) const {
                        bitmap_px_to_dip(src_px.height, rt_dpi),
                        vp.width, vp.height, impl_->pan_x, impl_->pan_y);
     return true;
+}
+
+std::vector<litepdf::core::SearchSession::Hit> PdfCanvas::overlay_hits() const {
+    // Only over THIS view's bitmap of THIS page, and only in single-page mode
+    // (spec §4.4; R17 left spread mode without an overlay).
+    Placement pl;
+    if (!impl_ || impl_->dual_page || !own_bitmap() || !single_page_placement(pl)
+        || !impl_->hits_fn
+        || !impl_->brush_hit_other_fill || !impl_->brush_hit_current_fill) {
+        return {};
+    }
+    return impl_->hits_fn(static_cast<std::size_t>(impl_->view->current_page()));
 }
 
 const litepdf::core::TextSelection* PdfCanvas::painted_selection() const noexcept {
@@ -1867,6 +1892,9 @@ void PdfCanvas::on_paint() {
         return;
     }
     const bool had_bitmap = static_cast<bool>(impl_->current_bitmap);
+    // #135: fetched once and kept: the overlay below draws exactly this list,
+    // and on_search_hits_changed compares the next search update against it.
+    impl_->painted_hits = overlay_hits();
 
     impl_->rt->BeginDraw();
     // (Phase 8 D7) Chrome polarity flip — dark canvas for Invert Colors,
@@ -2012,30 +2040,27 @@ void PdfCanvas::on_paint() {
             const float oy  = dst.top;
             const int   pg  = impl_->view->current_page();
 
-            if (impl_->hits_fn
-                && impl_->brush_hit_other_fill && impl_->brush_hit_current_fill) {
-                const auto hits = impl_->hits_fn(static_cast<std::size_t>(pg));
-                for (const auto& hit : hits) {
-                    const auto& q = hit.geom;
-                    const D2D1_RECT_F r = quad_bounds_dip(q, ox, oy, pct);
+            // overlay_hits() already checked the source and both fill brushes.
+            for (const auto& hit : impl_->painted_hits) {
+                const auto& q = hit.geom;
+                const D2D1_RECT_F r = quad_bounds_dip(q, ox, oy, pct);
 
-                    const bool is_current =
-                        impl_->current_hit.has_value()
-                        && impl_->current_hit->page == hit.page
-                        && impl_->current_hit->geom.ul_x == q.ul_x
-                        && impl_->current_hit->geom.ul_y == q.ul_y
-                        && impl_->current_hit->geom.lr_x == q.lr_x
-                        && impl_->current_hit->geom.lr_y == q.lr_y;
+                const bool is_current =
+                    impl_->current_hit.has_value()
+                    && impl_->current_hit->page == hit.page
+                    && impl_->current_hit->geom.ul_x == q.ul_x
+                    && impl_->current_hit->geom.ul_y == q.ul_y
+                    && impl_->current_hit->geom.lr_x == q.lr_x
+                    && impl_->current_hit->geom.lr_y == q.lr_y;
 
-                    if (is_current) {
-                        impl_->rt->FillRectangle(r, impl_->brush_hit_current_fill.Get());
-                        if (impl_->brush_hit_current_stroke) {
-                            impl_->rt->DrawRectangle(
-                                r, impl_->brush_hit_current_stroke.Get(), 1.0f);
-                        }
-                    } else {
-                        impl_->rt->FillRectangle(r, impl_->brush_hit_other_fill.Get());
+                if (is_current) {
+                    impl_->rt->FillRectangle(r, impl_->brush_hit_current_fill.Get());
+                    if (impl_->brush_hit_current_stroke) {
+                        impl_->rt->DrawRectangle(
+                            r, impl_->brush_hit_current_stroke.Get(), 1.0f);
                     }
+                } else {
+                    impl_->rt->FillRectangle(r, impl_->brush_hit_other_fill.Get());
                 }
             }
 
