@@ -22,9 +22,9 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ### Fixed
 
-- Find Next and Find Previous now step through matches on the same line from
-  left to right. When a search had more than about 30 matches, matches
-  sharing a line could be visited out of order (#139).
+- Find Next and Find Previous could visit matches on the same line out of
+  order when a search had more than about 30 matches. They now keep the order
+  the page lists them in, normally left to right (#139).
 
 ## [1.5.3] — 2026-10-12 — Smoother page turns during search, and a find bar fix
 

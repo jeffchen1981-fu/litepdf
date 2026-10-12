@@ -18,8 +18,7 @@ namespace litepdf::ui {
 
 // True when `a` and `b` draw the same highlights: the same multiset of (page,
 // eight quad corners). Order is ignored -- each rectangle is drawn on its own,
-// and SearchSession's unstable std::sort can swap two hits on one line between
-// updates. The snippet is not drawn, so it is ignored too. Otherwise errs toward
+// so two orders of the same hits draw the same highlights. The snippet is not drawn, so it is ignored too. Otherwise errs toward
 // "different": a needless repaint costs one frame, a skipped one leaves wrong
 // highlights on screen.
 inline bool same_overlay(const std::vector<core::SearchSession::Hit>& a,

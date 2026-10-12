@@ -507,10 +507,10 @@ std::vector<HitPos> per_page_order(const SearchSession& s, std::size_t pages) {
 
 }  // namespace
 
-// #139: "m" puts 36 hits on page 0, six to a line, so a whole-list
-// std::sort (unstable past MSVC's 32-element insertion sort) is free to
-// reorder hits that share a line. next() must still step through a line
-// left to right.
+// #139: "m" puts 36 hits on page 0, six to a line. next() and hits_for_page()
+// must step through a line left to right. With pages finishing in page order
+// (InlineDispatcher) the old whole-list std::sort happened to keep this order;
+// the out-of-order case below is the one it failed.
 TEST_CASE("SearchSession: hits sharing a line keep reading order",
           "[search][session]") {
     Fx f;
@@ -524,7 +524,10 @@ TEST_CASE("SearchSession: hits sharing a line keep reading order",
 }
 
 // #139: pages finish in any order on the worker pool. Each page's hits must
-// land at their place in the list, whichever pages arrived before them.
+// land at their place in the list, whichever pages arrived before them, and
+// hits sharing a line must keep their order. The old code re-sorted the whole
+// list with std::sort, which is unstable past MSVC's 32-element insertion
+// sort, and scrambled page 0's lines here.
 TEST_CASE("SearchSession: pages finishing out of order still yield page order",
           "[search][session]") {
     Document doc = open_search_fixture();
