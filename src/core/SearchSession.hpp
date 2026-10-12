@@ -8,14 +8,17 @@
 //   - Public API is single-threaded (UI thread).
 //   - Task lambdas submitted to dispatcher run on worker threads. They
 //     touch SearchState under its own std::mutex.
-//   - Document::page_hits is not thread-safe on the same Document;
-//     since one SearchSession owns one Document, and SearchDispatcher
-//     is FIFO per priority, concurrent page_hits on the same doc does
-//     not occur in Phase 6.1 (single tab, one SearchSession). Phase 6.2
-//     cross-tab uses distinct Documents per tab, so there is still no
-//     race. Revisit this if we ever want two workers to strip-mine
-//     pages of the same Document concurrently — then workers would
-//     need cloned fz_contexts (see Document::clone_context()).
+//   - A scan never touches the tab Document (#130). The session opens its
+//     own fz_document on its own cloned context at construction, and every
+//     scan task runs on that pair under a session-owned mutex, which
+//     serialises the dispatcher's workers on it (MuPDF allows one document
+//     on several threads as long as the uses never overlap). The tab
+//     Document's doc_mutex is never taken by a scan, so a UI-thread call
+//     into the Document never waits on a search, and a search never waits
+//     on a print or a text-selection build.
+//   - The UI-thread calls still use the tab Document: set_query's
+//     page_count() (which takes no lock) and query_compiles() (a brief
+//     doc_mutex hold on the UI thread, never on a worker).
 
 #include "app/SearchDispatcher.hpp"
 #include "core/Document.hpp"
@@ -25,6 +28,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace litepdf::core {
@@ -46,7 +50,17 @@ public:
 
     // Caller must keep `doc` and `dispatcher` alive for the SearchSession's
     // lifetime. SearchSession holds non-owning refs.
-    SearchSession(const Document& doc, litepdf::app::ISearchDispatcher& dispatcher);
+    //
+    // Opens `doc.source_path()` again on a context cloned from `doc` and,
+    // when `password` is non-empty, authenticates that document with it --
+    // pass the password `doc` was authenticated with. The scans run on that
+    // document only (see Thread-safety above). Its copy of the password is
+    // wiped on every exit.
+    //
+    // Throws std::runtime_error if the clone, the open or the
+    // authentication fails, after releasing whatever it acquired.
+    SearchSession(const Document& doc, litepdf::app::ISearchDispatcher& dispatcher,
+                  std::optional<std::string_view> password = std::nullopt);
     ~SearchSession();
 
     SearchSession(const SearchSession&)            = delete;

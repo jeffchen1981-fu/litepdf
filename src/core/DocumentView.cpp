@@ -166,10 +166,11 @@ DocumentView::DocumentView(Document doc,
         impl_->doc, num_workers, impl_->cache.get(), password);
 
     // Construct SearchSession LAST — it references impl_->doc (already
-    // moved into place) and the caller-owned dispatcher. If this throws
-    // (shouldn't, current ctor is noexcept-ish), earlier members RAII-
-    // unwind correctly via Impl's declaration order.
-    impl_->session = std::make_unique<SearchSession>(impl_->doc, dispatcher);
+    // moved into place) and the caller-owned dispatcher, and opens its own
+    // document on a cloned context, authenticated with the same password
+    // as the render workers (#130). If it throws (clone, open or password
+    // failure), earlier members RAII-unwind via Impl's declaration order.
+    impl_->session = std::make_unique<SearchSession>(impl_->doc, dispatcher, password);
 }
 
 DocumentView::~DocumentView() {

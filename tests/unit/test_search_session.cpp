@@ -25,11 +25,13 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <future>
 #include <memory>
 #include <new>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -209,6 +211,68 @@ TEST_CASE("SearchSession: rapid query changes settle on correct results (ThreadP
     }
     REQUIRE(s.scan_complete());
     REQUIRE(s.hit_count() == 15);  // exactly Lorem's hits, no stale leakage
+}
+
+// #130 T1: a scan must not need the tab Document's doc_mutex. with_rendered_page
+// holds doc_mutex for the whole callback, so a scan that still took it would
+// stall on every page until the callback returned.
+//
+// The session, the pool and the Document are built OUTSIDE the callback, and
+// the session outlives it: destroying the session inside it would hang instead
+// of failing, because ~SearchSession spins on tasks blocked on the held lock.
+//
+// The callback holds no REQUIRE and calls no locking Document method. It runs
+// outside fz_try, so a throw out of it (a failed REQUIRE) would leak the
+// pixmap; and a same-thread re-entry of doc_mutex throws on MSVC. set_query's
+// page_count() takes no lock, and scan_complete()/hit_count() lock only the
+// session's state. The outcome goes into locals, asserted after the return.
+// Before the change the poll times out after 5 s, the callback returns, the
+// lock is released and the scan drains, so the test fails without hanging.
+TEST_CASE("SearchSession: a scan completes while doc_mutex is held",
+          "[search][session][threads]") {
+    Document doc = open_search_fixture();
+    ThreadPoolDispatcher pool(2);
+    SearchSession s(doc, pool);
+
+    bool        complete = false;
+    std::size_t count    = 0;
+    const bool rendered = doc.with_rendered_page(
+        0, 1.0f, 1.0f, false, [&](int, int, const std::uint8_t*) {
+            s.set_query(L"Lorem", SearchSession::Flags{});
+            // A deadline, not an iteration count: Windows rounds a 5 ms sleep
+            // up to the ~15.6 ms timer tick.
+            const auto deadline =
+                std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (!s.scan_complete() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            complete = s.scan_complete();
+            count    = s.hit_count();
+        });
+
+    REQUIRE(rendered);
+    REQUIRE(complete);
+    REQUIRE(count == 15);
+}
+
+// #130 T2: the session scans its own document, so it must authenticate that
+// document itself. encrypted-text.pdf draws "ENCRYPTED n" on 8 lines
+// (scripts/generate-encrypted-text-fixture.py:63-65); an unauthenticated
+// document decrypts every content stream to garbage and reports 0, so the
+// exact count rules that mode out.
+TEST_CASE("SearchSession: scans a user-password PDF with the password",
+          "[search][session]") {
+    Document doc;
+    const auto err = doc.open(std::filesystem::path("tests/fixtures/encrypted-text.pdf"));
+    REQUIRE(err.has_value());
+    REQUIRE(*err == Document::OpenError::NeedsPassword);
+    REQUIRE(doc.authenticate("test"));
+
+    InlineDispatcher inline_dispatcher;
+    SearchSession s(doc, inline_dispatcher, std::string_view{"test"});
+    s.set_query(L"ENCRYPTED", SearchSession::Flags{});
+    REQUIRE(s.scan_complete());
+    REQUIRE(s.hit_count() == 8);
 }
 
 TEST_CASE("SearchSession: destruct while holding state is safe",

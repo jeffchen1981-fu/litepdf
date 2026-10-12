@@ -66,8 +66,10 @@ public:
     // Throws std::runtime_error if `doc` is not opened (clone_context
     // returns null) or if context cloning fails (e.g. OOM).
     // `password` is the one `doc` was authenticated with, or none if it
-    // needed none; the render workers authenticate their own documents with
-    // it (#126) and do not keep it. std::optional, not a bare string_view, so
+    // needed none; the render workers (#126) and the search session (#130)
+    // authenticate their own documents with it and do not keep it. Also
+    // throws std::runtime_error if one of them fails to open or
+    // authenticate its document. std::optional, not a bare string_view, so
     // a worker count passed in its place fails to compile instead of a
     // literal 0 converting to string_view(nullptr) (see RenderEngine.hpp).
     explicit DocumentView(Document doc,
