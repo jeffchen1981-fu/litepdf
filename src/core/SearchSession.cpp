@@ -370,6 +370,15 @@ void SearchSession::set_query(std::wstring q, Flags f) {
                                                 cookie.get());
             }
 
+            // Order this page's hits top to bottom before taking the state
+            // mutex (#139). Stable, so hits sharing a line keep the order
+            // the page reports them in: left to right.
+            std::vector<Hit> page_hits;
+            page_hits.reserve(raw_hits.size());
+            for (auto& ph : raw_hits) page_hits.push_back(Hit{i, std::move(ph)});
+            std::stable_sort(page_hits.begin(), page_hits.end(),
+                [](const Hit& a, const Hit& b) { return a.geom.ul_y < b.geom.ul_y; });
+
             // Epoch check #2: we were busy in MuPDF; the user may have
             // typed more characters in the meantime. Drop stale results.
             OnUpdate cb;
@@ -378,20 +387,15 @@ void SearchSession::set_query(std::wstring q, Flags f) {
                 if (state_strong->epoch.load(std::memory_order_acquire) != ep) {
                     return;
                 }
-                state_strong->hits.reserve(state_strong->hits.size()
-                                           + raw_hits.size());
-                for (auto& ph : raw_hits) {
-                    state_strong->hits.push_back(Hit{i, std::move(ph)});
-                }
-                // Keep hits sorted by (page, top-to-bottom). std::sort
-                // on the growing vector is O(n log n) per insert but n
-                // is typically in the tens for a human-typed query;
-                // the simpler invariant beats a fancier merge here.
-                std::sort(state_strong->hits.begin(), state_strong->hits.end(),
-                    [](const Hit& a, const Hit& b) {
-                        if (a.page != b.page) return a.page < b.page;
-                        return a.geom.ul_y < b.geom.ul_y;
-                    });
+                // `hits` stays sorted by page, so this page's hits go in
+                // as one block before the first hit of a later page. No
+                // re-sort of the whole list under the mutex, which UI-thread
+                // readers wait on (#139).
+                auto& hits = state_strong->hits;
+                const auto at = std::upper_bound(hits.begin(), hits.end(), i,
+                    [](std::size_t p, const Hit& h) { return p < h.page; });
+                hits.insert(at, std::make_move_iterator(page_hits.begin()),
+                            std::make_move_iterator(page_hits.end()));
                 if (state_strong->pages_remaining > 0) {
                     --state_strong->pages_remaining;
                 }
@@ -500,11 +504,13 @@ bool SearchSession::scan_complete() const {
 std::vector<SearchSession::Hit>
 SearchSession::hits_for_page(std::size_t page) const {
     std::lock_guard<std::mutex> g(impl_->state->m);
-    std::vector<Hit> out;
-    for (const auto& h : impl_->state->hits) {
-        if (h.page == page) out.push_back(h);
-    }
-    return out;
+    // Hits are sorted by page: the page's hits are one contiguous range.
+    const auto& hits = impl_->state->hits;
+    const auto first = std::lower_bound(hits.begin(), hits.end(), page,
+        [](const Hit& h, std::size_t p) { return h.page < p; });
+    const auto last = std::upper_bound(first, hits.end(), page,
+        [](std::size_t p, const Hit& h) { return p < h.page; });
+    return std::vector<Hit>(first, last);
 }
 
 }  // namespace litepdf::core
