@@ -27,6 +27,7 @@
 
 #include <mupdf/fitz.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -36,6 +37,7 @@
 #include <memory>
 #include <new>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <system_error>
 #include <thread>
@@ -440,6 +442,112 @@ private:
 };
 
 }  // namespace
+
+namespace {
+
+// One hit by position, so two orders of the same hits can be compared.
+struct HitPos {
+    std::size_t page;
+    float       ul_x;
+    float       ul_y;
+};
+
+bool operator==(const HitPos& a, const HitPos& b) {
+    return a.page == b.page && a.ul_x == b.ul_x && a.ul_y == b.ul_y;
+}
+
+}  // namespace
+
+template <>
+struct Catch::StringMaker<HitPos> {
+    static std::string convert(const HitPos& h) {
+        return "p" + std::to_string(h.page) + "(" + std::to_string(h.ul_x) + ","
+             + std::to_string(h.ul_y) + ")";
+    }
+};
+
+namespace {
+
+// The order a session must keep: page by page, top to bottom, and hits that
+// share a line in the order the page reports them (left to right).
+std::vector<HitPos> expected_order(const Document& doc, std::string_view needle) {
+    std::vector<HitPos> out;
+    for (std::size_t p = 0; p < doc.page_count(); ++p) {
+        auto hits = doc.page_hits(p, needle, Document::SearchFlags{});
+        std::stable_sort(hits.begin(), hits.end(),
+            [](const Document::PageHit& a, const Document::PageHit& b) {
+                return a.ul_y < b.ul_y;
+            });
+        for (const auto& h : hits) out.push_back({p, h.ul_x, h.ul_y});
+    }
+    return out;
+}
+
+// The session's hits in next() order, starting from the first.
+std::vector<HitPos> walk_order(SearchSession& s) {
+    std::vector<HitPos> out;
+    s.set_reference_page(0);
+    auto h = s.current();
+    for (std::size_t i = 0; h && i < s.hit_count(); ++i) {
+        out.push_back({h->page, h->geom.ul_x, h->geom.ul_y});
+        h = s.next();
+    }
+    return out;
+}
+
+std::vector<HitPos> per_page_order(const SearchSession& s, std::size_t pages) {
+    std::vector<HitPos> out;
+    for (std::size_t p = 0; p < pages; ++p) {
+        for (const auto& h : s.hits_for_page(p)) {
+            out.push_back({h.page, h.geom.ul_x, h.geom.ul_y});
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+// #139: "m" puts 36 hits on page 0, six to a line. next() and hits_for_page()
+// must step through a line left to right. With pages finishing in page order
+// (InlineDispatcher) the old whole-list std::sort happened to keep this order;
+// the out-of-order case below is the one it failed.
+TEST_CASE("SearchSession: hits sharing a line keep reading order",
+          "[search][session]") {
+    Fx f;
+    f.session->set_query(L"m", SearchSession::Flags{});
+    REQUIRE(f.session->scan_complete());
+
+    const auto expected = expected_order(f.doc, "m");
+    REQUIRE(expected.size() > 32);
+    REQUIRE(walk_order(*f.session) == expected);
+    REQUIRE(per_page_order(*f.session, f.doc.page_count()) == expected);
+}
+
+// #139: pages finish in any order on the worker pool. Each page's hits must
+// land at their place in the list, whichever pages arrived before them, and
+// hits sharing a line must keep their order. The old code re-sorted the whole
+// list with std::sort, which is unstable past MSVC's 32-element insertion
+// sort, and scrambled page 0's lines here.
+TEST_CASE("SearchSession: pages finishing out of order still yield page order",
+          "[search][session]") {
+    Document doc = open_search_fixture();
+    DeferredDispatcher d;
+    SearchSession s(doc, d);
+
+    s.set_query(L"m", SearchSession::Flags{});  // tasks 0..6, none run
+    const std::size_t pages = doc.page_count();
+    for (std::size_t i : {std::size_t{5}, std::size_t{0}, std::size_t{6},
+                          std::size_t{2}, std::size_t{1}, std::size_t{4},
+                          std::size_t{3}}) {
+        d.run(i);
+    }
+    REQUIRE(pages == 7);
+    REQUIRE(s.scan_complete());
+
+    const auto expected = expected_order(doc, "m");
+    REQUIRE(walk_order(s) == expected);
+    REQUIRE(per_page_order(s, pages) == expected);
+}
 
 // A worker of the superseded generation that takes the state mutex right
 // after set_query() cleared the hit list must see the new epoch and drop its

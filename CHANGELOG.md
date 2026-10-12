@@ -16,6 +16,18 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   when nothing on screen had changed, and key presses had to wait behind those
   redraws. On a 750-page PDF a page turn during a search now usually waits
   about as long as with no search running (#135).
+- Searching for a very common word no longer keeps the window waiting while
+  the search runs, and the search finishes sooner. Each page's matches used
+  to trigger a re-sort of every match found so far, and the window had to
+  wait for it. Searching a 750-page PDF for "e" (about 190,000 matches) kept
+  the window waiting about 6.5 s in total and took about 11 s; it now waits
+  about 0.2 s and takes about 6.5 s (#139).
+
+### Fixed
+
+- Find Next and Find Previous could visit matches on the same line out of
+  order when a search had more than about 30 matches. They now keep the order
+  the page lists them in, normally left to right (#139).
 
 ## [1.5.3] — 2026-10-12 — Smoother page turns during search, and a find bar fix
 
