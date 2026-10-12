@@ -2300,6 +2300,14 @@ litepdf::core::SearchSession::OnUpdate MainWindow::make_search_update_poster() {
     // `this`: the lambda can outlive the window, and a PostMessageW to a dead
     // HWND just fails (which reopens the gate, harmlessly).
     return [target = hwnd_, gate = search_update_gate_]() {
+        if (!gate->claim()) return;
+        if (PostMessageW(target, WM_USER_SEARCH_UPDATE, 0, 0)) return;
+        // While our claim held the gate, another worker's update may have
+        // found it closed and posted nothing, relying on our message. Reopen
+        // and post once more so that update still reaches the UI. A second
+        // failure means the window is gone or its queue is wedged; nothing
+        // could be delivered then anyway.
+        gate->post_failed();
         if (gate->claim() && !PostMessageW(target, WM_USER_SEARCH_UPDATE, 0, 0)) {
             gate->post_failed();
         }

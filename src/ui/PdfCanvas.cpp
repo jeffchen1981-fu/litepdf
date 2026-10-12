@@ -508,6 +508,13 @@ void PdfCanvas::set_current_hit(std::optional<litepdf::core::SearchSession::Hit>
 
 void PdfCanvas::on_search_hits_changed() {
     if (!impl_ || !hwnd_) return;
+    // No render target: the last on_paint could not create one and drew
+    // nothing, so painted_hits says nothing about the screen. Invalidate as
+    // before #135 -- each paint retries create_render_target.
+    if (!impl_->rt) {
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
     // Each repaint blocks the UI thread in EndDraw until the next vsync, and a
     // scan reports every page it finishes -- one repaint each kept the UI
     // thread in EndDraw most of the time and queued input behind it (#135).

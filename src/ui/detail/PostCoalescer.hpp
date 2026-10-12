@@ -32,6 +32,8 @@ public:
 
     // The post failed (window gone, queue full): nothing is queued, so the next
     // claim() must post rather than wait for a message that will never come.
+    // Claim and post once more after this: a claim() that returned false while
+    // the failed one held the gate posted nothing and relied on that message.
     void post_failed() noexcept { release(); }
 
 private:
