@@ -87,6 +87,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_document_selection.cpp   # #52 Task 6
     unit/test_selection_drag.cpp       # #52 Task 8
     unit/test_hit_overlay.cpp          # #135 skip repaints that redraw the same hits
+    unit/test_post_coalescer.cpp       # #135 at most one queued search update
     unit/test_clipboard_text.cpp       # #52 Task 8
     unit/test_mupdf_root.cpp           # #66 MuPDFRoot::of foreign lock table
     unit/test_cli_bench_selection.cpp  # #73 --bench-selection harness

@@ -201,8 +201,9 @@ public:
     // #135: a search session reported new hits. Repaints only when the hit
     // overlay would now draw something other than what the last paint drew --
     // a scan reports once per page, from every tab, and nearly all of those
-    // leave the painted page untouched. Callers that replace the hits wholesale
-    // (a new query, a clear) still invalidate directly.
+    // leave the painted page untouched. The find bar's own query changes and
+    // its close still invalidate directly; a cross-tab search's set_query on the
+    // active tab repaints through the first update that follows it.
     void on_search_hits_changed();
 
     // --- Phase 7 Task 7: page-change observer ---

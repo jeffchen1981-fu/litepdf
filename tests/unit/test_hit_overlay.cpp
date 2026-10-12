@@ -33,6 +33,27 @@ TEST_CASE("HitOverlay identical hits draw the same overlay", "[ui][hit_overlay]"
     REQUIRE(same_overlay(a, b));
 }
 
+TEST_CASE("HitOverlay the same hits in another order draw the same overlay",
+          "[ui][hit_overlay]") {
+    // SearchSession re-sorts every hit by (page, ul_y) with std::sort after each
+    // scanned page. Two matches on one line tie, and the unstable sort can swap
+    // them, so the painted page's hits come back in another order with nothing
+    // on screen changed. Each rectangle is drawn on its own, so order is not
+    // part of what the overlay draws.
+    const std::vector<SearchSession::Hit> a{hit(3, 10, 20), hit(3, 50, 20), hit(3, 10, 60)};
+    const std::vector<SearchSession::Hit> b{hit(3, 50, 20), hit(3, 10, 20), hit(3, 10, 60)};
+    REQUIRE(same_overlay(a, b));
+}
+
+TEST_CASE("HitOverlay how often a hit occurs counts, not just which hits occur",
+          "[ui][hit_overlay]") {
+    // Order-insensitive, but a multiset, not a set: these two have the same size
+    // and the same distinct hits, and differ only in how often each occurs.
+    const std::vector<SearchSession::Hit> a{hit(3, 10, 20), hit(3, 10, 20), hit(3, 10, 60)};
+    const std::vector<SearchSession::Hit> b{hit(3, 10, 20), hit(3, 10, 60), hit(3, 10, 60)};
+    REQUIRE_FALSE(same_overlay(a, b));
+}
+
 TEST_CASE("HitOverlay a hit arriving or leaving changes the overlay", "[ui][hit_overlay]") {
     const std::vector<SearchSession::Hit> one{hit(3, 10, 20)};
     const std::vector<SearchSession::Hit> two{hit(3, 10, 20), hit(3, 10, 60)};

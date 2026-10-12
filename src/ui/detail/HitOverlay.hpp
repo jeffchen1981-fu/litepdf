@@ -9,26 +9,35 @@
 #include "core/SearchSession.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
+#include <utility>
 #include <vector>
 
 namespace litepdf::ui {
 
-// True when `a` and `b` draw the same highlights. Compares each hit's page and
-// all eight quad corners in order; the snippet is not drawn, so it is ignored.
-// Errs toward "different": a needless repaint costs one frame, a skipped one
-// leaves wrong highlights on screen.
+// True when `a` and `b` draw the same highlights: the same multiset of (page,
+// eight quad corners). Order is ignored -- each rectangle is drawn on its own,
+// and SearchSession's unstable std::sort can swap two hits on one line between
+// updates. The snippet is not drawn, so it is ignored too. Otherwise errs toward
+// "different": a needless repaint costs one frame, a skipped one leaves wrong
+// highlights on screen.
 inline bool same_overlay(const std::vector<core::SearchSession::Hit>& a,
-                         const std::vector<core::SearchSession::Hit>& b) noexcept {
-    return std::equal(a.begin(), a.end(), b.begin(), b.end(),
-        [](const core::SearchSession::Hit& x, const core::SearchSession::Hit& y) {
-            const auto& p = x.geom;
-            const auto& q = y.geom;
-            return x.page == y.page
-                && p.ul_x == q.ul_x && p.ul_y == q.ul_y
-                && p.ur_x == q.ur_x && p.ur_y == q.ur_y
-                && p.ll_x == q.ll_x && p.ll_y == q.ll_y
-                && p.lr_x == q.lr_x && p.lr_y == q.lr_y;
-        });
+                         const std::vector<core::SearchSession::Hit>& b) {
+    if (a.size() != b.size()) return false;
+    using Key = std::pair<std::size_t, std::array<float, 8>>;
+    auto keys = [](const std::vector<core::SearchSession::Hit>& hits) {
+        std::vector<Key> out;
+        out.reserve(hits.size());
+        for (const auto& h : hits) {
+            const auto& q = h.geom;
+            out.push_back({h.page, {q.ul_x, q.ul_y, q.ur_x, q.ur_y,
+                                    q.ll_x, q.ll_y, q.lr_x, q.lr_y}});
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    };
+    return keys(a) == keys(b);
 }
 
 }  // namespace litepdf::ui
