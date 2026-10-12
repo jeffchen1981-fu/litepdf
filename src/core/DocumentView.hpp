@@ -18,15 +18,16 @@
 //   4. UI-thread fz_context dropped fourth.
 //   5. Document cleaned up last via unique_ptr — SearchSession keeps a
 //      `const Document&` (page_count() and query_compiles() on the UI
-//      thread) and clones its own escrow context from it, so Document must
-//      outlive the session. In-flight search tasks do not touch Document
-//      (#130): they use only the session's own context, document and
-//      mutex, and ~SearchSession drains them before dropping those. Since
-//      the SearchDispatcher is owned ABOVE DocumentView (in MainWindow)
-//      and outlives every tab, a task that is still queued after
-//      DocumentView destruction only holds a shared_ptr<State>. Document
-//      outliving the session is guaranteed by declaring SearchSession
-//      AFTER Document in Impl so it destructs FIRST.
+//      thread), so Document must outlive the session. In-flight search
+//      tasks do not touch Document (#130): they use only the session's
+//      own context, document and mutex, and ~SearchSession drains them
+//      before dropping those. Because ~SearchSession drains every task,
+//      nothing of the session's is left running on the dispatcher once
+//      the session is gone; the dispatcher (owned above DocumentView, in
+//      MainWindow, and outliving every tab) only has to outlive the
+//      session. Document outliving the session is guaranteed by
+//      declaring SearchSession AFTER Document in Impl so it destructs
+//      FIRST.
 
 #include <cstddef>
 #include <filesystem>

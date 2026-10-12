@@ -196,7 +196,7 @@ DocumentView::~DocumentView() {
     // the session's own context and document, not impl_->doc. impl_->doc
     // must still be destroyed AFTER the session (below, via Impl
     // unwinding): the session holds a `const Document&` for page_count()
-    // and query_compiles() on the UI thread, and cloned its context from it.
+    // and query_compiles() on the UI thread.
     impl_->session.reset();
     // Engine next — ensures no worker is mid-access to cache or contexts.
     impl_->engine.reset();
