@@ -9,6 +9,8 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+## [1.5.4] — 2026-10-13 — A more responsive window during search, and a Find Next order fix
+
 ### Changed
 
 - Page turns and other keys respond faster while a search is running. The
