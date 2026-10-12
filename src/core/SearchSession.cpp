@@ -155,7 +155,34 @@ SearchSession::SearchSession(const Document& doc,
         throw std::runtime_error("SearchSession: fz_open_document failed");
     }
 
-    if (!pw.empty()) {
+    // Ask once, right after the open and BEFORE any authentication, and never
+    // again after a successful one: pdf_needs_password re-runs a blank
+    // pdf_authenticate_password (pdf-crypt.c:826-833), and that failed blank
+    // attempt resets the document's access and key (:803), de-authenticating
+    // it. An encrypted document scanned without its key decrypts every
+    // content stream to garbage and reports 0 hits, so a missing, empty or
+    // wrong password must fail here rather than scan.
+    int needs = 0;
+    bool query_failed = false;
+    fz_var(needs);
+    fz_var(query_failed);
+    fz_try(ctx) {
+        needs = fz_needs_password(ctx, sdoc);
+    }
+    fz_catch(ctx) {
+        query_failed = true;
+    }
+    if (query_failed) {
+        // Rollback: drop the document on the context it was opened on,
+        // before that context (the local escrow) goes.
+        fz_drop_document(ctx, sdoc);
+        throw std::runtime_error(
+            "SearchSession: could not tell whether the document needs a password");
+    }
+
+    if (needs) {
+        // Attempted whenever a password is needed, even an empty one, so the
+        // document itself is what refuses (spec §3.2).
         int ok = 0;
         fz_var(ok);
         fz_try(ctx) {
@@ -165,11 +192,11 @@ SearchSession::SearchSession(const Document& doc,
             ok = 0;
         }
         if (!ok) {
-            // Rollback: drop the document on the context it was opened on,
-            // before that context (the local escrow) goes.
+            // Rollback, as above.
             fz_drop_document(ctx, sdoc);
-            throw std::runtime_error(
-                "SearchSession: the document rejected the password");
+            throw std::runtime_error(pw.empty()
+                ? "SearchSession: document needs a password"
+                : "SearchSession: password rejected");
         }
     }
 

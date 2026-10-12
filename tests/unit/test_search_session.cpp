@@ -19,9 +19,12 @@
 
 #include "app/SearchDispatcher.hpp"
 #include "core/Document.hpp"
+#include "core/EscrowContext.hpp"
 #include "core/SearchSession.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+
+#include <mupdf/fitz.h>
 
 #include <chrono>
 #include <cstddef>
@@ -31,7 +34,9 @@
 #include <future>
 #include <memory>
 #include <new>
+#include <stdexcept>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -273,6 +278,109 @@ TEST_CASE("SearchSession: scans a user-password PDF with the password",
     s.set_query(L"ENCRYPTED", SearchSession::Flags{});
     REQUIRE(s.scan_complete());
     REQUIRE(s.hit_count() == 8);
+}
+
+// #130 T3: a session whose own document needs a password it was not given
+// (none, or a wrong one) must fail loud at construction rather than scan
+// garbage and report 0 hits.
+TEST_CASE("SearchSession: refuses a user-password PDF without its password",
+          "[search][session]") {
+    Document doc;
+    const auto err = doc.open(std::filesystem::path("tests/fixtures/encrypted-text.pdf"));
+    REQUIRE(err.has_value());
+    REQUIRE(*err == Document::OpenError::NeedsPassword);
+    REQUIRE(doc.authenticate("test"));
+
+    InlineDispatcher d;
+    REQUIRE_THROWS_AS(SearchSession(doc, d), std::runtime_error);
+    REQUIRE_THROWS_AS(SearchSession(doc, d, std::string_view{"wrong"}),
+                      std::runtime_error);
+}
+
+// The rollback of a throwing constructor, and the destructor, must each give
+// back the session's cloned context. The probe keeps the family countable
+// (same pattern as test_document_selection's Type3 case).
+TEST_CASE("SearchSession: constructor failure and destruction release the session context",
+          "[search][session]") {
+    Document doc;
+    const auto err = doc.open(std::filesystem::path("tests/fixtures/encrypted-text.pdf"));
+    REQUIRE(err.has_value());
+    REQUIRE(*err == Document::OpenError::NeedsPassword);
+    REQUIRE(doc.authenticate("test"));
+
+    fz_context* tmp = doc.clone_context();
+    REQUIRE(tmp != nullptr);
+    EscrowContext probe = EscrowContext::clone_from(tmp);
+    fz_drop_context(tmp);
+    REQUIRE(probe.valid());
+    const int before = detail::family_context_count(probe.get());
+
+    InlineDispatcher d;
+    REQUIRE_THROWS_AS(SearchSession(doc, d), std::runtime_error);
+    REQUIRE(detail::family_context_count(probe.get()) == before);
+
+    {
+        SearchSession s(doc, d, std::string_view{"test"});
+        REQUIRE(detail::family_context_count(probe.get()) == before + 1);
+    }
+    REQUIRE(detail::family_context_count(probe.get()) == before);
+}
+
+namespace {
+
+// Copies a fixture to a unique temp path and removes it (best effort) when
+// the scope ends, so a failed assertion does not leave the copy behind.
+struct TempCopy {
+    std::filesystem::path path;
+    explicit TempCopy(const char* fixture, const char* name)
+        : path(std::filesystem::temp_directory_path() / name) {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        std::filesystem::copy_file(fixture, path);
+    }
+    ~TempCopy() {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
+};
+
+}  // namespace
+
+// The context count cannot see a leaked fz_document (it holds no context
+// reference). On Windows an open fz_document holds its file open, so a
+// delete after the tab Document has closed fails if the rollback leaked it.
+TEST_CASE("SearchSession: constructor failure releases the session document",
+          "[search][session]") {
+    const TempCopy copy("tests/fixtures/encrypted-text.pdf",
+                        "litepdf-130-t3-rollback.pdf");
+    Document doc;
+    const auto err = doc.open(copy.path);
+    REQUIRE(err.has_value());
+    REQUIRE(*err == Document::OpenError::NeedsPassword);
+    REQUIRE(doc.authenticate("test"));
+
+    InlineDispatcher d;
+    REQUIRE_THROWS(SearchSession(doc, d));
+    doc.close();
+    REQUIRE(std::filesystem::remove(copy.path));
+}
+
+// Validates the oracle above: the session's own document blocks the delete
+// for as long as the session lives, even with the tab Document closed.
+TEST_CASE("SearchSession: holds its own document open until destroyed",
+          "[search][session]") {
+    const TempCopy copy("tests/fixtures/search.pdf",
+                        "litepdf-130-t3-holds-open.pdf");
+    Document doc;
+    REQUIRE_FALSE(doc.open(copy.path).has_value());
+
+    InlineDispatcher d;
+    auto s = std::make_unique<SearchSession>(doc, d);
+    doc.close();
+    std::error_code ec;
+    REQUIRE_FALSE(std::filesystem::remove(copy.path, ec));
+    s.reset();
+    REQUIRE(std::filesystem::remove(copy.path));
 }
 
 TEST_CASE("SearchSession: destruct while holding state is safe",

@@ -52,13 +52,14 @@ public:
     // lifetime. SearchSession holds non-owning refs.
     //
     // Opens `doc.source_path()` again on a context cloned from `doc` and,
-    // when `password` is non-empty, authenticates that document with it --
-    // pass the password `doc` was authenticated with. The scans run on that
-    // document only (see Thread-safety above). Its copy of the password is
-    // wiped on every exit.
+    // when that document needs a password, authenticates it with `password`
+    // -- pass the password `doc` was authenticated with. The scans run on
+    // that document only (see Thread-safety above). Its copy of the password
+    // is wiped on every exit.
     //
-    // Throws std::runtime_error if the clone, the open or the
-    // authentication fails, after releasing whatever it acquired.
+    // Throws std::runtime_error if the clone or the open fails, or if the
+    // document needs a password and `password` is missing, empty or wrong,
+    // after releasing whatever it acquired.
     SearchSession(const Document& doc, litepdf::app::ISearchDispatcher& dispatcher,
                   std::optional<std::string_view> password = std::nullopt);
     ~SearchSession();
