@@ -40,6 +40,8 @@ public:
     };
 
     virtual ~ISearchDispatcher() = default;
+    // If submit throws, `t` was neither run nor queued and never will be:
+    // SearchSession rolls back its drain count on that assumption.
     virtual void submit(Task t) = 0;
 };
 

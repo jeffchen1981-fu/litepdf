@@ -88,6 +88,14 @@ public:
     std::vector<Hit> hits_for_page(std::size_t page) const;
 
 private:
+    // Test seam: `hook` runs on the set_query() thread right after the
+    // previous generation's hits are cleared and the state mutex is
+    // released, before any task of the new generation is submitted. It lets
+    // a test land a superseded worker in exactly that window, which no
+    // dispatcher double can reach. Reached only via SearchSessionTestAccess.
+    void set_after_reset_hook(std::function<void()> hook);
+    friend struct SearchSessionTestAccess;
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

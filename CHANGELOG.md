@@ -9,6 +9,12 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+### Fixed
+
+- Typing quickly in the find bar, or clearing it, could leave matches from
+  the earlier search behind, so the match count was too high and Next/Previous
+  stepped onto words the current search does not contain.
+
 ## [1.5.2] — 2026-10-11 — Password-protected PDF fix and faster text selection
 
 ### Changed
