@@ -14,9 +14,10 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 ### Changed
 
 - Turning pages while a search is still running no longer waits for the
-  search to finish reading a page. The search now reads its own copy of the
-  document, which on a 750-page PDF used about 14 to 18 MB more memory per
-  tab (#130).
+  search to finish reading a page. Each open tab now keeps a second copy of
+  the document for searching. On a 750-page PDF that used about 14 MB more
+  memory as soon as the tab opened, and about 18 MB more after a search
+  (#130).
 
 ### Fixed
 
