@@ -1,14 +1,14 @@
 # Run a search scan on the session's own document — design
 
 **Date:** 2026-10-11
-**Baseline:** `main` @ `4adbda7`
+**Baseline:** `main` @ `6a9c107` (rebased after #133; first written against `4adbda7`)
 **Issue:** #130 (a search scan holds `doc_mutex` through each page's cold text
 build, so page turns can wait behind it)
 **Ships as:** one PR.
 
 ## 1. Motivation
 
-`SearchSession` workers call `Document::page_hits` (`SearchSession.cpp:219`),
+`SearchSession` workers call `Document::page_hits` (`SearchSession.cpp:223`),
 which takes the tab Document's `doc_mutex` (`Document.cpp:502`) and holds it
 through the cold structured-text build (`fz_new_stext_page_from_page_number`,
 `:522`). The scan's abort flag is polled only in the match loop (`:527`), after
@@ -247,7 +247,7 @@ loads them only for its own rare calls.
   shape).
 - `~SearchSession` keeps its order: bump the epoch, abort the active
   generation (now also its cookie), and spin until `pending_tasks` reaches 0
-  (`SearchSession.cpp:89-116`). After that, no task can still be using the
+  (`SearchSession.cpp:91-118`). After that, no task can still be using the
   document, so the destructor drops the document on its own context, then the
   context.
 - Constructor failure (clone fails, open fails, password rejected) rolls back
@@ -308,7 +308,7 @@ ASCII and prefixed `SearchSession:` / `Document:`.
   Expected: `scan_complete()` and `hit_count() == 15`.
   - The count is pinned because `scan_complete()` alone cannot tell a correct
     scan from one where every page failed: `pages_remaining` is decremented
-    whether or not `page_hits` found anything (`SearchSession.cpp:244-246`),
+    whether or not `page_hits` found anything (`SearchSession.cpp:248-250`),
     and `page_hits` reports failure as an empty result (`Document.cpp:550-553`).
   - Before the change the workers block on `doc_mutex`, the poll times out, the
     callback returns, the lock is released, and the scan drains, so the test

@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Branch `perf/130-search-scan-own-document` (spec committed at `0bc8f06`). Baseline `main` @ `4adbda7`.
+- Branch `perf/130-search-scan-own-document` (spec committed at `5d81d45` after the rebase). Baseline `main` @ `6a9c107` (#133 merged; the branch was rebased onto it).
 - Build and test **Release** only (Debug fails with LNK2038). Use the full BuildTools paths, never a bare `cmake`/`ctest`:
   - `$cmake = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"` (ctest.exe in the same dir)
   - build: `& $cmake --build build --target litepdf_unit_tests --config Release`
@@ -39,7 +39,7 @@
 **Files:**
 - Create: `src/core/detail/PageHitsAccess.hpp`
 - Modify: `src/core/Document.hpp` (`page_hits` declaration and its comment at `:130-151`; new accessor), `src/core/Document.cpp` (`page_hits` at `:489-580`; `Impl::doc_mutex` comment at `:51-67`)
-- Modify: `src/core/SearchSession.cpp:216-220` (call site loses the abort argument, interim; see Step 6)
+- Modify: `src/core/SearchSession.cpp:220-224` (call site loses the abort argument, interim; see Step 6)
 - Modify: `src/cli/bench_selection.cpp:80` (drop the `nullptr` 4th argument; this file is also compiled into `litepdf_unit_tests`, `tests/CMakeLists.txt:101`)
 - Modify: `src/core/EscrowContext.hpp:49-50` (the "every caller today" list gains `Document::clone_escrow_context`)
 - Test: `tests/unit/test_page_hits_cookie.cpp` (new; register in `tests/CMakeLists.txt` next to `test_document_search.cpp`), `tests/unit/test_document_search.cpp:94, 100, 101, 119-129`
@@ -77,7 +77,7 @@
   Check with `rg -n -i "search worker|SearchSession worker" src/core/Document.cpp src/core/Document.hpp`: it prints nothing. Then `rg -n "page_hits" src/core/Document.cpp src/core/Document.hpp`: every hit is the wrapper's or the helper's declaration, definition or call, and none is a comment about `doc_mutex`.
 - [ ] **Step 4: Run** `build\tests\Release\litepdf_unit_tests.exe "[document][search]"` and the four new cases by name. Expected: all pass, including the unchanged `page_hits: page 0 has 12 Lorem hits`.
 - [ ] **Step 5: CLI.** Build `litepdf-cli` too (`--target litepdf-cli`). Expected: it compiles with the `bench_selection.cpp:80` edit.
-- [ ] **Step 6: Interim call site.** `SearchSession.cpp:219` calls `doc_ref.page_hits(i, needle_utf8, df)` without the token. Until Task 2, a superseded generation stops only between pages (epoch check). Leave `GenerationAbort` untouched. Run `"[search]"`; expected: all pass.
+- [ ] **Step 6: Interim call site.** `SearchSession.cpp:223` calls `doc_ref.page_hits(i, needle_utf8, df)` without the token. Until Task 2, a superseded generation stops only between pages (epoch check). Leave `GenerationAbort` untouched. Run `"[search]"`; expected: all pass.
 - [ ] **Step 7: Commit** `refactor(core): lock-free page_hits helper that builds text with a cookie (#130)`.
 
 ## Task 2: SearchSession scans its own document; each generation owns a cookie
@@ -112,11 +112,11 @@
   - `Impl` gains `EscrowContext escrow; fz_document* sdoc = nullptr; std::mutex scan_mtx;`. None of these go into `State` (spec §3.6).
   - The constructor clones via `doc.clone_escrow_context()` and opens `doc.source_path()` on it, using the UTF-8 conversion from `RenderEngine.cpp:368-374`. If `password` is non-empty, it authenticates a wiped NUL-terminated copy. On any failure it drops what it opened (the document on `escrow.get()`) and throws `std::runtime_error`.
   - The task lambda captures `fz_context* sctx`, `fz_document* sdoc`, `std::mutex* smtx` and the generation's `std::shared_ptr<fz_cookie>` in place of `&doc_ref` and the `atomic<int>` token. It calls `page_hits_on(sctx, sdoc, i, needle_utf8, df, cookie.get())` with `std::lock_guard(*smtx)` held.
-  - The lock lives in a block scope around that call only, opened **after** epoch check #1, so it is inside the drain `Guard`'s scope (`SearchSession.cpp:205-214`) and released before the Guard decrements `pending_tasks`. Declared ahead of the Guard, it would unlock after the decrement, and `~SearchSession` could already have destroyed the mutex.
+  - The lock lives in a block scope around that call only, opened **after** epoch check #1, so it is inside the drain `Guard`'s scope (`SearchSession.cpp:209-218`) and released before the Guard decrements `pending_tasks`. Declared ahead of the Guard, it would unlock after the decrement, and `~SearchSession` could already have destroyed the mutex.
   - Once the lock is held, re-check the epoch and return if it moved. A task can pass check #1 and then wait on the lock while the generation is superseded; without the re-check it would run a whole stale build, and on formats whose run ignores the cookie (spec §3.4) nothing would stop it.
   - `~SearchSession` keeps the epoch bump, `gen.abort_active()` and the `pending_tasks` spin in that order, then `fz_drop_document(escrow.get(), sdoc)`. The escrow drops its context when `Impl` dies.
   - `set_query`'s `impl_->doc.page_count()` stays on the tab Document; it takes no lock (`Document.cpp:399-402`).
-  - Rewrite the stale comments: `SearchSession.hpp:7-18` (the session scans its own document under its own mutex; the tab Document's `doc_mutex` is never taken), the `GenerationAbort.hpp` header (the token is the generation's `fz_cookie`), and `SearchSession.cpp:94-103`.
+  - Rewrite the stale comments: `SearchSession.hpp:7-18` (the session scans its own document under its own mutex; the tab Document's `doc_mutex` is never taken), the `GenerationAbort.hpp` header (the token is the generation's `fz_cookie`), and `SearchSession.cpp:96-105`.
   - `DocumentView.cpp:172`: `std::make_unique<SearchSession>(impl_->doc, dispatcher, password)`.
 - [ ] **Step 5: Run** `"[search]"`, `"[abort]"`, `"[crosstab]"` and the full exe. Expected: all pass, including T1, the unchanged `SearchSession: rapid query changes settle on correct results (ThreadPool)`, and the Ctrl+W race test.
 - [ ] **Step 6: Commit** `perf(core): run a search scan on the session's own document (#130)`.
@@ -161,7 +161,7 @@
 **Files:**
 - Modify: `CHANGELOG.md` (`## [Unreleased]` → `### Changed`)
 
-- [ ] **Step 1: CHANGELOG.** `## [Unreleased]` is empty today (`CHANGELOG.md:10`). Add a `### Changed` heading under it with one line, per the ship convention (perf → Changed). Claim only what T6 measures:
+- [ ] **Step 1: CHANGELOG.** `## [Unreleased]` (`CHANGELOG.md:10`) already holds a `### Fixed` block from #133. Add a `### Changed` heading **above** that block, the order 1.5.2 uses (Changed before Fixed), with one line, per the ship convention (perf → Changed). Claim only what T6 measures:
   - page turns, resizes and tab switches no longer wait for a running search to finish a page;
   - in a PDF, closing a tab or retyping stops the current page's text build early. Reference `(#130)`.
 - [ ] **Step 2: T6 GUI probe (nothing committed).** Regenerate the spec PDF if needed: headless Edge `--print-to-pdf` of `third_party/mupdf/thirdparty/gumbo-parser/benchmarks/html5_spec.html` into the scratchpad. Read the scripted-GUI-smoke reference memory's "Read first" list before driving the app. On the `main` build and on this branch, start a search for a never-matching word, then:
