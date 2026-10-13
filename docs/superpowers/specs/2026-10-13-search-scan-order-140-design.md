@@ -106,21 +106,36 @@ one owner; the runnability check drops them at pop, as today.
   served least recently (smallest `last_served`; never-served owners first;
   ties by list order). Pop its front task, set `last_served = ++serve_seq_`,
   add the owner to `in_flight_`, `--queued_`. Erase the `OwnerQueue` if it is
-  now empty, and the lane if that is now empty. A new search's owner has never
-  been served, so it takes the next free worker.
-- **release:** an RAII guard created right after the pop removes the owner from
-  `in_flight_` (under `m_`) and `notify_all`s on every exit from the worker's
+  now empty, and the lane if that is now empty. A new search first discards its
+  owner's queued tasks (`discard`, below), which erases its `OwnerQueue`; the
+  queue it then submits into is new and never served, so it takes the next
+  free worker.
+- **release:** an RAII guard constructed after the pop's `unique_lock` scope
+  has closed (so its destructor can take `m_` itself) removes the owner from
+  `in_flight_` and then `notify_all`s, on every exit from the worker's
   iteration: the existing "not runnable" and "no `run`" `continue`s
   (`SearchDispatcher.cpp:103-105`), a normal return, and a throw. A popped task
   that is skipped must still release its owner, or that owner is pinned forever.
+  The `notify_all` on every iteration, including the last, is also what lets a
+  worker waiting on an in-flight owner see `queued_ == 0` at shutdown.
+- **discard (new, on `ISearchDispatcher`):**
+  `virtual std::size_t discard(const std::weak_ptr<void>& owner)` removes the
+  owner's queued tasks without running them and returns how many it removed.
+  The base implementation returns 0 (nothing queued: `InlineDispatcher` and the
+  test doubles keep working unchanged). `ThreadPoolDispatcher` erases the
+  owner's `OwnerQueue` in every lane under `m_` (no-throw: erasing destroys the
+  tasks, and `Task`'s destructor does not throw) and subtracts from `queued_`.
+  A task already popped is not affected; it runs and decrements its own drain
+  count as today.
 - **wait predicate:** a worker waits until `stop_ && queued_ == 0` (then it
   exits) or some queued task's owner is ready. Drain-before-exit keeps its
   meaning: every queued task still runs before the pool's workers return.
 - **Ordering contract** (stated on `ThreadPoolDispatcher`; `InlineDispatcher`
   runs on submit and keeps its own "submission order, no reordering" note):
   among queued tasks whose owner is ready, the lowest priority number runs
-  first; within a priority, one owner's tasks run one at a time in submission
-  order, and the least recently served ready owner goes next. A lower lane can
+  first; an owner runs one task at a time across all lanes, in submission order
+  within a lane; within a lane, the least recently served ready owner goes
+  next. A lower lane can
   therefore starve a higher one while it has ready work; today every
   production submission is P2 (`SearchSession.cpp:333`), and this design keeps
   it that way (§3.3).
@@ -136,13 +151,27 @@ one owner; the runnability check drops them at pop, as today.
 - Unchanged: the runnability check, the try/catch around `run`,
   `InlineDispatcher`.
 
-**Retyping.** Every generation of one session shares the session's `State`
-(`SearchSession.cpp:58`, captured by every task at `:318-334`), so a retype's
-tasks queue behind the previous generation's on the same owner. Those exit at
-epoch check #1 before touching `scan_mtx`; at one task in flight per owner they
-drain one after another, a few microseconds each, so a 753-page retype pays a
-few milliseconds before its start page runs. The find bar debounces at 120 ms
-(`FindBar.cpp:58-59`), so generations do not pile up faster than they drain.
+**Retyping and closing: stale tasks are discarded, not drained.** Every
+generation of one session shares the session's `State` (`SearchSession.cpp:58`,
+captured by every task at `:318-334`), so it is one owner across generations.
+If a retype's tasks were queued behind the previous generation's, those stale
+tasks would drain one per turn of that owner, and with two other tabs keeping
+both workers busy a turn comes only when one of their pages completes (a
+simulation of this pop rule: ~5 s for 752 stale tasks behind two 7 ms-per-page
+tabs). The same holds for `~SearchSession`, which spins on the UI thread until
+every queued task has run (`SearchSession.cpp:226-236`). So the session
+discards instead:
+
+- `set_query`, right after the reset block (epoch bumped) and before its first
+  submit: `n = dispatcher.discard(state_weak)`, then
+  `pending_tasks.fetch_sub(n)`. The removed tasks were all of the previous
+  generations (nothing of the new one is submitted yet), and none of them ran,
+  so none decrements itself.
+- `~SearchSession`, after its epoch bump and before its spin: the same. The spin
+  then waits only for tasks already popped, which is at most one (one in flight
+  per owner).
+
+A stale task that was already popped still exits at its epoch check as today.
 
 **Why one task in flight per owner.** Each session's scan holds its own
 `scan_mtx` for the whole page (`SearchSession.cpp:357-371`, a blocking
@@ -184,11 +213,10 @@ Outward order would help only Shift+Enter.
 The first draft ran find-bar searches at P1 and cross-tab searches at P2, so a
 find-bar search would not wait behind another tab's queued pages under strict
 FIFO. With one task in flight per owner and the least recently served ready
-owner going next (§3.1), a new search takes the next free worker. A P1 lane
-would instead starve
-every P2 owner while it has work — including a closing tab's stale tasks, which
-`~SearchSession` spins on, on the UI thread (`SearchSession.cpp:226-236`) — so
-everything stays at P2.
+owner going next (§3.1), a new search takes the next free worker, so a P1 lane
+buys nothing. It would also cost something: while the find-bar scan has ready
+work, every P2 owner — the other tabs of a cross-tab search — gets only the
+worker the P1 owner cannot use. Everything stays at P2.
 
 ### 3.4 The start page each caller passes
 
@@ -267,8 +295,8 @@ Enter lands on the start page's first match once that page has completed.
 
 | file | change |
 |---|---|
-| `src/app/SearchDispatcher.hpp/.cpp` | lanes, owner queues, in-flight set replace the priority queue; ordering contract on `ISearchDispatcher` |
-| `src/core/SearchSession.hpp/.cpp` | `set_query` start page and submit order; `origin_page` / `anchored`; `next` / `prev` page hint; `current()` while unanchored; insert stability |
+| `src/app/SearchDispatcher.hpp/.cpp` | lanes, owner queues, in-flight set replace the priority queue; `discard`; worker count clamped; ordering contract on `ThreadPoolDispatcher` |
+| `src/core/SearchSession.hpp/.cpp` | `set_query` start page, submit order and discard of the previous generation; `~SearchSession` discard; `origin_page` / `anchored`; `next` / `prev` page hint; `current()` while unanchored; insert stability |
 | `src/ui/MainWindow.cpp` | canonical current page to `set_query`, `next`, `prev` |
 | `src/app/CrossTabSearch.cpp` | each tab's canonical current page to `set_query` |
 | `tests/unit/test_search_dispatcher.cpp` | §6.1 |
@@ -305,12 +333,17 @@ push sequence (five tasks pop 0, 2, 4, 1, 3); it is not an STL guarantee.
 
 ### 6.1 Dispatcher (`ThreadPoolDispatcher`)
 
-No wall-clock thresholds. Order tests run `pool(1)` with a gate task (one that
-blocks on a flag) so everything is queued before anything runs, then release
-it and record the run order. Concurrency tests run `pool(2)`: tasks record
-"started" / "finished" events and block on per-task gates; "has not started"
-is checked after a 50 ms grace (a wrong scheduler starts it in microseconds),
-"has started" is waited for with a 5 s timeout.
+No timing threshold that a correct scheduler could miss. Order tests run
+`pool(1)` with a gate task (one that blocks on a flag) so everything is queued
+before anything runs, then release it and record the run order. Concurrency
+tests run `pool(2)`: tasks record "started" / "finished" events and block on
+per-task gates; "has not started" is checked after a 50 ms grace (a wrong
+scheduler starts it in microseconds; the grace can only let a wrong scheduler
+pass, never fail a right one), "has started" is waited for with a 5 s timeout.
+Every gate is released by a scope guard declared after the pool, so it is
+destroyed first: a failed `REQUIRE` unwinds into an open gate and the pool's
+destructor returns, and RED shows as an assertion failure, not as ctest's
+120 s per-test `TIMEOUT` (`tests/CMakeLists.txt:120-125`).
 
 1. One owner, five tasks at P2 → run in submission order. RED on main.
 2. A P1 task submitted after P2 tasks of another owner → runs first.
@@ -321,25 +354,38 @@ is checked after a 50 ms grace (a wrong scheduler starts it in microseconds),
    main (A2 starts at once on the second worker).
 5. The second worker takes another owner: `pool(2)`, A1 held, then A2 and B1
    queued in that order, A2 modelled as waiting on A's mutex (held by A1, like
-   `scan_mtx`) → B1 starts while A1 is still held. RED on main (the heap pops
-   A2 first, which blocks the second worker on A's mutex).
+   `scan_mtx`) → B1 starts while A1 is still held. RED on main, because main
+   has no per-owner cap: the idle second worker wakes on A2's own submit and
+   pops it before B1 is queued, then blocks on A's mutex (independent of heap
+   order).
 6. A new owner takes the next free worker: `pool(2)`, A1 and B1 both held, A2
    and B2 queued, then C1 submitted; release A1 → C1 starts before A2 and B2.
-   (Expected RED on main by heap order; confirmed when written, and kept as a
-   guard for "least recently served" either way.)
+   RED on main (MSVC's heap has A2 on top).
 7. A ready lower-priority owner runs while a higher-priority owner is in
    flight: A1 (P1) held, A2 (P1) queued, B1 (P2) queued → B1 starts while A1 is
    held.
-8. A popped task that is skipped still releases its owner: owner A's first task
-   has no `run` (the "no `run`" `continue`), its second is live → the second
-   runs, and the pool's destructor returns.
-9. An expired owner's tasks are skipped and do not block another owner. The
-   task's `run` must not capture the owner (the existing `make_task` does,
-   which keeps the owner alive); the test asserts `t.state_weak.expired()`
-   before submitting and that a later task of another owner ran.
+8. A popped task that is skipped on the "no `run`" path still releases its
+   owner: owner A's first task has no `run`, its second is live → the second
+   starts (5 s wait), and the pool's destructor returns.
+9. The same on the "not runnable" path: owner E (expired) has two tasks, then
+   owner B one. The tasks' `run` must not capture E (the existing `make_task`
+   does, which keeps the owner alive); the test asserts
+   `t.state_weak.expired()` before submitting, that B's task ran, and that the
+   pool's destructor returns. Without the release, E's second task stays queued
+   behind a pinned owner.
+   For 8 and 9 the missing-release failure keeps the pool's destructor waiting,
+   so after the failed assertion the RED run ends at ctest's per-test
+   `TIMEOUT`; accepted for these two tests, and stated in their comments.
 10. `ThreadPoolDispatcher(0)` runs a submitted task before its destructor
     returns (clamped to one worker). RED on main.
-11. Destruction still drains every queued task (existing test).
+11. `discard`: `pool(1)` held by a gate task of owner G; owners A (three
+    tasks) and B (two) queued → `discard(A)` returns 3; after the gate opens
+    only B's tasks run. A task of A that is already running when `discard(A)`
+    is called still finishes.
+12. After `discard(A)` while A has a task in flight, A's next submit does not
+    start until that task finishes (the in-flight entry survives the erased
+    queue), and then goes before an owner served more recently.
+13. Destruction still drains every queued task (existing test).
 
 ### 6.2 SearchSession (`DeferredDispatcher` / `InlineDispatcher`)
 
@@ -373,8 +419,18 @@ scanned.
    page-then-position" becomes `current()` empty, `next()` → p1, p3, p6; "cursor
    wraps at document boundaries" becomes `next()` ×3 → p1, p3, p6, then `next()`
    → p1, then `prev()` → p6.
-8. Unchanged and still passing: set_reference_page, #139 reading order, #133
-   seams, cross-tab tests.
+8. A retype discards the previous generation's queued tasks: the test file's
+   `DeferredDispatcher` gains a `discard` override over its own queue. Two
+   `set_query` calls → its queue holds only the second generation's 7 tasks;
+   after running them, the session's destructor returns (the drain count
+   reached 0, so the discarded tasks were subtracted). RED on main (14 queued).
+9. `~SearchSession` discards: `ThreadPoolDispatcher pool(1)` held by a gate
+   task of another owner; a session with 7 queued tasks is destroyed on a
+   `std::async` thread → it returns within 2 s while the gate is still held.
+   RED on main (it spins until the gate opens; the gate guard opens it on the
+   failed assertion, so RED is an assertion failure).
+10. Unchanged and still passing: set_reference_page, #139 reading order, #133
+    seams, cross-tab tests.
 
 ### 6.3 Real pool
 
@@ -412,12 +468,10 @@ Under `[Unreleased]`:
 ## 8. Accepted risks and out of scope
 
 - **Scrolling mid-scan does not re-order** the remaining pages (§5).
-- **Closing a tab while two or more other tabs are scanning** still makes
-  `~SearchSession` wait for its stale queued tasks: they drain one per turn, and
-  a turn comes round each time a live page completes, so up to roughly (queued
-  pages × a live page's time ÷ 2). The mechanism is the same on main (heap
-  order) and its size there was never measured. Follow-up: let the session
-  discard its queued tasks on destruction (new issue, filed with this PR).
+- **A tab closed while its page is mid-build** still waits for that one page:
+  `~SearchSession` discards everything queued (§3.1) but cannot cut short a
+  task already running; the cookie abort stops a PDF build at MuPDF's next
+  poll, and formats whose build ignores the cookie finish the page (as today).
 - **A cross-tab scan's tabs take turns** rather than running one tab at a time;
   the results panel fills for every tab at once.
 - **Clicking a cross-tab results row** sets the canvas hit but not the session
