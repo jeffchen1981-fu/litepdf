@@ -13,6 +13,7 @@
 #include "core/Document.hpp"
 #include "core/DocumentView.hpp"
 #include "core/SearchSession.hpp"
+#include "search_test_kit.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -21,6 +22,7 @@
 
 using namespace litepdf::app;
 using namespace litepdf::core;
+using litepdf::test_kit::DeferredDispatcher;
 
 namespace {
 
@@ -89,4 +91,27 @@ TEST_CASE("CrossTabSearch weak-ref protects against view destruction",
     // NOTE: we don't call clear() here because detach touches the
     // destroyed view. The design contract is "the caller clears before
     // closing tabs" — matching the snapshot-frozen semantics of §D9.
+}
+
+TEST_CASE("CrossTabSearch: each tab scans from its own page first",
+          "[crosstab]") {
+    DeferredDispatcher d;
+    auto v1 = std::make_unique<DocumentView>(open_search_fixture(), d);
+    auto v2 = std::make_unique<DocumentView>(open_search_fixture(), d);
+    v1->set_current_page(5);
+    v2->set_current_page(2);
+
+    CrossTabSearch xts;
+    xts.dispatch(L"Page", SearchSession::Flags{},
+                 {{v1.get(), L"a"}, {v2.get(), L"b"}});
+
+    // v1's seven tasks were queued before v2's, in submission order, so
+    // slot 0 is v1's first page and slot 7 is v2's first page.
+    d.run(0);
+    d.run(7);
+    CHECK(!v1->search().hits_for_page(5).empty());
+    CHECK(!v2->search().hits_for_page(2).empty());
+
+    // Every queued task must run before the views go out of scope.
+    d.run_all();
 }

@@ -30,6 +30,15 @@ inline int dual_page_compute_right(int left_page, int page_count) noexcept {
     return left_page + 1;
 }
 
+// The page a search scans first and Find Next / Find Previous start from:
+// the page on screen, or the left page of its spread in two-page mode so
+// the visible pages come first in the forward scan order.
+inline int search_start_page(int current_page, int page_count,
+                             bool dual_page) noexcept {
+    return dual_page ? dual_page_compute_left(current_page, page_count)
+                     : current_page;
+}
+
 // Forward / backward navigation step in spread mode. Pure logic; both
 // PdfCanvas::on_key_down (PgUp/PgDn) and any future programmatic-jump
 // caller share the same snap rule via these helpers.
