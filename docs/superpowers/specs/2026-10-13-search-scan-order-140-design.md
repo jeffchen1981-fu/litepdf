@@ -39,8 +39,8 @@ every search where the user presses Enter before the scan finishes.
 **(b) The first Find Next skips the first match.** `set_query` resets
 `cursor = 0` (`:272`), and `next()` increments before it reads
 (`:476-483`). No code in `src/` calls `set_reference_page` or `current()`
-(`rg -n "set_reference_page|\.current\(\)" src` hits only their declaration and
-definition in `SearchSession.hpp/.cpp`), so the first Enter after a search
+(`rg -n "set_reference_page|\.current\(\)" src` hits only their declaration,
+their definition and a comment in `SearchSession.hpp/.cpp`), so the first Enter after a search
 returns `hits[1]`: the second match on the lowest page found so far, not a
 match on the page on screen.
 
@@ -57,9 +57,9 @@ it, and Find Next / Find Previous start from the page on screen.
 2. Total scan time for `e` on `html5_spec.pdf`: the branch's median is at most
    5 % above main's, over 3 runs each, run alternately, with a warm file and the
    process pinned to P-cores (see §6.4).
-3. Two tabs scanning at once use both workers, and a tab with cheap pages is not
-   held back by one with expensive pages (§6.1 tests 5 and 6, timing-based unit
-   tests with wide margins).
+3. Two tabs scanning at once use both workers: while one tab's page is
+   running, the other worker takes the other tab's page instead of waiting on
+   the first tab (§6.1 tests 4-7, gate-based, no wall-clock thresholds).
 4. After a new search, the first Enter goes to the first match on or after the
    page on screen at the moment of the Enter, and the first Shift+Enter to the
    last match before it; both wrap. While the scan is still running, pages
@@ -79,13 +79,18 @@ structure; `ISearchDispatcher::Task` and `submit` keep their signatures.
 ```cpp
 // private to ThreadPoolDispatcher
 struct OwnerQueue {
-    std::weak_ptr<void> owner;   // Task::state_weak of its tasks
-    std::deque<Task>    tasks;   // submission order
+    std::weak_ptr<void> owner;            // Task::state_weak of its tasks
+    std::deque<Task>    tasks;            // submission order
+    std::uint64_t       last_served = 0;  // 0 = never served
 };
 std::map<std::uint8_t, std::list<OwnerQueue>> lanes_;  // key: priority
 std::vector<std::weak_ptr<void>>              in_flight_;  // reserved to num_workers
 std::size_t                                   queued_ = 0;
+std::uint64_t                                 serve_seq_ = 0;
 ```
+
+The constructor clamps `num_workers` to at least 1 (today `0` is accepted and
+creates no worker, so nothing would ever drain).
 
 Owner identity is `same_owner(a, b) = !a.owner_before(b) && !b.owner_before(a)`:
 it compares control blocks, so it stays correct after the owner expires, and
@@ -94,33 +99,50 @@ any of its tasks is queued or running. Tasks with an empty `state_weak` share
 one owner; the runnability check drops them at pop, as today.
 
 - **submit:** in the lane for `t.priority`, append to the `OwnerQueue` of the
-  same owner, or add a new `OwnerQueue` at the back of the lane. `++queued_`,
+  same owner, or add a new `OwnerQueue` (never served) to the lane. `++queued_`,
   `notify_one`.
-- **pop (under `m_`):** walk the lanes from the smallest key. In each lane walk
-  the `OwnerQueue`s from the front and take the first one whose owner is not in
-  `in_flight_`. Pop its front task, add its owner to `in_flight_`, `--queued_`.
-  If its queue is now empty, erase it; otherwise move it to the back of the lane.
-  Erase an empty lane.
-- **after `run` returns (or throws):** under `m_`, remove the owner from
-  `in_flight_`, then `notify_all` (a waiting worker may now be able to pop that
-  owner's next task).
+- **pop (under `m_`):** take the lane with the smallest key that has a
+  *ready* owner (one not in `in_flight_`). Within it, take the ready owner
+  served least recently (smallest `last_served`; never-served owners first;
+  ties by list order). Pop its front task, set `last_served = ++serve_seq_`,
+  add the owner to `in_flight_`, `--queued_`. Erase the `OwnerQueue` if it is
+  now empty, and the lane if that is now empty. A new search's owner has never
+  been served, so it takes the next free worker.
+- **release:** an RAII guard created right after the pop removes the owner from
+  `in_flight_` (under `m_`) and `notify_all`s on every exit from the worker's
+  iteration: the existing "not runnable" and "no `run`" `continue`s
+  (`SearchDispatcher.cpp:103-105`), a normal return, and a throw. A popped task
+  that is skipped must still release its owner, or that owner is pinned forever.
 - **wait predicate:** a worker waits until `stop_ && queued_ == 0` (then it
-  exits) or some queued task's owner is not in flight. Drain-before-exit keeps
-  its meaning: every queued task still runs before the pool's workers return.
-- **Ordering contract** (stated on `ISearchDispatcher`): a lower priority number
-  runs first; within a priority, one owner's tasks run one at a time in
-  submission order, and owners take turns.
+  exits) or some queued task's owner is ready. Drain-before-exit keeps its
+  meaning: every queued task still runs before the pool's workers return.
+- **Ordering contract** (stated on `ThreadPoolDispatcher`; `InlineDispatcher`
+  runs on submit and keeps its own "submission order, no reordering" note):
+  among queued tasks whose owner is ready, the lowest priority number runs
+  first; within a priority, one owner's tasks run one at a time in submission
+  order, and the least recently served ready owner goes next. A lower lane can
+  therefore starve a higher one while it has ready work; today every
+  production submission is P2 (`SearchSession.cpp:333`), and this design keeps
+  it that way (§3.3).
 - **Exception safety.** `submit` keeps its "if it throws, `t` was neither run
   nor queued" contract (`SearchDispatcher.hpp:43-44`, which #133's rollback
   relies on): everything that allocates (a new lane via `map::emplace`, a new
   `OwnerQueue` built in a one-element temporary `std::list`, `deque::push_back`)
   either happens before anything is linked in or has the strong guarantee, and
   the temporary is linked with `splice` (no-throw). On the worker side nothing
-  may throw outside the existing try/catch: rotation is `list::splice`,
-  `in_flight_` was reserved to `num_workers` at construction so its
-  `push_back` never allocates, and removal is a swap-and-pop.
+  may throw outside the existing try/catch: popping and erasing are no-throw,
+  `in_flight_` is reserved to the (clamped) worker count before any worker
+  starts, so its `push_back` never allocates, and removal is a swap-and-pop.
 - Unchanged: the runnability check, the try/catch around `run`,
-  `InlineDispatcher` (it runs on submit and has no queue to order).
+  `InlineDispatcher`.
+
+**Retyping.** Every generation of one session shares the session's `State`
+(`SearchSession.cpp:58`, captured by every task at `:318-334`), so a retype's
+tasks queue behind the previous generation's on the same owner. Those exit at
+epoch check #1 before touching `scan_mtx`; at one task in flight per owner they
+drain one after another, a few microseconds each, so a 753-page retype pays a
+few milliseconds before its start page runs. The find bar debounces at 120 ms
+(`FindBar.cpp:58-59`), so generations do not pile up faster than they drain.
 
 **Why one task in flight per owner.** Each session's scan holds its own
 `scan_mtx` for the whole page (`SearchSession.cpp:357-371`, a blocking
@@ -149,8 +171,8 @@ void set_query(std::wstring q, Flags f, std::size_t start_page = 0);
   `start = pages ? start_page % pages : 0`. The reset block stores it as
   `origin_page` (§3.5), so the scan and the cursor use the same page.
 - The submit loop visits `i = (start + k) % pages` for `k = 0 .. pages-1`.
-  Everything else in the loop (task body, drain counter, submit-throw rollback
-  from #133) is unchanged; only the page each iteration submits changes.
+  The task body, the drain counter and the submit-throw rollback from #133 are
+  unchanged; only the page each iteration submits changes in the loop.
 - All tasks stay at priority 2.
 
 **Forward, not outward.** Enter (Find Next) is the common key and walks
@@ -161,8 +183,9 @@ Outward order would help only Shift+Enter.
 
 The first draft ran find-bar searches at P1 and cross-tab searches at P2, so a
 find-bar search would not wait behind another tab's queued pages under strict
-FIFO. With owners taking turns and one task in flight per owner (§3.1), a new
-search already gets a worker at the next pop. A P1 lane would instead starve
+FIFO. With one task in flight per owner and the least recently served ready
+owner going next (§3.1), a new search takes the next free worker. A P1 lane
+would instead starve
 every P2 owner while it has work — including a closing tab's stale tasks, which
 `~SearchSession` spins on, on the UI thread (`SearchSession.cpp:226-236`) — so
 everything stays at P2.
@@ -231,8 +254,10 @@ std::optional<Hit> prev(std::optional<std::size_t> from_page = std::nullopt);
   insert. If `anchored` and `index <= cursor`, add the number of inserted hits
   to `cursor`, so it keeps pointing at the same hit. (`anchored` implies the
   list was non-empty, and only `set_query` empties it, which also clears
-  `anchored`.) All of this is already under `st.m`, after epoch check #2, so a
-  superseded worker never reaches it.
+  `anchored`.) All of this is already under `st.m`, after epoch check #2: a
+  worker that passes check #2 inserts into the current generation's list
+  before any later `set_query` can take the lock, and one that was superseded
+  before check #2 returns without touching `hits`, `cursor` or `anchored`.
 
 Because one session's pages complete in submission order (§3.1), at any moment
 during a scan the session holds the pages `start .. k` (wrapping), so the first
@@ -274,43 +299,56 @@ Enter lands on the start page's first match once that page has completed.
 TDD: each test is written first and run RED before the code that makes it
 pass. RED means a behavioural failure, not a compile error: the plan lands the
 new signatures (start page, page hint) with today's behaviour first, then the
-tests, then the behaviour.
+tests, then the behaviour. "RED on main" is against MSVC's `std::priority_queue`,
+the project's only toolchain, whose equal-key order is deterministic for a given
+push sequence (five tasks pop 0, 2, 4, 1, 3); it is not an STL guarantee.
 
 ### 6.1 Dispatcher (`ThreadPoolDispatcher`)
 
-Order tests run `pool(1)` with a gate task (a task that blocks on a flag) so
-everything is queued before anything runs, then release it and record the run
-order.
+No wall-clock thresholds. Order tests run `pool(1)` with a gate task (one that
+blocks on a flag) so everything is queued before anything runs, then release
+it and record the run order. Concurrency tests run `pool(2)`: tasks record
+"started" / "finished" events and block on per-task gates; "has not started"
+is checked after a 50 ms grace (a wrong scheduler starts it in microseconds),
+"has started" is waited for with a 5 s timeout.
 
 1. One owner, five tasks at P2 → run in submission order. RED on main.
-2. A P1 task submitted after P2 tasks → runs first.
+2. A P1 task submitted after P2 tasks of another owner → runs first.
 3. Owners A and B, three P2 tasks each, all of A submitted first → A1 B1 A2 B2
    A3 B3. RED on main.
-4. One task in flight per owner: `pool(2)`, one owner, eight tasks that each
-   increment an atomic "running" count, record the maximum, sleep 5 ms,
-   decrement → maximum is 1. RED on main (2).
-5. Two owners use both workers: `pool(2)`, owners A and B, ten tasks each,
-   each task holds its owner's mutex (modelling `scan_mtx`) for 20 ms → the
-   whole batch finishes in under 300 ms (serial: 400 ms; ideal: 200 ms).
-6. A cheap owner is not held back: `pool(2)`, A's ten tasks take 1 ms, B's ten
-   take 50 ms, each holding its owner's mutex → A's last task completes within
-   150 ms of release (turns without the cap: ~450 ms). Expected RED on main,
-   where heap order puts some of A's tasks behind most of B's; confirmed when
-   the test is written, and if main happens to pass, the test is kept as a
-   regression guard for the cap and recorded as such.
-7. An expired owner's tasks are skipped and do not block another owner. The
-   task's `run` must not capture the owner (the existing `make_task` does, which
-   keeps the owner alive); the test asserts `t.state_weak.expired()` before
-   submitting, so it cannot pass vacuously.
-8. Destruction still drains every queued task (existing test).
+4. One task in flight per owner: `pool(2)`, A1 held on its gate, A2 queued →
+   A2 has not started while A1 is held; it starts after A1's release. RED on
+   main (A2 starts at once on the second worker).
+5. The second worker takes another owner: `pool(2)`, A1 held, then A2 and B1
+   queued in that order, A2 modelled as waiting on A's mutex (held by A1, like
+   `scan_mtx`) → B1 starts while A1 is still held. RED on main (the heap pops
+   A2 first, which blocks the second worker on A's mutex).
+6. A new owner takes the next free worker: `pool(2)`, A1 and B1 both held, A2
+   and B2 queued, then C1 submitted; release A1 → C1 starts before A2 and B2.
+   (Expected RED on main by heap order; confirmed when written, and kept as a
+   guard for "least recently served" either way.)
+7. A ready lower-priority owner runs while a higher-priority owner is in
+   flight: A1 (P1) held, A2 (P1) queued, B1 (P2) queued → B1 starts while A1 is
+   held.
+8. A popped task that is skipped still releases its owner: owner A's first task
+   has no `run` (the "no `run`" `continue`), its second is live → the second
+   runs, and the pool's destructor returns.
+9. An expired owner's tasks are skipped and do not block another owner. The
+   task's `run` must not capture the owner (the existing `make_task` does,
+   which keeps the owner alive); the test asserts `t.state_weak.expired()`
+   before submitting and that a later task of another owner ran.
+10. `ThreadPoolDispatcher(0)` runs a submitted task before its destructor
+    returns (clamped to one worker). RED on main.
+11. Destruction still drains every queued task (existing test).
 
 ### 6.2 SearchSession (`DeferredDispatcher` / `InlineDispatcher`)
 
 Exact order is asserted on the deterministic dispatchers. The fixture is
 `search.pdf` (7 pages); the query `Page` has at least one hit on every page
-(each page's first line is "Page N", `scripts/generate-search-fixture.py`), so
-after each deferred task runs, the page whose `hits_for_page` grew is the page
-that task scanned.
+(each page's first line is "Page N", `scripts/generate-search-fixture.py`;
+PyMuPDF 1.27.2 on the committed file finds 2, 2, 1, 1, 2, 1, 1), so after each
+deferred task runs, the page whose `hits_for_page` grew is the page that task
+scanned.
 
 1. `set_query(L"Page", {}, 5)` → `DeferredDispatcher` tasks scan pages 5, 6,
    0, 1, 2, 3, 4.
@@ -318,9 +356,15 @@ that task scanned.
    with `start = 9` returns the p3 hit (first on or after page 2).
 3. Insert stability (Fable): `Lorem`, start 5; run page 5, `next()` → a page-5
    hit; run page 0 (12 hits inserted ahead), `next()` → the next page-5 hit.
-4. First `next()` after a search lands on the first hit on or after the
-   origin; `next(6)` lands on the first hit on or after page 6; first `prev()`
-   on the last hit before the origin; both wrap.
+4. First-use anchoring, each case on a fresh `set_query`:
+   - `dolor` (p1, p3, p6), origin 0: first `next()` → p1.
+   - `dolor`, origin 2: first `next()` → p3; first `prev()` → p1.
+   - `dolor`, origin 0: first `prev()` → p6 (wraps backward).
+   - `dolor`, origin 0: first `next(4)` → p6 (the hint wins over the origin).
+   - `Lorem` (p0 ×12, p5 ×3), origin 6: first `next()` → the first p0 hit
+     (nothing on or after p6, wraps forward).
+   - `dolor`, origin 0: `next()` → p1, then `next(6)` → p3 (anchored: the hint
+     is ignored and the cursor steps +1).
 5. `next()` / `prev()` with no hits return nothing and leave the session
    unanchored (the first `next()` after hits arrive still anchors).
 6. `current()` is empty after `set_query` and equals the hit `next()` returned
@@ -350,7 +394,7 @@ E-cores run the same MuPDF work ~1.9x slower), 3 runs each:
   query (criterion 1);
 - total scan time for `e`, median vs main's median (criterion 2).
 
-Criterion 3 is covered by §6.1 tests 5 and 6; the kit has no cross-tab driver.
+Criterion 3 is covered by §6.1 tests 4-7; the kit has no cross-tab driver.
 
 ## 7. CHANGELOG
 
