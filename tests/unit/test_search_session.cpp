@@ -109,8 +109,10 @@ TEST_CASE("SearchSession: dolor query walks page-then-position",
     Fx f;
     f.session->set_query(L"dolor", SearchSession::Flags{});
     REQUIRE(f.session->hit_count() == 3);
+    // No match is selected after a new search (#140).
+    REQUIRE_FALSE(f.session->current().has_value());
     // dolor is on p1, p3, p6.
-    auto h0 = f.session->current();
+    auto h0 = f.session->next();
     REQUIRE(h0.has_value());
     REQUIRE(h0->page == 1);
     auto h1 = f.session->next();
@@ -173,15 +175,111 @@ TEST_CASE("SearchSession: cursor wraps at document boundaries",
           "[search][session]") {
     Fx f;
     f.session->set_query(L"dolor", SearchSession::Flags{});
-    // current=p1, next()->p3, next()->p6 (last)
-    f.session->next();
-    f.session->next();
+    // next() -> p1, p3, p6 (last)
+    REQUIRE(f.session->next()->page == 1);
+    REQUIRE(f.session->next()->page == 3);
+    REQUIRE(f.session->next()->page == 6);
     auto wrapped = f.session->next();
     REQUIRE(wrapped.has_value());
     REQUIRE(wrapped->page == 1);    // wrapped forward to first
     auto before = f.session->prev();
     REQUIRE(before.has_value());
     REQUIRE(before->page == 6);     // wrapped backward to last
+}
+
+// #140: the first next()/prev() after a query places the cursor relative to
+// the start page (or the hint) instead of stepping from hits[0].
+TEST_CASE("SearchSession: first next anchors on the start page",
+          "[search][session]") {
+    Fx f;
+    SearchSession& s = *f.session;
+    const SearchSession::Flags none{};
+
+    s.set_query(L"dolor", none, 0);
+    REQUIRE(s.next()->page == 1);
+
+    s.set_query(L"dolor", none, 2);
+    REQUIRE(s.next()->page == 3);
+
+    s.set_query(L"dolor", none, 2);
+    REQUIRE(s.prev()->page == 1);
+
+    s.set_query(L"dolor", none, 0);
+    REQUIRE(s.prev()->page == 6);       // wraps backward
+
+    s.set_query(L"dolor", none, 0);
+    REQUIRE(s.next(4)->page == 6);      // the hint wins over the origin
+
+    s.set_query(L"Lorem", none, 6);
+    REQUIRE(s.next()->page == 0);       // nothing on or after p6: wraps forward
+
+    s.set_query(L"dolor", none, 0);
+    REQUIRE(s.next()->page == 1);
+    REQUIRE(s.next(6)->page == 3);      // anchored: the hint is ignored
+}
+
+// Start 9 would reduce to 2 and expect p3, which the old hits[1] also
+// returned; 13 reduces to 6, so only the reduced origin gives p6.
+TEST_CASE("SearchSession: start page past the end anchors on the reduced page",
+          "[search][session]") {
+    Fx f;
+    f.session->set_query(L"dolor", SearchSession::Flags{}, 13);
+    REQUIRE(f.session->next()->page == 6);
+}
+
+// #140: pages before the start page arrive last. A page landing ahead of the
+// cursor must not move it onto another hit.
+TEST_CASE("SearchSession: cursor stays on its hit when an earlier page lands",
+          "[search][session]") {
+    Document doc = open_search_fixture();
+    DeferredDispatcher d;
+    SearchSession s(doc, d);
+    s.set_query(L"Lorem", SearchSession::Flags{}, 5);
+
+    d.run(0);                           // page 5
+    const auto a = s.next();
+    CHECK(a.has_value());
+    CHECK(a->page == 5);
+
+    d.run(2);                           // page 0: 12 hits land ahead
+    const auto b = s.next();
+    CHECK(b.has_value());
+    CHECK(b->page == 5);
+    const auto on5 = s.hits_for_page(5);
+    REQUIRE(on5.size() == 3);
+    CHECK(a->geom.ul_x == on5[0].geom.ul_x);
+    CHECK(b->geom.ul_x == on5[1].geom.ul_x);   // the hit after `a`
+
+    d.run_all();
+}
+
+// #140: Enter before the start page has finished does nothing and leaves the
+// session unanchored, so a later Enter still anchors on the start page.
+TEST_CASE("SearchSession: next with no hits stays unanchored",
+          "[search][session]") {
+    Document doc = open_search_fixture();
+    DeferredDispatcher d;
+    SearchSession s(doc, d);
+    s.set_query(L"dolor", SearchSession::Flags{}, 0);
+
+    CHECK_FALSE(s.next().has_value());
+    CHECK_FALSE(s.prev().has_value());
+    d.run_all();
+
+    const auto h = s.next();
+    REQUIRE(h.has_value());
+    CHECK(h->page == 1);
+}
+
+TEST_CASE("SearchSession: current follows next", "[search][session]") {
+    Fx f;
+    f.session->set_query(L"dolor", SearchSession::Flags{});
+    CHECK_FALSE(f.session->current().has_value());
+    const auto h = f.session->next();
+    REQUIRE(h.has_value());
+    const auto c = f.session->current();
+    REQUIRE(c.has_value());
+    CHECK(c->page == h->page);
 }
 
 TEST_CASE("SearchSession: set_reference_page repositions cursor",

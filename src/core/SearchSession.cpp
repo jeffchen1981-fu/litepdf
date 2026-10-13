@@ -51,6 +51,13 @@ struct SearchSession::Impl {
         std::atomic<int>         pending_tasks{0};
         std::vector<Hit>         hits;
         std::size_t              cursor = 0;
+        // This generation's (reduced) start page; the first next()/prev()
+        // places the cursor relative to it (#140).
+        std::size_t              origin_page = 0;
+        // False until the cursor is placed on a hit (by next(), prev() or
+        // set_reference_page()); while false, current() is empty and a
+        // page landing in `hits` has no cursor to keep in place.
+        bool                     anchored = false;
         std::size_t              pages_remaining = 0;
         OnUpdate                 on_update;
     };
@@ -283,6 +290,8 @@ void SearchSession::set_query(std::wstring q, Flags f, std::size_t start_page) {
         st.flags           = f;
         st.hits.clear();
         st.cursor          = 0;
+        st.origin_page     = start;
+        st.anchored        = false;
         st.pages_remaining = 0;
         ep = st.epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
     }
@@ -418,8 +427,15 @@ void SearchSession::set_query(std::wstring q, Flags f, std::size_t start_page) {
                 auto& hits = state_strong->hits;
                 const auto at = std::upper_bound(hits.begin(), hits.end(), i,
                     [](std::size_t p, const Hit& h) { return p < h.page; });
+                // Keep the cursor on the hit it points at: hits inserted
+                // at or before it push it right (#140).
+                const auto index = static_cast<std::size_t>(at - hits.begin());
+                const auto added = page_hits.size();
                 hits.insert(at, std::make_move_iterator(page_hits.begin()),
                             std::make_move_iterator(page_hits.end()));
+                if (state_strong->anchored && index <= state_strong->cursor) {
+                    state_strong->cursor += added;
+                }
                 if (state_strong->pages_remaining > 0) {
                     --state_strong->pages_remaining;
                 }
@@ -477,6 +493,19 @@ SearchSession::OnUpdate SearchSession::on_update() const {
     return impl_->state->on_update;
 }
 
+namespace {
+
+// Index of the first hit on or after `page` in `hits` (sorted by page);
+// hits.size() if there is none.
+std::size_t first_hit_at_or_after(const std::vector<SearchSession::Hit>& hits,
+                                  std::size_t page) {
+    const auto it = std::lower_bound(hits.begin(), hits.end(), page,
+        [](const SearchSession::Hit& h, std::size_t p) { return h.page < p; });
+    return static_cast<std::size_t>(it - hits.begin());
+}
+
+}  // namespace
+
 void SearchSession::set_reference_page(std::size_t page) {
     auto& st = *impl_->state;
     std::lock_guard<std::mutex> g(st.m);
@@ -484,35 +513,52 @@ void SearchSession::set_reference_page(std::size_t page) {
         st.cursor = 0;
         return;
     }
-    // Hits are sorted by (page, ul_y). First hit at-or-after `page`:
-    auto it = std::lower_bound(st.hits.begin(), st.hits.end(), page,
-        [](const Hit& h, std::size_t p) { return h.page < p; });
-    if (it == st.hits.end()) it = st.hits.begin();  // wrap
-    st.cursor = static_cast<std::size_t>(std::distance(st.hits.begin(), it));
+    // First hit at-or-after `page`, wrapping to the first hit.
+    const std::size_t i = first_hit_at_or_after(st.hits, page);
+    st.cursor = i == st.hits.size() ? 0 : i;
+    st.anchored = true;
 }
 
 std::optional<SearchSession::Hit> SearchSession::current() const {
     std::lock_guard<std::mutex> g(impl_->state->m);
-    if (impl_->state->hits.empty()) return std::nullopt;
+    if (!impl_->state->anchored) return std::nullopt;
     return impl_->state->hits[impl_->state->cursor];
 }
 
-std::optional<SearchSession::Hit> SearchSession::next() {
-    std::lock_guard<std::mutex> g(impl_->state->m);
-    if (impl_->state->hits.empty()) return std::nullopt;
-    auto& c = impl_->state->cursor;
-    const auto n = impl_->state->hits.size();
-    c = (c + 1) % n;
-    return impl_->state->hits[c];
+std::optional<SearchSession::Hit>
+SearchSession::next(std::optional<std::size_t> from_page) {
+    auto& st = *impl_->state;
+    std::lock_guard<std::mutex> g(st.m);
+    if (st.hits.empty()) return std::nullopt;
+    if (!st.anchored) {
+        // First use: the first hit on or after the page on screen.
+        const std::size_t i =
+            first_hit_at_or_after(st.hits, from_page.value_or(st.origin_page));
+        st.cursor = i == st.hits.size() ? 0 : i;
+        st.anchored = true;
+    } else {
+        st.cursor = (st.cursor + 1) % st.hits.size();
+    }
+    return st.hits[st.cursor];
 }
 
-std::optional<SearchSession::Hit> SearchSession::prev() {
-    std::lock_guard<std::mutex> g(impl_->state->m);
-    if (impl_->state->hits.empty()) return std::nullopt;
-    auto& c = impl_->state->cursor;
-    const auto n = impl_->state->hits.size();
-    c = (c + n - 1) % n;
-    return impl_->state->hits[c];
+std::optional<SearchSession::Hit>
+SearchSession::prev(std::optional<std::size_t> from_page) {
+    auto& st = *impl_->state;
+    std::lock_guard<std::mutex> g(st.m);
+    if (st.hits.empty()) return std::nullopt;
+    const auto n = st.hits.size();
+    if (!st.anchored) {
+        // First use: the hit just before the first one on or after the page
+        // on screen, wrapping to the last.
+        const std::size_t i =
+            first_hit_at_or_after(st.hits, from_page.value_or(st.origin_page));
+        st.cursor = (i + n - 1) % n;
+        st.anchored = true;
+    } else {
+        st.cursor = (st.cursor + n - 1) % n;
+    }
+    return st.hits[st.cursor];
 }
 
 std::size_t SearchSession::hit_count() const {
