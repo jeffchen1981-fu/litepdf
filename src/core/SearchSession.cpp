@@ -245,7 +245,10 @@ SearchSession::~SearchSession() {
     // only a task already popped is left, and the pool runs at most one
     // task of this session at a time: this waits for at most one, which
     // returns at its epoch check or stops at the cookie poll (or, on a
-    // format whose build ignores the cookie, finishes its page).
+    // format whose build ignores the cookie, finishes its page). A task
+    // already past epoch check #2 also calls the on_update observer before
+    // its guard decrements; every production observer posts, so the spin
+    // cannot deadlock on it.
     while (st.pending_tasks.load(std::memory_order_acquire) > 0) {
         std::this_thread::yield();
     }

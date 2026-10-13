@@ -112,6 +112,7 @@ TEST_CASE("CrossTabSearch: each tab scans from its own page first",
     CHECK(!v1->search().hits_for_page(5).empty());
     CHECK(!v2->search().hits_for_page(2).empty());
 
-    // Every queued task must run before the views go out of scope.
+    // Run the tail for completeness; the views do not require it
+    // (~SearchSession discards whatever is still queued).
     d.run_all();
 }

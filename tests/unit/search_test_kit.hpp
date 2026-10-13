@@ -101,8 +101,8 @@ private:
 
 // Queues every submitted task without running it, so a test decides when
 // (and inside which window) each one runs. run() honours the weak-state
-// gate the real dispatchers apply. Single-threaded: drive it from the test
-// thread only.
+// gate the real dispatchers apply. Not thread-safe: drive it from one thread
+// at a time.
 //
 // A slot is never removed: a task that has run, or was discarded, leaves an
 // empty Task{} behind, so run(i) indices stay those of submission order.

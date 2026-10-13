@@ -86,7 +86,7 @@ TEST_CASE("ThreadPoolDispatcher processes all tasks and joins on destruction",
         ThreadPoolDispatcher pool(2);
         for (int i = 0; i < 50; ++i) pool.submit(make_task(s, i, 0));
         // Destructor drains the queue before workers exit (see worker_loop
-        // predicate: return stop_ && q_.empty()), so all 50 tasks run.
+        // predicate: return stop_ && queued_ == 0), so all 50 tasks run.
     }
     std::lock_guard<std::mutex> g(s->m);
     REQUIRE(s->pages_processed.size() == 50);
@@ -97,7 +97,7 @@ TEST_CASE("ThreadPoolDispatcher respects task priority",
     auto s = std::make_shared<MockState>();
 
     // Gate: hold the single worker with a slow first task so subsequent
-    // submissions stack in the priority queue before any dequeue.
+    // submissions stack in the owner queues before any dequeue.
     std::mutex                 gate_m;
     std::condition_variable    gate_cv;
     bool                       gate_entered = false;
@@ -376,10 +376,10 @@ TEST_CASE("SearchDispatcher: a task with no run still releases its owner",
 
 TEST_CASE("SearchDispatcher: an expired owner's tasks release the owner",
           "[app][dispatcher][thread]") {
-    // Without the release the expired owner stays pinned in flight, its
-    // second task stays queued, and the pool's destructor waits on it
-    // forever: RED ends at ctest's 120 s TIMEOUT after the failed assertion
-    // (accepted, spec §6.1).
+    // Without the release the expired owner stays pinned in flight and its
+    // second task stays queued. No assertion fails (B0 still runs); the
+    // pool's destructor waits forever on that second task, so RED shows as
+    // ctest's 120 s TIMEOUT (accepted, spec §6.1).
     Events ev;
     Gate   gG;
     auto   g = make_owner();

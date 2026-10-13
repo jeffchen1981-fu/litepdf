@@ -650,12 +650,14 @@ TEST_CASE("SearchSession: superseded worker cannot append hits after a retype",
         d.run(0);  // Lorem page 0, landing between reset and submit
     });
     s.set_query(L"dolor", SearchSession::Flags{});
-    // CHECK, not REQUIRE: the queued tasks must still drain below, or
-    // ~SearchSession would spin on them.
+    // CHECK, not REQUIRE: a failure here still lets the test run on to its
+    // final assertions.
     CHECK(fired);
     CHECK(s.hit_count() == 0);
 
-    d.run_all();  // stale Lorem tasks drop; dolor scans all 7 pages
+    // dolor scans all 7 pages (Lorem tasks 1-6 were discarded by the retype;
+    // task 0 dropped at its epoch check inside the hook).
+    d.run_all();
     REQUIRE(s.scan_complete());
     REQUIRE(s.hit_count() == 3);  // dolor only: p1, p3, p6
 }
@@ -677,7 +679,7 @@ TEST_CASE("SearchSession: superseded worker cannot append hits after a clear",
     CHECK(fired);
     CHECK(s.hit_count() == 0);
 
-    d.run_all();  // drain the remaining stale tasks before ~SearchSession
+    d.run_all();  // nothing left: clear() discarded the queued Lorem tasks
     REQUIRE(s.hit_count() == 0);
 }
 
