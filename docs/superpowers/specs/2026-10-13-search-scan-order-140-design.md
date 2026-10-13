@@ -124,7 +124,8 @@ one owner; the runnability check drops them at pop, as today.
   The base implementation returns 0 (nothing queued: `InlineDispatcher` and the
   test doubles keep working unchanged). `ThreadPoolDispatcher` erases the
   owner's `OwnerQueue` in every lane under `m_` (no-throw: erasing destroys the
-  tasks, and `Task`'s destructor does not throw) and subtracts from `queued_`.
+  tasks, and `Task`'s destructor does not throw), erases any lane it leaves
+  empty (pop relies on "no empty lane"), and subtracts from `queued_`.
   A task already popped is not affected; it runs and decrements its own drain
   count as today.
 - **wait predicate:** a worker waits until `stop_ && queued_ == 0` (then it
@@ -162,11 +163,14 @@ tabs). The same holds for `~SearchSession`, which spins on the UI thread until
 every queued task has run (`SearchSession.cpp:226-236`). So the session
 discards instead:
 
-- `set_query`, right after the reset block (epoch bumped) and before its first
-  submit: `n = dispatcher.discard(state_weak)`, then
-  `pending_tasks.fetch_sub(n)`. The removed tasks were all of the previous
-  generations (nothing of the new one is submitted yet), and none of them ran,
-  so none decrements itself.
+- `set_query`, right after the reset block (epoch bumped, after-reset hook
+  fired) and before `begin_generation()`, so before the empty-query early
+  return (`SearchSession.cpp:295-298`) and `clear()` discards too:
+  `n = dispatcher.discard(state_weak)`, then `pending_tasks.fetch_sub(n)`. The
+  removed tasks were all of the previous generations (nothing of the new one is
+  submitted yet), and none of them ran, so none decrements itself (the drain
+  guard is a local inside `run`, `:342-347`, not a capture). Between the two
+  steps the count is briefly too high, never too low.
 - `~SearchSession`, after its epoch bump and before its spin: the same. The spin
   then waits only for tasks already popped, which is at most one (one in flight
   per owner).
@@ -380,12 +384,16 @@ destructor returns, and RED shows as an assertion failure, not as ctest's
     returns (clamped to one worker). RED on main.
 11. `discard`: `pool(1)` held by a gate task of owner G; owners A (three
     tasks) and B (two) queued → `discard(A)` returns 3; after the gate opens
-    only B's tasks run. A task of A that is already running when `discard(A)`
-    is called still finishes.
-12. After `discard(A)` while A has a task in flight, A's next submit does not
+    only B's tasks run.
+12. `discard` does not count a task already popped: `pool(2)`, A1 held on its
+    gate (running), A2 and A3 queued → `discard(A)` returns 2, and A1 finishes
+    after its gate opens. (A count one too high here would let
+    `pending_tasks` reach 0 under a running task: a use-after-free in
+    `~SearchSession`.)
+13. After `discard(A)` while A has a task in flight, A's next submit does not
     start until that task finishes (the in-flight entry survives the erased
     queue), and then goes before an owner served more recently.
-13. Destruction still drains every queued task (existing test).
+14. Destruction still drains every queued task (existing test).
 
 ### 6.2 SearchSession (`DeferredDispatcher` / `InlineDispatcher`)
 
@@ -421,14 +429,20 @@ scanned.
    → p1, then `prev()` → p6.
 8. A retype discards the previous generation's queued tasks: the test file's
    `DeferredDispatcher` gains a `discard` override over its own queue. Two
-   `set_query` calls → its queue holds only the second generation's 7 tasks;
-   after running them, the session's destructor returns (the drain count
-   reached 0, so the discarded tasks were subtracted). RED on main (14 queued).
+   `set_query` calls → `CHECK` its queue holds only the second generation's 7
+   tasks (`CHECK`, not `REQUIRE`: the queued tasks must still drain, per the
+   file's existing rule at `test_search_session.cpp:569-570`), run them all,
+   then destroy the session on a helper thread with a 5 s bounded wait,
+   detaching and leaking on timeout (the pattern at `:608-634`) → it returns,
+   so the drain count reached 0 and the discarded tasks were subtracted. A
+   missing subtraction fails the wait instead of hanging the suite. RED on main
+   (14 queued).
 9. `~SearchSession` discards: `ThreadPoolDispatcher pool(1)` held by a gate
    task of another owner; a session with 7 queued tasks is destroyed on a
-   `std::async` thread → it returns within 2 s while the gate is still held.
-   RED on main (it spins until the gate opens; the gate guard opens it on the
-   failed assertion, so RED is an assertion failure).
+   helper thread (the `:608-634` pattern, not `std::async`, whose future would
+   block in its destructor) → it returns within 2 s while the gate is still
+   held. RED on main (it spins until the gate opens); on timeout the test opens
+   the gate, joins, and fails, so RED is an assertion failure.
 10. Unchanged and still passing: set_reference_page, #139 reading order, #133
     seams, cross-tab tests.
 
