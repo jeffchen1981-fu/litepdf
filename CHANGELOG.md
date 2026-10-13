@@ -9,14 +9,16 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+## [1.5.4] — 2026-10-13 — A more responsive window during search, and a Find Next order fix
+
 ### Changed
 
 - Page turns and other keys respond faster while a search is running. The
-  page was being redrawn every time the search finished reading a page, even
-  when nothing on screen had changed, and key presses had to wait behind those
-  redraws. On a 750-page PDF a page turn during a search now usually waits
-  about as long as with no search running (#135).
-- Searching for a very common word no longer keeps the window waiting while
+  search asked for the page to be redrawn every time it finished reading a
+  page, even when nothing on screen had changed, and key presses had to wait
+  behind those redraws. On a 750-page PDF a page turn during a search now
+  usually waits about as long as with no search running (#135).
+- Searching for a very common word keeps the window waiting far less while
   the search runs, and the search finishes sooner. Each page's matches used
   to trigger a re-sort of every match found so far, and the window had to
   wait for it. Searching a 750-page PDF for "e" (about 190,000 matches) kept
@@ -26,8 +28,9 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 ### Fixed
 
 - Find Next and Find Previous could visit matches on the same line out of
-  order when a search had more than about 30 matches. They now keep the order
-  the page lists them in, normally left to right (#139).
+  order in a search with more than about 30 matches, depending on the order
+  in which the search finished reading its pages. They now keep the order the
+  page lists them in, normally left to right (#139).
 
 ## [1.5.3] — 2026-10-12 — Smoother page turns during search, and a find bar fix
 
@@ -621,7 +624,7 @@ and Phase 12 (release hardening: crash-safe session restore).
 
 [Compare initial commit…0.0.1-phase0](https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.1-phase0)
 
-[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.5.3...HEAD
+[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.5.4...HEAD
 [0.0.12-phase10]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.12-phase10
 [0.0.11-phase9]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.11-phase9
 [0.0.10-phase8.5]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.10-phase8.5
