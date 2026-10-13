@@ -105,11 +105,15 @@ one owner; the runnability check drops them at pop, as today.
   *ready* owner (one not in `in_flight_`). Within it, take the ready owner
   served least recently (smallest `last_served`; never-served owners first;
   ties by list order). Pop its front task, set `last_served = ++serve_seq_`,
-  add the owner to `in_flight_`, `--queued_`. Erase the `OwnerQueue` if it is
-  now empty, and the lane if that is now empty. A new search first discards its
-  owner's queued tasks (`discard`, below), which erases its `OwnerQueue`; the
-  queue it then submits into is new and never served, so it takes the next
-  free worker.
+  add the owner to `in_flight_`, `--queued_`. An emptied `OwnerQueue` is
+  **kept while its owner is in flight** (it carries the owner's `last_served`);
+  release erases it if it is still empty then, and erases the lane if that is
+  now empty. Otherwise an owner that submits again while its task runs would
+  get a fresh queue stamped "never served" and jump ahead of owners waiting
+  longer (it would tie with a genuinely new owner and win or lose on list
+  order). A tab whose previous scan is still running therefore keeps its place
+  in the rotation when it starts a new search; a tab with nothing running starts
+  a never-served queue and takes the next free worker.
 - **release:** an RAII guard constructed after the pop's `unique_lock` scope
   has closed (so its destructor can take `m_` itself) removes the owner from
   `in_flight_` and then `notify_all`s, on every exit from the worker's
@@ -122,10 +126,12 @@ one owner; the runnability check drops them at pop, as today.
   `virtual std::size_t discard(const std::weak_ptr<void>& owner)` removes the
   owner's queued tasks without running them and returns how many it removed.
   The base implementation returns 0 (nothing queued: `InlineDispatcher` and the
-  test doubles keep working unchanged). `ThreadPoolDispatcher` erases the
-  owner's `OwnerQueue` in every lane under `m_` (no-throw: erasing destroys the
-  tasks, and `Task`'s destructor does not throw), erases any lane it leaves
-  empty (pop relies on "no empty lane"), and subtracts from `queued_`.
+  test doubles keep working unchanged). `ThreadPoolDispatcher`, under `m_`,
+  clears the owner's `OwnerQueue` in every lane (no-throw: this destroys the
+  tasks, and `Task`'s destructor does not throw), erases each cleared queue
+  unless the owner is in flight (then release erases it, as above), erases any
+  lane left empty (pop relies on "no empty lane"), and subtracts from
+  `queued_`.
   A task already popped is not affected; it runs and decrements its own drain
   count as today.
 - **wait predicate:** a worker waits until `stop_ && queued_ == 0` (then it
@@ -217,8 +223,8 @@ Outward order would help only Shift+Enter.
 The first draft ran find-bar searches at P1 and cross-tab searches at P2, so a
 find-bar search would not wait behind another tab's queued pages under strict
 FIFO. With one task in flight per owner and the least recently served ready
-owner going next (§3.1), a new search takes the next free worker, so a P1 lane
-buys nothing. It would also cost something: while the find-bar scan has ready
+owner going next (§3.1), a new search waits at most for each other busy tab's
+current page, so a P1 lane buys little. It would also cost something: while the find-bar scan has ready
 work, every P2 owner — the other tabs of a cross-tab search — gets only the
 worker the P1 owner cannot use. Everything stays at P2.
 
@@ -391,8 +397,11 @@ destructor returns, and RED shows as an assertion failure, not as ctest's
     `pending_tasks` reach 0 under a running task: a use-after-free in
     `~SearchSession`.)
 13. After `discard(A)` while A has a task in flight, A's next submit does not
-    start until that task finishes (the in-flight entry survives the erased
-    queue), and then goes before an owner served more recently.
+    start until that task finishes, and it keeps A's place in the rotation:
+    `pool(2)`, A0 and B0 gated and started, A1 queued, `discard(A) == 1`, then
+    A2 and C0 (never served) submitted; open gA0 → C0 starts before A2. With a
+    re-created, never-served queue for A, A2 would tie with C0 and win on list
+    order.
 14. Destruction still drains every queued task (existing test).
 
 ### 6.2 SearchSession (`DeferredDispatcher` / `InlineDispatcher`)
@@ -482,6 +491,13 @@ Under `[Unreleased]`:
 ## 8. Accepted risks and out of scope
 
 - **Scrolling mid-scan does not re-order** the remaining pages (§5).
+- **Single-tab scan time (open risk, measured in §6.4).** Today the second
+  worker can do page N's post-scan work (hit sort, insert, update callback,
+  outside `scan_mtx`) while the first scans page N+1. One task in flight per
+  owner removes that overlap. If the branch's median scan time for `e` exceeds
+  main's by more than 5 % (criterion 2), the work stops there and the numbers
+  go back to the user before anything ships; the candidate remedy is letting
+  an owner have a second task in flight while no other owner is ready.
 - **A tab closed while its page is mid-build** still waits for that one page:
   `~SearchSession` discards everything queued (§3.1) but cannot cut short a
   task already running; the cookie abort stops a PDF build at MuPDF's next
