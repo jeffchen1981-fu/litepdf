@@ -1,16 +1,21 @@
 #pragma once
 
 // Shared helpers for the search dispatcher and SearchSession tests (#140).
-// Header-only; included by the test .cpp files that need it.
+// Header-only; included by the test .cpp files that need it: Gate,
+// GateGuard, Events, and the DeferredDispatcher double.
 //
 // Lifetimes: declare Gates and Events BEFORE the dispatcher (its drain at
 // scope end must not touch destroyed objects) and the GateGuard AFTER it
 // (destroyed first, so a failed REQUIRE never leaves a worker blocked on a
 // closed gate and the pool's destructor returns).
 
+#include "app/SearchDispatcher.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -92,6 +97,53 @@ private:
     mutable std::mutex       m_;
     std::condition_variable  cv_;
     std::vector<std::string> events_;
+};
+
+// Queues every submitted task without running it, so a test decides when
+// (and inside which window) each one runs. run() honours the weak-state
+// gate the real dispatchers apply. Single-threaded: drive it from the test
+// thread only.
+//
+// A slot is never removed: a task that has run, or was discarded, leaves an
+// empty Task{} behind, so run(i) indices stay those of submission order.
+class DeferredDispatcher final : public litepdf::app::ISearchDispatcher {
+public:
+    void submit(Task t) override { tasks_.push_back(std::move(t)); }
+
+    void run(std::size_t i) {
+        Task t = std::move(tasks_.at(i));
+        tasks_.at(i) = Task{};
+        if (!t.state_weak.expired() && t.run) t.run();
+    }
+
+    // Runs every task not yet run, including ones submitted meanwhile.
+    void run_all() {
+        for (std::size_t i = 0; i < tasks_.size(); ++i) run(i);
+    }
+
+    // Slots still holding a task: neither run nor discarded.
+    std::size_t queued() const {
+        return static_cast<std::size_t>(std::count_if(
+            tasks_.begin(), tasks_.end(),
+            [](const Task& t) { return static_cast<bool>(t.run); }));
+    }
+
+    // Empties the owner's queued slots (same control block, as the pool
+    // compares owners) and returns how many it emptied.
+    std::size_t discard(const std::weak_ptr<void>& owner) override {
+        std::size_t n = 0;
+        for (Task& t : tasks_) {
+            if (t.run && !t.state_weak.owner_before(owner)
+                      && !owner.owner_before(t.state_weak)) {
+                t = Task{};
+                ++n;
+            }
+        }
+        return n;
+    }
+
+private:
+    std::vector<Task> tasks_;
 };
 
 }  // namespace litepdf::test_kit

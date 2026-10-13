@@ -69,9 +69,12 @@ public:
     SearchSession& operator=(const SearchSession&) = delete;
 
     // Bumps epoch (cancels in-flight stale tasks via the run lambda's
-    // epoch check), clears hits, and submits one task per page. Empty
-    // query clears everything and marks scan_complete=true immediately.
-    void set_query(std::wstring q, Flags f);
+    // epoch check), clears hits, discards the previous generation's tasks
+    // still queued on the dispatcher, and submits one task per page: from
+    // `start_page` (taken modulo the page count, so any value is valid)
+    // forward, wrapping past the last page to page 0. Empty query clears
+    // everything and marks scan_complete=true immediately.
+    void set_query(std::wstring q, Flags f, std::size_t start_page = 0);
     void clear();
 
     // True iff `q` compiles as a search needle under `f` (delegates to

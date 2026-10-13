@@ -12,16 +12,18 @@
 //
 // Most cases use InlineDispatcher, which runs tasks synchronously on
 // submit(), so after set_query() returns every page has already been
-// scanned and scan_complete() is true. Two cases drive a real
+// scanned and scan_complete() is true. Some cases drive a real
 // ThreadPoolDispatcher (rapid retype; a scan completing while doc_mutex is
-// held); the cases at the end use dispatcher doubles
-// (DeferredDispatcher, ThrowingDispatcher) to pin down a task interleaving
-// or a submit failure deterministically.
+// held; #140's destructor discard and pool scan order); others use
+// dispatcher doubles (DeferredDispatcher from search_test_kit.hpp,
+// ThrowingDispatcher) to pin down a task interleaving, a scan order or a
+// submit failure deterministically.
 
 #include "app/SearchDispatcher.hpp"
 #include "core/Document.hpp"
 #include "core/EscrowContext.hpp"
 #include "core/SearchSession.hpp"
+#include "search_test_kit.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -29,12 +31,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <stdexcept>
 #include <string>
@@ -46,6 +50,7 @@
 
 using namespace litepdf::core;
 using namespace litepdf::app;
+using litepdf::test_kit::DeferredDispatcher;
 
 namespace litepdf::core {
 
@@ -403,27 +408,6 @@ TEST_CASE("SearchSession: destruct while holding state is safe",
 
 namespace {
 
-// Queues every submitted task without running it, so a test decides when
-// (and inside which window) each one runs. run() honours the weak-state
-// gate the real dispatchers apply.
-class DeferredDispatcher final : public ISearchDispatcher {
-public:
-    void submit(Task t) override { tasks_.push_back(std::move(t)); }
-
-    void run(std::size_t i) {
-        Task t = std::move(tasks_.at(i));
-        if (!t.state_weak.expired() && t.run) t.run();
-    }
-
-    // Runs every task not yet run, including ones submitted meanwhile.
-    void run_all() {
-        for (std::size_t i = 0; i < tasks_.size(); ++i) run(i);
-    }
-
-private:
-    std::vector<Task> tasks_;
-};
-
 // Runs tasks inline like InlineDispatcher, but submit() throws bad_alloc on
 // call number `fail_on` (1-based) -- as ThreadPoolDispatcher::submit's queue
 // push can -- without running that task.
@@ -630,5 +614,201 @@ TEST_CASE("SearchSession: destructor returns after a dispatcher submit throws",
         (void)doc.release();
         (void)d.release();
         FAIL("~SearchSession still spinning 5 s after a submit throw");
+    }
+}
+
+// --- #140: scan order and stale-task discard ---------------------------------
+//
+// "Page" has at least one hit on every search.pdf page (each page's first
+// line is "Page N"; 2, 2, 1, 1, 2, 1, 1), so after a deferred task runs, the
+// page whose hits_for_page became non-empty is the page that task scanned.
+
+namespace {
+
+// Pages with hits that are not in `seen` yet, in page order; adds them.
+std::vector<std::size_t> newly_hit_pages(const SearchSession& s, std::size_t pages,
+                                         std::vector<bool>& seen) {
+    std::vector<std::size_t> out;
+    for (std::size_t p = 0; p < pages; ++p) {
+        if (!seen[p] && !s.hits_for_page(p).empty()) {
+            seen[p] = true;
+            out.push_back(p);
+        }
+    }
+    return out;
+}
+
+// Deletes `s` on a helper thread and waits up to `timeout` for it to return
+// (the pattern of "destructor returns after a dispatcher submit throws"; not
+// std::async, whose future would block in its destructor). On timeout the
+// thread is detached and the session leaked; the caller must then keep
+// everything the spinning destructor can reach alive.
+bool destroyed_within(std::unique_ptr<SearchSession> s,
+                      std::chrono::milliseconds timeout) {
+    auto              destroyed = std::make_shared<std::promise<void>>();
+    std::future<void> done      = destroyed->get_future();
+    SearchSession*    raw       = s.release();
+    std::thread t([raw, destroyed] {
+        delete raw;
+        destroyed->set_value();
+    });
+    if (done.wait_for(timeout) == std::future_status::ready) {
+        t.join();
+        return true;
+    }
+    t.detach();
+    return false;
+}
+
+}  // namespace
+
+TEST_CASE("SearchSession: scan starts at the start page and wraps",
+          "[search][session]") {
+    Document doc = open_search_fixture();
+    DeferredDispatcher d;
+    SearchSession s(doc, d);
+
+    s.set_query(L"Page", SearchSession::Flags{}, 5);
+    const std::size_t pages = doc.page_count();
+    std::vector<bool>        seen(pages, false);
+    std::vector<std::size_t> order;
+    for (std::size_t i = 0; i < 7; ++i) {
+        d.run(i);
+        for (std::size_t p : newly_hit_pages(s, pages, seen)) order.push_back(p);
+    }
+    CHECK(order == std::vector<std::size_t>{5, 6, 0, 1, 2, 3, 4});
+    d.run_all();
+}
+
+TEST_CASE("SearchSession: start page past the end is reduced",
+          "[search][session]") {
+    Document doc = open_search_fixture();
+    DeferredDispatcher d;
+    SearchSession s(doc, d);
+
+    s.set_query(L"Page", SearchSession::Flags{}, 9);  // 9 % 7 == 2
+    d.run(0);
+    std::vector<bool> seen(doc.page_count(), false);
+    CHECK(newly_hit_pages(s, doc.page_count(), seen) == std::vector<std::size_t>{2});
+    d.run_all();
+}
+
+TEST_CASE("SearchSession: one-page document with any start page",
+          "[search][session]") {
+    Document doc;
+    REQUIRE_FALSE(doc.open(std::filesystem::path("tests/fixtures/simple.pdf")).has_value());
+    REQUIRE(doc.page_count() == 1);
+    InlineDispatcher d;
+    SearchSession s(doc, d);
+
+    s.set_query(L"a", SearchSession::Flags{}, 5);
+    REQUIRE(s.scan_complete());
+    REQUIRE(s.hit_count() > 0);
+}
+
+// Every generation shares the session's State, so a retype's tasks would
+// otherwise queue behind the previous generation's on the session's one
+// owner queue. The destructor runs on a helper thread: if the discarded
+// tasks were not subtracted from the drain count it would spin forever.
+TEST_CASE("SearchSession: a retype discards the previous generation",
+          "[search][session][threads]") {
+    auto doc = std::make_unique<Document>(open_search_fixture());
+    auto d   = std::make_unique<DeferredDispatcher>();
+    auto s   = std::make_unique<SearchSession>(*doc, *d);
+
+    s->set_query(L"Lorem", SearchSession::Flags{});
+    s->set_query(L"dolor", SearchSession::Flags{});
+    // CHECK, not REQUIRE: the queued tasks must still drain below.
+    CHECK(d->queued() == 7);
+    d->run_all();
+    CHECK(s->scan_complete());
+    CHECK(s->hit_count() == 3);
+
+    if (destroyed_within(std::move(s), std::chrono::seconds(5))) {
+        SUCCEED("~SearchSession returned");
+    } else {
+        // Keep everything the spinning destructor can reach alive forever.
+        (void)doc.release();
+        (void)d.release();
+        FAIL("~SearchSession still spinning 5 s after a retype");
+    }
+}
+
+// The pool's one worker is held by another owner's task, so none of the
+// session's 7 tasks can run: the destructor returns only if it discards them.
+TEST_CASE("SearchSession: destructor discards queued tasks",
+          "[search][session][threads]") {
+    using litepdf::test_kit::Events;
+    using litepdf::test_kit::Gate;
+    using litepdf::test_kit::GateGuard;
+
+    Gate   g;
+    Events ev;
+    Document doc = open_search_fixture();
+    ThreadPoolDispatcher pool(1);
+    GateGuard guard(g);
+
+    auto other = std::make_shared<int>(0);
+    ISearchDispatcher::Task gt{};
+    gt.state_weak = std::weak_ptr<void>(std::static_pointer_cast<void>(other));
+    gt.run = [&] {
+        ev.record("G");
+        g.wait();
+    };
+    pool.submit(std::move(gt));
+    REQUIRE(ev.wait_for("G"));
+
+    auto s = std::make_unique<SearchSession>(doc, pool);
+    s->set_query(L"Lorem", SearchSession::Flags{});  // 7 queued behind G
+
+    // Not destroyed_within: on a timeout the thread is joined here instead
+    // of leaked. Opening G lets a spinning destructor's tasks drain.
+    auto              destroyed = std::make_shared<std::promise<void>>();
+    std::future<void> done      = destroyed->get_future();
+    SearchSession*    raw       = s.release();
+    std::thread t([raw, destroyed] {
+        delete raw;
+        destroyed->set_value();
+    });
+    const bool returned =
+        done.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    if (!returned) g.open();
+    t.join();
+    if (!returned) FAIL("~SearchSession waited on queued tasks behind another owner");
+    SUCCEED("~SearchSession returned while G held the only worker");
+}
+
+// The real pool runs one task per owner at a time, in submission order, so
+// the start page completes first and the rest follow forward with wrap.
+TEST_CASE("SearchSession: the start page completes first on the pool",
+          "[search][session][threads]") {
+    Document doc = open_search_fixture();
+    const std::size_t pages = doc.page_count();
+    REQUIRE(pages == 7);
+    ThreadPoolDispatcher pool(2);
+
+    for (int round = 0; round < 20; ++round) {
+        std::mutex               m;
+        std::condition_variable  cv;
+        std::vector<bool>        seen(pages, false);
+        std::vector<std::size_t> order;
+
+        SearchSession s(doc, pool);
+        // Runs on a worker, outside the session's state mutex.
+        s.set_on_update([&] {
+            std::lock_guard<std::mutex> lk(m);
+            for (std::size_t p : newly_hit_pages(s, pages, seen)) order.push_back(p);
+            cv.notify_all();
+        });
+        s.set_query(L"Page", SearchSession::Flags{}, 5);
+
+        // Not scan_complete(): it turns true before the last callback runs.
+        std::unique_lock<std::mutex> lk(m);
+        const bool all = cv.wait_for(lk, std::chrono::seconds(5),
+                                     [&] { return order.size() == pages; });
+        INFO("round " << round);
+        CHECK(all);
+        CHECK(order == std::vector<std::size_t>{5, 6, 0, 1, 2, 3, 4});
+        if (!all || order != std::vector<std::size_t>{5, 6, 0, 1, 2, 3, 4}) break;
     }
 }
