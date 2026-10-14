@@ -83,24 +83,32 @@ TEST_CASE("RenderEngine throws when Document is not open", "[core][render][pool]
 // fails, and MuPDF's reason follows the fixed text.
 TEST_CASE("RenderEngine open failure carries MuPDF's error message",
           "[core][render][pool]") {
-    const auto path = std::filesystem::temp_directory_path() /
-                      "litepdf-137-render-open.pdf";
-    std::error_code ec;
-    std::filesystem::remove(path, ec);
-    std::filesystem::copy_file("tests/fixtures/simple.pdf", path);
-    std::string what;
-    {
-        litepdf::core::Document doc;
-        REQUIRE(!doc.open(path).has_value());
-        { std::ofstream truncate(path, std::ios::binary | std::ios::trunc); }
-        REQUIRE(std::filesystem::file_size(path) == 0);
-        try {
-            litepdf::core::RenderEngine engine(doc, 2);
-        } catch (const std::runtime_error& e) {
-            what = e.what();
+    // Removes the copy (best effort) when the scope ends, so a failed
+    // assertion does not leave it behind (as test_search_session's TempCopy).
+    struct TempCopy {
+        std::filesystem::path path = std::filesystem::temp_directory_path() /
+                                     "litepdf-137-render-open.pdf";
+        TempCopy() {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+            std::filesystem::copy_file("tests/fixtures/simple.pdf", path);
         }
+        ~TempCopy() {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+        }
+    } const copy;
+
+    std::string what;
+    litepdf::core::Document doc;
+    REQUIRE(!doc.open(copy.path).has_value());
+    { std::ofstream truncate(copy.path, std::ios::binary | std::ios::trunc); }
+    REQUIRE(std::filesystem::file_size(copy.path) == 0);
+    try {
+        litepdf::core::RenderEngine engine(doc, 2);
+    } catch (const std::runtime_error& e) {
+        what = e.what();
     }
-    std::filesystem::remove(path, ec);
 
     const std::string prefix = "RenderEngine: fz_open_document failed for worker 0: ";
     INFO("what() = " << what);
