@@ -400,14 +400,15 @@ RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache,
             fz_context* ctx = impl_->worker_ctxs[i];
             fz_document* wdoc = nullptr;
             // MuPDF's message from a failed open or authenticate (#137);
-            // fz_convert_error as in SearchSession's constructor.
-            std::string reason;
+            // fz_convert_error into a fixed buffer, as in SearchSession's
+            // constructor.
+            char reason[detail::kOpenFailureReasonSize] = "";
             fz_try(ctx) {
                 wdoc = fz_open_document(ctx, path_str.c_str());
             }
             fz_catch(ctx) {
                 // Leave wdoc null; throw std::runtime_error below.
-                reason = fz_convert_error(ctx, nullptr);
+                fz_strlcpy(reason, fz_convert_error(ctx, nullptr), sizeof reason);
             }
             if (!wdoc) {
                 throw std::runtime_error(detail::open_failure(
@@ -423,7 +424,8 @@ RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache,
                 }
                 fz_catch(ctx) {
                     ok = 0;
-                    reason = fz_convert_error(ctx, nullptr);
+                    fz_strlcpy(reason, fz_convert_error(ctx, nullptr),
+                               sizeof reason);
                 }
                 if (!ok) {
                     throw std::runtime_error(detail::open_failure(

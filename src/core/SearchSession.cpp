@@ -156,7 +156,9 @@ SearchSession::SearchSession(const Document& doc,
     // MuPDF's message from whichever step below fails (#137). Taken with
     // fz_convert_error, which also marks the error handled, so dropping the
     // context does not log it a second time as an "UNHANDLED EXCEPTION!".
-    std::string reason;
+    // Copied into a fixed buffer: an allocating copy could throw before the
+    // rollback that drops `sdoc`, leaking the document and its file handle.
+    char reason[detail::kOpenFailureReasonSize] = "";
 
     fz_document* sdoc = nullptr;
     fz_var(sdoc);
@@ -165,7 +167,7 @@ SearchSession::SearchSession(const Document& doc,
     }
     fz_catch(ctx) {
         sdoc = nullptr;
-        reason = fz_convert_error(ctx, nullptr);
+        fz_strlcpy(reason, fz_convert_error(ctx, nullptr), sizeof reason);
     }
     if (!sdoc) {
         throw std::runtime_error(detail::open_failure(
@@ -188,7 +190,7 @@ SearchSession::SearchSession(const Document& doc,
     }
     fz_catch(ctx) {
         query_failed = true;
-        reason = fz_convert_error(ctx, nullptr);
+        fz_strlcpy(reason, fz_convert_error(ctx, nullptr), sizeof reason);
     }
     if (query_failed) {
         // Rollback: drop the document on the context it was opened on,
@@ -209,7 +211,7 @@ SearchSession::SearchSession(const Document& doc,
         }
         fz_catch(ctx) {
             ok = 0;
-            reason = fz_convert_error(ctx, nullptr);
+            fz_strlcpy(reason, fz_convert_error(ctx, nullptr), sizeof reason);
         }
         if (!ok) {
             // Rollback, as above.
