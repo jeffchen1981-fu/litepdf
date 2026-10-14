@@ -1,6 +1,7 @@
 #include "core/RenderEngine.hpp"
 #include "core/Document.hpp"
 #include "core/PageCache.hpp"
+#include "core/detail/OpenFailure.hpp"
 #include "core/detail/TextPageAccess.hpp"
 
 // RenderEngine is the only TU that includes <mupdf/fitz.h> publicly; the
@@ -398,16 +399,20 @@ RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache,
         for (std::size_t i = 0; i < n; ++i) {
             fz_context* ctx = impl_->worker_ctxs[i];
             fz_document* wdoc = nullptr;
+            // MuPDF's message from a failed open or authenticate (#137);
+            // fz_convert_error as in SearchSession's constructor.
+            std::string reason;
             fz_try(ctx) {
                 wdoc = fz_open_document(ctx, path_str.c_str());
             }
             fz_catch(ctx) {
                 // Leave wdoc null; throw std::runtime_error below.
+                reason = fz_convert_error(ctx, nullptr);
             }
             if (!wdoc) {
-                throw std::runtime_error(
+                throw std::runtime_error(detail::open_failure(
                     "RenderEngine: fz_open_document failed for worker " +
-                    std::to_string(i));
+                    std::to_string(i), reason));
             }
             // Adopt before authenticating so the rollback below drops it.
             impl_->worker_docs.push_back(wdoc);
@@ -418,11 +423,12 @@ RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache,
                 }
                 fz_catch(ctx) {
                     ok = 0;
+                    reason = fz_convert_error(ctx, nullptr);
                 }
                 if (!ok) {
-                    throw std::runtime_error(
+                    throw std::runtime_error(detail::open_failure(
                         "RenderEngine: worker " + std::to_string(i) +
-                        " rejected the document's password");
+                        " rejected the document's password", reason));
                 }
             }
         }

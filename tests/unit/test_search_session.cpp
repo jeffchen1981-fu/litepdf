@@ -35,6 +35,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <future>
 #include <memory>
@@ -487,6 +488,31 @@ TEST_CASE("SearchSession: holds its own document open until destroyed",
     REQUIRE_FALSE(std::filesystem::remove(copy.path, ec));
     s.reset();
     REQUIRE(std::filesystem::remove(copy.path));
+}
+
+// #137: a session that cannot open its own document must say why. The tab
+// Document opened the file before it was emptied, so only the session's own
+// open fails, and MuPDF's reason follows the fixed text.
+TEST_CASE("SearchSession: open failure carries MuPDF's error message",
+          "[search][session]") {
+    const TempCopy copy("tests/fixtures/search.pdf",
+                        "litepdf-137-session-open.pdf");
+    Document doc;
+    REQUIRE_FALSE(doc.open(copy.path).has_value());
+    { std::ofstream truncate(copy.path, std::ios::binary | std::ios::trunc); }
+    REQUIRE(std::filesystem::file_size(copy.path) == 0);
+
+    InlineDispatcher d;
+    const std::string prefix = "SearchSession: fz_open_document failed: ";
+    std::string what;
+    try {
+        SearchSession s(doc, d);
+    } catch (const std::runtime_error& e) {
+        what = e.what();
+    }
+    INFO("what() = " << what);
+    REQUIRE(what.rfind(prefix, 0) == 0);
+    REQUIRE(what.size() > prefix.size());
 }
 
 TEST_CASE("SearchSession: destruct while holding state is safe",

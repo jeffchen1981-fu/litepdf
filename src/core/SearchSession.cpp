@@ -2,6 +2,7 @@
 
 #include "core/EscrowContext.hpp"
 #include "core/GenerationAbort.hpp"
+#include "core/detail/OpenFailure.hpp"
 #include "core/detail/PageHitsAccess.hpp"
 
 #include <mupdf/fitz.h>
@@ -152,6 +153,11 @@ SearchSession::SearchSession(const Document& doc,
     std::string pw(password.value_or(std::string_view{}));
     const WipeOnExit wipe{pw};
 
+    // MuPDF's message from whichever step below fails (#137). Taken with
+    // fz_convert_error, which also marks the error handled, so dropping the
+    // context does not log it a second time as an "UNHANDLED EXCEPTION!".
+    std::string reason;
+
     fz_document* sdoc = nullptr;
     fz_var(sdoc);
     fz_try(ctx) {
@@ -159,9 +165,11 @@ SearchSession::SearchSession(const Document& doc,
     }
     fz_catch(ctx) {
         sdoc = nullptr;
+        reason = fz_convert_error(ctx, nullptr);
     }
     if (!sdoc) {
-        throw std::runtime_error("SearchSession: fz_open_document failed");
+        throw std::runtime_error(detail::open_failure(
+            "SearchSession: fz_open_document failed", reason));
     }
 
     // Ask once, right after the open and BEFORE any authentication, and never
@@ -180,13 +188,15 @@ SearchSession::SearchSession(const Document& doc,
     }
     fz_catch(ctx) {
         query_failed = true;
+        reason = fz_convert_error(ctx, nullptr);
     }
     if (query_failed) {
         // Rollback: drop the document on the context it was opened on,
         // before that context (the local escrow) goes.
         fz_drop_document(ctx, sdoc);
-        throw std::runtime_error(
-            "SearchSession: could not tell whether the document needs a password");
+        throw std::runtime_error(detail::open_failure(
+            "SearchSession: could not tell whether the document needs a password",
+            reason));
     }
 
     if (needs) {
@@ -199,13 +209,14 @@ SearchSession::SearchSession(const Document& doc,
         }
         fz_catch(ctx) {
             ok = 0;
+            reason = fz_convert_error(ctx, nullptr);
         }
         if (!ok) {
             // Rollback, as above.
             fz_drop_document(ctx, sdoc);
-            throw std::runtime_error(pw.empty()
+            throw std::runtime_error(detail::open_failure(pw.empty()
                 ? "SearchSession: document needs a password"
-                : "SearchSession: password rejected");
+                : "SearchSession: password rejected", reason));
         }
     }
 
