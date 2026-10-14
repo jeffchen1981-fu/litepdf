@@ -95,6 +95,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_cli_args.cpp             # #100 strict CLI argument parsing
     unit/test_text_prefetch_engine.cpp # #98
     unit/test_text_prefetch_view.cpp   # #98
+    unit/test_mupdf_error_state.cpp    # #146 rule outside Document
     # The CLI helpers under test are compiled straight into the test binary
     # (they are not part of litepdf_core). All are MuPDF-header-free and
     # resolve their fz_* calls through the litepdf::mupdf dependency that

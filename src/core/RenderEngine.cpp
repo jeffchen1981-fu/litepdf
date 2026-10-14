@@ -138,7 +138,10 @@ struct RenderEngine::Impl {
     // Exception safety: fz_try/fz_catch wraps each MuPDF call individually so
     // a failure in load doesn't leak a pixmap, and a failure in rasterize
     // doesn't leak a page. On catch, pix is null-guarded and ownership is
-    // not transferred. Silent failure for Phase 2; Phase 3 will add logging.
+    // not transferred. Each catch reports the error, which also marks it
+    // handled: the worker's context lives across requests, and a code left
+    // set would be reported again as an "UNHANDLED EXCEPTION!" by its next
+    // throw or its drop (#146).
     static void worker_loop(Impl* impl, std::size_t idx) {
         fz_context* ctx = impl->worker_ctxs[idx];
         fz_document* wdoc = impl->worker_docs[idx];
@@ -211,6 +214,7 @@ struct RenderEngine::Impl {
                     dlist = fz_new_display_list_from_page(ctx, page);
                 }
                 fz_catch(ctx) {
+                    fz_report_error(ctx);   // also marks it handled (#146)
                     if (dlist) { fz_drop_display_list(ctx, dlist); dlist = nullptr; }
                 }
                 if (page) fz_drop_page(ctx, page);
@@ -271,6 +275,7 @@ struct RenderEngine::Impl {
                     if (draw_dev) fz_drop_device(ctx, draw_dev);
                 }
                 fz_catch(ctx) {
+                    fz_report_error(ctx);   // also marks it handled (#146)
                     if (pix) { fz_drop_pixmap(ctx, pix); pix = nullptr; }
                 }
                 fz_drop_display_list(ctx, dlist);
@@ -287,6 +292,7 @@ struct RenderEngine::Impl {
                     fz_invert_pixmap(ctx, pix);
                 }
                 fz_catch(ctx) {
+                    fz_report_error(ctx);   // also marks it handled (#146)
                     fz_drop_pixmap(ctx, pix);
                     pix = nullptr;
                 }
