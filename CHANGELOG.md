@@ -9,6 +9,23 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+### Changed
+
+- A search now reads the page on screen first and continues forward from it,
+  so that page's matches appear right away. Searching a 750-page PDF for "e"
+  from page 6, that page's matches used to arrive among the last pages read,
+  seconds after the query; they now arrive in about 0.03 s, and the whole
+  search takes as long as before (#140).
+
+### Fixed
+
+- The first Find Next after a new search went to the second match found so
+  far, skipping the first one and ignoring the page on screen. It now goes to
+  the first match on or after the page on screen, and Find Previous to the
+  last match before it.
+  Find Next could also jump back to an earlier page when more pages finished
+  reading while stepping through matches (#140).
+
 ## [1.5.4] — 2026-10-13 — A more responsive window during search, and a Find Next order fix
 
 ### Changed

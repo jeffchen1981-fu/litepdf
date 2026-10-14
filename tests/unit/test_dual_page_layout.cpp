@@ -8,6 +8,15 @@ using litepdf::ui::dual_page_compute_left;
 using litepdf::ui::dual_page_compute_right;
 using litepdf::ui::dual_page_step_next_left;
 using litepdf::ui::dual_page_step_prev_left;
+using litepdf::ui::search_start_page;
+
+TEST_CASE("dual_page: search start page is the spread's left page",
+          "[dual_page]") {
+    REQUIRE(search_start_page(0, 10, true) == 0);
+    REQUIRE(search_start_page(2, 10, true) == 1);
+    REQUIRE(search_start_page(9, 10, true) == 9);
+    REQUIRE(search_start_page(4, 10, false) == 4);
+}
 
 TEST_CASE("dual_page: cover page 0 is alone", "[dual_page]") {
     REQUIRE(dual_page_compute_left(0, 10) == 0);

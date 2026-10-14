@@ -2203,6 +2203,15 @@ void MainWindow::on_find_open() {
     update_find_counter();
 }
 
+namespace {
+// (#140) The page on screen, as the page a search scans first and Find
+// Next / Find Previous start from (the spread's left page in two-page mode).
+std::size_t find_start_page(const litepdf::core::DocumentView& v) {
+    return static_cast<std::size_t>(litepdf::ui::search_start_page(
+        v.current_page(), v.page_count(), v.dual_page()));
+}
+}  // namespace
+
 void MainWindow::on_find_query_changed(const std::wstring& q, bool mc,
                                        bool ww, bool rx) {
     litepdf::core::SearchSession::Flags f{mc, ww, rx};
@@ -2217,7 +2226,7 @@ void MainWindow::on_find_query_changed(const std::wstring& q, bool mc,
         return;
     }
     if (find_bar_) find_bar_->set_invalid_pattern(false);
-    v->search().set_query(q, f);
+    v->search().set_query(q, f, find_start_page(*v));
     update_find_counter();
     if (canvas_) {
         canvas_->set_current_hit(std::nullopt);
@@ -2228,7 +2237,7 @@ void MainWindow::on_find_query_changed(const std::wstring& q, bool mc,
 void MainWindow::on_find_next() {
     auto* v = active_view();
     if (!v || !canvas_) return;
-    auto h = v->search().next();
+    auto h = v->search().next(find_start_page(*v));
     if (!h) return;
     canvas_->set_current_hit(*h);
     canvas_->scroll_into_view(*h);
@@ -2241,7 +2250,7 @@ void MainWindow::on_find_next() {
 void MainWindow::on_find_prev() {
     auto* v = active_view();
     if (!v || !canvas_) return;
-    auto h = v->search().prev();
+    auto h = v->search().prev(find_start_page(*v));
     if (!h) return;
     canvas_->set_current_hit(*h);
     canvas_->scroll_into_view(*h);

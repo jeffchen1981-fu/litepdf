@@ -1,6 +1,7 @@
 #include "app/CrossTabSearch.hpp"
 
 #include "core/DocumentView.hpp"
+#include "ui/PdfCanvasLayout.hpp"
 
 #include <algorithm>
 #include <mutex>
@@ -171,7 +172,10 @@ void CrossTabSearch::dispatch(std::wstring                        query,
             if (cb) cb();
         });
 
-        sess->set_query(query, flags);
+        // (#140) Scan from the page on screen, wrapping to the front.
+        const auto start = static_cast<std::size_t>(litepdf::ui::search_start_page(
+            view->current_page(), view->page_count(), view->dual_page()));
+        sess->set_query(query, flags, start);
     }
 }
 

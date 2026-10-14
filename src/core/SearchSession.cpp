@@ -43,12 +43,21 @@ struct SearchSession::Impl {
         // set_query() and decremented by an RAII scope guard at the top
         // of each task lambda so every early-return path (stale-epoch
         // skip, MuPDF throw, normal completion) decrements exactly once.
+        // A task the dispatcher discards never runs; set_query() and
+        // ~SearchSession subtract the count discard() returns instead.
         // ~SearchSession spins on this counter so no worker is still
         // using the session's own document, context or scan mutex (all
         // in Impl) when the dtor drops them.
         std::atomic<int>         pending_tasks{0};
         std::vector<Hit>         hits;
         std::size_t              cursor = 0;
+        // This generation's (reduced) start page; the first next()/prev()
+        // places the cursor relative to it (#140).
+        std::size_t              origin_page = 0;
+        // False until the cursor is placed on a hit (by next(), prev() or
+        // set_reference_page()); while false, current() is empty and a
+        // page landing in `hits` has no cursor to keep in place.
+        bool                     anchored = false;
         std::size_t              pages_remaining = 0;
         OnUpdate                 on_update;
     };
@@ -209,11 +218,12 @@ SearchSession::~SearchSession() {
     // Drain every in-flight task before dropping the session's own document
     // and context, which those tasks use through raw pointers.
     //
-    // Step 1: bump epoch so queued-but-not-yet-running tasks observe the
-    // new generation and return without scanning -- including one already
-    // waiting on scan_mtx, which re-checks the epoch once it holds it.
-    // They still pay one scope-guard decrement each, which is what lets
-    // the drain loop below terminate.
+    // Step 1: bump epoch so a task that has not started scanning yet --
+    // one already popped, or one still queued on a dispatcher that cannot
+    // discard (Step 2) -- returns without scanning, including one already
+    // waiting on scan_mtx, which re-checks the epoch once it holds it. It
+    // still pays one scope-guard decrement, which is what lets the drain
+    // loop below terminate.
     auto& st = *impl_->state;
     st.epoch.fetch_add(1, std::memory_order_acq_rel);
     // Also abort the active generation's cookie so a task already building a
@@ -223,19 +233,27 @@ SearchSession::~SearchSession() {
     // (ePub, FB2, SVG, CBZ) still finish the one page in progress (§3.4).
     impl_->gen.abort_active();
 
-    // Step 2: spin-wait until every submitted task has executed its
-    // scope guard. Tasks that haven't run yet will be popped off the
-    // dispatcher queue and — seeing the bumped epoch — return
-    // immediately, decrementing the counter inside their guard's dtor.
-    //
-    // Worst case: all N page tasks are sequenced behind a higher-priority
-    // batch on a 2-worker pool; they still burn down in O(N / workers)
-    // epoch-checks. In practice this is microseconds.
+    // Step 2: discard this session's tasks still queued, and take their
+    // count back -- they never run, so they never decrement it. Otherwise
+    // they would have to wait for turns behind other tabs' scans before
+    // each could return at its epoch check.
+    const std::size_t discarded = impl_->dispatcher.discard(impl_->state);
+    st.pending_tasks.fetch_sub(static_cast<int>(discarded), std::memory_order_acq_rel);
+
+    // Step 3: spin-wait until every task not discarded has executed its
+    // scope guard. On ThreadPoolDispatcher queued tasks were discarded, so
+    // only a task already popped is left, and the pool runs at most one
+    // task of this session at a time: this waits for at most one, which
+    // returns at its epoch check or stops at the cookie poll (or, on a
+    // format whose build ignores the cookie, finishes its page). A task
+    // already past epoch check #2 also calls the on_update observer before
+    // its guard decrements; every production observer posts, so the spin
+    // cannot deadlock on it.
     while (st.pending_tasks.load(std::memory_order_acquire) > 0) {
         std::this_thread::yield();
     }
 
-    // Step 3: no task can still be using the pair. Drop the document on its
+    // Step 4: no task can still be using the pair. Drop the document on its
     // own context; `escrow` drops the context when Impl dies, after this.
     if (impl_->sdoc) {
         fz_drop_document(impl_->escrow.get(), impl_->sdoc);
@@ -246,8 +264,13 @@ SearchSession::~SearchSession() {
 // ---------------------------------------------------------------------------
 // set_query / clear
 // ---------------------------------------------------------------------------
-void SearchSession::set_query(std::wstring q, Flags f) {
+void SearchSession::set_query(std::wstring q, Flags f, std::size_t start_page) {
     auto& st = *impl_->state;
+
+    // page_count() takes no lock. Read once, here: the scan starts at
+    // `start` (reduced, so any start page is valid) and wraps forward.
+    const std::size_t pages = impl_->doc.page_count();
+    const std::size_t start = pages ? start_page % pages : 0;
 
     // Bump the epoch in the SAME critical section that clears the hits. A
     // superseded task re-checks the epoch under st.m before appending, so
@@ -270,9 +293,20 @@ void SearchSession::set_query(std::wstring q, Flags f) {
         st.flags           = f;
         st.hits.clear();
         st.cursor          = 0;
+        st.origin_page     = start;
+        st.anchored        = false;
         st.pages_remaining = 0;
         ep = st.epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
     }
+
+    // Discard the previous generations' tasks still queued, so this
+    // generation's tasks do not wait behind them on this session's queue
+    // (every generation shares `state`, one owner to the dispatcher). None
+    // of them ran, so none will decrement pending_tasks: take their count
+    // back here. Until then the count is briefly too high, never too low.
+    // Above the empty-query return, so clear() discards too.
+    const std::size_t discarded = impl_->dispatcher.discard(impl_->state);
+    st.pending_tasks.fetch_sub(static_cast<int>(discarded), std::memory_order_acq_rel);
 
     // Start a new abort generation: this sets the PREVIOUS generation's
     // cookie `abort`, so a worker still building a page for the old query
@@ -298,7 +332,6 @@ void SearchSession::set_query(std::wstring q, Flags f) {
         return;
     }
 
-    const std::size_t pages = impl_->doc.page_count();
     {
         std::lock_guard<std::mutex> g(st.m);
         st.pages_remaining = pages;
@@ -324,9 +357,12 @@ void SearchSession::set_query(std::wstring q, Flags f) {
     const std::string            needle_utf8  = utf16_to_utf8(state_strong->query);
     const Flags                  captured_flags = f;
 
-    // Priority: all tasks at P2 in v1. Phase 6.x optimization will use
-    // set_reference_page() to bump nearby pages to P0/P1.
-    for (std::size_t i = 0; i < pages; ++i) {
+    // All tasks at P2. The order pages complete in comes from the order they
+    // are submitted -- the start page, then forward with wrap -- and the
+    // dispatcher's per-owner FIFO, which runs one task of this session at a
+    // time (spec #140 §3.1-3.3).
+    for (std::size_t k = 0; k < pages; ++k) {
+        const std::size_t i = (start + k) % pages;
         litepdf::app::ISearchDispatcher::Task t{};
         t.state_weak = std::weak_ptr<void>(
             std::static_pointer_cast<void>(state_strong));
@@ -394,8 +430,15 @@ void SearchSession::set_query(std::wstring q, Flags f) {
                 auto& hits = state_strong->hits;
                 const auto at = std::upper_bound(hits.begin(), hits.end(), i,
                     [](std::size_t p, const Hit& h) { return p < h.page; });
+                // Keep the cursor on the hit it points at: hits inserted
+                // at or before it push it right (#140).
+                const auto index = static_cast<std::size_t>(at - hits.begin());
+                const auto added = page_hits.size();
                 hits.insert(at, std::make_move_iterator(page_hits.begin()),
                             std::make_move_iterator(page_hits.end()));
+                if (state_strong->anchored && index <= state_strong->cursor) {
+                    state_strong->cursor += added;
+                }
                 if (state_strong->pages_remaining > 0) {
                     --state_strong->pages_remaining;
                 }
@@ -453,6 +496,19 @@ SearchSession::OnUpdate SearchSession::on_update() const {
     return impl_->state->on_update;
 }
 
+namespace {
+
+// Index of the first hit on or after `page` in `hits` (sorted by page);
+// hits.size() if there is none.
+std::size_t first_hit_at_or_after(const std::vector<SearchSession::Hit>& hits,
+                                  std::size_t page) {
+    const auto it = std::lower_bound(hits.begin(), hits.end(), page,
+        [](const SearchSession::Hit& h, std::size_t p) { return h.page < p; });
+    return static_cast<std::size_t>(it - hits.begin());
+}
+
+}  // namespace
+
 void SearchSession::set_reference_page(std::size_t page) {
     auto& st = *impl_->state;
     std::lock_guard<std::mutex> g(st.m);
@@ -460,35 +516,52 @@ void SearchSession::set_reference_page(std::size_t page) {
         st.cursor = 0;
         return;
     }
-    // Hits are sorted by (page, ul_y). First hit at-or-after `page`:
-    auto it = std::lower_bound(st.hits.begin(), st.hits.end(), page,
-        [](const Hit& h, std::size_t p) { return h.page < p; });
-    if (it == st.hits.end()) it = st.hits.begin();  // wrap
-    st.cursor = static_cast<std::size_t>(std::distance(st.hits.begin(), it));
+    // First hit at-or-after `page`, wrapping to the first hit.
+    const std::size_t i = first_hit_at_or_after(st.hits, page);
+    st.cursor = i == st.hits.size() ? 0 : i;
+    st.anchored = true;
 }
 
 std::optional<SearchSession::Hit> SearchSession::current() const {
     std::lock_guard<std::mutex> g(impl_->state->m);
-    if (impl_->state->hits.empty()) return std::nullopt;
+    if (!impl_->state->anchored) return std::nullopt;
     return impl_->state->hits[impl_->state->cursor];
 }
 
-std::optional<SearchSession::Hit> SearchSession::next() {
-    std::lock_guard<std::mutex> g(impl_->state->m);
-    if (impl_->state->hits.empty()) return std::nullopt;
-    auto& c = impl_->state->cursor;
-    const auto n = impl_->state->hits.size();
-    c = (c + 1) % n;
-    return impl_->state->hits[c];
+std::optional<SearchSession::Hit>
+SearchSession::next(std::optional<std::size_t> from_page) {
+    auto& st = *impl_->state;
+    std::lock_guard<std::mutex> g(st.m);
+    if (st.hits.empty()) return std::nullopt;
+    if (!st.anchored) {
+        // First use: the first hit on or after the page on screen.
+        const std::size_t i =
+            first_hit_at_or_after(st.hits, from_page.value_or(st.origin_page));
+        st.cursor = i == st.hits.size() ? 0 : i;
+        st.anchored = true;
+    } else {
+        st.cursor = (st.cursor + 1) % st.hits.size();
+    }
+    return st.hits[st.cursor];
 }
 
-std::optional<SearchSession::Hit> SearchSession::prev() {
-    std::lock_guard<std::mutex> g(impl_->state->m);
-    if (impl_->state->hits.empty()) return std::nullopt;
-    auto& c = impl_->state->cursor;
-    const auto n = impl_->state->hits.size();
-    c = (c + n - 1) % n;
-    return impl_->state->hits[c];
+std::optional<SearchSession::Hit>
+SearchSession::prev(std::optional<std::size_t> from_page) {
+    auto& st = *impl_->state;
+    std::lock_guard<std::mutex> g(st.m);
+    if (st.hits.empty()) return std::nullopt;
+    const auto n = st.hits.size();
+    if (!st.anchored) {
+        // First use: the hit just before the first one on or after the page
+        // on screen, wrapping to the last.
+        const std::size_t i =
+            first_hit_at_or_after(st.hits, from_page.value_or(st.origin_page));
+        st.cursor = (i + n - 1) % n;
+        st.anchored = true;
+    } else {
+        st.cursor = (st.cursor + n - 1) % n;
+    }
+    return st.hits[st.cursor];
 }
 
 std::size_t SearchSession::hit_count() const {

@@ -69,9 +69,12 @@ public:
     SearchSession& operator=(const SearchSession&) = delete;
 
     // Bumps epoch (cancels in-flight stale tasks via the run lambda's
-    // epoch check), clears hits, and submits one task per page. Empty
-    // query clears everything and marks scan_complete=true immediately.
-    void set_query(std::wstring q, Flags f);
+    // epoch check), clears hits, discards the previous generation's tasks
+    // still queued on the dispatcher, and submits one task per page: from
+    // `start_page` (taken modulo the page count, so any value is valid)
+    // forward, wrapping past the last page to page 0. Empty query clears
+    // everything and marks scan_complete=true immediately.
+    void set_query(std::wstring q, Flags f, std::size_t start_page = 0);
     void clear();
 
     // True iff `q` compiles as a search needle under `f` (delegates to
@@ -91,12 +94,23 @@ public:
     OnUpdate on_update() const;
 
     // Reposition cursor to first hit at-or-after the given page; wraps
-    // to the first hit if nothing is at-or-after.
+    // to the first hit if nothing is at-or-after. Anchors the cursor when
+    // there are hits.
     void set_reference_page(std::size_t page);
 
+    // The cursor is unanchored after set_query() and stays so until the
+    // first next()/prev() that finds a hit (or set_reference_page()):
+    //   - current() is empty while unanchored (no match is selected).
+    //   - The first next() returns the first hit on or after `from_page`
+    //     (default: set_query's start page; wraps to the first hit); the
+    //     first prev() returns the hit just before it (wraps to the last).
+    //   - Once anchored, next()/prev() step one hit, wrapping, and ignore
+    //     `from_page`.
+    //   - With no hits yet both return nothing and stay unanchored.
+    // The cursor keeps pointing at the same hit while pages land.
     std::optional<Hit> current() const;
-    std::optional<Hit> next();
-    std::optional<Hit> prev();
+    std::optional<Hit> next(std::optional<std::size_t> from_page = std::nullopt);
+    std::optional<Hit> prev(std::optional<std::size_t> from_page = std::nullopt);
 
     std::size_t hit_count() const;
     bool        scan_complete() const;
