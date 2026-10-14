@@ -184,6 +184,7 @@ bool read_page_count(fz_context* ctx, fz_document* doc, std::size_t& out) {
         }
     }
     fz_catch(ctx) {
+        fz_report_error(ctx);   // also marks it handled (#146)
         return false;
     }
     if (n < 0) return false;
@@ -214,6 +215,10 @@ std::optional<Document::OpenError> Document::open(const std::filesystem::path& p
     }
     fz_catch(impl_->ctx) {
         // File was recognized as a PDF but failed to parse → treat as corrupted.
+        // Reporting also marks the error handled: with no document to drop,
+        // the context's own drop would otherwise report it again as an
+        // "UNHANDLED EXCEPTION!" (#146).
+        fz_report_error(impl_->ctx);
         return OpenError::Corrupted;
     }
 
@@ -302,6 +307,7 @@ bool Document::with_rendered_page(
     } fz_always(ctx) {
         if (dev) fz_drop_device(ctx, dev);
     } fz_catch(ctx) {
+        fz_report_error(ctx);   // also marks it handled (#146)
         if (pix)  { fz_drop_pixmap(ctx, pix);   pix  = nullptr; }
         if (page) { fz_drop_page(ctx, page);    page = nullptr; }
         return false;
@@ -317,6 +323,7 @@ bool Document::with_rendered_page(
         h       = fz_pixmap_height(ctx, pix);
         samples = fz_pixmap_samples(ctx, pix);
     } fz_catch(ctx) {
+        fz_report_error(ctx);   // also marks it handled (#146)
         fz_drop_pixmap(ctx, pix);
         return false;
     }
@@ -373,6 +380,7 @@ bool Document::authenticate(std::string_view password) {
         ok = fz_authenticate_password(impl_->ctx, impl_->doc, pw.c_str());
     }
     fz_catch(impl_->ctx) {
+        fz_report_error(impl_->ctx);   // also marks it handled (#146)
         SecureZeroMemory(pw.data(), pw.size());
         return false;
     }
@@ -413,6 +421,7 @@ PageSize Document::page_size(std::size_t index) const {
         if (page) fz_drop_page(impl_->ctx, page);
     }
     fz_catch(impl_->ctx) {
+        fz_report_error(impl_->ctx);   // also marks it handled (#146)
         throw std::runtime_error("fz_load_page / fz_bound_page failed");
     }
 
@@ -456,6 +465,7 @@ std::string Document::page_text(std::size_t index) const {
         if (page)  fz_drop_page(impl_->ctx, page);
     }
     fz_catch(impl_->ctx) {
+        fz_report_error(impl_->ctx);   // also marks it handled (#146)
         throw std::runtime_error("page_text extraction failed");
     }
 
@@ -541,8 +551,13 @@ std::vector<Document::PageHit> detail::page_hits_on(
         if (fzpage) fz_drop_page(ctx, fzpage);
     }
     fz_catch(ctx) {
+        // fz_convert_error, not fz_caught_message: it also marks the error
+        // handled, so a later throw on this context, or its drop, does not
+        // report it again as an "UNHANDLED EXCEPTION!" (#146). A cookie abort
+        // never lands here: the build stops without throwing (above) and
+        // fz_run_page_contents swallows an FZ_ERROR_ABORT itself.
         std::fprintf(stderr, "litepdf: page_hits failed on page %zu: %s\n",
-                     page, fz_caught_message(ctx));
+                     page, fz_convert_error(ctx, nullptr));
         return out;   // invalid regex / load failure → empty (UI gates via query_compiles)
     }
 
@@ -611,7 +626,12 @@ bool Document::query_compiles(std::string_view needle_utf8, SearchFlags flags) c
         fz_search_set_options(ctx, search, options, needle.c_str());  // compiles regex
     }
     fz_always(ctx) { if (search) fz_drop_search(ctx, search); }
-    fz_catch(ctx)  { ok = false; }
+    fz_catch(ctx) {
+        // A pattern that does not compile is this function's answer, not a
+        // failure: mark it handled without printing it (#146).
+        fz_convert_error(ctx, nullptr);
+        ok = false;
+    }
     return ok;
 }
 
@@ -627,8 +647,9 @@ std::vector<Document::OutlineEntry> Document::outline() const {
         root = fz_load_outline(impl_->ctx, impl_->doc);
     }
     fz_catch(impl_->ctx) {
+        // Marks the error handled, as in page_hits_on (#146).
         std::fprintf(stderr, "litepdf: fz_load_outline failed: %s\n",
-                     fz_caught_message(impl_->ctx));
+                     fz_convert_error(impl_->ctx, nullptr));
         return result;
     }
 
