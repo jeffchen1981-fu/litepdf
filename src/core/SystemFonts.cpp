@@ -171,7 +171,7 @@ fz_font* resolve_cjk_system_font(fz_context* ctx, const char* name, int ordering
             if (data) fallback = fz_new_font_from_memory(ctx, name, data, len, 0, 1);
         }
         fz_catch(ctx) {
-            // A real failure (only allocation can fail here). Reporting also
+            // A real failure (in practice only an allocation). Reporting also
             // marks it handled: MuPDF's own caller wraps this hook in a fz_try
             // that would clear it, but a direct caller's context would report
             // it again as an "UNHANDLED EXCEPTION!" (#146).

@@ -5,7 +5,7 @@
 // (error.c, fz_vthrow; context.c, fz_drop_context).
 //
 // Each case installs a warning callback on the context the failed call ran on
-// and throws on it straight after, with no MuPDF call in between.
+// and throws on it straight after, with no MuPDF try or throw in between.
 #include "core/Document.hpp"
 #include "core/RenderEngine.hpp"
 #include "core/SystemFonts.hpp"
@@ -47,18 +47,20 @@ std::string warnings_from_probe_throw(fz_context* ctx) {
 }
 
 // Submits one request with no cache, and probes the worker's context from
-// on_complete, the first code to run after the worker's catch. Returns the
+// on_complete, the first callback to run after the worker's catch. Returns the
 // probe's warnings; the request must fail (a null pixmap).
 std::string probe_after_failed_render(int page, float scale) {
-    Document doc;
-    REQUIRE_FALSE(doc.open("tests/fixtures/simple.pdf").has_value());
-    RenderEngine engine(doc, 1);
-
+    // Declared before the engine: if the wait below fails, ~RenderEngine still
+    // drains the queue and runs on_complete, which must find these alive.
     std::mutex m;
     std::condition_variable cv;
     bool done = false;
     bool got_pixmap = false;
     std::string warnings;
+
+    Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/simple.pdf").has_value());
+    RenderEngine engine(doc, 1);
 
     RenderEngine::RenderRequest req{};
     req.page_num = page;
