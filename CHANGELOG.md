@@ -9,20 +9,25 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+## [1.5.5] — 2026-10-15 — Search starts on the page on screen, and Find Next starts there too
+
 ### Changed
 
 - A search now reads the page on screen first and continues forward from it,
   so that page's matches appear right away. Searching a 750-page PDF for "e"
   from page 6, that page's matches used to arrive among the last pages read,
   seconds after the query; they now arrive in about 0.03 s, and the whole
-  search takes as long as before (#140).
+  search takes about as long as before (#140).
 
 ### Fixed
 
 - The first Find Next after a new search went to the second match found so
   far, skipping the first one and ignoring the page on screen. It now goes to
   the first match on or after the page on screen, and Find Previous to the
-  last match before it.
+  last match before it. The search reads the pages before the one it started
+  on last, so until it reaches them both only see the matches found so far:
+  Find Previous then goes to the last match found so far, which can be on a
+  later page.
   Find Next could also jump back to an earlier page when more pages finished
   reading while stepping through matches (#140).
 
@@ -641,7 +646,7 @@ and Phase 12 (release hardening: crash-safe session restore).
 
 [Compare initial commit…0.0.1-phase0](https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.1-phase0)
 
-[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.5.4...HEAD
+[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.5.5...HEAD
 [0.0.12-phase10]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.12-phase10
 [0.0.11-phase9]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.11-phase9
 [0.0.10-phase8.5]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.10-phase8.5
