@@ -24,7 +24,10 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 - The first Find Next after a new search went to the second match found so
   far, skipping the first one and ignoring the page on screen. It now goes to
   the first match on or after the page on screen, and Find Previous to the
-  last match before it.
+  last match before it. The search reads the pages before the one it started
+  on last, so until it reaches them both only see the matches found so far:
+  Find Previous then goes to the last match found so far, which can be on a
+  later page.
   Find Next could also jump back to an earlier page when more pages finished
   reading while stepping through matches (#140).
 
