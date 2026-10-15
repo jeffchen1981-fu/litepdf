@@ -17,7 +17,7 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   so that page's matches appear right away. Searching a 750-page PDF for "e"
   from page 6, that page's matches used to arrive among the last pages read,
   seconds after the query; they now arrive in about 0.03 s, and the whole
-  search takes as long as before (#140).
+  search takes about as long as before (#140).
 
 ### Fixed
 
