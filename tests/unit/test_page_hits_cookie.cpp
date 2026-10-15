@@ -14,6 +14,7 @@
 #include <mupdf/fitz.h>
 
 #include <filesystem>
+#include <string>
 
 using namespace litepdf::core;
 
@@ -74,6 +75,48 @@ TEST_CASE("Document: page_hits_on stops before the build when the cookie is abor
     REQUIRE(detail::page_hits_on(esc.get(), d.doc, 0, "Lorem", {}, &c).empty());
     // MuPDF checks abort before it counts a token (pdf-interpret.c:1558-1561).
     REQUIRE(c.progress == 0);
+}
+
+// #146: a failure page_hits_on catches and logs must also be marked handled.
+// MuPDF keeps a caught error's code on the context until a later catch
+// overwrites it, and a throw that comes first reports the old error again as
+// "UNHANDLED EXCEPTION!" (error.c, fz_vthrow). Here the throw comes straight
+// after the failed call, with no MuPDF call in between.
+TEST_CASE("Document: page_hits_on leaves no unhandled error on its context",
+          "[document][search]") {
+    // Declared first, so it outlives the escrow if a REQUIRE fails while the
+    // callback below still points at it.
+    std::string warnings;
+    Document tab;
+    REQUIRE_FALSE(tab.open(std::filesystem::path(kSearchFixture)).has_value());
+    auto esc = tab.clone_escrow_context();
+    REQUIRE(esc.valid());
+    fz_context* ctx = esc.get();
+    DocOnEscrow d{esc, open_on(ctx, kSearchFixture)};
+    REQUIRE(d.doc != nullptr);
+
+    // The escrow's own copy of the callback: the tab's context is unaffected.
+    fz_set_warning_callback(ctx, [](void* user, const char* message) {
+        *static_cast<std::string*>(user) += std::string(message) + "\n";
+    }, &warnings);
+
+    Document::SearchFlags regex{};
+    regex.regex = true;
+    REQUIRE(detail::page_hits_on(ctx, d.doc, 0, "foo(", regex, nullptr).empty());
+
+    bool caught = false;
+    fz_try(ctx) {
+        fz_throw(ctx, FZ_ERROR_GENERIC, "#146 probe");
+    }
+    fz_catch(ctx) {
+        caught = true;
+        fz_convert_error(ctx, nullptr);
+    }
+    fz_set_warning_callback(ctx, nullptr, nullptr);
+
+    REQUIRE(caught);
+    INFO("warnings:\n" << warnings);
+    REQUIRE(warnings.find("UNHANDLED EXCEPTION!") == std::string::npos);
 }
 
 TEST_CASE("Document: clone_escrow_context is empty on an unopened document",

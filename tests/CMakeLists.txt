@@ -34,6 +34,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_document_unicode_path.cpp
     unit/test_document_search.cpp   # Phase 6 Task 3
     unit/test_page_hits_cookie.cpp  # #130 lock-free page_hits helper + cookie
+    unit/test_document_error_state.cpp  # #146 caught MuPDF errors marked handled
     unit/test_render_engine_lifecycle.cpp
     unit/test_render_engine_submit.cpp
     unit/test_render_engine_priority.cpp
