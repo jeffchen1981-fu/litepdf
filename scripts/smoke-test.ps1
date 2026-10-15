@@ -281,12 +281,37 @@ if ($hwnd4 -eq [IntPtr]::Zero) {
 # Let first tab finish opening before we fire Ctrl+F.
 Start-Sleep -Seconds 1
 
+# A command posted with `ux-probe send-cmd` runs when litepdf's UI thread gets
+# to it, which on a slow CI runner can be after a fixed sleep has ended (PR
+# #148 saw the results panel still visible 300 ms after F6). Re-read a probe
+# every 100 ms until $Until accepts the parsed state or $TimeoutSeconds
+# expires, and return the last raw reading for the caller to check and report.
+function Wait-UxProbeState {
+    param(
+        [string]$Probe,
+        [scriptblock]$Until,
+        [int]$TimeoutSeconds = 5
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $raw = ""
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 100
+        $raw = & $uxProbe $Probe 2>&1 | Out-String
+        try {
+            $state = $raw | ConvertFrom-Json -ErrorAction Stop
+            if (& $Until $state) { break }
+        } catch {
+            # ux-probe may emit diagnostic lines; keep polling.
+        }
+    }
+    return $raw
+}
+
 # Post IDM_FIND (40042) via ux-probe send-cmd.
 & $uxProbe send-cmd 40042 | Out-Null
-Start-Sleep -Milliseconds 300
 
 # Confirm a LitePDFFindBar child is present + visible.
-$findState = & $uxProbe find-bar-state 2>&1 | Out-String
+$findState = Wait-UxProbeState -Probe find-bar-state -Until { param($s) $s.present -and $s.visible }
 try {
     $fb = $findState | ConvertFrom-Json -ErrorAction Stop
     if (-not $fb.present) {
@@ -353,10 +378,9 @@ Start-Sleep -Seconds 1
 
 # Post IDM_CROSS_TAB_FIND (40045) via ux-probe.
 & $uxProbe send-cmd 40045 | Out-Null
-Start-Sleep -Milliseconds 400
 
 # Confirm the ResultsPanel child is present + visible.
-$rpState = & $uxProbe results-panel-state 2>&1 | Out-String
+$rpState = Wait-UxProbeState -Probe results-panel-state -Until { param($s) $s.present -and $s.visible }
 try {
     $rp = $rpState | ConvertFrom-Json -ErrorAction Stop
     if (-not $rp.present) {
@@ -375,8 +399,7 @@ try {
 
 # F6 toggles the panel off.
 & $uxProbe send-cmd 40046 | Out-Null
-Start-Sleep -Milliseconds 300
-$rpState2 = & $uxProbe results-panel-state 2>&1 | Out-String
+$rpState2 = Wait-UxProbeState -Probe results-panel-state -Until { param($s) -not $s.visible }
 try {
     $rp2 = $rpState2 | ConvertFrom-Json -ErrorAction Stop
     if ($rp2.visible) {
