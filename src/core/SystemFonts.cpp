@@ -146,7 +146,12 @@ fz_font* resolve_cjk_system_font(fz_context* ctx, const char* name, int ordering
             fz_try(ctx) {
                 font = fz_new_font_from_file(ctx, name, r.path.c_str(), r.index, 0);
             }
-            fz_catch(ctx) { font = nullptr; }  // fall through to last resort
+            fz_catch(ctx) {
+                // Expected: fall through to the last resort, silently. Converting
+                // also marks the error handled (#146).
+                fz_convert_error(ctx, nullptr);
+                font = nullptr;
+            }
             if (font) return font;
         }
         // D6 last resort: a guaranteed base14 face so the hook never returns
@@ -165,7 +170,14 @@ fz_font* resolve_cjk_system_font(fz_context* ctx, const char* name, int ordering
             // use_glyph_bbox=1 to match MuPDF's own base14 load (font.c:931).
             if (data) fallback = fz_new_font_from_memory(ctx, name, data, len, 0, 1);
         }
-        fz_catch(ctx) { fallback = nullptr; }
+        fz_catch(ctx) {
+            // A real failure (in practice only an allocation). Reporting also
+            // marks it handled: MuPDF's own caller wraps this hook in a fz_try
+            // that would clear it, but a direct caller's context would report
+            // it again as an "UNHANDLED EXCEPTION!" (#146).
+            fz_report_error(ctx);
+            fallback = nullptr;
+        }
         return fallback;
     } catch (...) {
         return nullptr;  // no C++ exception may cross into MuPDF's C frame
