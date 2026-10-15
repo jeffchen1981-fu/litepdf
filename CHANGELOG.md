@@ -9,6 +9,8 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+## [1.5.5] — 2026-10-15 — Search starts on the page on screen, and Find Next starts there too
+
 ### Changed
 
 - A search now reads the page on screen first and continues forward from it,
@@ -641,7 +643,7 @@ and Phase 12 (release hardening: crash-safe session restore).
 
 [Compare initial commit…0.0.1-phase0](https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.1-phase0)
 
-[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.5.4...HEAD
+[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.5.5...HEAD
 [0.0.12-phase10]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.12-phase10
 [0.0.11-phase9]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.11-phase9
 [0.0.10-phase8.5]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.10-phase8.5
