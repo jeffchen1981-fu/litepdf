@@ -2,8 +2,12 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <stdexcept>
+#include <string>
+#include <system_error>
 #include <thread>
 #include "core/Document.hpp"
 #include "core/PageCache.hpp"
@@ -72,6 +76,44 @@ TEST_CASE("RenderEngine with 4 workers starts and joins", "[core][render][pool]"
 TEST_CASE("RenderEngine throws when Document is not open", "[core][render][pool]") {
     litepdf::core::Document doc;  // never opened
     REQUIRE_THROWS_AS(litepdf::core::RenderEngine(doc, 2), std::runtime_error);
+}
+
+// #137: a worker that cannot open its document must say why. The Document
+// opened the file before it was emptied, so only the worker's own open
+// fails, and MuPDF's reason follows the fixed text.
+TEST_CASE("RenderEngine open failure carries MuPDF's error message",
+          "[core][render][pool]") {
+    // Removes the copy (best effort) when the scope ends, so a failed
+    // assertion does not leave it behind (as test_search_session's TempCopy).
+    struct TempCopy {
+        std::filesystem::path path = std::filesystem::temp_directory_path() /
+                                     "litepdf-137-render-open.pdf";
+        TempCopy() {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+            std::filesystem::copy_file("tests/fixtures/simple.pdf", path);
+        }
+        ~TempCopy() {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+        }
+    } const copy;
+
+    std::string what;
+    litepdf::core::Document doc;
+    REQUIRE(!doc.open(copy.path).has_value());
+    { std::ofstream truncate(copy.path, std::ios::binary | std::ios::trunc); }
+    REQUIRE(std::filesystem::file_size(copy.path) == 0);
+    try {
+        litepdf::core::RenderEngine engine(doc, 2);
+    } catch (const std::runtime_error& e) {
+        what = e.what();
+    }
+
+    const std::string prefix = "RenderEngine: fz_open_document failed for worker 0: ";
+    INFO("what() = " << what);
+    REQUIRE(what.rfind(prefix, 0) == 0);
+    REQUIRE(what.size() > prefix.size());
 }
 
 TEST_CASE("RenderEngine rejects zero workers", "[core][render][pool]") {
