@@ -157,9 +157,6 @@ Write-Host "[OK] bookmarks.pdf main window handle: $hwnd2"
 # so it takes a moment past the bare window creation for the title to update.
 # The dash is built from its code point: this file has no BOM, and Windows
 # PowerShell 5.1 on a non-UTF-8 code page would misread a literal em dash.
-Start-Sleep -Seconds 1
-$proc2.Refresh()
-$title2 = $proc2.MainWindowTitle
 $dash = [string][char]0x2014
 if ($ExpectDev) {
     $verTriple = ((Get-Content (Join-Path $repoRoot "VERSION") -Raw).Trim()) -replace '-.*$', ''
@@ -168,6 +165,20 @@ if ($ExpectDev) {
     $titlePattern = "^LitePDF " + $dash + " bookmarks"
 } else {
     $titlePattern = "bookmarks"
+}
+# The worker posts WM_USER_OPEN_OK whenever it finishes, which on a slow CI
+# runner can be after a fixed sleep has ended (#150), so poll the title until
+# it matches or 5 s pass, and report the last title read.
+$titleDeadline = (Get-Date).AddSeconds(5)
+$title2 = ""
+while ((Get-Date) -lt $titleDeadline) {
+    Start-Sleep -Milliseconds 100
+    if ($proc2.HasExited) {
+        throw "litepdf.exe exited while waiting for the bookmarks.pdf title (exit code $($proc2.ExitCode))"
+    }
+    $proc2.Refresh()
+    $title2 = $proc2.MainWindowTitle
+    if ($title2 -match $titlePattern) { break }
 }
 if ($title2 -notmatch $titlePattern) {
     Stop-Process -Id $proc2.Id -Force -ErrorAction SilentlyContinue
@@ -397,11 +408,20 @@ try {
     throw "results-panel-state probe failed: $rpState"
 }
 
-# F6 toggles the panel off.
+# F6 toggles the panel off. on_toggle_results only hides the panel, so it must
+# still be present: a gone main window also reads {"present":false,"visible":false},
+# and checking only visible would pass when litepdf has crashed (#150).
 & $uxProbe send-cmd 40046 | Out-Null
 $rpState2 = Wait-UxProbeState -Probe results-panel-state -Until { param($s) -not $s.visible }
+if ($proc5.HasExited) {
+    throw "litepdf.exe exited after F6 (exit code $($proc5.ExitCode))"
+}
 try {
     $rp2 = $rpState2 | ConvertFrom-Json -ErrorAction Stop
+    if (-not $rp2.present) {
+        Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
+        throw "results panel child window not found after F6 toggle"
+    }
     if ($rp2.visible) {
         Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
         throw "results panel still visible after F6 toggle"
