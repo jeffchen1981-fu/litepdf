@@ -56,6 +56,10 @@ $proc = Start-Process -FilePath $exe `
     -ArgumentList @($fixture, "--log-timings") `
     -RedirectStandardError $errFile `
     -PassThru -NoNewWindow
+# A -NoNewWindow process object keeps no handle unless one is read, and then
+# ExitCode reads empty once the process has exited. Read it now, here and after
+# every launch below, so a crash reports its exit code.
+$null = $proc.Handle
 
 # Poll for MainWindowHandle up to 5 s (slow HDDs / cold-cache CI).
 $deadline = (Get-Date).AddSeconds(5)
@@ -133,6 +137,7 @@ Write-Host "Launching: $exe $bookmarksFixture"
 $proc2 = Start-Process -FilePath $exe `
     -ArgumentList @($bookmarksFixture) `
     -PassThru -NoNewWindow
+$null = $proc2.Handle
 
 $deadline2 = (Get-Date).AddSeconds(5)
 $hwnd2 = [IntPtr]::Zero
@@ -157,9 +162,6 @@ Write-Host "[OK] bookmarks.pdf main window handle: $hwnd2"
 # so it takes a moment past the bare window creation for the title to update.
 # The dash is built from its code point: this file has no BOM, and Windows
 # PowerShell 5.1 on a non-UTF-8 code page would misread a literal em dash.
-Start-Sleep -Seconds 1
-$proc2.Refresh()
-$title2 = $proc2.MainWindowTitle
 $dash = [string][char]0x2014
 if ($ExpectDev) {
     $verTriple = ((Get-Content (Join-Path $repoRoot "VERSION") -Raw).Trim()) -replace '-.*$', ''
@@ -168,6 +170,20 @@ if ($ExpectDev) {
     $titlePattern = "^LitePDF " + $dash + " bookmarks"
 } else {
     $titlePattern = "bookmarks"
+}
+# The worker posts WM_USER_OPEN_OK whenever it finishes, which on a slow CI
+# runner can be after a fixed sleep has ended (#150), so poll the title until
+# it matches or 5 s pass, and report the last title read.
+$titleDeadline = (Get-Date).AddSeconds(5)
+$title2 = ""
+while ((Get-Date) -lt $titleDeadline) {
+    Start-Sleep -Milliseconds 100
+    if ($proc2.HasExited) {
+        throw "litepdf.exe exited while waiting for the bookmarks.pdf title (exit code $($proc2.ExitCode))"
+    }
+    $proc2.Refresh()
+    $title2 = $proc2.MainWindowTitle
+    if ($title2 -match $titlePattern) { break }
 }
 if ($title2 -notmatch $titlePattern) {
     Stop-Process -Id $proc2.Id -Force -ErrorAction SilentlyContinue
@@ -187,6 +203,7 @@ Write-Host "Launching first instance: $exe $fixture (simple.pdf)"
 $proc3 = Start-Process -FilePath $exe `
     -ArgumentList @($fixture) `
     -PassThru -NoNewWindow
+$null = $proc3.Handle
 $deadline3 = (Get-Date).AddSeconds(5)
 $hwnd3 = [IntPtr]::Zero
 while ((Get-Date) -lt $deadline3) {
@@ -261,6 +278,7 @@ Write-Host "Launching for find-bar smoke: $exe $searchFixture"
 $proc4 = Start-Process -FilePath $exe `
     -ArgumentList @($searchFixture) `
     -PassThru -NoNewWindow
+$null = $proc4.Handle
 $deadline4 = (Get-Date).AddSeconds(5)
 $hwnd4 = [IntPtr]::Zero
 while ((Get-Date) -lt $deadline4) {
@@ -345,6 +363,7 @@ Write-Host "Launching first instance for cross-tab find: $exe $searchFixture"
 $proc5 = Start-Process -FilePath $exe `
     -ArgumentList @($searchFixture) `
     -PassThru -NoNewWindow
+$null = $proc5.Handle
 $deadline5 = (Get-Date).AddSeconds(5)
 $hwnd5 = [IntPtr]::Zero
 while ((Get-Date) -lt $deadline5) {
@@ -397,20 +416,31 @@ try {
     throw "results-panel-state probe failed: $rpState"
 }
 
-# F6 toggles the panel off.
+# F6 toggles the panel off. on_toggle_results only hides the panel, so it must
+# still be present: a gone main window also reads {"present":false,"visible":false},
+# and checking only visible would pass when litepdf has crashed (#150).
 & $uxProbe send-cmd 40046 | Out-Null
 $rpState2 = Wait-UxProbeState -Probe results-panel-state -Until { param($s) -not $s.visible }
-try {
-    $rp2 = $rpState2 | ConvertFrom-Json -ErrorAction Stop
-    if ($rp2.visible) {
-        Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
-        throw "results panel still visible after F6 toggle"
-    }
-    Write-Host "[OK] results panel hidden after F6"
-} catch {
+if ($proc5.HasExited) {
+    throw "litepdf.exe exited after F6 (exit code $($proc5.ExitCode))"
+}
+# Parse first and check outside the try, so each check's own message is the one
+# reported instead of the catch's generic one.
+$rp2 = $null
+try { $rp2 = $rpState2 | ConvertFrom-Json -ErrorAction Stop } catch { }
+if ($null -eq $rp2) {
     Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
     throw "results-panel-state post-toggle probe failed: $rpState2"
 }
+if (-not $rp2.present) {
+    Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
+    throw "results panel child window not found after F6 toggle: $rpState2"
+}
+if ($rp2.visible) {
+    Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
+    throw "results panel still visible after F6 toggle"
+}
+Write-Host "[OK] results panel hidden after F6"
 
 Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 500
@@ -429,6 +459,7 @@ Write-Host "Launching for thumb-pane smoke: $exe $bookmarksFixture"
 $proc6 = Start-Process -FilePath $exe `
     -ArgumentList @($bookmarksFixture) `
     -PassThru -NoNewWindow
+$null = $proc6.Handle
 $deadline6 = (Get-Date).AddSeconds(5)
 $hwnd6 = [IntPtr]::Zero
 while ((Get-Date) -lt $deadline6) {
@@ -489,6 +520,7 @@ function Start-LitePDFSmokeLaunch {
     Write-Host "----"
     Write-Host "Launching: $exe $fixture"
     $proc = Start-Process -FilePath $exe -ArgumentList @($fixture) -PassThru -NoNewWindow
+    $null = $proc.Handle
     $deadline = (Get-Date).AddSeconds($timeoutSeconds)
     while ((Get-Date) -lt $deadline -and $proc.MainWindowHandle -eq [IntPtr]::Zero) {
         Start-Sleep -Milliseconds 100
@@ -528,6 +560,7 @@ if (Test-Path $encryptedFixture) {
     Write-Host "----"
     Write-Host "Launching encrypted PDF (modal expected): $exe $encryptedFixture"
     $procEnc = Start-Process -FilePath $exe -ArgumentList @($encryptedFixture) -PassThru -NoNewWindow
+    $null = $procEnc.Handle
     Start-Sleep -Seconds 1
     $procEnc.Refresh()
     if ($procEnc.HasExited) {
