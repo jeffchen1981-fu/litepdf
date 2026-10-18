@@ -330,21 +330,26 @@ function Wait-UxProbeState {
 
 # Confirm a LitePDFFindBar child is present + visible.
 $findState = Wait-UxProbeState -Probe find-bar-state -Until { param($s) $s.present -and $s.visible }
-try {
-    $fb = $findState | ConvertFrom-Json -ErrorAction Stop
-    if (-not $fb.present) {
-        Stop-Process -Id $proc4.Id -Force -ErrorAction SilentlyContinue
-        throw "find bar child window not found after Ctrl+F"
-    }
-    if (-not $fb.visible) {
-        Stop-Process -Id $proc4.Id -Force -ErrorAction SilentlyContinue
-        throw "find bar present but not visible after Ctrl+F"
-    }
-    Write-Host "[OK] find bar child visible after Ctrl+F"
-} catch {
+if ($proc4.HasExited) {
+    throw "litepdf.exe exited after Ctrl+F (exit code $($proc4.ExitCode))"
+}
+# Parse first and check outside the try, so each check's own message is the one
+# reported instead of the catch's generic one (#153).
+$fb = $null
+try { $fb = $findState | ConvertFrom-Json -ErrorAction Stop } catch { }
+if ($null -eq $fb) {
     Stop-Process -Id $proc4.Id -Force -ErrorAction SilentlyContinue
     throw "find-bar-state probe failed: $findState"
 }
+if (-not $fb.present) {
+    Stop-Process -Id $proc4.Id -Force -ErrorAction SilentlyContinue
+    throw "find bar child window not found after Ctrl+F: $findState"
+}
+if (-not $fb.visible) {
+    Stop-Process -Id $proc4.Id -Force -ErrorAction SilentlyContinue
+    throw "find bar present but not visible after Ctrl+F"
+}
+Write-Host "[OK] find bar child visible after Ctrl+F"
 
 Stop-Process -Id $proc4.Id -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 500
@@ -400,21 +405,24 @@ Start-Sleep -Seconds 1
 
 # Confirm the ResultsPanel child is present + visible.
 $rpState = Wait-UxProbeState -Probe results-panel-state -Until { param($s) $s.present -and $s.visible }
-try {
-    $rp = $rpState | ConvertFrom-Json -ErrorAction Stop
-    if (-not $rp.present) {
-        Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
-        throw "results panel child window not found after Ctrl+Shift+F"
-    }
-    if (-not $rp.visible) {
-        Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
-        throw "results panel present but not visible after Ctrl+Shift+F"
-    }
-    Write-Host "[OK] results panel visible after Ctrl+Shift+F"
-} catch {
+if ($proc5.HasExited) {
+    throw "litepdf.exe exited after Ctrl+Shift+F (exit code $($proc5.ExitCode))"
+}
+$rp = $null
+try { $rp = $rpState | ConvertFrom-Json -ErrorAction Stop } catch { }
+if ($null -eq $rp) {
     Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
     throw "results-panel-state probe failed: $rpState"
 }
+if (-not $rp.present) {
+    Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
+    throw "results panel child window not found after Ctrl+Shift+F: $rpState"
+}
+if (-not $rp.visible) {
+    Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
+    throw "results panel present but not visible after Ctrl+Shift+F"
+}
+Write-Host "[OK] results panel visible after Ctrl+Shift+F"
 
 # F6 toggles the panel off. on_toggle_results only hides the panel, so it must
 # still be present: a gone main window also reads {"present":false,"visible":false},
