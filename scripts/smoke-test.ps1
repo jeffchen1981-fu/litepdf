@@ -236,6 +236,7 @@ Write-Host "[OK] forwarder exited with code 0"
 $uxProbe = Join-Path $PSScriptRoot "ux-probe.ps1"
 $tabCount = -1
 $activeIdx = -1
+$tabLabels = @()
 $pollDeadline = (Get-Date).AddSeconds(5)
 while ((Get-Date) -lt $pollDeadline) {
     Start-Sleep -Milliseconds 200
@@ -244,10 +245,17 @@ while ((Get-Date) -lt $pollDeadline) {
         $obj = $raw | ConvertFrom-Json -ErrorAction Stop
         $tabCount = [int]$obj.count
         $activeIdx = [int]$obj.active
+        $tabLabels = @($obj.labels)
         if ($tabCount -ge 2) { break }
     } catch {
         # ux-probe may still be coming up or emit diagnostic lines; keep polling.
     }
+}
+# #155: tab-enum once crashed this instance on every run, after the count and
+# active index were already read, so check that it is still alive and that the
+# labels came back: they are the part a crashed read cannot fake.
+if ($proc3.HasExited) {
+    throw "first instance exited during tab-enum (exit code $($proc3.ExitCode))"
 }
 if ($tabCount -ne 2) {
     Stop-Process -Id $proc3.Id -Force -ErrorAction SilentlyContinue
@@ -257,7 +265,12 @@ if ($activeIdx -ne 1) {
     Stop-Process -Id $proc3.Id -Force -ErrorAction SilentlyContinue
     throw "expected active tab index 1 (most recent forward), got $activeIdx"
 }
-Write-Host "[OK] first instance has 2 tabs, active=1"
+$expectedLabels = @("simple.pdf", "bookmarks.pdf")
+if (($tabLabels -join "|") -ne ($expectedLabels -join "|")) {
+    Stop-Process -Id $proc3.Id -Force -ErrorAction SilentlyContinue
+    throw "expected tab labels [$($expectedLabels -join ', ')], got [$($tabLabels -join ', ')]"
+}
+Write-Host "[OK] first instance has 2 tabs, active=1, labels: $($tabLabels -join ', ')"
 
 Stop-Process -Id $proc3.Id -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 500

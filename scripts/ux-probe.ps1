@@ -42,6 +42,18 @@ public static extern int GetMenuString(IntPtr m, uint id, System.Text.StringBuil
 [DllImport("user32.dll")] public static extern uint GetMenuState(IntPtr m, uint id, uint flag);
 [DllImport("user32.dll", SetLastError=true)]
 public static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+[DllImport("kernel32.dll", SetLastError=true)]
+public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+[DllImport("kernel32.dll", SetLastError=true)]
+public static extern IntPtr VirtualAllocEx(IntPtr proc, IntPtr addr, IntPtr size, uint type, uint protect);
+[DllImport("kernel32.dll", SetLastError=true)]
+public static extern bool VirtualFreeEx(IntPtr proc, IntPtr addr, IntPtr size, uint type);
+[DllImport("kernel32.dll", SetLastError=true)]
+public static extern bool WriteProcessMemory(IntPtr proc, IntPtr addr, byte[] buf, IntPtr size, out IntPtr written);
+[DllImport("kernel32.dll", SetLastError=true)]
+public static extern bool ReadProcessMemory(IntPtr proc, IntPtr addr, byte[] buf, IntPtr size, out IntPtr read);
+[DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
 [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
 [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
@@ -225,42 +237,66 @@ function Tab-Enum([IntPtr]$parent) {
   $count  = [W.U32]::SendMessage($tabc, $TCM_GETITEMCOUNT, [IntPtr]::Zero, [IntPtr]::Zero).ToInt32()
   $active = [W.U32]::SendMessage($tabc, $TCM_GETCURSEL,    [IntPtr]::Zero, [IntPtr]::Zero).ToInt32()
 
-  # Allocate a text buffer in unmanaged memory. 260 wchars covers MAX_PATH
-  # which is well above any legitimate Tab::label (currently path.filename()).
-  # Under-sizing would silently truncate — TCM_GETITEMW has no error signal.
-  $bufLen  = 260
-  $bufSize = $bufLen * 2
-  $bufPtr  = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($bufSize)
+  # Windows does not marshal TCM_* messages across processes: the control
+  # reads lParam, and the pszText inside it, in litepdf's own address space.
+  # So the TCITEMW and its text buffer are allocated INSIDE litepdf and read
+  # back from there. A pointer from this process made litepdf's tab control
+  # read unmapped memory and crash on every call (#155).
+  [uint32]$tabPid = 0
+  [void][W.U32]::GetWindowThreadProcessId($tabc, [ref]$tabPid)
+  # PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE
+  $hProc = [W.U32]::OpenProcess(0x0038, $false, $tabPid)
+  if ($hProc -eq [IntPtr]::Zero) {
+    throw "tab-enum: OpenProcess($tabPid) failed (error $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+  }
 
   # TCITEMW on x64: UINT mask (4) + DWORD dwState (4) + DWORD dwStateMask (4)
   # + 4 bytes padding + LPWSTR pszText (8) + int cchTextMax (4) + int iImage (4)
   # + LPARAM lParam (8). Offsets: mask=0, pszText=16, cchTextMax=24. Use 64 bytes
-  # to be safe against any compiler padding.
+  # to be safe against any compiler padding. The text buffer follows it.
+  # 260 wchars covers MAX_PATH, which is well above any legitimate Tab::label
+  # (currently path.filename()). Under-sizing would silently truncate —
+  # TCM_GETITEMW has no error signal.
   $structSize = 64
-  $structPtr  = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($structSize)
+  $bufLen     = 260
+  $bufSize    = $bufLen * 2
+  # MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE
+  $remote = [W.U32]::VirtualAllocEx($hProc, [IntPtr]::Zero, [IntPtr]($structSize + $bufSize), 0x3000, 0x04)
+  if ($remote -eq [IntPtr]::Zero) {
+    $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    [void][W.U32]::CloseHandle($hProc)
+    throw "tab-enum: VirtualAllocEx in pid $tabPid failed (error $err)"
+  }
+  $remoteBuf = [IntPtr]($remote.ToInt64() + $structSize)
 
   $labels = @()
   try {
     for ($i = 0; $i -lt $count; $i++) {
-      # Zero the struct and the text buffer each iteration.
-      for ($z = 0; $z -lt $structSize; $z++) {
-        [System.Runtime.InteropServices.Marshal]::WriteByte($structPtr, $z, 0)
+      # A fresh, zeroed struct and text buffer each iteration.
+      $struct = New-Object byte[] $structSize
+      [BitConverter]::GetBytes([int32]$TCIF_TEXT).CopyTo($struct, 0)
+      [BitConverter]::GetBytes($remoteBuf.ToInt64()).CopyTo($struct, 16)
+      [BitConverter]::GetBytes([int32]$bufLen).CopyTo($struct, 24)
+      $text = New-Object byte[] $bufSize
+      $n = [IntPtr]::Zero
+      if (-not [W.U32]::WriteProcessMemory($hProc, $remote, $struct, [IntPtr]$structSize, [ref]$n) -or
+          -not [W.U32]::WriteProcessMemory($hProc, $remoteBuf, $text, [IntPtr]$bufSize, [ref]$n)) {
+        throw "tab-enum: WriteProcessMemory failed (error $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
       }
-      for ($z = 0; $z -lt $bufSize; $z++) {
-        [System.Runtime.InteropServices.Marshal]::WriteByte($bufPtr, $z, 0)
-      }
-      [System.Runtime.InteropServices.Marshal]::WriteInt32($structPtr, 0,  $TCIF_TEXT)
-      [System.Runtime.InteropServices.Marshal]::WriteIntPtr($structPtr, 16, $bufPtr)
-      [System.Runtime.InteropServices.Marshal]::WriteInt32($structPtr, 24, $bufLen)
 
-      [void][W.U32]::SendMessage($tabc, $TCM_GETITEMW, [IntPtr]$i, $structPtr)
-      $label = [System.Runtime.InteropServices.Marshal]::PtrToStringUni($bufPtr)
-      if ($null -eq $label) { $label = "" }
+      [void][W.U32]::SendMessage($tabc, $TCM_GETITEMW, [IntPtr]$i, $remote)
+      if (-not [W.U32]::ReadProcessMemory($hProc, $remoteBuf, $text, [IntPtr]$bufSize, [ref]$n)) {
+        throw "tab-enum: ReadProcessMemory failed (error $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+      }
+      $label = [System.Text.Encoding]::Unicode.GetString($text)
+      $nul = $label.IndexOf([char]0)
+      if ($nul -ge 0) { $label = $label.Substring(0, $nul) }
       $labels += $label
     }
   } finally {
-    [System.Runtime.InteropServices.Marshal]::FreeHGlobal($structPtr)
-    [System.Runtime.InteropServices.Marshal]::FreeHGlobal($bufPtr)
+    # MEM_RELEASE
+    [void][W.U32]::VirtualFreeEx($hProc, $remote, [IntPtr]::Zero, 0x8000)
+    [void][W.U32]::CloseHandle($hProc)
   }
 
   $obj = [ordered]@{ count = $count; active = $active; labels = $labels }
@@ -455,7 +491,10 @@ switch ($Action) {
     # never exit non-zero on "window not found" — smoke-test polls with
     # retry and treats empty JSON as "not up yet". The contract is:
     # stdout is always exactly one line of valid JSON; any missing-state
-    # reports as count=0 rather than throwing.
+    # reports as count=0 rather than throwing. The one exception: once the
+    # tab control is found, failing to read litepdf's memory (OpenProcess,
+    # VirtualAllocEx, Write/ReadProcessMemory) throws with the reason, since
+    # a process that vanished mid-read is a result, not "not up yet" (#155).
     $h = Get-LitePdfHwnd
     if ($h -eq [IntPtr]::Zero) {
       Write-Output '{"count":0,"active":-1,"labels":[]}'
