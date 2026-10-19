@@ -42,6 +42,75 @@ if ($size -gt $maxBytes) {
 }
 Write-Host "[OK] exe size: $size bytes"
 
+# #156: litepdf's crash handler writes a minidump to %LOCALAPPDATA%\LitePDF\crashes
+# for each unhandled exception. A crash that a step's checks cannot see (#155),
+# or one after they pass, would otherwise go unreported, so list the dumps before
+# the first launch and fail if a new one appears. Compare by name, not by count:
+# every launch prunes the folder to its newest 5 dumps, so older dumps, this
+# run's included, can vanish.
+$crashDir = Join-Path $env:LOCALAPPDATA "LitePDF\crashes"
+function Get-CrashDumpNames {
+    if (-not (Test-Path -LiteralPath $crashDir)) { return }
+    Get-ChildItem -LiteralPath $crashDir -File |
+        Where-Object { $_.Extension -eq ".dmp" } |
+        ForEach-Object { $_.Name }
+}
+$crashBaseline = @(Get-CrashDumpNames)
+$crashDumpsChecked = $false
+
+# Returns the names of the dumps that were not there before the first launch,
+# and copies each to build/smoke-crashes, which CI uploads when the run fails.
+function Get-NewCrashDumps {
+    $new = @(Get-CrashDumpNames | Where-Object { $crashBaseline -notcontains $_ })
+    if ($new.Count -gt 0) {
+        $keep = Join-Path $repoRoot "build/smoke-crashes"
+        New-Item -ItemType Directory -Force -Path $keep | Out-Null
+        foreach ($name in $new) {
+            # A later launch may have pruned it since the listing.
+            Copy-Item -LiteralPath (Join-Path $crashDir $name) -Destination $keep -Force -ErrorAction SilentlyContinue
+        }
+    }
+    return $new
+}
+
+function Write-NewCrashDumps {
+    param([string[]]$Names)
+    Write-Host "litepdf crashed during the smoke run; new crash dump(s) in ${crashDir}:"
+    foreach ($name in $Names) { Write-Host "  $name" }
+}
+
+# A failing step throws, which skips the check at the end of the script, so list
+# new dumps here too: a crash is often why the step failed. break rethrows the
+# step's error.
+trap {
+    if (($null -ne $crashBaseline) -and -not $crashDumpsChecked) {
+        try {
+            $newDumps = @(Get-NewCrashDumps)
+            if ($newDumps.Count -gt 0) { Write-NewCrashDumps -Names $newDumps }
+        } catch { }
+    }
+    break
+}
+
+# Ends a step by killing its litepdf instance. Stop-Process says nothing when
+# the process has already gone, so a crash after the step's checks passed went
+# unreported (#156): fail with its exit code instead. Stop-Process also returns
+# before the process is gone, and a launch that still finds the dying instance's
+# single-instance mutex tries to forward to it and exits 1, so wait for the exit.
+function Stop-LitePDF {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [string]$Step
+    )
+    if ($Process.HasExited) {
+        throw "litepdf.exe exited before the end of the $Step step (exit code $($Process.ExitCode))"
+    }
+    Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+    if (-not $Process.WaitForExit(5000)) {
+        throw "litepdf.exe did not exit within 5 s of being stopped at the end of the $Step step"
+    }
+}
+
 # Phase 3 smoke: launch with a fixture + --log-timings, confirm the window
 # opens (proxy for first-page render), and assert the cold-start timing line
 # is within budget. If the window never shows, the renderer never ran, so we
@@ -88,7 +157,7 @@ Write-Host "[OK] main window handle: $hwnd"
 # Let the first-frame render + timing log land.
 Start-Sleep -Seconds 2
 
-Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+Stop-LitePDF -Process $proc -Step "cold-start"
 Start-Sleep -Milliseconds 500  # allow stderr buffers to flush
 
 if (-not (Test-Path $errFile)) {
@@ -191,7 +260,7 @@ if ($title2 -notmatch $titlePattern) {
 }
 Write-Host "[OK] bookmarks.pdf window title: $title2"
 
-Stop-Process -Id $proc2.Id -Force -ErrorAction SilentlyContinue
+Stop-LitePDF -Process $proc2 -Step "bookmarks.pdf"
 Start-Sleep -Milliseconds 500
 
 # Phase 5 multi-tab + single-instance smoke: launch simple.pdf, then a second
@@ -285,7 +354,7 @@ if (($tabLabels -join "|") -ne ($expectedLabels -join "|")) {
 }
 Write-Host "[OK] first instance has 2 tabs, active=1, labels: $($tabLabels -join ', ')"
 
-Stop-Process -Id $proc3.Id -Force -ErrorAction SilentlyContinue
+Stop-LitePDF -Process $proc3 -Step "multi-tab"
 Start-Sleep -Milliseconds 500
 
 # Phase 6 Task 10: in-doc find bar smoke. Launch search.pdf, post WM_COMMAND
@@ -377,7 +446,7 @@ if (-not $fb.visible) {
 }
 Write-Host "[OK] find bar child visible after Ctrl+F"
 
-Stop-Process -Id $proc4.Id -Force -ErrorAction SilentlyContinue
+Stop-LitePDF -Process $proc4 -Step "find-bar"
 Start-Sleep -Milliseconds 500
 
 # Phase 6 Task 14: cross-tab find smoke. Launch with two fixtures so the
@@ -476,7 +545,7 @@ if ($rp2.visible) {
 }
 Write-Host "[OK] results panel hidden after F6"
 
-Stop-Process -Id $proc5.Id -Force -ErrorAction SilentlyContinue
+Stop-LitePDF -Process $proc5 -Step "cross-tab find"
 Start-Sleep -Milliseconds 500
 
 # Phase 7 Task 9: thumbnail pane open/close smoke. Launch with bookmarks.pdf
@@ -535,7 +604,7 @@ if ($proc6.HasExited) {
 }
 Write-Host "[OK] thumb pane hidden via F4 toggle (process alive)"
 
-Stop-Process -Id $proc6.Id -Force -ErrorAction SilentlyContinue
+Stop-LitePDF -Process $proc6 -Step "thumb-pane"
 Start-Sleep -Milliseconds 500
 
 # ---------------------------------------------------------------- Phase 8 ----
@@ -568,7 +637,7 @@ function Start-LitePDFSmokeLaunch {
         throw "$fixture never showed a window in $timeoutSeconds s"
     }
     Write-Host "[OK] $fixture window shown"
-    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    Stop-LitePDF -Process $proc -Step (Split-Path -Leaf $fixture)
     Start-Sleep -Milliseconds 300
 }
 
@@ -588,7 +657,7 @@ if (Test-Path $cbzFixture) {
 
 # Encrypted PDF: cannot drive the modal headlessly. Just verify the
 # process is alive 1 s post-launch — a crashed-on-encrypted regression
-# would exit early. The modal is dismissed by Stop-Process below.
+# would exit early. The modal is dismissed by Stop-LitePDF below.
 $encryptedFixture = Join-Path $repoRoot "tests/fixtures/encrypted.pdf"
 if (Test-Path $encryptedFixture) {
     Write-Host "----"
@@ -601,10 +670,20 @@ if (Test-Path $encryptedFixture) {
         throw "encrypted.pdf launch crashed (exit code $($procEnc.ExitCode))"
     }
     Write-Host "[OK] encrypted.pdf process alive after 1 s (modal blocking on user input)"
-    Stop-Process -Id $procEnc.Id -Force -ErrorAction SilentlyContinue
+    Stop-LitePDF -Process $procEnc -Step "encrypted.pdf"
     Start-Sleep -Milliseconds 300
 } else {
     Write-Host "[SKIP] encrypted.pdf not found at $encryptedFixture"
 }
+
+# #156: fail if any litepdf instance crashed during the run, including one that
+# crashed after its step's checks had passed.
+$crashDumpsChecked = $true
+$newDumps = @(Get-NewCrashDumps)
+if ($newDumps.Count -gt 0) {
+    Write-NewCrashDumps -Names $newDumps
+    throw "litepdf crashed during the smoke run: $($newDumps.Count) new crash dump(s), listed above"
+}
+Write-Host "[OK] no new crash dumps in $crashDir"
 
 Write-Host "[OK] smoke test passed."
