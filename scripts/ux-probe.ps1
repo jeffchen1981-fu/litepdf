@@ -247,7 +247,8 @@ function Tab-Enum([IntPtr]$parent) {
   # PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE
   $hProc = [W.U32]::OpenProcess(0x0038, $false, $tabPid)
   if ($hProc -eq [IntPtr]::Zero) {
-    throw "tab-enum: OpenProcess($tabPid) failed (error $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+    $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    throw "tab-enum: OpenProcess($tabPid) failed (error $err)"
   }
 
   # TCITEMW on x64: UINT mask (4) + DWORD dwState (4) + DWORD dwStateMask (4)
@@ -281,12 +282,14 @@ function Tab-Enum([IntPtr]$parent) {
       $n = [IntPtr]::Zero
       if (-not [W.U32]::WriteProcessMemory($hProc, $remote, $struct, [IntPtr]$structSize, [ref]$n) -or
           -not [W.U32]::WriteProcessMemory($hProc, $remoteBuf, $text, [IntPtr]$bufSize, [ref]$n)) {
-        throw "tab-enum: WriteProcessMemory failed (error $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+        $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "tab-enum: WriteProcessMemory failed (error $err)"
       }
 
       [void][W.U32]::SendMessage($tabc, $TCM_GETITEMW, [IntPtr]$i, $remote)
       if (-not [W.U32]::ReadProcessMemory($hProc, $remoteBuf, $text, [IntPtr]$bufSize, [ref]$n)) {
-        throw "tab-enum: ReadProcessMemory failed (error $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+        $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "tab-enum: ReadProcessMemory failed (error $err)"
       }
       $label = [System.Text.Encoding]::Unicode.GetString($text)
       $nul = $label.IndexOf([char]0)

@@ -237,10 +237,19 @@ $uxProbe = Join-Path $PSScriptRoot "ux-probe.ps1"
 $tabCount = -1
 $activeIdx = -1
 $tabLabels = @()
+$tabEnumError = $null
 $pollDeadline = (Get-Date).AddSeconds(5)
 while ((Get-Date) -lt $pollDeadline) {
     Start-Sleep -Milliseconds 200
-    $raw = & $uxProbe tab-enum 2>&1 | Out-String
+    try {
+        $raw = & $uxProbe tab-enum 2>&1 | Out-String
+    } catch {
+        # tab-enum throws only when it found the tab control but could not
+        # read litepdf's memory, which a retry will not fix. Stop polling and
+        # let the checks below report it.
+        $tabEnumError = $_.Exception.Message
+        break
+    }
     try {
         $obj = $raw | ConvertFrom-Json -ErrorAction Stop
         $tabCount = [int]$obj.count
@@ -256,6 +265,10 @@ while ((Get-Date) -lt $pollDeadline) {
 # labels came back: they are the part a crashed read cannot fake.
 if ($proc3.HasExited) {
     throw "first instance exited during tab-enum (exit code $($proc3.ExitCode))"
+}
+if ($null -ne $tabEnumError) {
+    Stop-Process -Id $proc3.Id -Force -ErrorAction SilentlyContinue
+    throw "tab-enum failed: $tabEnumError"
 }
 if ($tabCount -ne 2) {
     Stop-Process -Id $proc3.Id -Force -ErrorAction SilentlyContinue
