@@ -46,8 +46,8 @@ Write-Host "[OK] exe size: $size bytes"
 # for each unhandled exception. A crash that a step's checks cannot see (#155),
 # or one after they pass, would otherwise go unreported, so list the dumps before
 # the first launch and fail if a new one appears. Compare by name, not by count:
-# every launch prunes the folder to its newest 5 dumps, so older dumps, this
-# run's included, can vanish.
+# every launch that does not forward to a running instance prunes the folder to
+# its newest 5 dumps, so older dumps, this run's included, can vanish.
 $crashDir = Join-Path $env:LOCALAPPDATA "LitePDF\crashes"
 function Get-CrashDumpNames {
     if (-not (Test-Path -LiteralPath $crashDir)) { return }
@@ -58,8 +58,10 @@ function Get-CrashDumpNames {
 $crashBaseline = @(Get-CrashDumpNames)
 $crashDumpsChecked = $false
 
-# Returns the names of the dumps that were not there before the first launch,
-# and copies each to build/smoke-crashes, which CI uploads when the run fails.
+# Returns the names of the dumps that were not there before the first launch.
+# Copies each to build/smoke-crashes, which ci.yml uploads when the job fails,
+# with the exe and pdb that produced it, so the dump can be read without
+# rebuilding that commit.
 function Get-NewCrashDumps {
     $new = @(Get-CrashDumpNames | Where-Object { $crashBaseline -notcontains $_ })
     if ($new.Count -gt 0) {
@@ -68,6 +70,11 @@ function Get-NewCrashDumps {
         foreach ($name in $new) {
             # A later launch may have pruned it since the listing.
             Copy-Item -LiteralPath (Join-Path $crashDir $name) -Destination $keep -Force -ErrorAction SilentlyContinue
+        }
+        # Best effort: a failed copy must not replace the crash report.
+        $pdb = [System.IO.Path]::ChangeExtension($exe, ".pdb")
+        foreach ($file in @($exe, $pdb)) {
+            Copy-Item -LiteralPath $file -Destination $keep -Force -ErrorAction SilentlyContinue
         }
     }
     return $new
