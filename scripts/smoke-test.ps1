@@ -453,7 +453,18 @@ if (-not $fb.visible) {
 }
 Write-Host "[OK] find bar child visible after Ctrl+F"
 
-Stop-LitePDF -Process $proc4 -Step "find-bar"
+# MUTANT (#156 CI proof, reverted by the next commit): crash litepdf after this
+# step's checks passed by starting a thread at 0x10 in it, then end the step
+# with a plain Stop-Process, so only the end-of-run dump check can catch it.
+Add-Type -Namespace M156 -Name K -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr OpenProcess(uint a, bool i, int pid);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr CreateRemoteThread(IntPtr h, IntPtr sa, UIntPtr ss, IntPtr start, IntPtr p, uint f, IntPtr id);
+'@
+$mh = [M156.K]::OpenProcess(0x1F0FFF, $false, $proc4.Id)
+$mt = [M156.K]::CreateRemoteThread($mh, [IntPtr]::Zero, [UIntPtr]::Zero, [IntPtr]0x10, [IntPtr]::Zero, 0, [IntPtr]::Zero)
+$null = $proc4.WaitForExit(10000)
+Write-Host "MUTANT: thread=$mt crashed=$($proc4.HasExited) exit code $($proc4.ExitCode)"
+Stop-Process -Id $proc4.Id -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 500
 
 # Phase 6 Task 14: cross-tab find smoke. Launch with two fixtures so the
