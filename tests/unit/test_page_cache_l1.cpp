@@ -335,10 +335,11 @@ TEST_CASE("PageCache L1 retain keeps both halves of a spread (#159)",
         fz_drop_pixmap(ctx, right);
 
         // A page that is not cached keeps nothing in its place, and the cache
-        // still admits entries afterwards.
+        // admits entries again once the pin is released.
         cache.retain_l1_pages(1.5f, /*invert=*/true, 7);
         REQUIRE(cache.l1_size() == 0);
         REQUIRE(cache.l1_bytes() == 0);
+        cache.release_l1_pin();
         cache.put_pixmap(0, 1.5f, /*invert=*/true, rgb_pixmap(ctx, 10, 10));
         REQUIRE(cache.l1_size() == 1);
     }
@@ -359,6 +360,40 @@ TEST_CASE("PageCache L1 retain leaves L2 alone (#159)", "[core][cache][l1][retai
         cache.retain_l1_pages(1.0f, /*invert=*/false, 5);
         REQUIRE(cache.l1_size() == 0);
         REQUIRE(cache.l2_size() == 2);
+    }
+    fz_drop_context(ctx);
+}
+
+TEST_CASE("PageCache L1 retain pins L1 to the kept keys until released (#159)",
+          "[core][cache][l1][retain]") {
+    litepdf::core::Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/simple.pdf").has_value());
+    fz_context* ctx = doc.clone_context();
+    REQUIRE(ctx);
+    {
+        // Room for two 300-byte pixmaps by bytes.
+        litepdf::core::PageCache cache(/*l1*/ 8, /*l2*/ 0, ctx, /*budget*/ 700);
+        cache.put_pixmap(1, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 10, 10));
+        cache.retain_l1_pages(1.0f, /*invert=*/false, 1, 2);
+
+        // A render that was already running when the tab went to the
+        // background lands now: it is not admitted, so it can neither refill
+        // the tab nor evict the kept page.
+        cache.put_pixmap(0, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 10, 10));
+        cache.put_pixmap(3, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 10, 10));
+        cache.put_pixmap(1, 2.0f, /*invert=*/false, rgb_pixmap(ctx, 10, 10));
+        REQUIRE(cache.l1_size() == 1);
+        REQUIRE(cache.l1_bytes() == 300);
+        // A kept key is admitted.
+        cache.put_pixmap(2, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 10, 10));
+        REQUIRE(cache.l1_size() == 2);
+
+        cache.release_l1_pin();
+        cache.put_pixmap(0, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 10, 10));
+        REQUIRE(cache.l1_size() == 2);  // admitted; the budget evicted the LRU
+        fz_pixmap* got = cache.get_pixmap(0, 1.0f);
+        REQUIRE(got);
+        fz_drop_pixmap(ctx, got);
     }
     fz_drop_context(ctx);
 }

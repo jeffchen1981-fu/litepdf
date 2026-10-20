@@ -202,8 +202,9 @@ public:
     // (#159) The tab is being left: drop its L1 pixmaps except those of
     // `page` and `other_page` (-1 for none) at the current render scale and
     // polarity. A background tab then holds what it shows, not a whole L1
-    // budget, and switching back is still an L1 hit. A render already running
-    // still lands in the cache. UI thread only.
+    // budget, and switching back is still an L1 hit. Until this view's next
+    // render request, L1 admits only those pages, so a render already running
+    // cannot refill it (PageCache::retain_l1_pages). UI thread only.
     void trim_l1_for_background(int page, int other_page = -1);
 
     // Phase 3 Task 11: cancel queued P1/P3 work, submit P0 for `page`

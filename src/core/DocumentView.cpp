@@ -338,6 +338,7 @@ bool DocumentView::zoom_out() {
 }
 
 void DocumentView::request_render(int page, RenderCb on_complete) {
+    impl_->cache->release_l1_pin();  // (#159) the tab is shown again
     RenderEngine::RenderRequest req;
     req.page_num    = page;
     req.priority    = 0;
@@ -404,6 +405,7 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb,
     // 1. Drop any queued P1 prefetch (and P3 thumbnails) from a prior nav
     //    so the queue stays short during rapid PgDn scrubbing.
     cancel_stale_renders(0);
+    impl_->cache->release_l1_pin();  // (#159) the tab is shown again
 
     // 2. P0 — current page (user-visible). Caller's callback delivers
     //    the pixmap to the UI thread. (#98) It alone may also carry the

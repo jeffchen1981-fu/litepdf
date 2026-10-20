@@ -497,4 +497,11 @@ TEST_CASE("DocumentView background trim keeps the shown pages at the current sca
         view->set_invert_colors(false);
         REQUIRE_FALSE(view->l1_holds(1));
     }
+    SECTION("the next render request releases the pin") {
+        view->trim_l1_for_background(1);
+        render_and_wait(*view, 0);
+        REQUIRE(view->l1_entry_count() == 2);
+        REQUIRE(view->l1_holds(0));
+        REQUIRE(view->l1_holds(1));
+    }
 }
