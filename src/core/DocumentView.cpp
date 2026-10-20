@@ -5,6 +5,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 #include "app/SearchDispatcher.hpp"
 #include "core/PageCache.hpp"
@@ -86,6 +87,27 @@ struct DocumentView::Impl {
     std::size_t            l1_budget     = kDefaultL1BudgetBytes;
     int                    last_prefetch_page = -1;
     TravelDirection        travel        = TravelDirection::Forward;
+    // (#49) Page sizes request_render_with_prefetch has looked up, so a page
+    // turn loads only the page it has not sized yet; a page's size does not
+    // change for the life of the Document. UI thread only.
+    std::vector<std::optional<PageSize>> page_sizes;
+
+    // Estimated L1 bytes of `page` at `scale`; 0 when its size is unknown.
+    // Document::page_size throws on a page that does not load. That is not
+    // cached, so a later call tries again.
+    std::size_t estimated_bytes(int page, float scale) noexcept {
+        try {
+            if (page < 0) return 0;
+            const auto i = static_cast<std::size_t>(page);
+            if (page_sizes.size() <= i) page_sizes.resize(doc.page_count());
+            if (i >= page_sizes.size()) return 0;
+            if (!page_sizes[i]) page_sizes[i] = doc.page_size(i);
+            return estimated_pixmap_bytes(page_sizes[i]->width_pt,
+                                          page_sizes[i]->height_pt, scale);
+        } catch (const std::exception&) {
+            return 0;
+        }
+    }
     std::optional<TextSelection> selection;       // #52; pure data, order-free
 
     // (#98) At most the current page's text. Its position among the members
@@ -404,24 +426,22 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb,
     // 3. P1 — prev/next prefetch. PageCache::put_pixmap fires inside
     //    the worker before on_complete, so the cache already holds its
     //    own ref by the time this callback runs; we just drop ours.
-    //    (#49) Both neighbours only while they fit in L1's byte budget
-    //    beside this page; past that, only one (core/detail/PrefetchPlan.hpp).
-    //    The size comes from this page alone. Document::page_size throws on
-    //    a page that does not load; this path never threw before #49, so an
-    //    unknown size falls back to both neighbours and the P0 render above
-    //    reports the failure, as it always has.
+    //    (#49) Both neighbours only while the three pages fit in L1's byte
+    //    budget together; past that, only one (core/detail/PrefetchPlan.hpp).
+    //    This path never threw before #49, and still does not: a page whose
+    //    size cannot be read counts as unknown, which falls back to both
+    //    neighbours, and the render reports the failure as it always has.
     impl_->travel = travel_direction(page, impl_->last_prefetch_page, impl_->travel);
     impl_->last_prefetch_page = page;
-    std::size_t page_bytes = 0;
-    try {
-        const auto sz = impl_->doc.page_size(static_cast<std::size_t>(page));
-        page_bytes = estimated_pixmap_bytes(sz.width_pt, sz.height_pt, render_scale());
-    } catch (const std::exception&) {
-        page_bytes = 0;
-    }
-    const int total = page_count();
-    const PrefetchPlan plan = prefetch_plan(page_bytes, impl_->l1_budget, impl_->travel,
-                                            page - 1 >= 0, page + 1 < total);
+    const int   total    = page_count();
+    const bool  has_prev = page - 1 >= 0;
+    const bool  has_next = page + 1 < total;
+    const float scale    = render_scale();
+    const PrefetchPlan plan = prefetch_plan(
+        impl_->estimated_bytes(page, scale),
+        has_prev ? impl_->estimated_bytes(page - 1, scale) : 0,
+        has_next ? impl_->estimated_bytes(page + 1, scale) : 0,
+        impl_->l1_budget, impl_->travel, has_prev, has_next);
 
     auto drop_cb = [](fz_pixmap* p, fz_context* ctx) {
         if (p) fz_drop_pixmap(ctx, p);
