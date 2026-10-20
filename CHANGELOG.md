@@ -18,20 +18,26 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   display one A4 or Letter page takes about 470-490 MiB, and paging there
   kept five of them. Paging through a 500-page Letter document at 800% on a
   200% display, litepdf's memory now levels off at about 1.7 GiB rather than
-  3 GiB, and peaks at about 2.6 GiB rather than 4 GiB. When the pages on both
-  sides no longer fit beside the current one, litepdf prepares only the next
-  page in the direction you are paging (on the first or last page, the one
-  neighbour it has). Paging on in one direction is as fast as before while two
-  pages fit in 1 GiB; the first page turn after reversing direction at such a
-  zoom level is rendered on demand (#49).
+  3 GiB; the most it reaches, while stepping up the zoom levels to 800%,
+  drops from about 4 GiB to about 2.6 GiB. When the pages on both sides no
+  longer fit beside the current one, litepdf prepares only the next page in
+  the direction you are paging (on the first or last page, the one neighbour
+  it has). Paging on in one direction is as fast as before while two pages
+  fit in 1 GiB; where only one neighbour is prepared, the first page turn
+  after reversing direction is rendered on demand. Where a single page is
+  larger than 512 MiB (A3 at 800% on a 200% display, or A4 or Letter at 800%
+  on a display at 225% or above), only one page fits, and some page turns are
+  rendered on demand (#49).
 - A tab you switch away from now keeps only the page it shows in memory (both
   pages in two-page view), not everything it had rendered. With four tabs
   each left at 800% on a 200% display, litepdf's memory drops from about
-  4.6 GiB to about 3.2 GiB: each background tab holds one page instead of
-  about 1 GiB. Switching back still shows the page at once. In single-page
-  view the pages next to it are prepared again after the switch; in two-page
-  view, other spreads of that tab are rendered again when you go to them
-  (#159).
+  4.5 GiB to about 3.1 GiB: each background tab holds one page instead of
+  about 1 GiB. Switching back still shows the page at once while two pages
+  fit in 1 GiB; past that, the tab may not keep the page it shows, and
+  switching back renders it on demand. In single-page view the pages next to
+  it are prepared again after the switch, as when paging (at 800% on a 200%
+  display, only the one in the direction you were paging); in two-page view,
+  other spreads of that tab are rendered again when you go to them (#159).
 
 ## [1.5.5] — 2026-10-15 — Search starts on the page on screen, and Find Next starts there too
 
