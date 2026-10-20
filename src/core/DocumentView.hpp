@@ -39,6 +39,7 @@
 #include <windows.h>  // HINSTANCE / HWND — Phase 7 Task 8 ensure_thumb_pane.
 
 #include "core/Document.hpp"
+#include "core/PageCache.hpp"     // kDefaultL1BudgetBytes (MuPDF-free)
 #include "core/TextSelection.hpp"
 
 // Forward decls — keep this header MuPDF-free. Callers that need to
@@ -75,12 +76,15 @@ public:
     // authenticate its document. std::optional, not a bare string_view, so
     // a worker count passed in its place fails to compile instead of a
     // literal 0 converting to string_view(nullptr) (see RenderEngine.hpp).
+    // `l1_budget_bytes` bounds the cache's L1 pixmaps by bytes as well as
+    // by count, and decides which neighbours are prefetched (#49).
     explicit DocumentView(Document doc,
                           litepdf::app::ISearchDispatcher& dispatcher,
                           std::optional<std::string_view> password = std::nullopt,
                           std::size_t num_workers = 2,
                           std::size_t l1_capacity = 5,
-                          std::size_t l2_capacity = 10);
+                          std::size_t l2_capacity = 10,
+                          std::size_t l1_budget_bytes = kDefaultL1BudgetBytes);
     ~DocumentView();
 
     DocumentView(const DocumentView&)            = delete;
@@ -235,6 +239,10 @@ public:
     // The page whose text a queued P0 may still build, -1 for none. Test
     // observability only; nothing in the product reads it.
     [[nodiscard]] int pending_text_page() const noexcept;
+
+    // (#49) Render requests queued in this view's engine and not yet taken by
+    // a worker, cancelled ones included. Test observability only.
+    [[nodiscard]] std::size_t queued_render_count() const noexcept;
 
     // UI thread's own fz_context clone (D3). Stays valid for the
     // lifetime of the DocumentView. Use for fz_drop_pixmap on refs

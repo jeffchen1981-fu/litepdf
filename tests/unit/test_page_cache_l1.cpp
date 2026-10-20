@@ -157,3 +157,125 @@ TEST_CASE("PageCache L1 keys on invert axis (Phase 8 D8)",
     }
     fz_drop_context(ctx);
 }
+
+// #49: L1 is bounded by the bytes it holds as well as by its entry count. A
+// 10x10 RGB pixmap without alpha is stride 30 x height 10 = 300 bytes.
+namespace {
+fz_pixmap* rgb_pixmap(fz_context* ctx, int w, int h) {
+    return fz_new_pixmap(ctx, fz_device_rgb(ctx), w, h, nullptr, 0);
+}
+}  // namespace
+
+TEST_CASE("PageCache L1 byte budget evicts LRU until the new entry fits (#49)",
+          "[core][cache][l1][budget]") {
+    litepdf::core::Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/simple.pdf").has_value());
+    fz_context* ctx = doc.clone_context();
+    REQUIRE(ctx);
+    {
+        // Room for five entries by count, but only two 300-byte ones by bytes.
+        litepdf::core::PageCache cache(/*l1*/ 5, /*l2*/ 0, ctx, /*budget*/ 700);
+        cache.put_pixmap(0, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 10, 10));
+        cache.put_pixmap(1, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 10, 10));
+        REQUIRE(cache.l1_size() == 2);
+        REQUIRE(cache.l1_bytes() == 600);
+
+        cache.put_pixmap(2, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 10, 10));
+        REQUIRE(cache.l1_size() == 2);
+        REQUIRE(cache.l1_bytes() == 600);
+        REQUIRE(cache.get_pixmap(0, 1.0f) == nullptr);  // the oldest went
+
+        fz_pixmap* got1 = cache.get_pixmap(1, 1.0f);
+        fz_pixmap* got2 = cache.get_pixmap(2, 1.0f);
+        REQUIRE(got1);
+        REQUIRE(got2);
+        fz_drop_pixmap(ctx, got1);
+        fz_drop_pixmap(ctx, got2);
+    }
+    fz_drop_context(ctx);
+}
+
+TEST_CASE("PageCache L1 admits an entry larger than the whole budget, alone (#49)",
+          "[core][cache][l1][budget]") {
+    litepdf::core::Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/simple.pdf").has_value());
+    fz_context* ctx = doc.clone_context();
+    REQUIRE(ctx);
+    {
+        litepdf::core::PageCache cache(/*l1*/ 5, /*l2*/ 0, ctx, /*budget*/ 400);
+        cache.put_pixmap(0, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 10, 10));
+        REQUIRE(cache.l1_size() == 1);
+
+        // 20x10 = 600 bytes, over the 400-byte budget on its own: it is kept
+        // and everything else goes.
+        fz_pixmap* big = rgb_pixmap(ctx, 20, 10);
+        cache.put_pixmap(1, 1.0f, /*invert=*/false, big);
+        REQUIRE(cache.l1_size() == 1);
+        REQUIRE(cache.l1_bytes() == 600);
+        REQUIRE(cache.get_pixmap(0, 1.0f) == nullptr);
+        fz_pixmap* got = cache.get_pixmap(1, 1.0f);
+        REQUIRE(got == big);
+        fz_drop_pixmap(ctx, got);
+    }
+    fz_drop_context(ctx);
+}
+
+TEST_CASE("PageCache L1 same-key replace re-counts bytes and evicts others (#49)",
+          "[core][cache][l1][budget]") {
+    litepdf::core::Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/simple.pdf").has_value());
+    fz_context* ctx = doc.clone_context();
+    REQUIRE(ctx);
+    {
+        litepdf::core::PageCache cache(/*l1*/ 5, /*l2*/ 0, ctx, /*budget*/ 800);
+        cache.put_pixmap(0, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 10, 10));
+        cache.put_pixmap(1, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 10, 10));
+        REQUIRE(cache.l1_bytes() == 600);
+
+        // Replace page 1 with a 600-byte pixmap: 300 + 600 > 800, so page 0
+        // (now the LRU) goes and the count reflects the new pixmap, not the old.
+        cache.put_pixmap(1, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 20, 10));
+        REQUIRE(cache.l1_size() == 1);
+        REQUIRE(cache.l1_bytes() == 600);
+        REQUIRE(cache.get_pixmap(0, 1.0f) == nullptr);
+    }
+    fz_drop_context(ctx);
+}
+
+TEST_CASE("PageCache L1 byte count follows eviction by count and clear (#49)",
+          "[core][cache][l1][budget]") {
+    litepdf::core::Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/simple.pdf").has_value());
+    fz_context* ctx = doc.clone_context();
+    REQUIRE(ctx);
+    {
+        // Default budget: only the count cap bites at these sizes.
+        litepdf::core::PageCache cache(/*l1*/ 2, /*l2*/ 0, ctx);
+        cache.put_pixmap(0, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 10, 10));
+        cache.put_pixmap(1, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 20, 10));
+        cache.put_pixmap(2, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 10, 10));
+        REQUIRE(cache.l1_size() == 2);
+        REQUIRE(cache.l1_bytes() == 900);  // page 0's 300 bytes left with it
+
+        cache.clear();
+        REQUIRE(cache.l1_size() == 0);
+        REQUIRE(cache.l1_bytes() == 0);
+    }
+    fz_drop_context(ctx);
+}
+
+TEST_CASE("PageCache L1 with a zero count cap still caches nothing (#49)",
+          "[core][cache][l1][budget]") {
+    litepdf::core::Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/simple.pdf").has_value());
+    fz_context* ctx = doc.clone_context();
+    REQUIRE(ctx);
+    {
+        // The always-admit-the-newest rule must not override a zero count cap.
+        litepdf::core::PageCache cache(/*l1*/ 0, /*l2*/ 0, ctx, /*budget*/ 1000);
+        cache.put_pixmap(0, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 10, 10));
+        REQUIRE(cache.l1_size() == 0);
+        REQUIRE(cache.l1_bytes() == 0);
+    }
+    fz_drop_context(ctx);
+}

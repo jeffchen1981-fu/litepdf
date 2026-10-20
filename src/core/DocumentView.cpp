@@ -5,6 +5,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 #include "app/SearchDispatcher.hpp"
 #include "core/PageCache.hpp"
@@ -12,6 +13,7 @@
 #include "core/SearchSession.hpp"
 #include "core/ThumbCache.hpp"
 #include "core/ThumbnailRenderer.hpp"
+#include "core/detail/PrefetchPlan.hpp"
 #include "core/detail/ZoomMath.hpp"
 #include "ui/ThumbnailPane.hpp"
 
@@ -79,6 +81,33 @@ struct DocumentView::Impl {
     float                  dpi          = 96.0f;
     bool                   invert_colors = false;  // Phase 8 D7/D9
     bool                   dual_page     = false;  // Phase 8 D10
+    // (#49) The L1 byte budget, and what request_render_with_prefetch needs
+    // to tell which way the reader is going: the page it last ran for (-1
+    // before the first) and the direction of the last real move.
+    std::size_t            l1_budget     = kDefaultL1BudgetBytes;
+    int                    last_prefetch_page = -1;
+    TravelDirection        travel        = TravelDirection::Forward;
+    // (#49) Page sizes request_render_with_prefetch has looked up, so a page
+    // turn loads only the page it has not sized yet; a page's size does not
+    // change for the life of the Document. UI thread only.
+    std::vector<std::optional<PageSize>> page_sizes;
+
+    // Estimated L1 bytes of `page` at `scale`; 0 when its size is unknown.
+    // Document::page_size throws on a page that does not load. That is not
+    // cached, so a later call tries again.
+    std::size_t estimated_bytes(int page, float scale) noexcept {
+        try {
+            if (page < 0) return 0;
+            const auto i = static_cast<std::size_t>(page);
+            if (page_sizes.size() <= i) page_sizes.resize(doc.page_count());
+            if (i >= page_sizes.size()) return 0;
+            if (!page_sizes[i]) page_sizes[i] = doc.page_size(i);
+            return estimated_pixmap_bytes(page_sizes[i]->width_pt,
+                                          page_sizes[i]->height_pt, scale);
+        } catch (const std::exception&) {
+            return 0;
+        }
+    }
     std::optional<TextSelection> selection;       // #52; pure data, order-free
 
     // (#98) At most the current page's text. Its position among the members
@@ -137,9 +166,11 @@ DocumentView::DocumentView(Document doc,
                            std::optional<std::string_view> password,
                            std::size_t num_workers,
                            std::size_t l1_capacity,
-                           std::size_t l2_capacity)
+                           std::size_t l2_capacity,
+                           std::size_t l1_budget_bytes)
     : impl_(std::make_unique<Impl>()) {
     impl_->doc = std::move(doc);
+    impl_->l1_budget = l1_budget_bytes;
     impl_->text_wanted = std::make_shared<std::atomic<int>>(-1);   // #98
 
     // Clone the UI-thread ctx and a dedicated cache_ctx BEFORE
@@ -158,8 +189,8 @@ DocumentView::DocumentView(Document doc,
 
     // Cache uses cache_ctx (not ui_ctx) for its internal keep/drop —
     // those ops happen on worker threads. The cache does not own it.
-    impl_->cache =
-        std::make_unique<PageCache>(l1_capacity, l2_capacity, impl_->cache_ctx.get());
+    impl_->cache = std::make_unique<PageCache>(l1_capacity, l2_capacity,
+                                               impl_->cache_ctx.get(), l1_budget_bytes);
 
     // Engine clones its own per-worker contexts off the Document.
     impl_->engine = std::make_unique<RenderEngine>(
@@ -395,11 +426,27 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb,
     // 3. P1 — prev/next prefetch. PageCache::put_pixmap fires inside
     //    the worker before on_complete, so the cache already holds its
     //    own ref by the time this callback runs; we just drop ours.
+    //    (#49) Both neighbours only while the three pages fit in L1's byte
+    //    budget together; past that, only one (core/detail/PrefetchPlan.hpp).
+    //    This path never threw before #49, and still does not: a page whose
+    //    size cannot be read counts as unknown, which falls back to both
+    //    neighbours, and the render reports the failure as it always has.
+    impl_->travel = travel_direction(page, impl_->last_prefetch_page, impl_->travel);
+    impl_->last_prefetch_page = page;
+    const int   total    = page_count();
+    const bool  has_prev = page - 1 >= 0;
+    const bool  has_next = page + 1 < total;
+    const float scale    = render_scale();
+    const PrefetchPlan plan = prefetch_plan(
+        impl_->estimated_bytes(page, scale),
+        has_prev ? impl_->estimated_bytes(page - 1, scale) : 0,
+        has_next ? impl_->estimated_bytes(page + 1, scale) : 0,
+        impl_->l1_budget, impl_->travel, has_prev, has_next);
+
     auto drop_cb = [](fz_pixmap* p, fz_context* ctx) {
         if (p) fz_drop_pixmap(ctx, p);
     };
-    const int total = page_count();
-    if (page - 1 >= 0) {
+    if (plan.prev) {
         RenderEngine::RenderRequest r1;
         r1.page_num    = page - 1;
         r1.priority    = 1;
@@ -408,7 +455,7 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb,
         r1.invert      = impl_->invert_colors;  // Phase 8 D7
         (void)impl_->engine->submit(std::move(r1));
     }
-    if (page + 1 < total) {
+    if (plan.next) {
         RenderEngine::RenderRequest r1;
         r1.page_num    = page + 1;
         r1.priority    = 1;
@@ -417,6 +464,10 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb,
         r1.invert      = impl_->invert_colors;  // Phase 8 D7
         (void)impl_->engine->submit(std::move(r1));
     }
+}
+
+std::size_t DocumentView::queued_render_count() const noexcept {
+    return impl_->engine->pending_count();
 }
 
 bool DocumentView::has_text_for(int page) const noexcept {

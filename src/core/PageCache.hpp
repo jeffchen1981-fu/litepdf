@@ -16,6 +16,11 @@ struct fz_context;
 
 namespace litepdf::core {
 
+// (#49) Default L1 byte budget per tab. One top-rung (800%) A4 pixmap on a
+// 200% display is ~489 MiB, so this keeps the current page and the next one
+// there, and both halves of a spread.
+inline constexpr std::size_t kDefaultL1BudgetBytes = std::size_t{1} << 30;
+
 /// Per-tab two-tier LRU cache over MuPDF refcounted objects.
 ///
 /// L1 (this task): fz_pixmap, keyed by (page_num, scale). Used for
@@ -38,9 +43,16 @@ namespace litepdf::core {
 /// the cache. It is used for all internal keep/drop operations.
 /// Refcount ops are atomic across clones of the same root context,
 /// so passing any clone is fine.
+///
+/// (#49) L1 is bounded twice: by `l1_capacity` entries and by
+/// `l1_budget_bytes` of pixmap samples. A new entry evicts LRU entries
+/// until both hold. The newest entry is always kept, even one larger than
+/// the whole budget on its own, so such a page is still cached -- alone; a
+/// zero `l1_capacity` still caches nothing.
 class PageCache {
 public:
-    PageCache(std::size_t l1_capacity, std::size_t l2_capacity, fz_context* ctx);
+    PageCache(std::size_t l1_capacity, std::size_t l2_capacity, fz_context* ctx,
+              std::size_t l1_budget_bytes = kDefaultL1BudgetBytes);
     ~PageCache();
 
     PageCache(const PageCache&) = delete;
@@ -87,6 +99,7 @@ public:
 
     void clear();                 // drops all cached entries (L1 + L2)
     std::size_t l1_size() const;  // for tests
+    std::size_t l1_bytes() const; // for tests: pixmap bytes L1 holds (#49)
     std::size_t l2_size() const;  // for tests
 
 private:
