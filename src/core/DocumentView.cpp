@@ -405,7 +405,7 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb,
     //    the worker before on_complete, so the cache already holds its
     //    own ref by the time this callback runs; we just drop ours.
     //    (#49) Both neighbours only while they fit in L1's byte budget
-    //    beside this page; past that, only the one in the travel direction.
+    //    beside this page; past that, only one (core/detail/PrefetchPlan.hpp).
     //    The size comes from this page alone. Document::page_size throws on
     //    a page that does not load; this path never threw before #49, so an
     //    unknown size falls back to both neighbours and the P0 render above
@@ -419,13 +419,14 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb,
     } catch (const std::exception&) {
         page_bytes = 0;
     }
-    const PrefetchPlan plan = prefetch_plan(page_bytes, impl_->l1_budget, impl_->travel);
+    const int total = page_count();
+    const PrefetchPlan plan = prefetch_plan(page_bytes, impl_->l1_budget, impl_->travel,
+                                            page - 1 >= 0, page + 1 < total);
 
     auto drop_cb = [](fz_pixmap* p, fz_context* ctx) {
         if (p) fz_drop_pixmap(ctx, p);
     };
-    const int total = page_count();
-    if (plan.prev && page - 1 >= 0) {
+    if (plan.prev) {
         RenderEngine::RenderRequest r1;
         r1.page_num    = page - 1;
         r1.priority    = 1;
@@ -434,7 +435,7 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb,
         r1.invert      = impl_->invert_colors;  // Phase 8 D7
         (void)impl_->engine->submit(std::move(r1));
     }
-    if (plan.next && page + 1 < total) {
+    if (plan.next) {
         RenderEngine::RenderRequest r1;
         r1.page_num    = page + 1;
         r1.priority    = 1;
@@ -443,6 +444,10 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb,
         r1.invert      = impl_->invert_colors;  // Phase 8 D7
         (void)impl_->engine->submit(std::move(r1));
     }
+}
+
+std::size_t DocumentView::queued_render_count() const noexcept {
+    return impl_->engine->pending_count();
 }
 
 bool DocumentView::has_text_for(int page) const noexcept {

@@ -207,7 +207,7 @@ TEST_CASE("PageCache L1 admits an entry larger than the whole budget, alone (#49
         REQUIRE(cache.l1_size() == 1);
 
         // 20x10 = 600 bytes, over the 400-byte budget on its own: it is kept
-        // (the page on screen stays cached) and everything else goes.
+        // and everything else goes.
         fz_pixmap* big = rgb_pixmap(ctx, 20, 10);
         cache.put_pixmap(1, 1.0f, /*invert=*/false, big);
         REQUIRE(cache.l1_size() == 1);

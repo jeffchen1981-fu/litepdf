@@ -240,6 +240,10 @@ public:
     // observability only; nothing in the product reads it.
     [[nodiscard]] int pending_text_page() const noexcept;
 
+    // (#49) Render requests queued in this view's engine and not yet taken by
+    // a worker, cancelled ones included. Test observability only.
+    [[nodiscard]] std::size_t queued_render_count() const noexcept;
+
     // UI thread's own fz_context clone (D3). Stays valid for the
     // lifetime of the DocumentView. Use for fz_drop_pixmap on refs
     // the caller moves onto the UI thread.

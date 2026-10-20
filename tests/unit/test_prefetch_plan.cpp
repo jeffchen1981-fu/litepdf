@@ -26,11 +26,12 @@ constexpr float kA4H = 841.89f;
 
 TEST_CASE("PrefetchPlan estimate brackets the pixmap MuPDF allocates",
           "[core][prefetch]") {
-    const std::size_t real = std::size_t{9525} * 13471 * 4;
-    const std::size_t est  = estimated_pixmap_bytes(kA4W, kA4H, 16.0f);
-    // At most one pixel of rounding per edge either way of the real bbox.
-    REQUIRE(est >= real);
-    REQUIRE(est <= std::size_t{9527} * 13473 * 4);
+    // fz_round_rect (floor(x0 + 0.001), ceil(x1 - 0.001)) makes a bbox at most
+    // ceil(w) + 1 pixels wide, ceil(h) + 1 high, wherever the page sits: the
+    // estimate covers that worst case, which at the origin is one pixel per
+    // side more than the 9525x13471 MuPDF allocates there.
+    const std::size_t est = estimated_pixmap_bytes(kA4W, kA4H, 16.0f);
+    REQUIRE(est == std::size_t{9526} * 13472 * 4);
 }
 
 TEST_CASE("PrefetchPlan estimate is 0 (unknown) for a degenerate input",
@@ -47,7 +48,7 @@ TEST_CASE("PrefetchPlan estimate is 0 (unknown) for a degenerate input",
 TEST_CASE("PrefetchPlan prefetches both neighbours while three pages fit",
           "[core][prefetch]") {
     for (auto dir : {TravelDirection::Forward, TravelDirection::Backward}) {
-        const auto plan = prefetch_plan(100, 300, dir);  // exactly three
+        const auto plan = prefetch_plan(100, 300, dir, true, true);  // exactly three
         REQUIRE(plan.prev);
         REQUIRE(plan.next);
     }
@@ -55,25 +56,46 @@ TEST_CASE("PrefetchPlan prefetches both neighbours while three pages fit",
 
 TEST_CASE("PrefetchPlan prefetches only the travel-direction neighbour past three",
           "[core][prefetch]") {
-    const auto fwd = prefetch_plan(101, 300, TravelDirection::Forward);
+    const auto fwd = prefetch_plan(101, 300, TravelDirection::Forward, true, true);
     REQUIRE_FALSE(fwd.prev);
     REQUIRE(fwd.next);
 
-    const auto back = prefetch_plan(101, 300, TravelDirection::Backward);
+    const auto back = prefetch_plan(101, 300, TravelDirection::Backward, true, true);
     REQUIRE(back.prev);
     REQUIRE_FALSE(back.next);
 
     // Still one neighbour when even a single page is over the budget: it is the
     // page the next turn shows, and the current page lives on as the canvas's
     // own bitmap.
-    const auto huge = prefetch_plan(1000, 300, TravelDirection::Forward);
+    const auto huge = prefetch_plan(1000, 300, TravelDirection::Forward, true, true);
     REQUIRE_FALSE(huge.prev);
     REQUIRE(huge.next);
 }
 
+TEST_CASE("PrefetchPlan on the first or last page takes the neighbour it has",
+          "[core][prefetch]") {
+    // Home from a later page reads as a move backward, and the reader then
+    // pages forward: the first page's only neighbour is the one to prepare.
+    const auto first = prefetch_plan(101, 300, TravelDirection::Backward, false, true);
+    REQUIRE_FALSE(first.prev);
+    REQUIRE(first.next);
+
+    const auto last = prefetch_plan(101, 300, TravelDirection::Forward, true, false);
+    REQUIRE(last.prev);
+    REQUIRE_FALSE(last.next);
+
+    // Never a neighbour the page lacks, while three fit or not.
+    const auto fits = prefetch_plan(100, 300, TravelDirection::Forward, false, true);
+    REQUIRE_FALSE(fits.prev);
+    REQUIRE(fits.next);
+    const auto only = prefetch_plan(101, 300, TravelDirection::Forward, false, false);
+    REQUIRE_FALSE(only.prev);
+    REQUIRE_FALSE(only.next);
+}
+
 TEST_CASE("PrefetchPlan with an unknown page size keeps today's both-neighbours",
           "[core][prefetch]") {
-    const auto plan = prefetch_plan(0, 300, TravelDirection::Forward);
+    const auto plan = prefetch_plan(0, 300, TravelDirection::Forward, true, true);
     REQUIRE(plan.prev);
     REQUIRE(plan.next);
 }
@@ -82,7 +104,8 @@ TEST_CASE("PrefetchPlan at the default budget, A4 on a 200% display",
           "[core][prefetch]") {
     // 600%: 3 x 275 MiB fits in 1 GiB -- both neighbours, as before #49.
     const auto r600 = prefetch_plan(estimated_pixmap_bytes(kA4W, kA4H, 12.0f),
-                                    kDefaultL1BudgetBytes, TravelDirection::Forward);
+                                    kDefaultL1BudgetBytes, TravelDirection::Forward,
+                                    true, true);
     REQUIRE(r600.prev);
     REQUIRE(r600.next);
 
@@ -90,7 +113,7 @@ TEST_CASE("PrefetchPlan at the default budget, A4 on a 200% display",
     const std::size_t top = estimated_pixmap_bytes(kA4W, kA4H, 16.0f);
     REQUIRE(2 * top <= kDefaultL1BudgetBytes);
     const auto r800 = prefetch_plan(top, kDefaultL1BudgetBytes,
-                                    TravelDirection::Forward);
+                                    TravelDirection::Forward, true, true);
     REQUIRE_FALSE(r800.prev);
     REQUIRE(r800.next);
 }

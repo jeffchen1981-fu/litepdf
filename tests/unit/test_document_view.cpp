@@ -1,6 +1,11 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
+#include <cstddef>
+#include <future>
+#include <memory>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -15,7 +20,9 @@
 // test_escrow_context.cpp.
 extern "C" {
 struct fz_context;
+struct fz_pixmap;
 void fz_drop_context(fz_context* ctx);
+void fz_drop_pixmap(fz_context* ctx, fz_pixmap* pix);
 }
 
 using litepdf::app::InlineDispatcher;
@@ -344,4 +351,97 @@ TEST_CASE("DocumentView drops its context clones when a member ctor throws",
     }
 
     REQUIRE(litepdf::core::detail::family_context_count(probe.get()) == 2);
+}
+
+// #49: which neighbours request_render_with_prefetch queues. The view's only
+// worker is held inside the first P0's completion callback, so every later
+// request stays queued and the count each call adds is exact. Which neighbour
+// is chosen is pinned by test_prefetch_plan.cpp; this pins that the view acts
+// on the plan.
+namespace {
+
+constexpr const char* kEightPages = "tests/fixtures/selection.pdf";
+
+struct HeldWorker {
+    std::promise<void> entered;
+    std::promise<void> release;
+    std::shared_future<void> released;
+};
+
+// Releases the held worker on scope exit, a failed REQUIRE included, so the
+// view's destructor can drain its engine. Declare it AFTER the view.
+struct ReleaseOnExit {
+    std::shared_ptr<HeldWorker> held;
+    ~ReleaseOnExit() {
+        try { held->release.set_value(); } catch (const std::future_error&) {}
+    }
+};
+
+std::shared_ptr<HeldWorker> hold_worker(DocumentView& view, int page) {
+    auto held = std::make_shared<HeldWorker>();
+    held->released = held->release.get_future().share();
+    auto entered = held->entered.get_future();
+    (void)view.set_current_page(page);
+    view.request_render_with_prefetch(page,
+        [held](fz_pixmap* p, fz_context* ctx) {
+            if (p) fz_drop_pixmap(ctx, p);
+            held->entered.set_value();
+            (void)held->released.wait_for(std::chrono::seconds(30));
+        },
+        {});
+    REQUIRE(entered.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    return held;
+}
+
+// Requests one request_render_with_prefetch(page) adds: its P0 plus the
+// neighbours it prefetches.
+std::size_t queued_by(DocumentView& view, int page) {
+    const std::size_t before = view.queued_render_count();
+    (void)view.set_current_page(page);
+    view.request_render_with_prefetch(page,
+        [](fz_pixmap* p, fz_context* ctx) { if (p) fz_drop_pixmap(ctx, p); }, {});
+    return view.queued_render_count() - before;
+}
+
+// One worker, render scale 1 (Custom 100% at 96 dpi), the given L1 budget.
+std::unique_ptr<DocumentView> one_worker_view(InlineDispatcher& disp,
+                                              std::size_t budget) {
+    Document doc;
+    REQUIRE_FALSE(doc.open(kEightPages).has_value());
+    REQUIRE(doc.page_count() == 8);
+    auto view = std::make_unique<DocumentView>(std::move(doc), disp, std::nullopt,
+                                               /*workers*/ 1, /*l1*/ 5, /*l2*/ 10,
+                                               budget);
+    view->set_viewport(800.0f, 600.0f, 96.0f);
+    view->set_zoom_pct(1.0f);
+    return view;
+}
+
+}  // namespace
+
+TEST_CASE("DocumentView prefetches both neighbours while three pages fit (#49)",
+          "[core][view][prefetch]") {
+    InlineDispatcher disp;
+    auto view = one_worker_view(disp, litepdf::core::kDefaultL1BudgetBytes);
+    ReleaseOnExit guard{hold_worker(*view, 4)};
+
+    REQUIRE(queued_by(*view, 3) == 3);  // P0 + pages 2 and 4
+    REQUIRE(queued_by(*view, 0) == 2);  // P0 + page 1: there is no page -1
+    REQUIRE(queued_by(*view, 7) == 2);  // P0 + page 6: there is no page 8
+}
+
+TEST_CASE("DocumentView prefetches one neighbour past the byte budget (#49)",
+          "[core][view][prefetch]") {
+    InlineDispatcher disp;
+    // A one-byte budget: every page is over a third of it.
+    auto view = one_worker_view(disp, 1);
+    ReleaseOnExit guard{hold_worker(*view, 4)};
+
+    REQUIRE(queued_by(*view, 5) == 2);  // forward: P0 + page 6
+    REQUIRE(queued_by(*view, 3) == 2);  // backward: P0 + page 2
+    // Home: backward onto the first page, whose only neighbour is page 1.
+    REQUIRE(queued_by(*view, 0) == 2);
+    // End: forward onto the last page, whose only neighbour is page 6.
+    REQUIRE(queued_by(*view, 7) == 2);
+    REQUIRE(queued_by(*view, 7) == 2);  // a resubmit of the same page
 }
