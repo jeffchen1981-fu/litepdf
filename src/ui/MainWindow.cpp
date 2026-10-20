@@ -765,6 +765,19 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
                     if (tp->visible()) tp->hide();
                 }
                 outgoing->view->cancel_background_renders();
+                // (#159) Every tab owns its own L1, so without this N tabs
+                // left zoomed in hold N full budgets while only the active
+                // tab is on screen. Keep the pages it shows, so switching
+                // back is still an L1 hit. set_active also reports a
+                // "switch" to the tab already active (Ctrl+N on itself, a
+                // search result in it, session restore); that tab stays on
+                // screen, so it keeps its cache.
+                if (new_index != old_index) {
+                    auto& v = *outgoing->view;
+                    const auto shown = litepdf::ui::shown_pages(
+                        v.current_page(), v.page_count(), v.dual_page());
+                    v.trim_l1_for_background(shown.first, shown.second);
+                }
             }
         }
     }
@@ -863,8 +876,6 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
     update_find_counter();
 
     schedule_session_save();  // Phase 12: active tab / open set changed
-
-    (void)new_index;
 }
 
 void MainWindow::on_tab_close_request(int index) {

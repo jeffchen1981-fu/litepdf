@@ -97,6 +97,15 @@ public:
     // survival across the call.
     fz_display_list* peek_display_list(int page_num) const;
 
+    // (#159) Drops every L1 entry except `page` and `other_page` (-1 for
+    // none) at `scale` and `invert` -- what a tab shows, kept when it goes to
+    // the background. L2 is untouched. It also PINS L1 to those keys:
+    // until release_l1_pin(), put_pixmap admits only them and drops anything
+    // else, so a render that was already running when the tab left cannot
+    // refill L1 or evict the kept pages.
+    void retain_l1_pages(float scale, bool invert, int page, int other_page = -1);
+    void release_l1_pin();
+
     void clear();                 // drops all cached entries (L1 + L2)
     std::size_t l1_size() const;  // for tests
     std::size_t l1_bytes() const; // for tests: pixmap bytes L1 holds (#49)

@@ -6,6 +6,7 @@
 #include <functional>
 #include <list>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 
 namespace litepdf::core {
@@ -47,6 +48,20 @@ struct PageCache::Impl {
     std::size_t l2_capacity;  // stored for Task 9; ignored here
     std::size_t l1_budget;    // (#49) bytes
     std::size_t l1_bytes = 0; // (#49) sum of L1Entry::bytes; guarded by mtx
+
+    // (#159) Set by retain_l1_pages: the only keys put_pixmap admits until
+    // release_l1_pin(). Guarded by mtx.
+    struct Pin {
+        float scale;
+        bool  invert;
+        int   page;
+        int   other_page;
+        bool admits(const L1Key& k) const noexcept {
+            return k.scale == scale && k.invert == invert &&
+                   (k.page == page || k.page == other_page);
+        }
+    };
+    std::optional<Pin> pin;
     mutable std::mutex mtx;
 
     struct L1Entry {
@@ -132,6 +147,10 @@ void PageCache::put_pixmap(int page_num, float scale, bool invert, fz_pixmap* pi
     const std::size_t bytes = pixmap_bytes(impl_->ctx, pix);
     std::lock_guard<std::mutex> lk(impl_->mtx);
     L1Key k{page_num, scale, invert};
+    if (impl_->pin && !impl_->pin->admits(k)) {
+        fz_drop_pixmap(impl_->ctx, pix);  // (#159) a background tab's late render
+        return;
+    }
     auto it = impl_->l1_map.find(k);
     if (it != impl_->l1_map.end()) {
         // Replace at same key: drop old, store new, promote to front.
@@ -165,6 +184,26 @@ void PageCache::put_pixmap(int page_num, float scale, bool invert, fz_pixmap* pi
     impl_->l1_lru.push_front(k);
     impl_->l1_map.emplace(k, Impl::L1Entry{pix, impl_->l1_lru.begin(), bytes});
     impl_->l1_bytes += bytes;
+}
+
+void PageCache::retain_l1_pages(float scale, bool invert, int page, int other_page) {
+    std::lock_guard<std::mutex> lk(impl_->mtx);
+    impl_->pin = Impl::Pin{scale, invert, page, other_page};
+    for (auto it = impl_->l1_map.begin(); it != impl_->l1_map.end();) {
+        if (impl_->pin->admits(it->first)) {
+            ++it;
+            continue;
+        }
+        impl_->l1_bytes -= it->second.bytes;
+        fz_drop_pixmap(impl_->ctx, it->second.pix);
+        impl_->l1_lru.erase(it->second.lru_it);
+        it = impl_->l1_map.erase(it);
+    }
+}
+
+void PageCache::release_l1_pin() {
+    std::lock_guard<std::mutex> lk(impl_->mtx);
+    impl_->pin.reset();
 }
 
 void PageCache::clear() {

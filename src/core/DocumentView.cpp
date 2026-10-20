@@ -338,6 +338,7 @@ bool DocumentView::zoom_out() {
 }
 
 void DocumentView::request_render(int page, RenderCb on_complete) {
+    impl_->cache->release_l1_pin();  // (#159) the tab is shown again
     RenderEngine::RenderRequest req;
     req.page_num    = page;
     req.priority    = 0;
@@ -404,6 +405,7 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb,
     // 1. Drop any queued P1 prefetch (and P3 thumbnails) from a prior nav
     //    so the queue stays short during rapid PgDn scrubbing.
     cancel_stale_renders(0);
+    impl_->cache->release_l1_pin();  // (#159) the tab is shown again
 
     // 2. P0 — current page (user-visible). Caller's callback delivers
     //    the pixmap to the UI thread. (#98) It alone may also carry the
@@ -468,6 +470,23 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb,
 
 std::size_t DocumentView::queued_render_count() const noexcept {
     return impl_->engine->pending_count();
+}
+
+void DocumentView::trim_l1_for_background(int page, int other_page) {
+    impl_->cache->retain_l1_pages(render_scale(), impl_->invert_colors, page,
+                                  other_page);
+}
+
+std::size_t DocumentView::l1_entry_count() const {
+    return impl_->cache->l1_size();
+}
+
+bool DocumentView::l1_holds(int page) const {
+    fz_pixmap* p = impl_->cache->get_pixmap(page, render_scale(),
+                                            impl_->invert_colors);
+    if (!p) return false;
+    fz_drop_pixmap(impl_->ui_ctx.get(), p);
+    return true;
 }
 
 bool DocumentView::has_text_for(int page) const noexcept {

@@ -9,6 +9,7 @@ using litepdf::ui::dual_page_compute_right;
 using litepdf::ui::dual_page_step_next_left;
 using litepdf::ui::dual_page_step_prev_left;
 using litepdf::ui::search_start_page;
+using litepdf::ui::shown_pages;
 
 TEST_CASE("dual_page: search start page is the spread's left page",
           "[dual_page]") {
@@ -76,4 +77,21 @@ TEST_CASE("dual_page: step_prev_left snaps to cover and walks back by 2",
     REQUIRE(dual_page_step_prev_left(3, 10) == 1);
     REQUIRE(dual_page_step_prev_left(5, 10) == 3);
     REQUIRE(dual_page_step_prev_left(9, 10) == 7);
+}
+
+TEST_CASE("dual_page: shown pages are what a background tab keeps (#159)",
+          "[dual_page][trim]") {
+    // Single-page view: the current page alone, whatever its position.
+    REQUIRE(shown_pages(4, 10, false).first == 4);
+    REQUIRE(shown_pages(4, 10, false).second == -1);
+    // A spread from either of its pages.
+    REQUIRE(shown_pages(3, 10, true).first == 3);
+    REQUIRE(shown_pages(3, 10, true).second == 4);
+    REQUIRE(shown_pages(4, 10, true).first == 3);
+    REQUIRE(shown_pages(4, 10, true).second == 4);
+    // The cover alone, and an odd tail alone.
+    REQUIRE(shown_pages(0, 10, true).first == 0);
+    REQUIRE(shown_pages(0, 10, true).second == -1);
+    REQUIRE(shown_pages(9, 10, true).first == 9);
+    REQUIRE(shown_pages(9, 10, true).second == -1);
 }

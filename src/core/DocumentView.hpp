@@ -199,6 +199,14 @@ public:
     // (RenderEngine::cancel_background). Queued P0 renders run on.
     void cancel_background_renders();
 
+    // (#159) The tab is being left: drop its L1 pixmaps except those of
+    // `page` and `other_page` (-1 for none) at the current render scale and
+    // polarity. A background tab then holds what it shows, not a whole L1
+    // budget, and switching back is still an L1 hit. Until this view's next
+    // render request, L1 admits only those pages, so a render already running
+    // cannot refill it (PageCache::retain_l1_pages). UI thread only.
+    void trim_l1_for_background(int page, int other_page = -1);
+
     // Phase 3 Task 11: cancel queued P1/P3 work, submit P0 for `page`
     // with the caller's callback, and submit P1 prefetch for prev/next
     // pages with drop-only callbacks. The pixmaps land in PageCache
@@ -243,6 +251,11 @@ public:
     // (#49) Render requests queued in this view's engine and not yet taken by
     // a worker, cancelled ones included. Test observability only.
     [[nodiscard]] std::size_t queued_render_count() const noexcept;
+
+    // (#159) L1 entries this view's cache holds, and whether one is `page` at
+    // the current render scale and polarity. Test observability only.
+    [[nodiscard]] std::size_t l1_entry_count() const;
+    [[nodiscard]] bool l1_holds(int page) const;
 
     // UI thread's own fz_context clone (D3). Stays valid for the
     // lifetime of the DocumentView. Use for fz_drop_pixmap on refs

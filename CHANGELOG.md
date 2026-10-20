@@ -22,6 +22,14 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   neighbour it has). Paging on in one direction is as fast as before while two
   pages fit in 1 GiB; the first page turn after reversing direction at such a
   zoom level is rendered on demand (#49).
+- A tab you switch away from now keeps only the page it shows in memory (both
+  pages in two-page view), not everything it had rendered. With four tabs
+  each left at 800% on a 200% display, litepdf's memory drops from about
+  4.6 GiB to about 3.2 GiB: each background tab holds one page instead of
+  about 1 GiB. Switching back still shows the page at once. In single-page
+  view the pages next to it are prepared again after the switch; in two-page
+  view, other spreads of that tab are rendered again when you go to them
+  (#159).
 
 ## [1.5.5] — 2026-10-15 — Search starts on the page on screen, and Find Next starts there too
 
