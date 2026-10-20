@@ -16,7 +16,7 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 - Each tab now keeps at most 1 GiB of rendered pages in memory, or one page
   when a single page is larger than that. At the 800% zoom level on a 200%
   display one A4 or Letter page takes about 470-490 MiB, and paging there
-  kept five of them. Paging through a 500-page Letter document at 800% on a
+  used to keep five of them. Paging through a 500-page Letter document at 800% on a
   200% display, litepdf's memory now levels off at about 1.7 GiB rather than
   3 GiB; the most it reaches, while stepping up the zoom levels to 800%,
   drops from about 4 GiB to about 2.6 GiB. When the pages on both sides no
@@ -24,12 +24,12 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   the direction you are paging (on the first or last page, the one neighbour
   it has). Paging on in one direction is as fast as before while two pages
   fit in 1 GiB; where only one neighbour is prepared, the first page turn
-  after reversing direction is rendered on demand. Where a single page is
+  after reversing direction is rendered on demand. Where the pages are each
   larger than 512 MiB (A3 at 800% on a 200% display, or A4 or Letter at 800%
-  on a display at 225% or above), only one page fits, and some page turns are
-  rendered on demand (#49).
-- A tab you switch away from now keeps only the page it shows in memory (both
-  pages in two-page view), not everything it had rendered. With four tabs
+  on a display at 225% or above), only one of them fits, and some page turns
+  are rendered on demand (#49).
+- A tab you switch away from now keeps only the rendered image of the page it
+  shows (both pages in two-page view), not every page it had rendered. With four tabs
   each left at 800% on a 200% display, litepdf's memory drops from about
   4.5 GiB to about 3.1 GiB: each background tab holds one page instead of
   about 1 GiB. Switching back still shows the page at once while two pages
