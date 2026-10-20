@@ -12,6 +12,7 @@
 #include "core/SearchSession.hpp"
 #include "core/ThumbCache.hpp"
 #include "core/ThumbnailRenderer.hpp"
+#include "core/detail/PrefetchPlan.hpp"
 #include "core/detail/ZoomMath.hpp"
 #include "ui/ThumbnailPane.hpp"
 
@@ -79,6 +80,12 @@ struct DocumentView::Impl {
     float                  dpi          = 96.0f;
     bool                   invert_colors = false;  // Phase 8 D7/D9
     bool                   dual_page     = false;  // Phase 8 D10
+    // (#49) The L1 byte budget, and what request_render_with_prefetch needs
+    // to tell which way the reader is going: the page it last ran for (-1
+    // before the first) and the direction of the last real move.
+    std::size_t            l1_budget     = kDefaultL1BudgetBytes;
+    int                    last_prefetch_page = -1;
+    TravelDirection        travel        = TravelDirection::Forward;
     std::optional<TextSelection> selection;       // #52; pure data, order-free
 
     // (#98) At most the current page's text. Its position among the members
@@ -137,9 +144,11 @@ DocumentView::DocumentView(Document doc,
                            std::optional<std::string_view> password,
                            std::size_t num_workers,
                            std::size_t l1_capacity,
-                           std::size_t l2_capacity)
+                           std::size_t l2_capacity,
+                           std::size_t l1_budget_bytes)
     : impl_(std::make_unique<Impl>()) {
     impl_->doc = std::move(doc);
+    impl_->l1_budget = l1_budget_bytes;
     impl_->text_wanted = std::make_shared<std::atomic<int>>(-1);   // #98
 
     // Clone the UI-thread ctx and a dedicated cache_ctx BEFORE
@@ -158,8 +167,8 @@ DocumentView::DocumentView(Document doc,
 
     // Cache uses cache_ctx (not ui_ctx) for its internal keep/drop —
     // those ops happen on worker threads. The cache does not own it.
-    impl_->cache =
-        std::make_unique<PageCache>(l1_capacity, l2_capacity, impl_->cache_ctx.get());
+    impl_->cache = std::make_unique<PageCache>(l1_capacity, l2_capacity,
+                                               impl_->cache_ctx.get(), l1_budget_bytes);
 
     // Engine clones its own per-worker contexts off the Document.
     impl_->engine = std::make_unique<RenderEngine>(
@@ -395,11 +404,28 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb,
     // 3. P1 — prev/next prefetch. PageCache::put_pixmap fires inside
     //    the worker before on_complete, so the cache already holds its
     //    own ref by the time this callback runs; we just drop ours.
+    //    (#49) Both neighbours only while they fit in L1's byte budget
+    //    beside this page; past that, only the one in the travel direction.
+    //    The size comes from this page alone. Document::page_size throws on
+    //    a page that does not load; this path never threw before #49, so an
+    //    unknown size falls back to both neighbours and the P0 render above
+    //    reports the failure, as it always has.
+    impl_->travel = travel_direction(page, impl_->last_prefetch_page, impl_->travel);
+    impl_->last_prefetch_page = page;
+    std::size_t page_bytes = 0;
+    try {
+        const auto sz = impl_->doc.page_size(static_cast<std::size_t>(page));
+        page_bytes = estimated_pixmap_bytes(sz.width_pt, sz.height_pt, render_scale());
+    } catch (const std::exception&) {
+        page_bytes = 0;
+    }
+    const PrefetchPlan plan = prefetch_plan(page_bytes, impl_->l1_budget, impl_->travel);
+
     auto drop_cb = [](fz_pixmap* p, fz_context* ctx) {
         if (p) fz_drop_pixmap(ctx, p);
     };
     const int total = page_count();
-    if (page - 1 >= 0) {
+    if (plan.prev && page - 1 >= 0) {
         RenderEngine::RenderRequest r1;
         r1.page_num    = page - 1;
         r1.priority    = 1;
@@ -408,7 +434,7 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb,
         r1.invert      = impl_->invert_colors;  // Phase 8 D7
         (void)impl_->engine->submit(std::move(r1));
     }
-    if (page + 1 < total) {
+    if (plan.next && page + 1 < total) {
         RenderEngine::RenderRequest r1;
         r1.page_num    = page + 1;
         r1.priority    = 1;

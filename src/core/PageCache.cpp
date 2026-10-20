@@ -33,17 +33,26 @@ struct L1KeyHash {
     }
 };
 
+// (#49) Bytes of pixmap samples, the part of a pixmap that scales with zoom.
+std::size_t pixmap_bytes(fz_context* ctx, fz_pixmap* pix) {
+    return static_cast<std::size_t>(fz_pixmap_stride(ctx, pix)) *
+           static_cast<std::size_t>(fz_pixmap_height(ctx, pix));
+}
+
 } // namespace
 
 struct PageCache::Impl {
     fz_context* ctx;
     std::size_t l1_capacity;
     std::size_t l2_capacity;  // stored for Task 9; ignored here
+    std::size_t l1_budget;    // (#49) bytes
+    std::size_t l1_bytes = 0; // (#49) sum of L1Entry::bytes; guarded by mtx
     mutable std::mutex mtx;
 
     struct L1Entry {
         fz_pixmap* pix;
         std::list<L1Key>::iterator lru_it;
+        std::size_t bytes;
     };
 
     std::list<L1Key> l1_lru;  // front = most recent, back = oldest
@@ -56,8 +65,8 @@ struct PageCache::Impl {
     std::list<int> l2_lru;  // front = most recent, back = oldest
     std::unordered_map<int, L2Entry> l2_map;
 
-    Impl(std::size_t l1_cap, std::size_t l2_cap, fz_context* c)
-        : ctx(c), l1_capacity(l1_cap), l2_capacity(l2_cap) {}
+    Impl(std::size_t l1_cap, std::size_t l2_cap, fz_context* c, std::size_t l1_budget_bytes)
+        : ctx(c), l1_capacity(l1_cap), l2_capacity(l2_cap), l1_budget(l1_budget_bytes) {}
 
     // Caller must hold mtx.
     void evict_oldest_l1() {
@@ -65,6 +74,7 @@ struct PageCache::Impl {
         const L1Key oldest = l1_lru.back();  // copy, not ref — erase invalidates
         auto it = l1_map.find(oldest);
         if (it != l1_map.end()) {
+            l1_bytes -= it->second.bytes;
             fz_drop_pixmap(ctx, it->second.pix);
             l1_map.erase(it);
         }
@@ -84,8 +94,9 @@ struct PageCache::Impl {
     }
 };
 
-PageCache::PageCache(std::size_t l1_capacity, std::size_t l2_capacity, fz_context* ctx)
-    : impl_(std::make_unique<Impl>(l1_capacity, l2_capacity, ctx)) {}
+PageCache::PageCache(std::size_t l1_capacity, std::size_t l2_capacity, fz_context* ctx,
+                     std::size_t l1_budget_bytes)
+    : impl_(std::make_unique<Impl>(l1_capacity, l2_capacity, ctx, l1_budget_bytes)) {}
 
 PageCache::~PageCache() {
     if (!impl_) return;
@@ -95,6 +106,7 @@ PageCache::~PageCache() {
     }
     impl_->l1_map.clear();
     impl_->l1_lru.clear();
+    impl_->l1_bytes = 0;
     for (auto& kv : impl_->l2_map) {
         fz_drop_display_list(impl_->ctx, kv.second.list);
     }
@@ -117,16 +129,24 @@ fz_pixmap* PageCache::get_pixmap(int page_num, float scale, bool invert) {
 
 void PageCache::put_pixmap(int page_num, float scale, bool invert, fz_pixmap* pix) {
     if (!pix) return;  // no-op on null; nothing to take ownership of
+    const std::size_t bytes = pixmap_bytes(impl_->ctx, pix);
     std::lock_guard<std::mutex> lk(impl_->mtx);
     L1Key k{page_num, scale, invert};
     auto it = impl_->l1_map.find(k);
     if (it != impl_->l1_map.end()) {
         // Replace at same key: drop old, store new, promote to front.
         fz_drop_pixmap(impl_->ctx, it->second.pix);
-        it->second.pix = pix;
+        impl_->l1_bytes = impl_->l1_bytes - it->second.bytes + bytes;
+        it->second.pix   = pix;
+        it->second.bytes = bytes;
         impl_->l1_lru.erase(it->second.lru_it);
         impl_->l1_lru.push_front(k);
         it->second.lru_it = impl_->l1_lru.begin();
+        // A larger replacement can push L1 over its budget. The replaced
+        // entry is at the front now, so this never evicts it.
+        while (impl_->l1_bytes > impl_->l1_budget && impl_->l1_map.size() > 1) {
+            impl_->evict_oldest_l1();
+        }
         return;
     }
     // New entry. Evict until we have room. If l1_capacity == 0 we must
@@ -135,11 +155,16 @@ void PageCache::put_pixmap(int page_num, float scale, bool invert, fz_pixmap* pi
         fz_drop_pixmap(impl_->ctx, pix);
         return;
     }
-    while (impl_->l1_map.size() >= impl_->l1_capacity) {
+    // (#49) Room by count AND by bytes. Stops at empty, so an entry larger
+    // than the whole budget is still admitted -- alone.
+    while (!impl_->l1_map.empty() &&
+           (impl_->l1_map.size() >= impl_->l1_capacity ||
+            impl_->l1_bytes + bytes > impl_->l1_budget)) {
         impl_->evict_oldest_l1();
     }
     impl_->l1_lru.push_front(k);
-    impl_->l1_map.emplace(k, Impl::L1Entry{pix, impl_->l1_lru.begin()});
+    impl_->l1_map.emplace(k, Impl::L1Entry{pix, impl_->l1_lru.begin(), bytes});
+    impl_->l1_bytes += bytes;
 }
 
 void PageCache::clear() {
@@ -149,6 +174,7 @@ void PageCache::clear() {
     }
     impl_->l1_map.clear();
     impl_->l1_lru.clear();
+    impl_->l1_bytes = 0;
     for (auto& kv : impl_->l2_map) {
         fz_drop_display_list(impl_->ctx, kv.second.list);
     }
@@ -159,6 +185,11 @@ void PageCache::clear() {
 std::size_t PageCache::l1_size() const {
     std::lock_guard<std::mutex> lk(impl_->mtx);
     return impl_->l1_map.size();
+}
+
+std::size_t PageCache::l1_bytes() const {
+    std::lock_guard<std::mutex> lk(impl_->mtx);
+    return impl_->l1_bytes;
 }
 
 fz_display_list* PageCache::get_display_list(int page_num) {

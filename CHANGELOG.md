@@ -9,6 +9,18 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+### Changed
+
+- Each tab now keeps at most 1 GiB of rendered pages in memory. At the 800%
+  zoom level on a 200% display one page takes about 490 MiB, and paging through
+  a document there kept five of them. Paging through a 500-page document at
+  800%, litepdf's memory now levels off at about 1.7 GiB rather than 3 GiB,
+  and peaks at 2.6 GiB rather than 4.1 GiB. When the pages on both sides no
+  longer fit beside the current one, litepdf prepares only the next page in the
+  direction you are paging, so paging on in one direction is as fast as before;
+  the first page turn after reversing direction at such a zoom level is
+  rendered on demand (#49).
+
 ## [1.5.5] — 2026-10-15 — Search starts on the page on screen, and Find Next starts there too
 
 ### Changed
