@@ -26,8 +26,10 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   pages in two-page view), not everything it had rendered. With four tabs
   each left at 800% on a 200% display, litepdf's memory drops from about
   4.6 GiB to about 3.1 GiB: each background tab holds one page instead of
-  about 1 GiB. Switching back still shows the page at once; the pages next to
-  it are prepared again after the switch (#159).
+  about 1 GiB. Switching back still shows the page at once. In single-page
+  view the pages next to it are prepared again after the switch; in two-page
+  view, other spreads of that tab are rendered again when you go to them
+  (#159).
 
 ## [1.5.5] — 2026-10-15 — Search starts on the page on screen, and Find Next starts there too
 

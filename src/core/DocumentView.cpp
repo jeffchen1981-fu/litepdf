@@ -483,7 +483,7 @@ bool DocumentView::l1_holds(int page) const {
     fz_pixmap* p = impl_->cache->get_pixmap(page, render_scale(),
                                             impl_->invert_colors);
     if (!p) return false;
-    fz_drop_pixmap(impl_->cache_ctx.get(), p);
+    fz_drop_pixmap(impl_->ui_ctx.get(), p);
     return true;
 }
 

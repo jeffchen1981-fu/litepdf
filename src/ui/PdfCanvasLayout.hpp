@@ -39,6 +39,21 @@ inline int search_start_page(int current_page, int page_count,
                      : current_page;
 }
 
+// (#159) The pages a tab shows, which it keeps in L1 when it goes to the
+// background: the current page, or both pages of its spread. `second` is -1
+// when one page is shown.
+struct ShownPages {
+    int first;
+    int second;
+};
+
+inline ShownPages shown_pages(int current_page, int page_count,
+                              bool dual_page) noexcept {
+    if (!dual_page) return {current_page, -1};
+    const int left = dual_page_compute_left(current_page, page_count);
+    return {left, dual_page_compute_right(left, page_count)};
+}
+
 // Forward / backward navigation step in spread mode. Pure logic; both
 // PdfCanvas::on_key_down (PgUp/PgDn) and any future programmatic-jump
 // caller share the same snap rule via these helpers.
