@@ -38,6 +38,17 @@ jobs:
         shell: pwsh
         run: ./scripts/smoke-test.ps1 -ExpectDev
 
+      # #156: the smoke test copies each crash dump litepdf wrote during the
+      # run here, with the exe and pdb, since the runner and its %LOCALAPPDATA%
+      # are gone afterwards.
+      - name: Upload smoke crash dumps
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: smoke-crash-dumps
+          path: build/smoke-crashes/
+          if-no-files-found: ignore
+
       - name: Upload exe artifact
         uses: actions/upload-artifact@v5
         with:
