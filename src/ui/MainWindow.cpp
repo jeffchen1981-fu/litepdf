@@ -765,6 +765,20 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
                     if (tp->visible()) tp->hide();
                 }
                 outgoing->view->cancel_background_renders();
+                // (#159) Every tab owns its own L1, so without this N tabs
+                // left zoomed in hold N full budgets while only the active
+                // tab is on screen. Keep the pages it shows, so switching
+                // back is still an L1 hit; its neighbours re-render then.
+                auto& v = *outgoing->view;
+                const int cur = v.current_page();
+                if (v.dual_page()) {
+                    const int left =
+                        litepdf::ui::dual_page_compute_left(cur, v.page_count());
+                    v.trim_l1_for_background(
+                        left, litepdf::ui::dual_page_compute_right(left, v.page_count()));
+                } else {
+                    v.trim_l1_for_background(cur);
+                }
             }
         }
     }

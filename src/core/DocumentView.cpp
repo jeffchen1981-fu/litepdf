@@ -470,6 +470,23 @@ std::size_t DocumentView::queued_render_count() const noexcept {
     return impl_->engine->pending_count();
 }
 
+void DocumentView::trim_l1_for_background(int page, int other_page) {
+    impl_->cache->retain_l1_pages(render_scale(), impl_->invert_colors, page,
+                                  other_page);
+}
+
+std::size_t DocumentView::l1_entry_count() const {
+    return impl_->cache->l1_size();
+}
+
+bool DocumentView::l1_holds(int page) const {
+    fz_pixmap* p = impl_->cache->get_pixmap(page, render_scale(),
+                                            impl_->invert_colors);
+    if (!p) return false;
+    fz_drop_pixmap(impl_->cache_ctx.get(), p);
+    return true;
+}
+
 bool DocumentView::has_text_for(int page) const noexcept {
     return impl_->text_slot.page() == page;
 }

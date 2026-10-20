@@ -445,3 +445,56 @@ TEST_CASE("DocumentView prefetches one neighbour past the byte budget (#49)",
     REQUIRE(queued_by(*view, 7) == 2);
     REQUIRE(queued_by(*view, 7) == 2);  // a resubmit of the same page
 }
+
+// #159: a tab going to the background keeps only the L1 pixmaps of the pages
+// it shows, at its current render scale and polarity.
+namespace {
+
+void render_and_wait(DocumentView& view, int page) {
+    auto done = std::make_shared<std::promise<void>>();
+    auto fut  = done->get_future();
+    view.request_render(page, [done](fz_pixmap* p, fz_context* ctx) {
+        if (p) fz_drop_pixmap(ctx, p);
+        done->set_value();
+    });
+    REQUIRE(fut.wait_for(std::chrono::seconds(30)) == std::future_status::ready);
+}
+
+}  // namespace
+
+TEST_CASE("DocumentView background trim keeps the shown pages at the current scale and polarity (#159)",
+          "[core][view][trim]") {
+    InlineDispatcher disp;
+    auto view = one_worker_view(disp, litepdf::core::kDefaultL1BudgetBytes);
+    render_and_wait(*view, 0);
+    render_and_wait(*view, 1);
+    render_and_wait(*view, 2);
+    view->set_invert_colors(true);
+    render_and_wait(*view, 1);   // page 1, other polarity
+    view->set_invert_colors(false);
+    view->set_zoom_pct(2.0f);
+    render_and_wait(*view, 1);   // page 1, other scale
+    view->set_zoom_pct(1.0f);
+    REQUIRE(view->l1_entry_count() == 5);
+
+    SECTION("single page") {
+        view->trim_l1_for_background(1);
+        REQUIRE(view->l1_entry_count() == 1);
+        REQUIRE(view->l1_holds(1));
+        REQUIRE_FALSE(view->l1_holds(0));
+    }
+    SECTION("both halves of a spread") {
+        view->trim_l1_for_background(1, 2);
+        REQUIRE(view->l1_entry_count() == 2);
+        REQUIRE(view->l1_holds(1));
+        REQUIRE(view->l1_holds(2));
+    }
+    SECTION("the polarity in force decides which entry stays") {
+        view->set_invert_colors(true);
+        view->trim_l1_for_background(1);
+        REQUIRE(view->l1_entry_count() == 1);
+        REQUIRE(view->l1_holds(1));    // the inverted one
+        view->set_invert_colors(false);
+        REQUIRE_FALSE(view->l1_holds(1));
+    }
+}

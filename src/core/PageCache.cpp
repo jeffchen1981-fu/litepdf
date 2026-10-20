@@ -167,6 +167,22 @@ void PageCache::put_pixmap(int page_num, float scale, bool invert, fz_pixmap* pi
     impl_->l1_bytes += bytes;
 }
 
+void PageCache::retain_l1_pages(float scale, bool invert, int page, int other_page) {
+    std::lock_guard<std::mutex> lk(impl_->mtx);
+    for (auto it = impl_->l1_map.begin(); it != impl_->l1_map.end();) {
+        const L1Key& k = it->first;
+        if (k.scale == scale && k.invert == invert &&
+            (k.page == page || k.page == other_page)) {
+            ++it;
+            continue;
+        }
+        impl_->l1_bytes -= it->second.bytes;
+        fz_drop_pixmap(impl_->ctx, it->second.pix);
+        impl_->l1_lru.erase(it->second.lru_it);
+        it = impl_->l1_map.erase(it);
+    }
+}
+
 void PageCache::clear() {
     std::lock_guard<std::mutex> lk(impl_->mtx);
     for (auto& kv : impl_->l1_map) {

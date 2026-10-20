@@ -10,6 +10,9 @@ extern "C" {
 struct fz_context;
 struct fz_pixmap;
 struct fz_colorspace;
+struct fz_display_list;
+typedef struct { float x0, y0, x1, y1; } fz_rect;  // by value, as in test_page_cache_l2.cpp
+fz_display_list* fz_new_display_list(fz_context*, fz_rect mediabox);
 fz_pixmap* fz_new_pixmap(fz_context*, fz_colorspace*, int w, int h, void* seps, int alpha);
 fz_colorspace* fz_device_rgb(fz_context*);
 void fz_drop_pixmap(fz_context*, fz_pixmap*);
@@ -276,6 +279,86 @@ TEST_CASE("PageCache L1 with a zero count cap still caches nothing (#49)",
         cache.put_pixmap(0, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 10, 10));
         REQUIRE(cache.l1_size() == 0);
         REQUIRE(cache.l1_bytes() == 0);
+    }
+    fz_drop_context(ctx);
+}
+
+TEST_CASE("PageCache L1 retain keeps only the given pages at one scale and polarity (#159)",
+          "[core][cache][l1][retain]") {
+    litepdf::core::Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/simple.pdf").has_value());
+    fz_context* ctx = doc.clone_context();
+    REQUIRE(ctx);
+    {
+        litepdf::core::PageCache cache(/*l1*/ 8, /*l2*/ 0, ctx);
+        cache.put_pixmap(0, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 10, 10));
+        cache.put_pixmap(1, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 10, 10));
+        cache.put_pixmap(2, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 10, 10));
+        cache.put_pixmap(1, 2.0f, /*invert=*/false, rgb_pixmap(ctx, 20, 10));
+        cache.put_pixmap(1, 1.0f, /*invert=*/true,  rgb_pixmap(ctx, 10, 10));
+        REQUIRE(cache.l1_size() == 5);
+
+        cache.retain_l1_pages(1.0f, /*invert=*/false, 1);
+        REQUIRE(cache.l1_size() == 1);
+        REQUIRE(cache.l1_bytes() == 300);
+        // The same page at another scale or polarity is not what is shown.
+        REQUIRE(cache.get_pixmap(1, 2.0f) == nullptr);
+        REQUIRE(cache.get_pixmap(1, 1.0f, true) == nullptr);
+        REQUIRE(cache.get_pixmap(0, 1.0f) == nullptr);
+        REQUIRE(cache.get_pixmap(2, 1.0f) == nullptr);
+        fz_pixmap* kept = cache.get_pixmap(1, 1.0f);
+        REQUIRE(kept);
+        fz_drop_pixmap(ctx, kept);
+    }
+    fz_drop_context(ctx);
+}
+
+TEST_CASE("PageCache L1 retain keeps both halves of a spread (#159)",
+          "[core][cache][l1][retain]") {
+    litepdf::core::Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/simple.pdf").has_value());
+    fz_context* ctx = doc.clone_context();
+    REQUIRE(ctx);
+    {
+        litepdf::core::PageCache cache(/*l1*/ 8, /*l2*/ 0, ctx);
+        for (int p = 0; p < 5; ++p) {
+            cache.put_pixmap(p, 1.5f, /*invert=*/true, rgb_pixmap(ctx, 10, 10));
+        }
+        cache.retain_l1_pages(1.5f, /*invert=*/true, 3, 4);
+        REQUIRE(cache.l1_size() == 2);
+        REQUIRE(cache.l1_bytes() == 600);
+        fz_pixmap* left  = cache.get_pixmap(3, 1.5f, true);
+        fz_pixmap* right = cache.get_pixmap(4, 1.5f, true);
+        REQUIRE(left);
+        REQUIRE(right);
+        fz_drop_pixmap(ctx, left);
+        fz_drop_pixmap(ctx, right);
+
+        // A page that is not cached keeps nothing in its place, and the cache
+        // still admits entries afterwards.
+        cache.retain_l1_pages(1.5f, /*invert=*/true, 7);
+        REQUIRE(cache.l1_size() == 0);
+        REQUIRE(cache.l1_bytes() == 0);
+        cache.put_pixmap(0, 1.5f, /*invert=*/true, rgb_pixmap(ctx, 10, 10));
+        REQUIRE(cache.l1_size() == 1);
+    }
+    fz_drop_context(ctx);
+}
+
+TEST_CASE("PageCache L1 retain leaves L2 alone (#159)", "[core][cache][l1][retain]") {
+    litepdf::core::Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/simple.pdf").has_value());
+    fz_context* ctx = doc.clone_context();
+    REQUIRE(ctx);
+    {
+        litepdf::core::PageCache cache(/*l1*/ 4, /*l2*/ 4, ctx);
+        cache.put_pixmap(0, 1.0f, /*invert=*/false, rgb_pixmap(ctx, 10, 10));
+        const fz_rect mb{0.0f, 0.0f, 0.0f, 0.0f};
+        cache.put_display_list(0, fz_new_display_list(ctx, mb));
+        cache.put_display_list(1, fz_new_display_list(ctx, mb));
+        cache.retain_l1_pages(1.0f, /*invert=*/false, 5);
+        REQUIRE(cache.l1_size() == 0);
+        REQUIRE(cache.l2_size() == 2);
     }
     fz_drop_context(ctx);
 }

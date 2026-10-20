@@ -97,6 +97,11 @@ public:
     // survival across the call.
     fz_display_list* peek_display_list(int page_num) const;
 
+    // (#159) Drops every L1 entry except `page` and `other_page` (-1 for
+    // none) at `scale` and `invert` -- what a tab shows, kept when it goes to
+    // the background. L2 is untouched.
+    void retain_l1_pages(float scale, bool invert, int page, int other_page = -1);
+
     void clear();                 // drops all cached entries (L1 + L2)
     std::size_t l1_size() const;  // for tests
     std::size_t l1_bytes() const; // for tests: pixmap bytes L1 holds (#49)
