@@ -4,8 +4,8 @@ Generate tests/fixtures/page-size.pdf, the fixture for Document::page_size
 (#165) in tests/unit/test_document_page_size.cpp.
 
   Page 1  No MediaBox of its own: it inherits [0 0 612 792] from the page-tree
-          node. CropBox [36 72 576 720], Rotate 90, UserUnit 2, so its size
-          is 648 x 540 crop points, doubled by UserUnit and turned on its
+          node. CropBox [36 72 576 720], Rotate 90, UserUnit 2, so its crop
+          is 540 wide and 648 high, doubled by UserUnit and turned on its
           side: 1296 wide, 1080 high. Every input of the bounds has a case.
   Page 2  Ten link annotations and an image XObject. Loading the page loads
           all eleven objects (annotations, and the transparency scan of the

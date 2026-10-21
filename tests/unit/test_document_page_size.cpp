@@ -83,10 +83,12 @@ TEST_CASE("Document::page_size applies inherited MediaBox, CropBox, UserUnit and
     CHECK(size.height_pt == 1080.0f);
 }
 
-TEST_CASE("Document::page_size equals the loaded page's bounds on every PDF fixture",
+TEST_CASE("Document::page_size equals the loaded page's bounds on every fixture",
           "[document][pages]") {
-    // Every PDF fixture that opens without a password. The same arithmetic
-    // runs on the same floats, so the sizes must be equal, not just close.
+    // Every PDF fixture that opens without a password (the one with a
+    // non-ASCII name is a copy of simple.pdf), and the ePub and CBZ, which
+    // still load the page. The same arithmetic runs on the same floats, so
+    // the sizes must be equal, not just close.
     const char* const fixtures[] = {
         "tests/fixtures/page-size.pdf",  "tests/fixtures/annot.pdf",
         "tests/fixtures/bookmarks.pdf",  "tests/fixtures/cjk-ja.pdf",
@@ -94,6 +96,7 @@ TEST_CASE("Document::page_size equals the loaded page's bounds on every PDF fixt
         "tests/fixtures/large.pdf",      "tests/fixtures/search.pdf",
         "tests/fixtures/selection.pdf",  "tests/fixtures/simple.pdf",
         "tests/fixtures/spread-unequal.pdf", "tests/fixtures/type3.pdf",
+        "tests/fixtures/sample.epub",    "tests/fixtures/sample.cbz",
     };
     for (const char* path : fixtures) {
         INFO(path);
@@ -117,10 +120,13 @@ TEST_CASE("Document::page_size reads nothing from the file", "[document][pages]"
     const char* const path = "tests/fixtures/page-size.pdf";
 
     // Control: loading page 2 reads its annotations and image from the file.
-    // If this stops reading, the fixture no longer tests anything.
+    // If this stops reading, the fixture no longer tests anything. Page 1
+    // loads first so that MuPDF's page-tree map, which a Document builds
+    // while opening, is not what the reads come from.
     {
         OwnDocument own(path);
         fz_rect r{};
+        REQUIRE(own.loaded_bounds(0, r));
         const ULONGLONG before = read_operations();
         REQUIRE(own.loaded_bounds(1, r));
         REQUIRE(read_operations() > before);

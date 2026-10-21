@@ -438,7 +438,7 @@ PageSize Document::page_size(std::size_t index) const {
     }
     fz_catch(impl_->ctx) {
         fz_report_error(impl_->ctx);   // also marks it handled (#146)
-        throw std::runtime_error("fz_load_page / fz_bound_page failed");
+        throw std::runtime_error("page_size: page bounds not readable");
     }
 
     PageSize result;

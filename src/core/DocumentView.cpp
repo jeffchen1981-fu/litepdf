@@ -93,8 +93,9 @@ struct DocumentView::Impl {
     std::vector<std::optional<PageSize>> page_sizes;
 
     // Estimated L1 bytes of `page` at `scale`; 0 when its size is unknown.
-    // Document::page_size throws on a page that does not load. That is not
-    // cached, so a later call tries again.
+    // Document::page_size throws on a page it cannot size: a PDF page object
+    // it cannot find, or another format's page that does not load. That is
+    // not cached, so a later call tries again.
     std::size_t estimated_bytes(int page, float scale) noexcept {
         try {
             if (page < 0) return 0;
