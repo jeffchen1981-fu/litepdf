@@ -9,6 +9,18 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+### Changed
+
+- Turning to a page of a PDF for the first time no longer makes the window
+  wait while litepdf reads that page's annotations and images from the file.
+  To choose which neighbouring pages to prepare, litepdf looks up the size of
+  the page and of its two neighbours while the window waits, and each lookup
+  used to load the whole page. On a test PDF with twelve images and twenty
+  links on every page, read from an SSD with nothing cached, one lookup took
+  about 1 ms typically and up to about 50 ms, for up to three pages per turn.
+  It now takes the size from the page's own entry in the file, which litepdf
+  normally holds in memory from the moment the document opens (#165).
+
 ## [1.5.6] — 2026-10-20 — Less memory at high zoom and in background tabs
 
 ### Changed
