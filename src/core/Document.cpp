@@ -413,9 +413,25 @@ PageSize Document::page_size(std::size_t index) const {
     std::lock_guard<std::mutex> lk(impl_->doc_mutex);
     fz_page* page = nullptr;
     fz_rect bounds = {};
+    fz_var(page);
     fz_try(impl_->ctx) {
-        page = fz_load_page(impl_->ctx, impl_->doc, static_cast<int>(index));
-        bounds = fz_bound_page(impl_->ctx, page);
+        // A PDF page's bounds come from its page object alone (MediaBox,
+        // CropBox, Rotate, UserUnit): this is what fz_bound_page computes
+        // for a loaded PDF page (pdf_bound_page, pdf-page.c). fz_load_page
+        // would also load every annotation and scan the resources for
+        // transparency, one file read per object not yet loaded, and this
+        // runs on the UI thread (#165). Other formats load the page.
+        pdf_document* pdf = pdf_specifics(impl_->ctx, impl_->doc);
+        if (pdf) {
+            pdf_obj* obj = pdf_lookup_page_obj(impl_->ctx, pdf, static_cast<int>(index));
+            fz_rect box;
+            fz_matrix ctm;
+            pdf_page_obj_transform(impl_->ctx, obj, &box, &ctm);
+            bounds = fz_transform_rect(box, ctm);
+        } else {
+            page = fz_load_page(impl_->ctx, impl_->doc, static_cast<int>(index));
+            bounds = fz_bound_page(impl_->ctx, page);
+        }
     }
     fz_always(impl_->ctx) {
         if (page) fz_drop_page(impl_->ctx, page);
