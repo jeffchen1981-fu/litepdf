@@ -513,7 +513,7 @@ in reading order.
     [0, the left page's height]. So unequal page heights are measured on the left page alone.
   - **From the strip.** page = the derived current page; offset = viewport top − `top(page)`,
     clamped to [0, the page's height].
-  - **Into the strip.** `scroll_y = anchor(page) + offset`. A page that fits lands exactly where
+  - **Into the strip.** `scroll_y = anchor(page)` when the offset is 0, else `top(page) + offset` (the offset is measured from the page's top). A page that fits lands exactly where
     navigating to it would put it. The current page is the carried page, pinned (§4.6).
   - **Into paged single.** Paged `pan_y` = −offset, clamped; `pan_x` = `pan_x_eff`.
   - **Into paged spread.** The spread containing the page; `pan_y` = −(the left page's top in
