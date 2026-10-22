@@ -438,3 +438,53 @@ TEST_CASE("StripSchedule: a pending page outside retain is cancelled once and re
     CHECK(out.released_count(2) == 1);
     CHECK(s.slot(2) == nullptr);
 }
+
+TEST_CASE("StripSchedule: an identical second pass adds no prefetch", "[ui][strip]") {
+    StripRenderState s;
+    FakeSubmitter out;
+    // |V| = 4 of 5 entries: page 4 takes the last one.
+    const SchedulePlan first = s.run_pass(input({0, 3}, {4, 5}), out);
+    CHECK(first.submit_p1 == std::vector<int>{4});
+
+    ScheduleInput again = input({0, 3}, {4, 5});
+    again.previous_first_visible = 0;
+    again.previous_last_visible = 3;
+    const SchedulePlan second = s.run_pass(again, out);
+    CHECK(second.submit_p1.empty());
+    CHECK(second.submit_p0.empty());
+    CHECK(out.pages_at(1) == std::vector<int>{4});
+    CHECK(s.slot(5) == nullptr);
+}
+
+TEST_CASE("StripSchedule: a failed prefetch is not retried while it stays in P",
+          "[ui][strip]") {
+    StripRenderState s;
+    FakeSubmitter out;
+    s.slots()[1] = failed(1);
+    auto submits_of_1 = [&] {
+        return std::count_if(out.submitted.begin(), out.submitted.end(),
+                             [](const Submitted& x) { return x.page == 1; });
+    };
+
+    const SchedulePlan first = s.run_pass(input({0, 0}, {1, 1}), out);
+    CHECK_FALSE(has(first.fail_reset, 1));
+    CHECK(s.slot(1)->kind == PageStateKind::Failed);
+
+    ScheduleInput again = input({0, 0}, {1, 1});
+    again.previous_first_visible = 0;
+    again.previous_last_visible = 0;
+    const SchedulePlan second = s.run_pass(again, out);
+    CHECK_FALSE(has(second.fail_reset, 1));
+    CHECK(s.slot(1)->kind == PageStateKind::Failed);
+    CHECK(submits_of_1() == 0);
+
+    ScheduleInput entered = input({1, 1});
+    entered.previous_first_visible = 0;
+    entered.previous_last_visible = 0;
+    const SchedulePlan third = s.run_pass(entered, out);
+    CHECK(has(third.fail_reset, 1));
+    CHECK(third.submit_p0 == std::vector<int>{1});
+    CHECK(submits_of_1() == 1);
+    CHECK(out.submitted.back().page == 1);
+    CHECK(out.submitted.back().priority == 0);
+}
