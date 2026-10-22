@@ -64,6 +64,7 @@ add_library(litepdf_core STATIC
     src/core/MuPDFRoot.cpp         # #61
     src/core/DocumentView.cpp
     src/core/MruList.cpp
+    src/core/ViewPrefs.cpp
     src/core/PageCache.cpp
     src/core/RenderEngine.cpp
     src/core/TabList.cpp
