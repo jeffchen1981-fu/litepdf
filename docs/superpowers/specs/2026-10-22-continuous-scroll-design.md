@@ -1,8 +1,8 @@
 # Continuous scroll (#55) — design
 
 - **Issue:** #55 "Continuous scroll: pages are one-at-a-time, with no multi-page strip layout"
-- **Status:** design approved in brainstorming; a Fable design review and the spec gate's
-  round 1 are folded in (§12); awaiting the spec gate's Codex lens
+- **Status:** design approved in brainstorming; a Fable design review and the spec gate (Opus,
+  Sonnet, Codex terra and luna) are folded in (§12); awaiting the user's review
 - **Code read at:** `5a40d5e` (main after #165/#166, unreleased after v1.5.6)
 - **Supersedes:** the "its own phase" note in
   `docs/superpowers/specs/2026-09-07-zoom-correctness-page-nav-design.md` §7
@@ -116,11 +116,12 @@ These run in both layouts. Each gets a strip branch; its paged branch keeps toda
 | `PdfCanvas::apply_viewport` | refit from the current page, then `set_viewport` | Called only for the reasons that refit (below). |
 | `PdfCanvas::resubmit_current_page` (Ctrl+wheel zoom; `on_size`, `on_paint` and the completion handler on `D2DERR_RECREATE_TARGET`) | resubmit the current page | Re-layout (§4.5), then reschedule. |
 | `PdfCanvas::discard_render_target` (`WM_DPICHANGED_BEFOREPARENT`, `D2DERR_RECREATE_TARGET`) | reset both slot bitmaps and the render target | Also drops every `PageBitmapSet` bitmap: Ready → None, and a Pending page loses its stale bitmap but stays Pending. On the recreate path `resubmit_current_page` follows and reschedules; on the DPI path the DPI `Layout` kick (`MainWindow.cpp:1490`) does. |
-| `PdfCanvas::set_view(v)` | always `++view_epoch` and resets per-view state | Same view and strip layout: no epoch bump and no state reset. A different view: cancel every Pending strip request of the old view (flag store, §3.3), clear `PageBitmapSet`, then bump the epoch. |
+| `PdfCanvas::set_view(v)` | always `++view_epoch` and resets per-view state | Same view and strip layout: no epoch bump and no state reset. A different view: cancel every Pending strip request of the old view (flag store, §3.3), clear `PageBitmapSet`, reset the `StripScroll` state (position, desired `pan_x`, the navigation pin), then bump the epoch. The incoming tab's position is restored by its `TabSwitch` kick (§7.4). |
+| `PdfCanvas::change_current_page` | `set_current_page`, then `cancel_gesture()`, then the page-change observer | Not used by the strip. The strip sets its current page through a new `set_strip_current_page` that calls `DocumentView::set_current_page` and fires the observer **without** `cancel_gesture()`, for both the derived page (§4.6) and navigation (§6.3). |
 | `WM_USER_RENDER_DONE` / `_RIGHT` handler | `on_completion_arrived` (#57), then `accept_completion`, bitmap, anchor | Unchanged. A layout switch bumps `view_epoch` (below), so a paged completion that lands while the strip is shown fails the epoch check and drops its pixmap. |
 | `WM_USER_STRIP_DONE` handler (new) | — | Calls `on_completion_arrived` **first**, before any early return, exactly as the paged handler does (#57), then applies §5.3. |
 | `ColdStartTimer::mark(3)` / `mark(4)` | marked when the first `current_bitmap` is created / first painted | The strip marks 3 when it creates its first page bitmap and 4 when it first paints one, so `smoke-test.ps1`'s `LitePDF cold-start:` line is emitted in either layout. |
-| Layout-switch reset (inside `apply_effective_layout`) | — | Cancels the old layout's outstanding work, then `anchor.clear()`, `wheel_flip_seq = 0`, resets both slot bitmaps and `PageBitmapSet`, and does `++view_epoch`. A switch within one tab then carries the position (§7.3); a switch caused by a tab switch does not — the incoming tab restores its own (§7.4). |
+| Layout-switch reset (inside `apply_effective_layout`) | — | **First** captures the position to carry (§7.3), before anything — including `set_dual_page`, which zeroes both pan axes today — changes the canvas. Then cancels the old layout's outstanding work, `anchor.clear()`, `wheel_flip_seq = 0`, resets both slot bitmaps and `PageBitmapSet`, and does `++view_epoch`. A switch within one tab then applies the carried position (§7.3); a switch caused by a tab switch discards it — the incoming tab restores its own (§7.4). |
 
 **`kick_render` reasons.** Every call site is classified, as of `5a40d5e`. Every strip branch that
 changes the zoom calls `refresh_zoom_readout` in the same message, as the paged branch does
@@ -209,10 +210,13 @@ for D2D.
 
 ### 4.5 Re-layout keeps the viewport-top point
 
+A strip position is a `StripPos`: either `InPage{p, f}` (fraction f ∈ [0, 1) down page p) or
+`InGapAfter{p, f}` (fraction f down the gap after page p; `p = −1` is the gap above page 0).
+§7.4 stores the same type.
+
 Every re-layout (zoom change, viewport resize, DPI change, refit) follows one rule:
 
-1. Before: record the viewport-top point as (page p, fraction f within page p), or as "in the
-   gap after p".
+1. Before: record the viewport-top point as a `StripPos`.
 2. Re-layout.
 3. Set `scroll_y` so that the same point is at the viewport top.
 
@@ -261,9 +265,9 @@ of hysteresis:
 | State | Holds |
 |---|---|
 | **None** | nothing |
-| **Pending** | `{seq, priority, cancel_flag, stale_bitmap?}` |
+| **Pending** | `{seq, priority, scale, invert, cancel_flag, stale_bitmap?}` (scale and invert as submitted) |
 | **Ready** | `{bitmap, scale, invert}`; *stale* when scale or invert differs from the view's |
-| **Failed** | — |
+| **Failed** | `{priority}` of the request that failed |
 
 A stale bitmap is still painted, stretched to the page's current rect, so a zoom never flashes
 the strip white.
@@ -277,15 +281,26 @@ Transitions:
   **at cancel time**; the late null is then dropped by §5.3 rule 2, so a page that re-enters V
   before that null arrives is simply re-requested.
 - Ready → None, and Pending loses its `stale_bitmap`: `discard_render_target` (§3.4).
-- Failed → None: the page leaves V, or the zoom or polarity changes. Failed is not re-requested
-  while it stays in V, so a page that keeps failing costs one render, not one per scroll event.
+- Failed → None: the page leaves V, or the render scale or polarity changes, or — for a page
+  that failed at P1 — the page enters V (so a failed prefetch gets one P0 attempt). A page that
+  failed at P0 is not re-requested while it stays in V, so a page that keeps failing costs one
+  render, not one per scroll event.
 - Any state → released: the page leaves the range (its request, if Pending, is cancelled
   first). This bounds the GPU bitmap count.
 
 ### 5.2 Scheduling (`StripSchedule`)
 
-Run after every scroll or re-layout, and after a §5.3 rule-4 completion:
+Run after every scroll or re-layout, after every kick, and after a §5.3 rule-4 completion:
 
+0. **Sweep.** Every Pending page whose `cancel_flag` reads `true` takes its cancel transition
+   (§5.1) now. Code outside the strip flags strip requests — `on_tab_switch`'s
+   `cancel_background_renders()` (even for a same-index switch) and `set_invert_colors` — and a
+   request cancelled after a worker found it in L1 posts **no** completion at all
+   (`RenderEngine.cpp:183-185` drops the pixmap and skips `on_complete`, unlike checkpoints A, B
+   and C). So the strip cannot rely on a completion to learn of a cancel. Both outside paths are
+   followed by a kick in the same message (`MainWindow.cpp:863` / `1727`), so the sweep runs
+   before the user can see the page stuck. A late completion for a swept request is then
+   dropped by §5.3 rule 2.
 1. **Visible pages (V)** = pages intersecting the viewport. Each page in V that is None, or
    Ready-stale, gets **P0**. A page in V that is Pending at **P1** is promoted: its P1 is
    cancelled and it is submitted at P0. Pages are submitted largest-visible-area first; the
@@ -311,16 +326,21 @@ for a page that is not in L1 would rasterise it again. So:
   page of the pass), it carries `on_text`, with `text_wanted` set to that page.
 - When the derived current page changes to page c, or c's P0 completes while c is current, and
   c's text is neither in the slot nor pending: if `l1_holds(c)`, submit a text-carrying
-  `request_page_render(c, P1, cb, on_text)` and cancel any earlier text-carrying request. If c is
-  not in L1, submit nothing; a press on c builds the text synchronously (R4 of the selection
-  spec).
+  `request_page_render(c, P1, cb, on_text)` and cancel the earlier **text-only P1**, if any. A P0
+  that carries `on_text` is never cancelled for text reasons: moving `text_wanted` to c already
+  makes its text build skip (#98 skip rule 2). If c is not in L1, submit nothing; a press on c
+  builds the text synchronously (R4 of the selection spec).
+- The worker also skips a text build while any P0 is queued (#98 skip rule 3). That skip is not
+  retried, exactly as in paged mode: #98 allows any skip, and the press then builds the text
+  synchronously (§10).
 - That text request does not change c's page state. Its pixmap completion never matches a
   Pending seq of c, so §5.3 rule 2 drops it; the worker builds the text regardless, because
   `on_text` depends on the pixmap having been delivered, not on the canvas accepting it.
 - The existing `wants_text_prefetch` gate still applies.
 
-**Zoom or invert change.** Cancel every Pending request (§5.1 cancel transition), mark Ready
-bitmaps stale, and reschedule.
+**Render scale or polarity change** — a zoom, a refit, a DPI change (`render_scale` includes the
+DPI), or invert. Cancel every Pending request (§5.1 cancel transition), mark Ready bitmaps stale,
+and reschedule.
 
 ### 5.3 Completion (`StripCompletion`)
 
@@ -334,14 +354,15 @@ The handler first calls `on_completion_arrived` (§3.4), then decides, in order:
 1. epoch ≠ view epoch → drop (the view, or the layout, changed);
 2. the page is not Pending, or seq ≠ its Pending seq → drop;
 3. a pixmap is present → create the D2D bitmap (creating the render target first if needed):
-   - success → Ready; invalidate that page's rect;
+   - success → Ready at the Pending entry's submitted scale and polarity; invalidate that page's
+     rect. If those differ from the view's (a change the cancel missed), the page is Ready-stale
+     and the next pass re-requests it;
    - no render target could be created, or `D2DERR_RECREATE_TARGET` → `discard_render_target`,
      the page → None, reschedule;
    - any other failure (for example a bitmap above the device's maximum size) → Failed;
-4. null and `cancelled` → the cancel transition (§5.1), then reschedule. This path is live:
-   code outside the strip flags strip requests too — `on_tab_switch`'s
-   `cancel_background_renders()` runs even for a same-index switch, and `set_invert_colors`
-   cancels everything below P0 — and the page may still be wanted;
+4. null and `cancelled` → the cancel transition (§5.1), then reschedule. Usually the §5.2 sweep
+   has already done this and rule 2 drops the completion; this rule covers a flag set after the
+   last sweep;
 5. null and not cancelled → Failed. Paint a white page with a thin border, and do not retry
    automatically. The page is re-requested when it leaves V and comes back, or on a zoom or
    invert change.
@@ -482,21 +503,30 @@ in reading order.
   tab only; a background tab picks it up at its next `on_tab_switch`.
 - **Every layout switch** goes through `apply_effective_layout`, which first does the reset in
   §3.4.
-- **Position carry, within one tab** (spread toggle, menu item):
-  - **Paged → continuous.** `scroll_y = anchor(cur) + in-page offset`, where the offset is how
-    far the page has been scrolled into (0 when the page fits). So a page that fits lands exactly
-    where navigating to it would put it. The current page is unchanged and pinned (§4.6).
-  - **Continuous → paged.** The current page becomes the derived page. Paged `pan_y` =
-    −(in-page offset), clamped, and `pan_x` = `pan_x_eff`. The pan is set before the render is
-    kicked. The switch cleared the anchor, so the paged completion path only re-clamps the pan
-    and the position survives.
+- **Position carry, within one tab** (spread toggle, menu item). The carried value is
+  (page, in-page offset in DIP), captured before the reset (§3.4):
+  - **From paged single.** page = the current page; offset = how far the page has been scrolled
+    into, `max(0, −pan_y − page_origin_y)` (0 when the page fits).
+  - **From paged spread.** page = the spread's left page; offset = how far the viewport top is
+    below that page's top inside the union placement (`content_extent`'s box), clamped to
+    [0, the left page's height]. So unequal page heights are measured on the left page alone.
+  - **From the strip.** page = the derived current page; offset = viewport top − `top(page)`,
+    clamped to [0, the page's height].
+  - **Into the strip.** `scroll_y = anchor(page) + offset`. A page that fits lands exactly where
+    navigating to it would put it. The current page is the carried page, pinned (§4.6).
+  - **Into paged single.** Paged `pan_y` = −offset, clamped; `pan_x` = `pan_x_eff`.
+  - **Into paged spread.** The spread containing the page; `pan_y` = −(the left page's top in
+    the union + offset), clamped to the union; `pan_x` = 0, because the union's horizontal layout
+    differs from the strip's.
+  - Into either paged layout, the pan is set before the render is kicked. The switch cleared the
+    anchor, so the paged completion path only re-clamps the pan and the position survives.
 - **A tab switch does not carry position** between tabs: the incoming tab restores its own
   (§7.4).
 
 ### 7.4 Tab state
 
-- `Tab` keeps the strip position in memory only, as (page, fraction) plus the desired `pan_x`,
-  rather than a raw `scroll_y`. It is written by `on_tab_switch`'s outgoing snapshot (beside
+- `Tab` keeps the strip position in memory only, as a `StripPos` (§4.5, so a viewport top in a
+  gap is kept too) plus the desired `pan_x`, rather than a raw `scroll_y`. It is written by `on_tab_switch`'s outgoing snapshot (beside
   `pan_x/pan_y` today) and restored by a `TabSwitch` kick. A background tab whose viewport or DPI
   changed then returns to the same place after re-layout. A same-index switch restores nothing
   (its kick is `Navigate`).
@@ -557,12 +587,17 @@ bumps it.
     than `W`.
 - **`StripScroll`**
   - clamping;
-  - viewport-top preservation across re-layout;
+  - viewport-top preservation across re-layout, including a `StripPos` in a gap;
   - the derived current page: bottom → last, top → 0, ties, the navigation pin surviving a
     re-layout and ending on scroll input;
   - desired vs effective `pan_x` when a wide page leaves V and comes back.
+- **Position carry** (pure, beside `StripScroll`): the offset capture from paged single, paged
+  spread with unequal page heights, and the strip, and its application into each layout.
 - **`StripSchedule`**
-  - V and P; promotion of a P1-pending page entering V;
+  - the sweep: a Pending page whose flag was set from outside, with no completion ever posted,
+    leaves Pending in the next pass and is re-requested if still wanted;
+  - V and P; promotion of a P1-pending page entering V; a page that failed at P1 entering V
+    gets one P0, a page that failed at P0 does not;
   - count room and byte room;
   - travel direction;
   - the cancel set and both cancel transitions (to None, to Ready-stale);
@@ -574,7 +609,8 @@ bumps it.
   - a page that is not Pending;
   - stale seq;
   - cancelled (with and without a stale bitmap) vs failed;
-  - success, recreate-target and other bitmap failures.
+  - success, recreate-target and other bitmap failures;
+  - a success whose submitted scale differs from the view's lands Ready-stale.
 - **`KickReason` dispatch** and **`EffectiveLayout`.** Table tests, including Spread off with the
   preference on, and a same-index tab switch mapping to `Navigate`.
 - **`ViewPrefs`.** A registry round trip under a test subkey, as the `MruList` tests do.
@@ -627,7 +663,8 @@ Scripted on a 50+ page fixture, with `ContinuousScroll=1` set before launch:
 | two-page on, then off, from mid-page | after off: same page box, same in-page offset (±1 DIP) |
 | a tab with two-page on (negative control) | no `WS_VSCROLL` on the canvas |
 | switch back to a strip tab | `WS_VSCROLL` present |
-| cold start in continuous mode | `LitePDF cold-start:` line present |
+| cold start in continuous mode | `WS_VSCROLL` present first (so the run really is the strip), then the `LitePDF cold-start:` line present |
+| strip tab A: Ctrl+G 20, then switch to strip tab B without scrolling | page box = B's own page, not 20 |
 
 PR 3 adds the same transition row through the menu item. From PR 4 onward, existing smoke steps
 that test paged behaviour set the preference off explicitly. Otherwise they would silently run in
@@ -657,8 +694,12 @@ first callback):
 1. Build a `DocumentView` on the 1000-page fixture with one worker, and hold that worker.
 2. Drive `StripSchedule` through 1000 successive viewports, top to bottom, as a drag would.
 3. Assert that the live (non-cancelled) queued requests never exceed |V| + |P| + 1.
-4. Release the worker and drain. Assert that started renders ≤ |final V| + |final P| + 1.
-5. Mutation check: with the cancel step removed, step 4's count exceeds the bound by hundreds.
+4. Halfway, call `cancel_background_renders()` from outside and run one pass: no page may stay
+   Pending with its flag set (the §5.2 sweep).
+5. Release the worker and drain. Assert that started renders ≤ |final V| + |final P| + 1, and
+   that every page of the final V ends Ready.
+6. Mutation checks: with the cancel step removed, step 5's count exceeds the bound by hundreds;
+   with the sweep removed, step 4 finds a stuck page.
 
 | Gate | PR | Condition |
 |---|---|---|
@@ -685,6 +726,8 @@ first callback):
   large document is O(N) on the UI thread (§4.4).
 - A null completion that cannot be posted leaves a page blank until it re-enters V (§5.3).
 - Changing the registry value while the app runs takes effect at the next start (§7.2).
+- A text build the worker skips because a P0 is queued (#98 skip rule 3) is not retried; a press
+  on that page builds its text synchronously, as in paged mode (§5.2).
 
 ## 11. Risk and review
 
@@ -750,3 +793,22 @@ questions. Every anchor was verified against the code; none was discarded. Overl
 | PR placement of the flag and the probes (Sonnet M5) | §8 |
 | Queue-size claim; flag store vs `engine->cancel`; null post failure (Opus negatives) | §5.2 step 3; §3.3; §5.3 known limit |
 | Large-document sizing time; message id (Sonnet questions 2, 3) | §4.4, §10; §3.3 |
+
+### 12.3 Spec gate, Codex lens (terra@medium, then luna@max, both at `f6b7916`)
+
+Both ran on the same pre-extracted evidence bundle. terra raised 1 finding and 2 questions; luna
+raised 8 findings. No overlap. Every anchor was verified; none was discarded.
+
+| Finding (lens) | Resolution |
+|---|---|
+| A late cancel on an L1 hit posts no completion, so a Pending page never learns it was cancelled (terra) | §5.2 step 0 sweep; §5.3 rule 4; §9.1; §9.4 steps 4 and 6 |
+| Which text request is cancelled is ambiguous (terra question) | §5.2 text prefetch: the text-only P1, never a P0 |
+| The scheduling gate never exercises an outside cancel (terra question) | §9.4 step 4 |
+| A derived-page change through `change_current_page` cancels the selection gesture (luna) | §3.4 `change_current_page` row (`set_strip_current_page`) |
+| The navigation pin leaks across strip-tab switches (luna) | §3.4 `set_view` row; §9.3 row |
+| A DPI change can accept an old-scale Pending render as current (luna) | §5.1 Pending records scale; §5.2 render-scale change; §5.3 rule 3 |
+| A text build skipped behind a queued P0 is never retried (luna) | Accepted as in paged mode (#98 allows any skip): §5.2, §10 |
+| A page that failed at P1 is never requested at P0 when it enters V (luna) | §5.1 Failed → None |
+| Spread position carry has no source coordinate, and `set_dual_page` zeroes the pan first (luna) | §3.4 layout-switch reset captures first; §7.3 carry rules; §9.1 |
+| Tab position cannot represent a viewport top in a gap (luna) | §4.5 `StripPos`; §7.4 |
+| The cold-start smoke row passes in paged mode too (luna) | §9.3 row checks `WS_VSCROLL` first |
