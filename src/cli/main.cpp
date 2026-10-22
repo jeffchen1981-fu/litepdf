@@ -9,12 +9,18 @@
 //
 // `--bench-selection [--page N] [--iterations N]` times the text-selection
 // work PdfCanvas does on the UI thread, page by page (#73; bench_selection.hpp).
+//
+// `--bench-page-sizes [--iterations N]` times DocumentView::page_sizes() on a
+// freshly opened document per iteration: the continuous-scroll page-sizing gate
+// (#55, spec section 4.4).
 
 #include "cli/bench_iteration.hpp"
 #include "cli/bench_selection.hpp"
 #include "cli/cli_args.hpp"
 #include "cli/render_to_ppm.hpp"
+#include "app/SearchDispatcher.hpp"
 #include "core/Document.hpp"
+#include "core/DocumentView.hpp"
 #include "core/Version.hpp"
 
 #include <algorithm>
@@ -22,9 +28,11 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -225,6 +233,37 @@ int run_selection_benchmark(const char* path, int only_page, int iterations) {
     return 0;
 }
 
+// --bench-page-sizes (#55, spec section 4.4): per iteration, open a fresh
+// Document, build a DocumentView on it, and time only the page_sizes() call, so
+// every sample sizes a cold document (the view caches the list for its life).
+int run_page_sizes_benchmark(const char* path, int iterations) {
+    litepdf::app::InlineDispatcher dispatcher;   // the view's search session needs one
+    std::vector<double> samples;
+    samples.reserve(static_cast<std::size_t>(iterations));
+    std::size_t pages = 0;
+    for (int i = 0; i < iterations; ++i) {
+        litepdf::core::Document doc;
+        if (auto err = doc.open(path)) {
+            std::fprintf(stderr, "Open error: %d\n", static_cast<int>(*err));
+            return 1;
+        }
+        try {
+            litepdf::core::DocumentView view(std::move(doc), dispatcher);
+            const auto t0 = std::chrono::steady_clock::now();
+            const auto& sizes = view.page_sizes();
+            const auto t1 = std::chrono::steady_clock::now();
+            pages = sizes.size();
+            samples.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "Could not build a view on %s: %s\n", path, e.what());
+            return 1;
+        }
+    }
+    std::printf("page_sizes: pages=%zu median_ms=%.3f max_ms=%.3f\n",
+                pages, vmedian(samples), *std::max_element(samples.begin(), samples.end()));
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -242,7 +281,8 @@ int main(int argc, char* argv[]) {
         std::fprintf(stderr,
             "Usage: %s --version\n"
             "       %s <file> [--render N | --benchmark [--iterations N] [--json]\n"
-            "                  | --bench-selection [--page N] [--iterations N]]\n",
+            "                  | --bench-selection [--page N] [--iterations N]\n"
+            "                  | --bench-page-sizes [--iterations N]]\n",
             argv[0], argv[0]);
         return 2;
     }
@@ -255,6 +295,9 @@ int main(int argc, char* argv[]) {
     const char* path = opt.path;
     const int render_page = opt.render_page;
 
+    if (opt.bench_page_sizes) {
+        return run_page_sizes_benchmark(path, opt.iterations);
+    }
     if (opt.bench_selection) {
         return run_selection_benchmark(path, opt.selection_page, opt.iterations);
     }

@@ -46,6 +46,8 @@ std::optional<std::string> parse_cli_args(int argc, const char* const* argv,
             out.json = true;
         } else if (std::strcmp(argv[i], "--bench-selection") == 0) {
             out.bench_selection = true;
+        } else if (std::strcmp(argv[i], "--bench-page-sizes") == 0) {
+            out.bench_page_sizes = true;
         } else if (std::strcmp(argv[i], "--page") == 0) {
             // A missing value is an error, not "every page": that would turn a
             // typo into a whole-document run, minutes long on a big file.
@@ -55,6 +57,19 @@ std::optional<std::string> parse_cli_args(int argc, const char* const* argv,
         } else {
             return std::string("unknown argument '") + argv[i] + "'";
         }
+    }
+
+    // Checked before the --bench-selection block, which would otherwise accept
+    // --bench-selection beside it.
+    if (out.bench_page_sizes) {
+        if (out.benchmark || out.render_page >= 0 || out.json || out.bench_selection
+            || out.selection_page >= 0) {
+            return "--bench-page-sizes excludes --benchmark, --render, --json, "
+                   "--bench-selection and --page";
+        }
+        // One sample per freshly opened document (spec section 4.4's gate).
+        if (!iterations_set) out.iterations = 9;
+        return std::nullopt;
     }
 
     if (out.bench_selection) {
@@ -73,7 +88,7 @@ std::optional<std::string> parse_cli_args(int argc, const char* const* argv,
     // --iterations / --json are only meaningful with --benchmark (spec §3.1).
     if (!out.benchmark && (out.json || iterations_set)) {
         return "--iterations/--json are only valid with --benchmark "
-               "(--iterations also with --bench-selection)";
+               "(--iterations also with --bench-selection or --bench-page-sizes)";
     }
     return std::nullopt;
 }
