@@ -89,8 +89,9 @@ New logic lives in these units, not inline in `PdfCanvas.cpp` (already ~2100 lin
   - `request_page_render(page, priority, cb, on_text = {}) -> RenderEngine::RenderToken`, with a
     caller-owned `cancel_flag`. It calls `release_l1_pin()` first, as both existing request
     functions do. Today `request_render` discards the token.
-  - `l1_holds(page)`: whether L1 has the page at the current scale and polarity (§5.2 text
-    prefetch). Read-only, under the cache mutex.
+  - `l1_contains(page)`: whether L1 has the page at the current scale and polarity, without
+    changing its LRU recency (`PageCache::l1_contains`). The existing `l1_holds` refreshes
+    recency and stays test-only.
   - `cancel_thumbnail_renders()` = `cancel_all_below_priority(2)`, which flags queued P3 only
     (§5.2).
   - PR 3: a set-taking **overload** of `trim_l1_for_background` and
@@ -326,7 +327,7 @@ for a page that is not in L1 would rasterise it again. So:
 - When a P0 is submitted for the page that will be the current page (the largest-visible-area
   page of the pass), it carries `on_text`, with `text_wanted` set to that page.
 - When the derived current page changes to page c, or c's P0 completes while c is current, and
-  c's text is neither in the slot nor pending: if `l1_holds(c)`, submit a text-carrying
+  c's text is neither in the slot nor pending: if `l1_contains(c)`, submit a text-carrying
   `request_page_render(c, P1, cb, on_text)` and cancel the earlier **text-only P1**, if any. A P0
   that carries `on_text` is never cancelled for text reasons: moving `text_wanted` to c already
   makes its text build skip (#98 skip rule 2). If c is not in L1, submit nothing; a press on c
@@ -546,7 +547,7 @@ Every PR leaves paged single and paged spread behaviour, and the existing tests,
      unit tests;
    - the `DocumentView` continuous flag (no refit on a page change), with its test;
    - `page_sizes()`, the §9.4 fixtures, and the §4.4 gate measurement;
-   - `request_page_render` (releases the pin), `l1_holds`, `cancel_thumbnail_renders`;
+   - `request_page_render` (releases the pin), `l1_contains`, `cancel_thumbnail_renders`;
    - `ViewPrefs`, default off;
    - the started-render counter and the §9.4 in-process scheduling test harness.
 2. **The strip renders and scrolls**, reachable only through the registry value:
@@ -603,7 +604,7 @@ bumps it.
   - travel direction;
   - the cancel set and both cancel transitions (to None, to Ready-stale);
   - the thumbnail cancel only when V changed;
-  - the text request: on the predicted current page's P0, and as a P1 only when `l1_holds`;
+  - the text request: on the predicted current page's P0, and as a P1 only when `l1_contains`;
   - full reschedule on a scale change, keeping stale bitmaps.
 - **`StripCompletion`**
   - epoch mismatch;
@@ -620,7 +621,7 @@ bumps it.
   - a token is returned;
   - `request_page_render` releases the pin: after `trim_l1_for_background(0)`, a rendered page 5
     is admitted to L1;
-  - `l1_holds`;
+  - `l1_contains`;
   - `page_sizes()`, including the size-failure fallbacks;
   - the set-taking `retain_l1_pages` overload (PR 3).
 

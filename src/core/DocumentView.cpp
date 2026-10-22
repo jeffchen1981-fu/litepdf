@@ -13,6 +13,7 @@
 #include "core/SearchSession.hpp"
 #include "core/ThumbCache.hpp"
 #include "core/ThumbnailRenderer.hpp"
+#include "core/detail/PageSizeFill.hpp"
 #include "core/detail/PrefetchPlan.hpp"
 #include "core/detail/ZoomMath.hpp"
 #include "ui/ThumbnailPane.hpp"
@@ -91,6 +92,13 @@ struct DocumentView::Impl {
     // turn loads only the page it has not sized yet; a page's size does not
     // change for the life of the Document. UI thread only.
     std::vector<std::optional<PageSize>> page_sizes;
+    // (#55) DocumentView::page_sizes(): every page's size, fallbacks
+    // included, built once. Separate from `page_sizes` above so a fallback
+    // never lands there: estimated_bytes must keep seeing an unreadable page
+    // as unknown (#49). UI thread only.
+    std::vector<PageSize>  strip_sizes;
+    bool                   strip_sized   = false;
+    bool                   continuous    = false;  // #55, spec §4.3
 
     // Estimated L1 bytes of `page` at `scale`; 0 when its size is unknown.
     // Document::page_size throws on a page it cannot size: a PDF page object
@@ -263,10 +271,36 @@ bool DocumentView::set_current_page(int idx) {
     impl_->text_slot = Document::TextPage{};
     impl_->text_wanted->store(-1, std::memory_order_relaxed);
     // Recompute the percentage if not Custom (page size may differ per page).
-    if (impl_->zm != ZoomMode::Custom) {
+    // (#55) Not in the strip: its one zoom is refit only at fit events
+    // (spec §4.3), or a page of another size would re-layout the strip.
+    if (!impl_->continuous && impl_->zm != ZoomMode::Custom) {
         set_viewport(impl_->vp_w, impl_->vp_h, impl_->dpi);
     }
     return true;
+}
+
+void DocumentView::set_continuous(bool on) noexcept {
+    impl_->continuous = on;
+}
+
+bool DocumentView::continuous() const noexcept {
+    return impl_->continuous;
+}
+
+const std::vector<PageSize>& DocumentView::page_sizes() {
+    if (impl_->strip_sized) return impl_->strip_sizes;
+    const std::size_t n = impl_->doc.page_count();
+    auto& cache = impl_->page_sizes;
+    if (cache.size() < n) cache.resize(n);
+    // Reads through the #49 size cache and fills it with every size that
+    // reads; a page that throws is left unknown there, and fill_page_sizes
+    // gives it its stand-in in strip_sizes only.
+    impl_->strip_sizes = detail::fill_page_sizes(n, [&](std::size_t i) {
+        if (!cache[i]) cache[i] = impl_->doc.page_size(i);
+        return *cache[i];
+    });
+    impl_->strip_sized = true;
+    return impl_->strip_sizes;
 }
 
 DocumentView::ZoomMode DocumentView::zoom_mode() const noexcept {
@@ -469,6 +503,30 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb,
     }
 }
 
+RenderEngine::RenderToken DocumentView::request_page_render(
+        int page, int priority, RenderCb on_complete,
+        std::shared_ptr<std::atomic<bool>> cancel_flag, TextCb on_text) {
+    impl_->cache->release_l1_pin();  // (#159) the tab is shown again
+    RenderEngine::RenderRequest req;
+    req.page_num    = page;
+    req.priority    = priority;
+    req.scale       = render_scale();
+    req.on_complete = std::move(on_complete);
+    req.invert      = impl_->invert_colors;  // Phase 8 D7
+    req.cancel_flag = std::move(cancel_flag);  // #117
+    if (on_text && wants_text_prefetch(page)) {  // #98
+        impl_->text_wanted->store(page, std::memory_order_relaxed);
+        req.on_text     = std::move(on_text);
+        req.text_wanted = impl_->text_wanted;
+    }
+    return impl_->engine->submit(std::move(req));
+}
+
+void DocumentView::cancel_thumbnail_renders() {
+    // Flags queued requests above P2: the thumbnails' P3 only.
+    impl_->engine->cancel_all_below_priority(2);
+}
+
 std::size_t DocumentView::queued_render_count() const noexcept {
     return impl_->engine->pending_count();
 }
@@ -488,6 +546,10 @@ bool DocumentView::l1_holds(int page) const {
     if (!p) return false;
     fz_drop_pixmap(impl_->ui_ctx.get(), p);
     return true;
+}
+
+bool DocumentView::l1_contains(int page) const {
+    return impl_->cache->l1_contains(page, render_scale(), impl_->invert_colors);
 }
 
 bool DocumentView::has_text_for(int page) const noexcept {
