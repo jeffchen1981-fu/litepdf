@@ -98,6 +98,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_cli_args.cpp             # #100 strict CLI argument parsing
     unit/test_text_prefetch_engine.cpp # #98
     unit/test_text_prefetch_view.cpp   # #98
+    unit/test_render_engine_counter.cpp # #55 renders_started
     unit/test_mupdf_error_state.cpp    # #146 rule outside Document
     unit/test_strip_layout.cpp         # #55 PR 1 Task 1
     unit/test_strip_scroll.cpp         # #55 PR 1 Task 2

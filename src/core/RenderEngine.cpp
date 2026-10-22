@@ -74,6 +74,10 @@ struct RenderEngine::Impl {
     // (#98) Bumped immediately before every TextPageAccess::build call in
     // maybe_deliver_text. Test observability only (text_builds_started()).
     std::atomic<std::size_t> text_builds{0};
+    // (#55) Bumped once per cache-using request that passes checkpoint A and
+    // misses L1, just before the L2 lookup / rasterise. Test observability only
+    // (renders_started()).
+    std::atomic<std::size_t> renders_started{0};
 
     // (#98) Called after on_complete has delivered a NON-NULL pixmap for `req`.
     // Builds the page's text on this worker's own context and document -- no
@@ -194,6 +198,11 @@ struct RenderEngine::Impl {
                     continue;  // skip MuPDF work entirely
                 }
             }
+
+            // (#55) Past checkpoint A and the L1 check: this request will build
+            // or reuse a display list and rasterise. bypass_cache (thumbnail)
+            // requests are not counted.
+            if (!req.bypass_cache) impl->renders_started.fetch_add(1);
 
             // L2 check — display list cache hit; else build one.
             // D18: bypass_cache requests skip L2 read so thumb display lists
@@ -488,6 +497,10 @@ void RenderEngine::begin_shutdown() noexcept {
 
 std::size_t RenderEngine::text_builds_started() const noexcept {
     return impl_->text_builds.load();
+}
+
+std::size_t RenderEngine::renders_started() const noexcept {
+    return impl_->renders_started.load();
 }
 
 RenderEngine::~RenderEngine() {

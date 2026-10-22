@@ -531,6 +531,10 @@ std::size_t DocumentView::queued_render_count() const noexcept {
     return impl_->engine->pending_count();
 }
 
+std::size_t DocumentView::renders_started() const noexcept {
+    return impl_->engine->renders_started();
+}
+
 void DocumentView::trim_l1_for_background(int page, int other_page) {
     impl_->cache->retain_l1_pages(render_scale(), impl_->invert_colors, page,
                                   other_page);

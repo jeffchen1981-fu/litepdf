@@ -288,6 +288,11 @@ public:
     // a worker, cancelled ones included. Test observability only.
     [[nodiscard]] std::size_t queued_render_count() const noexcept;
 
+    // (#55) Renders this view's engine has started: not cancelled before a
+    // worker took them, not served from L1, not thumbnails. Test observability
+    // only.
+    [[nodiscard]] std::size_t renders_started() const noexcept;
+
     // (#159) L1 entries this view's cache holds, and whether one is `page` at
     // the current render scale and polarity. Test observability only.
     [[nodiscard]] std::size_t l1_entry_count() const;
