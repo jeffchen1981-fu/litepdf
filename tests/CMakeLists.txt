@@ -103,6 +103,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_strip_scroll.cpp         # #55 PR 1 Task 2
     unit/test_strip_carry.cpp          # #55 PR 1 Task 3
     unit/test_strip_schedule.cpp       # #55 PR 1 Task 4
+    unit/test_strip_completion.cpp     # #55 PR 1 Task 5
     # The CLI helpers under test are compiled straight into the test binary
     # (they are not part of litepdf_core). All are MuPDF-header-free and
     # resolve their fz_* calls through the litepdf::mupdf dependency that
