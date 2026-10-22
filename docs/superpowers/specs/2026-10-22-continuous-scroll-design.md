@@ -202,6 +202,13 @@ for D2D.
 
   A format that misses its gate opens in paged mode, with the menu item greyed for that tab, and
   a follow-up issue is filed. There is no lazy or estimated sizing in this phase.
+
+  Measured in PR 1 (medians of 9): 1000-page PDF 0.410 ms, EPUB 2.329 ms, CBZ 1.770 ms; the
+  10,000-page PDF took 3.619 ms.
+- **Formats without a gate reading.** `Document` also opens XPS, FB2 and SVG
+  (`Document.cpp`'s `kAllowedExts`). XPS and FB2 have no reading above, so they get
+  `format_ok = false` and stay paged until a follow-up measures them. SVG always opens as a
+  single page and counts as passing.
 - **Large documents.** PR 1 also records (not gates) the time for a 10,000-page PDF. Sizing is
   O(N) on the UI thread; above 100 ms at 10,000 pages a follow-up issue is filed (§10).
 - **A page whose size cannot be read.** If `page_size` throws for page `i`, page `i` takes page
@@ -239,6 +246,8 @@ a re-layout. Without this, the track position and the re-layout would fight over
   Rules 1-2 matter at low zoom, where several pages are fully visible and tie: without them,
   scrolling to the bottom would report a page several pages before the last. Rules 1-2 apply
   only when the strip is at least 1 DIP taller than the viewport; otherwise rule 3 decides.
+  Both use a 0.5-DIP tolerance: "at its maximum" means within 0.5 DIP of `total − vp_h`, and
+  "== 0" means within 0.5 DIP of 0 (`StripScroll.hpp`'s `derive_current_page`).
 - **When it is recomputed.** After every scroll input and every re-layout. The observer fires
   only when the value changes.
 - **Navigation intent.** An explicit navigation (§6.3) sets the current page to its target
@@ -425,8 +434,10 @@ viewport or `W` is wider than it. The existing cursor rules then apply unchanged
   view, and an empty canvas after the last tab closes have no scrollbar.
 - `SIF_DISABLENOSCROLL` keeps it visible while the content fits.
 - Scrollbar units are rounded DIPs: `nMin = 0`, `nMax = total − 1`, `nPage` = viewport height.
-  Win32's largest `nPos` is then `nMax − nPage + 1 = total − viewport`, the same as `scroll_y`'s
-  maximum. 67 M is well within `int`.
+  Win32's largest `nPos` is then `nMax − nPage + 1`, which, because of the rounding, can differ
+  from the exact maximum scroll (`total − vp_h`) by up to about 1 DIP. So a thumb or track
+  position equal to the largest `nPos` maps to the exact maximum scroll, 0 maps to 0, and every
+  other position maps 1:1 to `scroll_y`. 67 M is well within `int`.
 - A thumb drag reads `GetScrollInfo(SIF_TRACKPOS)`, which is 32-bit. `WM_VSCROLL`'s
   `HIWORD(wParam)` is only 16-bit and wraps above 65535.
 - The scrollbar arrows act as ↑/↓, and track clicks act as PgUp/PgDn.
@@ -499,6 +510,10 @@ in reading order.
 | else preference on and the format passed §4.4 | continuous |
 | else | paged single |
 
+"The format passed §4.4" means both that the format passes (XPS and FB2 do not yet; SVG does)
+and that the document has at least one page: a 0-page view stays paged (§4.6, "0 pages: no
+strip").
+
 - **Choosing Continuous Scroll in a spread tab** turns the preference on and turns that tab's
   spread off. Turning spread on does not change the preference, and turning it off returns to
   the preference's layout. Changing the preference re-applies the effective layout to the active
@@ -508,7 +523,7 @@ in reading order.
 - **Position carry, within one tab** (spread toggle, menu item). The carried value is
   (page, in-page offset in DIP), captured before the reset (§3.4):
   - **From paged single.** page = the current page; offset = how far the page has been scrolled
-    into, `max(0, −pan_y − page_origin_y)` (0 when the page fits).
+    into, `−pan_y − page_origin_y`, clamped to [0, the page's height] (0 when the page fits).
   - **From paged spread.** page = the spread's left page; offset = how far the viewport top is
     below that page's top inside the union placement (`content_extent`'s box), clamped to
     [0, the left page's height]. So unequal page heights are measured on the left page alone.
