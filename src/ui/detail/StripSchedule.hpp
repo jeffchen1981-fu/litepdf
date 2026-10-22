@@ -277,9 +277,9 @@ public:
 
     // A render scale or polarity change (spec 5.1, 5.2). Every Pending request is
     // cancelled and every Failed page forgotten; Ready bitmaps stay and are
-    // stale by is_stale() from the next pass on, which carries the new values
-    // in its ScheduleInput -- so the parameters are not stored here.
-    void change_render_params(float /*scale*/, bool /*invert*/) {
+    // stale by is_stale() from the next pass on, which carries the new scale
+    // and polarity in its ScheduleInput -- so this call takes no parameters.
+    void change_render_params() {
         for (auto& [page, s] : slots_) {
             if (s.kind == PageStateKind::Pending)
                 cancel_pending(s);

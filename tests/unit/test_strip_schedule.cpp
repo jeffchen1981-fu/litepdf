@@ -271,7 +271,7 @@ TEST_CASE("StripSchedule: two quick scale changes keep the stale bitmap", "[ui][
     FakeSubmitter out;
     s.slots()[0] = ready(1.0f);
 
-    s.change_render_params(2.0f, false);
+    s.change_render_params();
     CHECK(s.slot(0)->kind == PageStateKind::Ready);
     CHECK(is_stale(*s.slot(0), 2.0f, false));
 
@@ -285,7 +285,7 @@ TEST_CASE("StripSchedule: two quick scale changes keep the stale bitmap", "[ui][
     CHECK(s.slot(0)->scale == 2.0f);
     const Flag first = s.slot(0)->cancel_flag;
 
-    s.change_render_params(3.0f, false);
+    s.change_render_params();
     CHECK(first->load());
     CHECK(s.slot(0)->kind == PageStateKind::Ready);
     CHECK(s.slot(0)->scale == 1.0f);
@@ -412,7 +412,7 @@ TEST_CASE("StripSchedule: a page that failed at P0 is requested again after a sc
     FakeSubmitter out;
     s.slots()[3] = failed(0);
 
-    s.change_render_params(2.0f, false);
+    s.change_render_params();
     CHECK(s.slot(3)->kind == PageStateKind::None);
 
     ScheduleInput in = input({3, 3});

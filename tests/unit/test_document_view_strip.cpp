@@ -274,7 +274,9 @@ TEST_CASE("PageCache: l1_contains does not change LRU order", "[core][cache][l1]
     fz_drop_context(ctx);
 }
 
-TEST_CASE("DocumentView: cancel_thumbnail_renders leaves strip requests alone",
+// The queued P3 (a thumbnail's priority) is the positive half: without it a
+// no-op cancel_thumbnail_renders would pass. The P0 and P1 are the strip's.
+TEST_CASE("DocumentView: cancel_thumbnail_renders flags a queued P3 but no strip request",
           "[core][view][strip]") {
     InlineDispatcher disp;
     auto view = one_worker_view(disp);
@@ -282,17 +284,26 @@ TEST_CASE("DocumentView: cancel_thumbnail_renders leaves strip requests alone",
 
     auto flag0 = std::make_shared<std::atomic<bool>>(false);
     auto flag1 = std::make_shared<std::atomic<bool>>(false);
+    auto flag3 = std::make_shared<std::atomic<bool>>(false);
     auto out0  = std::make_shared<Outcome>();
     auto out1  = std::make_shared<Outcome>();
+    auto out3  = std::make_shared<Outcome>();
     auto fut0  = out0->got_pixmap.get_future();
     auto fut1  = out1->got_pixmap.get_future();
+    auto fut3  = out3->got_pixmap.get_future();
     (void)view->request_page_render(2, 0, record(out0), flag0);
     (void)view->request_page_render(3, 1, record(out1), flag1);
+    (void)view->request_page_render(4, 3, record(out3), flag3);
 
     view->cancel_thumbnail_renders();
+    REQUIRE(flag3->load());
+    REQUIRE_FALSE(flag0->load());
+    REQUIRE_FALSE(flag1->load());
+
     guard.release();
     REQUIRE(wait_outcome(fut0));
     REQUIRE(wait_outcome(fut1));
+    REQUIRE_FALSE(wait_outcome(fut3));
     REQUIRE_FALSE(flag0->load());
     REQUIRE_FALSE(flag1->load());
 }
