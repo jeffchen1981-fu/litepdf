@@ -701,7 +701,10 @@ first callback):
 5. Release the worker and drain. Assert that started renders ≤ |final V| + |final P| + 1, and
    that every page of the final V ends Ready.
 6. Mutation checks: with the cancel step removed, step 5's count exceeds the bound by hundreds;
-   with the sweep removed, step 4 finds a stuck page.
+   with the sweep disabled (a flagged Pending page never counts as swept), step 4 finds a stuck
+   page. Emptying only the plan's sweep list is not a discriminating mutant: the plan already
+   judges a flagged page by its cancel transition and resubmits or cancels it in the same pass,
+   so the test also asserts that every flagged page appears in that list.
 
 | Gate | PR | Condition |
 |---|---|---|
