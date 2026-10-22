@@ -86,8 +86,8 @@ New logic lives in these units, not inline in `PdfCanvas.cpp` (already ~2100 lin
 - **`DocumentView`**
   - A continuous flag. While it is set, `set_current_page` does not re-derive the fit (§4.3).
   - `page_sizes()` returns every page's size, built on the existing private cache (§4.4).
-  - `request_page_render(page, priority, cb, on_text = {}) -> RenderEngine::RenderToken`, with a
-    caller-owned `cancel_flag`. It calls `release_l1_pin()` first, as both existing request
+  - `request_page_render(page, priority, on_complete, cancel_flag, on_text = {}) ->
+    RenderEngine::RenderToken`, where `cancel_flag` is caller-owned. It calls `release_l1_pin()` first, as both existing request
     functions do. Today `request_render` discards the token.
   - `l1_contains(page)`: whether L1 has the page at the current scale and polarity, without
     changing its LRU recency (`PageCache::l1_contains`). The existing `l1_holds` refreshes
