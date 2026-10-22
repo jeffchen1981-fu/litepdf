@@ -20,6 +20,7 @@
   - `$ctest = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe"`
   - build tests: `& $cmake --build build --target litepdf_unit_tests --config Release`; everything: `& $cmake --build build --config Release`
   - targeted run from the repo root: `build\tests\Release\litepdf_unit_tests.exe "<name or wildcard>"`
+  - **Every "run" step in a task means: build the test target first, then run.** The executable does not rebuild itself; running it without a build tests a stale binary. A "see it fail" step that expects a compile error means the *build* fails.
   - full suite from **PowerShell** at the repo root: `& $ctest --test-dir build -C Release` (read the count with `-N` first; 534 at `5a40d5e`).
 - `TEST_CASE` names: pure ASCII, prefixed by subsystem (`StripLayout: `, `StripScroll: `, `StripCarry: `, `StripSchedule: `, `StripCompletion: `, `EffectiveLayout: `, `DocumentView: `, `PageCache: `, `RenderEngine: `, `ViewPrefs: `, `StripFixtures: `, `CliArgs: `), because `ctest -R` matches names.
 - **Existing tests are not edited** (spec §9.2). New behaviour comes through new functions or overloads; no existing signature changes.
@@ -29,7 +30,8 @@
 - **Spec deviations, decided here** (each task that owns one patches the spec in its commit):
   1. §3.3 names a new `DocumentView::l1_holds(page)`. One already exists (test observability, `DocumentView.cpp:485`) and it calls `PageCache::get_pixmap`, which refreshes the entry's LRU recency — a scheduler query must not reorder L1. This PR adds a non-bumping `PageCache::l1_contains` and `DocumentView::l1_contains` and leaves `l1_holds` untouched. Task 7 replaces every `l1_holds` mention in the spec with `l1_contains`.
   2. §3.4's Spread row says the spread-off kick "runs as `TabSwitch` (refit, restore, reschedule)". Restoring the tab's stored position would overwrite the §7.3 carry just applied, so the `Spread` actions are refit, readout, relayout and reschedule **without** restore. Task 6 patches that row.
-  3. §4.6's rules 1–2 (bottom → last page, top → page 0) apply only when the strip is taller than the viewport. When it fits, max scroll is 0 and rule 1 would report the last page at the top; rule 3 then decides (all pages tie → page 0). Task 2 patches §4.6.
+  3. §4.6's rules 1–2 (bottom → last page, top → page 0) apply only when the strip is taller than the viewport by at least 1 DIP (`total − vp_h >= 1`). Otherwise max scroll is (about) 0, both rules would fire at once, and rule 1 would report the last page at the top; rule 3 then decides. Task 2 patches §4.6.
+  4. §7.3 "Into the strip" says `scroll_y = anchor(page) + offset`, but the carried offset is measured from the page's top, and `anchor = top − G`, so a scrolled page would land 8 DIP short. The rule is: offset 0 → `anchor(page)` (where navigation puts the page); offset > 0 → `top(page) + offset`. Task 3 patches §7.3.
 - Commit messages: conventional commits, English, ending with `Co-Authored-By: <the model that wrote the commit> <noreply@anthropic.com>`. In this worktree `git add` files by name (`git commit -a` trips over the MuPDF junction).
 - No `VERSION` change and no CHANGELOG entry in this PR (no user-visible change).
 
@@ -72,7 +74,7 @@
   3. `StripLayout: visible range at boundaries` — at zoom 1.0: `visible(0,8)` is empty (the top gap); `visible(0,9)` is `{0,0}`; `visible(208,216)` is empty (gap after page 0); `visible(207,217)` is `{0,1}`; `visible(631,632)` is empty; `visible(0,632)` is `{0,2}`.
   4. `StripLayout: position_at and y_of round-trip in pages and gaps` — for y in `{0, 4, 8, 100, 208, 212, 216, 623.9, 628}`: `y_of(position_at(y)) == Approx(y).margin(1e-9)`; `position_at(4)` is `InGapAfter{-1, 0.5}`; `position_at(212)` is `InGapAfter{0, 0.5}`; `position_at(108)` is `InPage{0, 0.5}`.
   5. `StripLayout: widest of a range` — widths `{100, 50, 100}`: `widest({1,1})==50`, `widest({0,2})==100`, `widest({})==0`.
-  6. `StripLayout: double precision at 10000 pages and 800 percent` — 10,000 A4 pages (595×842 pt) at 8.0 (`top(9999) == 67433264`): `top(9999) - top(9998) == 842*8 + 8` exactly; `position_at(top(9999) + 1)` is `InPage{9999, f}` with `f > 0` and `y_of` of it `== top(9999) + 1`. Control in the same test, proving the assertion can fail under `float`: `CHECK(static_cast<float>(l.top(9999)) + 1.0f == static_cast<float>(l.top(9999)))` — at 67 M, `float`'s spacing is 8, so a 1-DIP step is lost. (A `float` *difference* control would not work: every top here is a multiple of 8 and therefore exact in `float`.)
+  6. `StripLayout: double precision at 10000 pages and 800 percent` — 10,000 pages of 595×**842.5** pt at 8.0 (page height 6740, step 6748, `top(9999) == 67473260`): `top(9999) - top(9998) == 6748` exactly; `position_at(top(9999) + 1)` is `InPage{9999, f}` with `f > 0` and `y_of` of it `== top(9999) + 1`. Two controls in the same test, proving the assertions can fail under `float`: (a) accumulating the same 10,000 steps in a local `float` gives `top9999_f - top9998_f != 6748` (842.5 is chosen so the sums are not all multiples of `float`'s spacing; with 842 pt every sum is a multiple of 8 and exact in `float`, which would blind the test); (b) `CHECK(static_cast<float>(l.top(9999)) + 1.0f == static_cast<float>(l.top(9999)))` — at 67 M `float`'s spacing is 8, so a 1-DIP step is lost.
   7. `StripLayout: zero pages` — `page_count()==0`, `total_height()==0`, `visible(0,100).empty()`.
 
 - [ ] **Step 2: Run them and see them fail** — `build\tests\Release\litepdf_unit_tests.exe "StripLayout: *"` → compile error (header missing).
@@ -88,6 +90,7 @@
 **Files:**
 - Create: `src/ui/detail/StripScroll.hpp`
 - Test: `tests/unit/test_strip_scroll.cpp`
+- Modify: `docs/superpowers/specs/2026-10-22-continuous-scroll-design.md` §4.6 (spec deviation 3)
 
 **Interfaces:**
 - Consumes: Task 1 (`StripLayout`, `StripPos`, `StripRange`, `kStripGapDip`).
@@ -95,7 +98,7 @@
   - `inline constexpr double kStripArrowStepDip = 100.0;` and `inline constexpr double kStripPageStepFraction = 0.9;`
   - `double clamp_strip_scroll(double y, double total, double vp_h) noexcept;` — `[0, max(0, total − vp_h)]`; NaN → 0
   - `double relayout_scroll(const StripPos& top_point, const StripLayout& next, double vp_h);` — `clamp_strip_scroll(next.y_of(top_point), …)` (§4.5)
-  - `int derive_current_page(const StripLayout& l, double scroll_y, double vp_h);` — §4.6 rules in order, rules 1–2 only when the strip is taller than the viewport (`total > vp_h`, spec deviation 3): at max scroll → last page; at 0 → page 0; else largest visible height, ties to the lower index; 0 pages → −1
+  - `int derive_current_page(const StripLayout& l, double scroll_y, double vp_h);` — §4.6 rules in order, rules 1–2 only when `total − vp_h >= 1` (spec deviation 3): at max scroll → last page; at 0 → page 0; else largest visible height, ties to the lower index; 0 pages → −1
   - `class CurrentPageTracker { public: void navigate(int page) noexcept; void scroll_input() noexcept; int recompute(const StripLayout& l, double scroll_y, double vp_h); int current() const noexcept; bool pinned() const noexcept; void reset() noexcept; };` — `navigate` sets and pins; `scroll_input` ends the pin; `recompute` keeps the pinned page while pinned, else derives; `reset` clears page to 0 and the pin (used by `set_view` in PR 2)
   - `double effective_pan_x(double desired, double widest, double vp_w) noexcept;` — `clamp_pan` semantics in `double`: `widest <= vp_w` → 0, else clamp to `[vp_w − widest, 0]`
   - `double apply_pan_x_delta(double desired, double delta, double widest, double vp_w) noexcept;` — `effective_pan_x(effective_pan_x(desired,…) + delta, …)`
@@ -106,14 +109,14 @@
   2. `StripScroll: relayout keeps the viewport-top point` — top point `position_at(108)` (`InPage{0,0.5}`) re-laid out at zoom 2.0 → `top(0)+0.5*400 == 208`; a point in the gap after page 0 at zoom 2.0 → `top(0)+400+4 == 412`.
   3. `StripScroll: current page at the bottom is the last page` — 10 pages of 100×100 pt at zoom 1.0, `vp_h=500` (four pages fully visible): at `scroll_y == total − 500`, `derive_current_page == 9`; at `scroll_y == 0`, `== 0`; at `scroll_y == anchor(3)`, `== 3` (tie among 3..6 → lowest).
   4. `StripScroll: current page is the one with the largest visible height` — 3-page layout, `vp_h=150`, `scroll_y=150` (page 0 shows 58, page 1 shows 84): `== 1`.
-  4b. `StripScroll: a strip that fits the viewport reports page 0` — 3 pages of 100×100 pt at zoom 1.0 (`total == 332`), `vp_h=700`: `derive_current_page(l, 0, 700) == 0` (rule 1 must not fire when max scroll is 0).
+  4b. `StripScroll: a strip that fits the viewport is decided by visible height` — the 3-page layout (heights 200/100/300, `total == 632`), `vp_h=700`: `derive_current_page(l, 0, 700) == 2` (rule 3: page 2 shows the most; rule 1 must not fire, and a "fits → page 0" shortcut would wrongly give 0). Near-fit: the same layout with `vp_h = 631.75` (`total − vp_h = 0.25 < 1`) at `scroll_y = 0` → also 2, not "last page by rule 1" and not "page 0 by rule 2".
   5. `StripScroll: navigation pins until scroll input` — tracker: `navigate(9)` at a scroll where derivation says 8 → `recompute == 9`; a second `recompute` after a re-layout still 9; `scroll_input()` then `recompute` → derived value.
   6. `StripScroll: desired pan_x survives a wide page leaving view` — `vp_w=600`: desired −300 with widest 1000 → effective −300; with widest 500 (wide page gone) → effective 0 while the stored desired stays −300; widest 1000 again → −300. `apply_pan_x_delta(-300, -500, 1000, 600) == -400`.
   7. `StripScroll: page_x centres a narrow page and pans a wide one` — `vp_w=600`, widest 1000, pan −200: `page_x(400,…) == 100`; `page_x(1000,…) == -200`; `page_x(800,…) == -200 + 100 == -100`.
 
 - [ ] **Step 2: Run and see them fail** — `build\tests\Release\litepdf_unit_tests.exe "StripScroll: *"` → compile error.
 
-- [ ] **Step 3: Implement `StripScroll.hpp`.** `derive_current_page` uses `l.visible(scroll_y, scroll_y + vp_h)` and compares clipped heights; "at max" means `total > vp_h && scroll_y >= (total - vp_h) - 0.5`, and "at 0" means `total > vp_h && scroll_y <= 0.5`. In the spec's §4.6, after the three rules, add: "Rules 1–2 apply only when the strip is taller than the viewport; a strip that fits is decided by rule 3."
+- [ ] **Step 3: Implement `StripScroll.hpp`.** `derive_current_page` uses `l.visible(scroll_y, scroll_y + vp_h)` and compares clipped heights; "tall" means `total - vp_h >= 1`; "at max" means `tall && scroll_y >= (total - vp_h) - 0.5`, and "at 0" means `tall && scroll_y <= 0.5` (with `tall`, the two cannot both hold). In the spec's §4.6, after the three rules, add: "Rules 1–2 apply only when the strip is at least 1 DIP taller than the viewport; otherwise rule 3 decides."
 
 - [ ] **Step 4: Run and see them pass.**
 
@@ -124,6 +127,7 @@
 **Files:**
 - Create: `src/ui/detail/StripCarry.hpp`
 - Test: `tests/unit/test_strip_carry.cpp`
+- Modify: `docs/superpowers/specs/2026-10-22-continuous-scroll-design.md` §7.3 "Into the strip" (spec deviation 4)
 
 **Interfaces:**
 - Consumes: Task 1 (`StripLayout`), Task 2 (`clamp_strip_scroll`), `ui/detail/ViewportMath.hpp` (`clamp_pan`).
@@ -132,20 +136,20 @@
   - `CarriedPosition carry_from_paged_single(int page, double pan_y, double page_origin_y, double page_h) noexcept;` — offset `clamp(−pan_y − page_origin_y, 0, page_h)`
   - `CarriedPosition carry_from_spread(int left_page, double pan_y, double left_top_in_union, double left_h) noexcept;` — offset `clamp(−pan_y − left_top_in_union, 0, left_h)`
   - `CarriedPosition carry_from_strip(const StripLayout& l, int page, double scroll_y);` — offset `clamp(scroll_y − l.top(page), 0, l.height(page))`
-  - `double strip_scroll_for(const StripLayout& l, const CarriedPosition& c, double vp_h);` — `clamp_strip_scroll(l.anchor(c.page) + c.offset_dip, …)`
+  - `double strip_scroll_for(const StripLayout& l, const CarriedPosition& c, double vp_h);` — `clamp_strip_scroll(c.offset_dip == 0 ? l.anchor(c.page) : l.top(c.page) + c.offset_dip, …)` (spec deviation 4)
   - `float paged_pan_y_for(const CarriedPosition& c, double page_h, double vp_h) noexcept;` — `clamp_pan(−offset, page_h, vp_h)`
   - `float spread_pan_y_for(const CarriedPosition& c, double left_top_in_union, double union_h, double vp_h) noexcept;` — `clamp_pan(−(left_top_in_union + offset), union_h, vp_h)`
 
 - [ ] **Step 1: Write the failing tests** (`tests/unit/test_strip_carry.cpp`, registered):
   1. `StripCarry: a fitting paged page carries offset zero` — `carry_from_paged_single(4, 0, 37.5, 300).offset_dip == 0`, and `strip_scroll_for` of it equals `anchor(4)` (the same place navigation puts page 4).
-  2. `StripCarry: an overflowing paged page carries how far it is scrolled` — `carry_from_paged_single(2, -250, 0, 1000).offset_dip == 250`; round trip through a strip layout and `paged_pan_y_for(…, 1000, 600) == -250`.
+  2. `StripCarry: an overflowing paged page carries how far it is scrolled` — `carry_from_paged_single(2, -250, 0, 1000).offset_dip == 250`; into a strip layout tall enough not to clamp: `strip_scroll_for(l, c, 600) - l.top(2) == 250` (not 242: the offset is from the page's top, not its anchor); back out: `carry_from_strip(l, 2, that scroll).offset_dip == 250` and `paged_pan_y_for(…, 1000, 600) == -250`.
   3. `StripCarry: a spread with unequal heights is measured on the left page` — left page top inside the union at 40 DIP, `pan_y = -140`, left height 500: offset 100; `spread_pan_y_for(c, 40, 800, 600) == -140`.
   4. `StripCarry: offsets clamp to the page` — `carry_from_strip` at a `scroll_y` inside the gap after the page gives `offset == height(page)`; a `scroll_y` above `top(page)` gives 0.
 
 - [ ] **Step 2: Run and see them fail** — `"StripCarry: *"`.
-- [ ] **Step 3: Implement `StripCarry.hpp`.**
+- [ ] **Step 3: Implement `StripCarry.hpp`.** In the spec's §7.3, replace "**Into the strip.** `scroll_y = anchor(page) + offset`." with "**Into the strip.** `scroll_y = anchor(page)` when the offset is 0, else `top(page) + offset` (the offset is measured from the page's top)."
 - [ ] **Step 4: Run and see them pass.**
-- [ ] **Step 5: Commit** — `feat(ui): position carry between paged and strip layouts (#55)`.
+- [ ] **Step 5: Commit** — `feat(ui): position carry between paged and strip layouts (#55)`; include the spec edit.
 
 ## Task 4: StripSchedule — per-page state and the scheduling pass
 
@@ -162,9 +166,9 @@
   - `bool is_stale(const PageSlot& s, float scale, bool invert) noexcept;` — Ready and (scale or invert differs)
   - `PageSlot cancel_transition(const PageSlot& s) noexcept;` — Pending with stale bitmap → Ready with `scale = stale_scale`, `invert = stale_invert`; Pending without → None; other states unchanged
   - `StripRange prefetch_range(const StripLayout& l, double scroll_y, double vp_h, StripTravel t);` — the pages intersecting the one viewport height beyond the viewport in the travel direction, minus V (needs Task 1's `StripLayout`)
-  - `struct ScheduleInput { StripRange visible; std::vector<int> visible_by_area; StripRange prefetch; StripRange retain; float scale; bool invert; std::size_t l1_capacity; std::size_t l1_budget; std::function<std::size_t(int)> bytes_of; int previous_first_visible; int previous_last_visible; };` — `visible_by_area` is V ordered largest visible area first (its first element is the predicted current page); `prefetch` is P (caller computes it from the travel direction, one viewport ahead); `retain` is V plus one viewport each side.
+  - `struct ScheduleInput { StripRange visible; std::vector<int> visible_by_area; StripRange prefetch; StripRange retain; float scale; bool invert; std::size_t l1_capacity; std::size_t l1_budget; std::function<std::size_t(int)> bytes_of; int previous_first_visible; int previous_last_visible; };` — `visible_by_area` is V with `derive_current_page(...)`'s page first (the predicted current page, so at the bottom it is the last page, not the top tied one), then the rest by visible height descending, ties to the lower index; `prefetch` is P (caller computes it from the travel direction, one viewport ahead); `retain` is V plus one viewport each side.
   - `struct SchedulePlan { std::vector<int> sweep; std::vector<int> release; std::vector<int> fail_reset; std::vector<int> cancel; std::vector<int> submit_p0; std::vector<int> submit_p1; int text_on_p0 = -1; bool visible_changed = false; };` — the canvas applies it in exactly this order: sweep (cancel transition), release (cancel if Pending, then drop), fail_reset (→ None), cancel (cancel transition), submit_p0 in order, submit_p1 in order; `text_on_p0` is the page among `submit_p0` that carries `on_text` (−1 for none).
-  - `SchedulePlan plan_strip_pass(const std::map<int, PageSlot>& slots, const ScheduleInput& in);` — pure. Swept pages are judged by every later rule **as their `cancel_transition` result** (so a swept page in V is resubmitted in the same pass). Rules: sweep = Pending with `cancel_flag` set; release = slots outside `retain`; fail_reset = Failed pages leaving V, plus Failed-at-P1 pages in V; P0 for each V page (in `visible_by_area` order) that is None, Ready-stale, Failed-at-P1, or Pending at P1 (those also go into `cancel`); P1 for each P page that is None, only while `l1_capacity − |V|` entries and `l1_budget − Σ bytes_of(V)` bytes remain (accumulating); cancel = Pending pages outside V ∪ P; `text_on_p0` = `visible_by_area[0]` iff it is in `submit_p0`; `visible_changed` = V differs from the previous first/last.
+  - `SchedulePlan plan_strip_pass(const std::map<int, PageSlot>& slots, const ScheduleInput& in);` — pure. Swept pages are judged by every later rule **as their `cancel_transition` result** (so a swept page in V is resubmitted in the same pass). Rules: sweep = Pending with `cancel_flag` set; release = slots outside `retain`; fail_reset = Failed pages leaving V, plus Failed-at-P1 pages in V; P0 for each V page (in `visible_by_area` order) that is None, Ready-stale, Failed-at-P1, or Pending at P1 (those also go into `cancel`); P1 for each P page that is None, only while `l1_capacity − |V|` entries and `l1_budget − Σ bytes_of(V)` bytes remain (accumulating); cancel = Pending pages outside V ∪ P **but inside `retain`** (a Pending page outside `retain` is handled once, by `release`; the two lists never share a page); `text_on_p0` = `visible_by_area[0]` iff it is in `submit_p0`; `visible_changed` = V differs from the previous first/last.
   - `class StripRenderState` — owns `std::map<int, PageSlot>` and applies a plan:
     - `struct Submitter { virtual ~Submitter() = default; virtual std::uint64_t submit(int page, int priority, bool with_text, std::shared_ptr<std::atomic<bool>> flag) = 0; virtual void cancel_thumbnails() = 0; virtual void released(int page) = 0; };`
     - `SchedulePlan run_pass(const ScheduleInput& in, Submitter& out);` — computes the plan, applies it in the order above (cancelling = storing `true` to the slot's flag, then `cancel_transition`), creates a fresh flag per submit, records `{seq, priority, scale, invert}`; when a Ready-stale page is resubmitted it becomes Pending with `has_stale_bitmap = true` and `stale_scale`/`stale_invert` copied from the Ready slot's `scale`/`invert`; calls `cancel_thumbnails()` iff `visible_changed`; returns the plan.
@@ -174,7 +178,7 @@
     - `const PageSlot* slot(int page) const; std::map<int, PageSlot>& slots();` (the latter for Task 5 and the canvas)
     - `void clear(Submitter& out);` — cancel every Pending, release all.
 
-- [ ] **Step 1: Write the failing tests** (`tests/unit/test_strip_schedule.cpp`, registered). A `FakeSubmitter` records `(page, priority, with_text)` tuples, counts `cancel_thumbnails`, records releases, and returns increasing seqs. Unless stated: `scale=1`, `invert=false`, `l1_capacity=5`, budget 1 GiB, `bytes_of` = 1 MB per page.
+- [ ] **Step 1: Write the failing tests** (`tests/unit/test_strip_schedule.cpp`, registered). A `FakeSubmitter` records `(page, priority, with_text, flag)` tuples (keeping each submitted flag), counts `cancel_thumbnails`, records releases, and returns increasing seqs. Unless stated: `scale=1`, `invert=false`, `l1_capacity=5`, budget 1 GiB, `bytes_of` = 1 MB per page.
   1. `StripSchedule: visible pages get P0 largest area first and the first carries text` — V {2,3,4}, `visible_by_area` {3,2,4}: P0 submits `3,2,4`; only 3 `with_text`.
   2. `StripSchedule: prefetch only while L1 has room` — V {0..3}, P {4,5}, capacity 5: one P1 (page 4); with `bytes_of`= 300 MB and budget 1 GiB, V uses 1.2 GB → no P1.
   3. `StripSchedule: pages leaving V and P are cancelled and their flags set` — after a pass on V {0,1}, run V {5,6} with `retain = {0,10}` (so the slots stay observable): pages 0 and 1's flags (kept from the first pass) read `true`, and their slots are None.
@@ -188,6 +192,7 @@
   11. `StripSchedule: a text request goes out only for a page still in L1` — `request_text(4, false, false, true, s)` submits `(4, 1, true)`; `request_text(5, …, true)` then cancels page 4's text flag and submits for 5; `l1_contains=false`, `slot_has_text=true` or `text_pending=true` → no submit; page 4's slot state is unchanged throughout.
   12. `StripSchedule: prefetch range follows the travel direction` — 3-page layout of Task 1 (pages at [8,208), [216,316), [324,624)), `vp_h=100`: Down at `scroll_y=100` (V {0}, window [200,300)) → `{1,1}`; Up at `scroll_y=400` (V {2}, window [300,400)) → `{1,1}`; Down at `scroll_y=400` (window [500,600) is page 2, already in V) → empty; Up at `scroll_y=0` → empty.
   13. `StripSchedule: a page that failed at P0 is requested again after a scale change` — page 3 Failed(priority 0), V {3}; `change_render_params(2.0,false)`; pass at scale 2.0 → `submit_p0 == {3}`.
+  14. `StripSchedule: a pending page outside retain is cancelled once and released` — page 2 Pending, then a pass with V {10}, retain {9..11}: page 2 is in `release` and not in `cancel`, its flag reads `true`, `released(2)` is called once, and the slot is gone.
 
 - [ ] **Step 2: Run and see them fail** — `"StripSchedule: *"`.
 - [ ] **Step 3: Implement `StripSchedule.hpp`.**
@@ -229,6 +234,7 @@
 **Files:**
 - Create: `src/ui/detail/EffectiveLayout.hpp`
 - Test: `tests/unit/test_effective_layout.cpp`
+- Modify: `docs/superpowers/specs/2026-10-22-continuous-scroll-design.md` §3.4 Spread row (spec deviation 2)
 
 **Interfaces:**
 - Produces (namespace `litepdf::ui`, §3.4, §7.3):
@@ -263,7 +269,7 @@
 - Modify: `src/core/DocumentView.hpp` (add `#include "core/RenderEngine.hpp"` — `RenderEngine::RenderToken` is a nested type and cannot be forward-declared; the header is MuPDF-free), `src/core/DocumentView.cpp` (`set_current_page` `:253-270`, `request_render` `:340-350`, `Impl` beside `page_sizes` `:93`)
 - Create: `src/core/detail/PageSizeFill.hpp`
 - Modify: `src/core/PageCache.hpp`, `src/core/PageCache.cpp` (beside `get_pixmap`)
-- Modify: `docs/superpowers/specs/2026-10-22-continuous-scroll-design.md` §3.3 (the `l1_holds` line)
+- Modify: `docs/superpowers/specs/2026-10-22-continuous-scroll-design.md` (every `l1_holds` outside §12; spec deviation 1)
 - Create: `tests/unit/test_document_view_strip.cpp`
 
 **Interfaces:**
@@ -285,7 +291,7 @@
   7. `DocumentView: cancel_thumbnail_renders leaves strip requests alone` — hold the worker; `request_page_render` page 2 at P0 and page 3 at P1; `cancel_thumbnail_renders()`; release → both callbacks receive non-null pixmaps and neither flag reads true. (That `cancel_all_below_priority(2)` flags a queued P3 is the engine's existing contract; this test pins only that the strip's own priorities survive it.)
 
 - [ ] **Step 2: Run and see them fail** — `"DocumentView: *"` and `"PageCache: l1_contains*"`.
-- [ ] **Step 3: Implement the APIs** and `src/core/detail/PageSizeFill.hpp`. In the spec's §3.3, replace the `l1_holds(page)` bullet with: "`l1_contains(page)`: whether L1 has the page at the current scale and polarity, without changing its LRU recency (`PageCache::l1_contains`). The existing `l1_holds` refreshes recency and stays test-only." Then replace every other `l1_holds` in the spec with `l1_contains` (`rg -n l1_holds docs/superpowers/specs/2026-10-22-continuous-scroll-design.md` must afterwards list only that sentence).
+- [ ] **Step 3: Implement the APIs** and `src/core/detail/PageSizeFill.hpp`. In the spec's §3.3, replace the `l1_holds(page)` bullet with: "`l1_contains(page)`: whether L1 has the page at the current scale and polarity, without changing its LRU recency (`PageCache::l1_contains`). The existing `l1_holds` refreshes recency and stays test-only." Then replace every other `l1_holds` in the spec with `l1_contains`, except inside §12 (the review record keeps its history): `rg -n l1_holds docs/superpowers/specs/2026-10-22-continuous-scroll-design.md` must afterwards list only that sentence and §12 lines.
 - [ ] **Step 4: Run them, then the full suite** — `"DocumentView: *"` passes; `& $ctest --test-dir build -C Release` all pass (the existing `DocumentView ...` tests unchanged).
 - [ ] **Step 5: Commit** — `feat(core): page sizes, token-returning render requests and non-bumping L1 query (#55)`; include the spec edit.
 
@@ -300,7 +306,7 @@
 - Produces: `[[nodiscard]] std::size_t RenderEngine::renders_started() const noexcept;` — incremented once per request with `bypass_cache == false` that passes checkpoint A **and** misses L1 (it will build or reuse a display list and rasterise). Requests cancelled at A, L1 hits, and `bypass_cache` (thumbnail) requests are not counted. Test observability only.
 - Produces: `[[nodiscard]] std::size_t DocumentView::renders_started() const noexcept;` forwarding to the engine.
 
-- [ ] **Step 1: Write the failing tests** (`tests/unit/test_render_engine_counter.cpp`, registered). Build at engine level, as `test_thumbnail_renderer.cpp:51` and `test_render_engine_cancel.cpp:22-24` do: open `selection.pdf` into a `Document`, a `PageCache cache(/*l1=*/4, /*l2=*/4, <a context cloned from the document>)`, and `RenderEngine engine(doc, 1, &cache)`; submit `RenderRequest`s directly and wait on promises. Hold the single worker by submitting a P0 for page 0 whose callback signals "entered" and blocks on a release future (release in a scope guard declared after the engine).
+- [ ] **Step 1: Write the failing tests** (`tests/unit/test_render_engine_counter.cpp`, registered). Build at engine level, as `test_thumbnail_renderer.cpp:51` and `test_render_engine_cancel.cpp:22-24` do: open `selection.pdf` into a `Document`, a `PageCache cache(/*l1=*/4, /*l2=*/4, <a context cloned from the document>)`, and `RenderEngine engine(doc, 1, &cache)`; submit `RenderRequest`s directly and wait on promises. Hold the single worker by submitting a P0 for page 0 whose callback signals "entered" and blocks on a release future (release in a scope guard declared after the engine). Drop the cloned cache context after the cache's scope, as `test_thumbnail_renderer.cpp:73` does.
   1. `RenderEngine: renders_started counts L1 misses only` — render page 0 and wait (count 1); render page 0 again at the same scale (L1 hit, still 1); render page 1 (2).
   2. `RenderEngine: renders_started skips cancelled and bypass requests` — hold the worker on page 0 (count 1 once it entered); submit page 2 with a caller-owned `cancel_flag` set to true before release; submit page 3 with `bypass_cache = true`; release and wait for all three callbacks → count still 1.
 - [ ] **Step 2: Run and see them fail** — `"RenderEngine: renders_started*"`.
@@ -342,14 +348,14 @@
 **Interfaces:**
 - Produces: `python scripts/generate-strip-fixtures.py [--check] [--pdf-pages N --pdf-out PATH]`. Default writes the three fixtures; `--check` regenerates to a temp dir and asserts byte identity with the committed files (as `generate-large-fixture.py` does: `rl_config.invariant = 1`, `pageCompression=0`, white page fill, reportlab 4.4.10); `--pdf-pages 10000 --pdf-out <temp>` writes the 10,000-page PDF for the recorded measurement and is never committed.
   - PDF: 1000 Letter pages, one heading line each (`"Strip page %d of %d."`), pages with 0-based index `i % 10 == 9` (9, 19, …) landscape (792×612) so widths differ.
-  - EPUB: 200 chapters, each one `<h1>` and 10 paragraphs of fixed lorem text; written with `zipfile`, **every entry `ZIP_STORED`** (deflate would make `--check` depend on the interpreter's zlib, the trap `generate-large-fixture.py`'s docstring records), `mimetype` first, then `META-INF/container.xml`, `OEBPS/content.opf`, `OEBPS/ch001.xhtml`…; every `ZipInfo.date_time = (2026,1,1,0,0,0)`.
+  - EPUB: 200 chapters, each one `<h1>` and 10 paragraphs, every paragraph exactly this sentence: `Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.` (a scratch EPUB of this shape opened as 400 pages in the current `litepdf-cli`, so each chapter spills to a second page); written with `zipfile`, **every entry `ZIP_STORED`** (deflate would make `--check` depend on the interpreter's zlib, the trap `generate-large-fixture.py`'s docstring records), `mimetype` first, then `META-INF/container.xml`, `OEBPS/content.opf`, `OEBPS/ch001.xhtml`…; every `ZipInfo.date_time = (2026,1,1,0,0,0)`.
   - CBZ: 300 PNGs, 200×300 grayscale (`"L"`), each a flat fill with its index drawn by Pillow's default font, named `001.png`…; every entry `ZIP_STORED`, same fixed `date_time`. The PNG bytes come from Pillow's own bundled zlib, so they are reproducible only with the pinned Pillow version (Step 5).
 - Produces: `CliOptions::bench_page_sizes` (bool). `parse_cli_args` accepts `--bench-page-sizes`; with it, `--iterations N` is allowed (default 9), and `--benchmark`, `--render`, `--json`, `--bench-selection` and `--page` are rejected with `"--bench-page-sizes excludes --benchmark, --render, --json, --bench-selection and --page"`.
 - Produces: `litepdf-cli <file> --bench-page-sizes [--iterations N]` — per iteration: open a fresh `Document` from the path, build a `DocumentView` on it with an `app::InlineDispatcher` (`src/app/SearchDispatcher.hpp`), and time only the `page_sizes()` call (cold cache every time); print `page_sizes: pages=<n> median_ms=<x> max_ms=<y>`.
 
 - [ ] **Step 1: Write the generator** and run it: `python scripts/generate-strip-fixtures.py`, then `python scripts/generate-strip-fixtures.py --check` → exit 0.
 - [ ] **Step 2: Write the failing fixture test** `StripFixtures: the strip fixtures open with the expected page counts` — `strip-1000.pdf` has 1000 pages and page 9 is 792 wide; `strip-chapters.epub` has more than 200 pages; `strip-images.cbz` has 300 pages. Run `"StripFixtures: *"` → fails before the files exist, passes after Step 1 (commit order: generator and fixtures together, test after; run the test now to see it pass).
-- [ ] **Step 3: Implement `--bench-page-sizes`.** First write `tests/unit/test_cli_args_page_sizes.cpp` (registered): `CliArgs: bench-page-sizes takes iterations` (`{exe, f, "--bench-page-sizes", "--iterations", "3"}` → no error, `bench_page_sizes`, `iterations == 3`; without `--iterations` → 9) and `CliArgs: bench-page-sizes excludes the other modes` (each of `--benchmark`, `--json`, `--render 0`, `--bench-selection` beside it → the error string above). Run `"CliArgs: bench-page-sizes*"` → fail; implement in `cli_args.cpp` and `main.cpp`; run → pass; run the existing `test_cli_args.cpp` cases → still pass.
+- [ ] **Step 3: Implement `--bench-page-sizes`.** First write `tests/unit/test_cli_args_page_sizes.cpp` (registered): `CliArgs: bench-page-sizes takes iterations` (`{exe, f, "--bench-page-sizes", "--iterations", "3"}` → no error, `bench_page_sizes`, `iterations == 3`; without `--iterations` → 9) and `CliArgs: bench-page-sizes excludes the other modes` (each of `--benchmark`, `--json`, `--render 0`, `--bench-selection`, `--page 1` beside it → the error string above). The exclusion check must come before `parse_cli_args`'s `if (out.bench_selection) { … return std::nullopt; }` block (`cli_args.cpp:60-67`), or `--bench-selection` beside it would parse. Run `"CliArgs: bench-page-sizes*"` → fail; implement in `cli_args.cpp` and `main.cpp`; run → pass; run the existing `test_cli_args.cpp` cases → still pass.
 - [ ] **Step 4: Measure the gate** — build everything, then from PowerShell at the repo root:
   - `build\Release\litepdf-cli.exe tests\fixtures\strip-1000.pdf --bench-page-sizes --iterations 9` → `median_ms <= 16`
   - `build\Release\litepdf-cli.exe tests\fixtures\strip-chapters.epub --bench-page-sizes --iterations 9` → `median_ms <= 100`
@@ -371,7 +377,7 @@
   - A `DocumentView` on `strip-1000.pdf`, one worker, `set_zoom_pct(1.0)`, viewport 800×600 @96; `StripLayout` from `page_sizes()` at 1.0.
   - A `Submitter` that takes its seq from its **own** counter before calling `request_page_render(page, priority, cb, flag)` (never from the engine's token id), and whose `cb` captures `page`, that seq and the flag, then pushes `{page, seq, has_pixmap = pixmap != nullptr, cancelled = flag->load()}` into a mutex-guarded queue (dropping the pixmap with its ctx); `cancel_thumbnails()` calls `cancel_thumbnail_renders()`; `released()` does nothing.
   - Hold the single worker on page 0 through `request_page_render` — **not** `request_render_with_prefetch`, which would also queue a P1 for page 1 — with a callback that signals "entered" and blocks on a release future (the `HeldWorker` / `ReleaseOnExit` shape of `test_document_view.cpp:365-396`, copied into this file).
-  - Drive 1000 viewports, `scroll_y` from 0 to `total − 600` in equal steps; for each: build `ScheduleInput` (V from `visible`, ordered by visible height; P from `prefetch_range(…, StripTravel::Down)`; retain V ± one viewport; `bytes_of` = `litepdf::core::estimated_pixmap_bytes(w_pt, h_pt, scale)` from `core/detail/PrefetchPlan.hpp`), `run_pass`, then assert `live_queued <= |V| + |P| + 1`, where `live_queued` counts Pending slots whose flag reads false.
+  - Drive 1000 viewports, `scroll_y` from 0 to `total − 600` in equal steps; for each: build `ScheduleInput` (V from `visible`; `visible_by_area` = `derive_current_page`'s page first, then the rest by visible height; P from `prefetch_range(…, StripTravel::Down)`; retain V ± one viewport; `bytes_of` = `litepdf::core::estimated_pixmap_bytes(w_pt, h_pt, scale)` from `core/detail/PrefetchPlan.hpp`), `run_pass`, then assert `live_queued <= |V| + |P| + 1`, where `live_queued` counts Pending slots whose flag reads false.
   - At step 500: call `cancel_background_renders()` and run one pass on the same viewport; assert no slot is Pending with its flag set.
   - Release the worker; on the test thread, drain the completion queue through `classify_strip_completion` / `after_bitmap(Ok)` / `after_null`, running a pass after each rule-4 action, until no slot in the final V is Pending (bounded wait, 30 s).
   - Assert `renders_started() <= |final V| + |final P| + 1` (the 1 is the held render of page 0) and every final-V slot is Ready.
