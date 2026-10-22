@@ -135,7 +135,7 @@ changes the zoom calls `refresh_zoom_readout` in the same message, as the paged 
 | `TabSwitch` | `on_tab_switch` (863), different index only | A refit event: `apply_viewport`, refresh the readout, restore the tab's strip position (§7.4), re-layout, reschedule |
 | `Restore` | session restore (1118) | A refit event (refresh the readout), then navigate to the saved page (§6.3), then reschedule |
 | `Restyle` | invert colours (1727) | Cancel all, keep bitmaps as stale, reschedule (§5.2) |
-| `Spread` | two-page toggle (1745) | `apply_effective_layout` has already run, in either direction. Turning spread on leaves the strip: the kick is paged. Turning it off with the preference on enters the strip: the kick runs as `TabSwitch` (refit, restore, reschedule) after the §7.3 position carry. |
+| `Spread` | two-page toggle (1745) | `apply_effective_layout` has already run, in either direction. Turning spread on leaves the strip: the kick is paged. Turning it off with the preference on enters the strip: refit, refresh the readout, re-layout, reschedule — **not** a tab-position restore, which would overwrite the §7.3 carry `apply_effective_layout` just applied. |
 
 A new `kick_render` call site must pick a reason. A call that defaults to one would compile, and
 would silently do the wrong thing in the strip.
