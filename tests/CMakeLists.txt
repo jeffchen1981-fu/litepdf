@@ -100,6 +100,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_text_prefetch_view.cpp   # #98
     unit/test_mupdf_error_state.cpp    # #146 rule outside Document
     unit/test_strip_layout.cpp         # #55 PR 1 Task 1
+    unit/test_strip_scroll.cpp         # #55 PR 1 Task 2
     # The CLI helpers under test are compiled straight into the test binary
     # (they are not part of litepdf_core). All are MuPDF-header-free and
     # resolve their fz_* calls through the litepdf::mupdf dependency that

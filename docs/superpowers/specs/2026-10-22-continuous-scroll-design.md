@@ -236,7 +236,8 @@ a re-layout. Without this, the track position and the re-layout would fight over
   3. otherwise, the page with the largest visible height; ties go to the lower index.
 
   Rules 1-2 matter at low zoom, where several pages are fully visible and tie: without them,
-  scrolling to the bottom would report a page several pages before the last.
+  scrolling to the bottom would report a page several pages before the last. Rules 1-2 apply
+  only when the strip is at least 1 DIP taller than the viewport; otherwise rule 3 decides.
 - **When it is recomputed.** After every scroll input and every re-layout. The observer fires
   only when the value changes.
 - **Navigation intent.** An explicit navigation (§6.3) sets the current page to its target
