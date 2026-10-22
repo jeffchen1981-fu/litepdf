@@ -1,8 +1,8 @@
 # Continuous scroll (#55) — design
 
 - **Issue:** #55 "Continuous scroll: pages are one-at-a-time, with no multi-page strip layout"
-- **Status:** design approved in brainstorming; a Fable design review is folded in (§12);
-  awaiting the spec gate
+- **Status:** design approved in brainstorming; a Fable design review and the spec gate's
+  round 1 are folded in (§12); awaiting the spec gate's Codex lens
 - **Code read at:** `5a40d5e` (main after #165/#166, unreleased after v1.5.6)
 - **Supersedes:** the "its own phase" note in
   `docs/superpowers/specs/2026-09-07-zoom-correctness-page-nav-design.md` §7
@@ -39,7 +39,8 @@ The issue was written at v1.3.0. Verified at `5a40d5e`:
     `ThumbnailPane::set_current_page` directly, and calls `StatusBar::set_empty` for a null view.
   - The canvas has no scrollbars.
   - There is no public all-page-sizes API. `DocumentView::Impl::page_sizes` is a private lazy
-    cache that only ever holds cur ±1.
+    cache: it is sized to the page count and filled for each page that prefetch planning has ever
+    looked up (cur ±1 at each turn), and never cleared. A size that throws is not cached.
 - **Stale in the issue.**
   - Prefetch is no longer unconditional ±1. Since #49 it fetches both neighbours only while
     cur+prev+next fit the 1 GiB L1 budget, and otherwise only the travel-direction neighbour
@@ -71,9 +72,10 @@ strip is shown.
 | Unit | Kind | Responsibility |
 |---|---|---|
 | `StripLayout` | pure header, `src/ui/detail/` | From all page sizes (pt), `zoom_pct` and the gap: each page's rect in document coordinates, the total height, the page at a given y (binary search on prefix sums), and the visible page range for a y-interval. |
-| `StripScroll` | pure header | Clamping `scroll_y`; wheel, key and page steps; re-layout that keeps the viewport-top point in place; the derived current page, including the navigation-intent pin; the stored-vs-effective `pan_x` (§4.2). |
-| `StripSchedule` | pure header | From the visible set, travel direction, L1 room and per-page state: which pages get P0, which get P1, and which pending requests to cancel. |
+| `StripScroll` | pure header | Clamping `scroll_y`; wheel, key and page steps; re-layout that keeps the viewport-top point in place; the derived current page, including the bottom/top rule and the navigation-intent pin; stored vs effective `pan_x` (§4.2). |
+| `StripSchedule` | pure header | From the visible set, travel direction, L1 room and per-page state: which pages get P0, which get P1, which are promoted, and which pending requests to cancel. |
 | `StripCompletion` | pure header | The per-page acceptance rule for strip completions. Coexists with `accept_completion`; does not replace it. |
+| `EffectiveLayout` | pure header | `(spread, preference, format passed §4.4) → {PagedSingle, PagedSpread, Strip}` (§7.3). |
 | `PageBitmapSet` | canvas-internal | Page-keyed D2D bitmaps plus per-page state, kept only for the visible range plus one viewport of hysteresis. |
 | `ViewPrefs` | core, registry | Reads and writes the continuous-scroll preference (§7.2). |
 
@@ -87,13 +89,19 @@ New logic lives in these units, not inline in `PdfCanvas.cpp` (already ~2100 lin
   - `request_page_render(page, priority, cb, on_text = {}) -> RenderEngine::RenderToken`, with a
     caller-owned `cancel_flag`. It calls `release_l1_pin()` first, as both existing request
     functions do. Today `request_render` discards the token.
+  - `l1_holds(page)`: whether L1 has the page at the current scale and polarity (§5.2 text
+    prefetch). Read-only, under the cache mutex.
   - `cancel_thumbnail_renders()` = `cancel_all_below_priority(2)`, which flags queued P3 only
     (§5.2).
-  - `trim_l1_for_background` / `PageCache::retain_l1_pages` accept a set of pages (PR 3, §7.4).
-- **`RenderEngine`.** No new cancel API: `cancel(token)` and the #117 `cancel_flag` already
-  provide per-request cancellation and the cancelled-vs-failed split. One test-observability
-  counter is added (§9.4).
-- **`ux-probe.ps1`.** Two new probes (§9.3).
+  - PR 3: a set-taking **overload** of `trim_l1_for_background` and
+    `PageCache::retain_l1_pages`. The existing one- and two-page signatures stay, so the existing
+    tests compile unchanged (§9.2).
+- **`RenderEngine`.** No new cancel API: the strip cancels a request by storing `true` to the
+  caller-owned `cancel_flag` it passed in (#117), which needs no live engine. One
+  test-observability counter is added (§9.4).
+- **`ux-probe.ps1`.** Two new probes (§9.3), in PR 2.
+- **Message id.** `WM_USER_STRIP_DONE = WM_USER + 6` (free at `5a40d5e`). The two reservation
+  comments (`PdfCanvas.hpp`, `MainWindow.cpp`, "WM_USER + 3 to + 5") become "+ 3 to + 6".
 
 ### 3.4 Shared entry points: what each does in the strip layout
 
@@ -102,26 +110,31 @@ These run in both layouts. Each gets a strip branch; its paged branch keeps toda
 | Entry point | Today (paged) | Strip layout |
 |---|---|---|
 | `MainWindow::kick_render(page)`, 21 call sites | `apply_viewport` (refit), refresh the zoom readout, then `request_render_with_prefetch` (or two P0s in a spread) | Gains a `KickReason` argument. The paged branch ignores it. The strip branch dispatches by reason, per the table below. |
+| `MainWindow::navigate_click(page)` | `change_current_page`; **returns early if the page did not change**; Top anchor; kick | The strip branch runs **first, before the early return**: strip navigation (§6.3), then a `Navigate` kick. Going to the derived current page while mid-page therefore scrolls to its top. |
+| `MainWindow::on_tab_switch` | snapshot, `set_view`, pan, `set_dual_page`, `set_viewport`, kick | Calls `apply_effective_layout` (below) right after `set_view`. Same-index calls (`new_index == old_index`) kick with `Navigate`, not `TabSwitch`. |
+| `MainWindow::apply_effective_layout(tab)` (new) | — | The **only** owner of layout switches. Computes `EffectiveLayout` for the tab (or `PagedSingle` for a null view) and, if it differs from the canvas's current layout, does the layout-switch reset below and sets or clears `WS_VSCROLL` (§6.2). Called from `on_tab_switch`, the two-page toggle (both directions), the Continuous Scroll menu item, and tab close. |
 | `PdfCanvas::apply_viewport` | refit from the current page, then `set_viewport` | Called only for the reasons that refit (below). |
-| `PdfCanvas::resubmit_current_page` (Ctrl+wheel zoom, `on_size`, device loss) | resubmit the current page | Re-layout (§4.5), then reschedule. |
-| `PdfCanvas::discard_render_target` (DPI change, `D2DERR_RECREATE_TARGET`) | reset both slot bitmaps and the render target | Also resets every `PageBitmapSet` bitmap: a Ready page goes back to None, and Pending pages stay Pending. The next paint recreates the target, and the following `resubmit_current_page` reschedules. |
-| `PdfCanvas::set_view(v)` | always `++view_epoch` and resets per-view state | Same view and strip layout (a same-index `TabManager::set_active`: Ctrl+N on itself, a search result in the active tab, `restore_finish`): no epoch bump and no state reset. A different view: cancel every Pending strip token of the old view, clear `PageBitmapSet`, then bump the epoch. |
+| `PdfCanvas::resubmit_current_page` (Ctrl+wheel zoom; `on_size`, `on_paint` and the completion handler on `D2DERR_RECREATE_TARGET`) | resubmit the current page | Re-layout (§4.5), then reschedule. |
+| `PdfCanvas::discard_render_target` (`WM_DPICHANGED_BEFOREPARENT`, `D2DERR_RECREATE_TARGET`) | reset both slot bitmaps and the render target | Also drops every `PageBitmapSet` bitmap: Ready → None, and a Pending page loses its stale bitmap but stays Pending. On the recreate path `resubmit_current_page` follows and reschedules; on the DPI path the DPI `Layout` kick (`MainWindow.cpp:1490`) does. |
+| `PdfCanvas::set_view(v)` | always `++view_epoch` and resets per-view state | Same view and strip layout: no epoch bump and no state reset. A different view: cancel every Pending strip request of the old view (flag store, §3.3), clear `PageBitmapSet`, then bump the epoch. |
 | `WM_USER_RENDER_DONE` / `_RIGHT` handler | `on_completion_arrived` (#57), then `accept_completion`, bitmap, anchor | Unchanged. A layout switch bumps `view_epoch` (below), so a paged completion that lands while the strip is shown fails the epoch check and drops its pixmap. |
 | `WM_USER_STRIP_DONE` handler (new) | — | Calls `on_completion_arrived` **first**, before any early return, exactly as the paged handler does (#57), then applies §5.3. |
 | `ColdStartTimer::mark(3)` / `mark(4)` | marked when the first `current_bitmap` is created / first painted | The strip marks 3 when it creates its first page bitmap and 4 when it first paints one, so `smoke-test.ps1`'s `LitePDF cold-start:` line is emitted in either layout. |
-| Layout switch (paged ↔ strip) | — | Cancels the old layout's outstanding work, then `anchor.clear()`, `wheel_flip_seq = 0`, resets both slot bitmaps and `PageBitmapSet`, and does `++view_epoch`. Then the transition of §7.3. |
+| Layout-switch reset (inside `apply_effective_layout`) | — | Cancels the old layout's outstanding work, then `anchor.clear()`, `wheel_flip_seq = 0`, resets both slot bitmaps and `PageBitmapSet`, and does `++view_epoch`. A switch within one tab then carries the position (§7.3); a switch caused by a tab switch does not — the incoming tab restores its own (§7.4). |
 
-**`kick_render` reasons.** Every call site is classified, as of `5a40d5e`:
+**`kick_render` reasons.** Every call site is classified, as of `5a40d5e`. Every strip branch that
+changes the zoom calls `refresh_zoom_readout` in the same message, as the paged branch does
+(#57: "the readout changes in the same message as the command that caused it").
 
 | `KickReason` | Call sites (`MainWindow.cpp`) | Strip branch |
 |---|---|---|
-| `Layout`: the canvas size changed | outline toggle (644), status bar toggle (661), thumbnails toggle (730), results splitter (1254), left splitter (1318), WM_SIZE (1410), DPI (1490), results panel show/toggle/close (2362, 2387, 2491) | `apply_viewport` (refits only when the zoom mode is not Custom), re-layout (§4.5), reschedule |
-| `Zoom` | Zoom In (1831), Zoom Out (1838), Reset Zoom (1854) | The zoom value is already set by the command (Reset sets FitWidth and refits). Re-layout (§4.5), refresh the readout, reschedule |
-| `Navigate` | `navigate_click` (424: Ctrl+G, page box, thumbnails, outline), Find Next/Prev (2257, 2268), cross-tab result (2478) | The caller already ran the strip navigation (§6.3), so this only reschedules. No refit. |
-| `TabSwitch` | `on_tab_switch` (863) | A refit event: `apply_viewport`, restore the tab's strip position (§7.4), re-layout, reschedule |
-| `Restore` | session restore (1118) | A refit event, then navigate to the saved page (§6.3), then reschedule |
-| `Restyle` | invert colours (1727) | Cancel all, mark Ready bitmaps stale, reschedule (§5.2) |
-| `Spread` | two-page toggle (1745) | Turning the spread on leaves the strip (a layout switch, §7.3) |
+| `Layout`: the canvas size changed | outline toggle (644), status bar toggle (661), thumbnails toggle (730), results splitter (1254), left splitter (1318), WM_SIZE (1410), DPI (1490), results panel show/toggle/close (2362, 2387, 2491) | `apply_viewport` (refits only when the zoom mode is not Custom), refresh the readout, re-layout (§4.5), reschedule |
+| `Zoom` | Zoom In (1831), Zoom Out (1838), Reset Zoom (1854) | The zoom value is already set by the command (Reset sets FitWidth and refits). Refresh the readout, re-layout (§4.5), reschedule |
+| `Navigate` | `navigate_click` (424: Ctrl+G, page box, thumbnails, outline), Find Next/Prev (2257, 2268), cross-tab result (2478), and a same-index `on_tab_switch` | The caller already ran the strip navigation (§6.3), so this only reschedules. No refit. |
+| `TabSwitch` | `on_tab_switch` (863), different index only | A refit event: `apply_viewport`, refresh the readout, restore the tab's strip position (§7.4), re-layout, reschedule |
+| `Restore` | session restore (1118) | A refit event (refresh the readout), then navigate to the saved page (§6.3), then reschedule |
+| `Restyle` | invert colours (1727) | Cancel all, keep bitmaps as stale, reschedule (§5.2) |
+| `Spread` | two-page toggle (1745) | `apply_effective_layout` has already run, in either direction. Turning spread on leaves the strip: the kick is paged. Turning it off with the preference on enters the strip: the kick runs as `TabSwitch` (refit, restore, reschedule) after the §7.3 position carry. |
 
 A new `kick_render` call site must pick a reason. A call that defaults to one would compile, and
 would silently do the wrong thing in the strip.
@@ -139,20 +152,22 @@ for D2D.
 
 - **Gap.** `G = 8` DIP between pages, and also above the first page and below the last (the
   same as the spread gutter).
-- **Vertical position.** `top(i) = G + Σ_{j<i} (h_j + G)`, where
-  `h_j = height_pt_j × zoom_pct`. The prefix sums are built once, in O(N), and rebuilt on every
-  zoom change.
-- **Horizontal position.** A page narrower than the viewport is centred in the viewport. Pages
-  wider than the viewport follow `pan_x`, whose range is set by the **widest currently visible**
-  page. That keeps a single landscape page from decentring the portrait pages around it, and it
-  matches `place_bitmap`'s rule (centre an axis that fits, pan an axis that overflows).
+- **Vertical position.** Pages are indexed from 0, like `current_page`; the page box shows
+  index + 1. `top(i) = G + Σ_{j<i} (h_j + G)`, where `h_j = height_pt_j × zoom_pct`. The prefix
+  sums are built once, in O(N), and rebuilt on every zoom change. A page's **scroll anchor** is
+  `top(i) − G`: the scroll position that shows page i with its gap above it. `anchor(0) = 0`.
+- **Horizontal position.** Let `W` be the width of the widest currently visible page.
+  - A page narrower than the viewport is centred in the viewport.
+  - A page wider than the viewport is centred on the centre line of `W`:
+    `x_i = pan_x_eff + (W − w_i) / 2`, where `pan_x_eff ∈ [vp_w − W, 0]`.
+  - So a single landscape page does not decentre the portrait pages around it, and every
+    overflowing page pans together. Paint, hit-test and selection mapping all use this `x_i`.
 - **Stored vs effective `pan_x`.**
   - The canvas stores a *desired* `pan_x` and never clamps the stored value on vertical
     movement.
-  - The *effective* `pan_x` = `clamp_pan(desired, widest visible width, viewport width)`,
-    computed at paint, hit-test and input time.
-  - A horizontal input (Shift+wheel, tilt wheel, ←/→, horizontal drag) applies its delta to the
-    effective value and stores the clamped result as the new desired value.
+  - `pan_x_eff = clamp_pan(desired, W, vp_w)`, computed at paint, hit-test and input time.
+  - A horizontal input (Shift+wheel, tilt wheel, ←/→, horizontal drag) applies its delta to
+    `pan_x_eff` and stores the clamped result as the new desired value.
   - So a reader on the right half of a wide page keeps that position when the page scrolls out
     of view and back in.
 - **Pixel rounding.** A rendered bitmap may be 1 px larger than its layout rect (MuPDF pixel
@@ -163,10 +178,9 @@ for D2D.
 - **One zoom for the strip.** The whole strip has one `zoom_pct`, hence one `render_scale`, so
   the L1 key shape is unchanged.
 - **Fit events.** FitWidth and FitPage are computed from the current page only at fit events:
-  - entering continuous mode;
+  - entering the strip (a layout switch, a `Spread`-off kick);
   - Reset Zoom (Ctrl+0);
-  - a `Layout`, `TabSwitch` or `Restore` kick (§3.4);
-  - a DPI change.
+  - a `Layout`, `TabSwitch` or `Restore` kick (§3.4), DPI included.
 
   They are **not** re-derived when the derived current page changes, and not on a `Navigate`
   kick. Otherwise scrolling past, or jumping to, a page of a different size would re-layout the
@@ -179,16 +193,19 @@ for D2D.
 
 - `DocumentView::page_sizes()` sizes every page once per document and caches the result. PDF
   uses the #165 path (`pdf_lookup_page_obj`, no page load); other formats use `fz_load_page` +
-  `fz_bound_page`.
+  `fz_bound_page`. It runs on the UI thread when a tab first needs the strip.
 - **Gate (PR 1).** Measured on the UI thread, on the fixtures of §9.4:
   - a 1000-page PDF: ≤ 16 ms;
   - a multi-chapter EPUB and a 300-image CBZ: ≤ 100 ms each.
 
   A format that misses its gate opens in paged mode, with the menu item greyed for that tab, and
   a follow-up issue is filed. There is no lazy or estimated sizing in this phase.
+- **Large documents.** PR 1 also records (not gates) the time for a 10,000-page PDF. Sizing is
+  O(N) on the UI thread; above 100 ms at 10,000 pages a follow-up issue is filed (§10).
 - **A page whose size cannot be read.** If `page_size` throws for page `i`, page `i` takes page
-  0's size; if page 0 itself throws, US Letter (612 × 792 pt). The render, if it succeeds, is
-  drawn at its rect's top-left.
+  0's size; if page 0 itself throws, US Letter (612 × 792 pt). This is new behaviour of
+  `page_sizes()`, not of the existing cache. The render, if it succeeds, is drawn at its rect's
+  top-left.
 
 ### 4.5 Re-layout keeps the viewport-top point
 
@@ -209,13 +226,18 @@ a re-layout. Without this, the track position and the re-layout would fight over
 
 ### 4.6 Derived current page
 
-- **Rule.** The current page is the page with the largest visible height; ties go to the lower
-  index. It is recomputed after every scroll and re-layout, and the observer fires only when the
-  value changes.
+- **Rule**, in order:
+  1. `scroll_y` at its maximum (the bottom) → the last page;
+  2. `scroll_y == 0` → page 0;
+  3. otherwise, the page with the largest visible height; ties go to the lower index.
+
+  Rules 1-2 matter at low zoom, where several pages are fully visible and tie: without them,
+  scrolling to the bottom would report a page several pages before the last.
+- **When it is recomputed.** After every scroll input and every re-layout. The observer fires
+  only when the value changes.
 - **Navigation intent.** An explicit navigation (§6.3) sets the current page to its target
-  directly, and derivation resumes at the next scroll input. Without this, "go to last page"
-  clamps at the bottom with the last two pages equally visible, and the tie rule would report
-  N−1.
+  directly. That pin survives re-layouts and ends at the next scroll input (wheel, keys, drag,
+  scrollbar) or the next navigation. While it holds, recomputation keeps the pinned page.
 - **Side effects of a change:**
 
 | Side effect | Continuous mode |
@@ -238,62 +260,72 @@ of hysteresis:
 
 | State | Holds |
 |---|---|
-| **None** | no bitmap and no request |
-| **Pending** | `{seq, token, cancel_flag}` |
-| **Ready** | `{bitmap, scale, invert}` |
+| **None** | nothing |
+| **Pending** | `{seq, priority, cancel_flag, stale_bitmap?}` |
+| **Ready** | `{bitmap, scale, invert}`; *stale* when scale or invert differs from the view's |
 | **Failed** | — |
+
+A stale bitmap is still painted, stretched to the page's current rect, so a zoom never flashes
+the strip white.
 
 Transitions:
 
 - None → Pending: a submit.
+- Ready (stale) → Pending: a submit; the bitmap moves into `stale_bitmap`.
 - Pending → Ready / Failed / None: a completion (§5.3).
-- Pending → None: **at cancel time** (§5.2 step 3). The late null is then dropped by §5.3
-  rule 2, so a page that re-enters V before that null arrives is simply re-requested.
-- Ready → None: `discard_render_target` (§3.4), or leaving the range.
+- Pending → (cancel) → Ready (stale) if it holds a `stale_bitmap`, otherwise None. This happens
+  **at cancel time**; the late null is then dropped by §5.3 rule 2, so a page that re-enters V
+  before that null arrives is simply re-requested.
+- Ready → None, and Pending loses its `stale_bitmap`: `discard_render_target` (§3.4).
 - Failed → None: the page leaves V, or the zoom or polarity changes. Failed is not re-requested
   while it stays in V, so a page that keeps failing costs one render, not one per scroll event.
-
-Pages that leave the range are released, which bounds the GPU bitmap count.
+- Any state → released: the page leaves the range (its request, if Pending, is cancelled
+  first). This bounds the GPU bitmap count.
 
 ### 5.2 Scheduling (`StripSchedule`)
 
-Run after every scroll or re-layout:
+Run after every scroll or re-layout, and after a §5.3 rule-4 completion:
 
 1. **Visible pages (V)** = pages intersecting the viewport. Each page in V that is None, or
-   Ready at a stale scale or polarity, gets **P0**. Pages are submitted largest-visible-area
-   first; the engine orders by priority, then arrival.
+   Ready-stale, gets **P0**. A page in V that is Pending at **P1** is promoted: its P1 is
+   cancelled and it is submitted at P0. Pages are submitted largest-visible-area first; the
+   engine orders by priority, then arrival.
 2. **Prefetch pages (P)** = pages within one viewport height ahead, in the travel direction.
    Each page in P that is None gets **P1**, but only if it fits L1 alongside V: there must be
    `l1_capacity − |V|` entries free **and** `l1_budget − bytes(V)` bytes free. Otherwise it gets
    no prefetch, because a prefetched page would be evicted by the visible ones. This keeps #49's
    "prefetch only what fits" rule.
-3. **Cancel.** Pending pages not in V ∪ P are cancelled by token and return to None. Cancelling
-   only sets the caller-owned flag, so it needs no live engine and is safe while a tab closes.
-   Queued requests are skipped by the worker. At most `num_workers` (2) in-flight requests finish, and
-   their results are discarded.
+3. **Cancel.** Pending pages not in V ∪ P are cancelled (flag store) and take their cancel
+   transition (§5.1). A cancelled entry stays in the engine's heap until a worker pops it and
+   skips it at checkpoint A; at most `num_workers` (2) requests a worker had already taken finish,
+   and their results are discarded. So the **live** work stays at about |V| + |P| during a fast
+   scrollbar drag, without throttling.
 4. **Thumbnails.** When V changed in this pass, call `cancel_thumbnail_renders()`, exactly as
    every paged page turn's `cancel_stale_renders(0)` cancels the queued thumbnails today. The
    #117 handler redraws the cancelled rows that are still visible.
 
-The queue therefore stays at about |V| + |P| during a fast scrollbar drag, without throttling.
+**Text prefetch (#98).** `on_text` can only ride on a submitted request, and a second request
+for a page that is not in L1 would rasterise it again. So:
 
-**Text prefetch (#98).** `on_text` can only ride on a submitted request. When the derived current
-page changes to page c, and c's text is neither in the slot nor pending, the scheduler submits
-`request_page_render(c, P1, cb, on_text)` with `text_wanted = c`, and cancels any earlier
-text-carrying request by its token. If c's pixmap is still in L1, the worker serves it from there
-and only builds text. This request does not change c's page state. Its pixmap completion never
-matches c's Pending seq, so §5.3 rule 2 drops it; the worker builds the text regardless, because
-`on_text` depends on the pixmap having been delivered, not on the canvas accepting it. The existing `wants_text_prefetch` gate
-still applies.
+- When a P0 is submitted for the page that will be the current page (the largest-visible-area
+  page of the pass), it carries `on_text`, with `text_wanted` set to that page.
+- When the derived current page changes to page c, or c's P0 completes while c is current, and
+  c's text is neither in the slot nor pending: if `l1_holds(c)`, submit a text-carrying
+  `request_page_render(c, P1, cb, on_text)` and cancel any earlier text-carrying request. If c is
+  not in L1, submit nothing; a press on c builds the text synchronously (R4 of the selection
+  spec).
+- That text request does not change c's page state. Its pixmap completion never matches a
+  Pending seq of c, so §5.3 rule 2 drops it; the worker builds the text regardless, because
+  `on_text` depends on the pixmap having been delivered, not on the canvas accepting it.
+- The existing `wants_text_prefetch` gate still applies.
 
-**Zoom or invert change.** Cancel every Pending request (each page returns to None), mark Ready
-bitmaps stale (they are still painted, stretched, so the strip does not flash white), and
-reschedule.
+**Zoom or invert change.** Cancel every Pending request (§5.1 cancel transition), mark Ready
+bitmaps stale, and reschedule.
 
 ### 5.3 Completion (`StripCompletion`)
 
 Paged mode posts a null completion with no identity (`PdfCanvas.cpp` `post_render_done_impl`:
-`WPARAM=0, LPARAM=0`); this is why #129 cannot cancel P0. Strip completions use a new message,
+`WPARAM=0, LPARAM=0`); this is why #129 cannot cancel P0. Strip completions use
 `WM_USER_STRIP_DONE`, whose payload **always** carries `{epoch, page, seq, cancelled}`, for null
 results too.
 
@@ -301,28 +333,36 @@ The handler first calls `on_completion_arrived` (§3.4), then decides, in order:
 
 1. epoch ≠ view epoch → drop (the view, or the layout, changed);
 2. the page is not Pending, or seq ≠ its Pending seq → drop;
-3. a pixmap is present → Ready; invalidate that page's rect;
-4. null and `cancelled` → None (defensive; a page is set to None when it is cancelled);
+3. a pixmap is present → create the D2D bitmap (creating the render target first if needed):
+   - success → Ready; invalidate that page's rect;
+   - no render target could be created, or `D2DERR_RECREATE_TARGET` → `discard_render_target`,
+     the page → None, reschedule;
+   - any other failure (for example a bitmap above the device's maximum size) → Failed;
+4. null and `cancelled` → the cancel transition (§5.1), then reschedule. This path is live:
+   code outside the strip flags strip requests too — `on_tab_switch`'s
+   `cancel_background_renders()` runs even for a same-index switch, and `set_invert_colors`
+   cancels everything below P0 — and the page may still be wanted;
 5. null and not cancelled → Failed. Paint a white page with a thin border, and do not retry
    automatically. The page is re-requested when it leaves V and comes back, or on a zoom or
    invert change.
 
-The #117 caveat applies: `cancel(token)` can flag a request that a worker has already taken, so
-a genuine failure can be reported as cancelled. That is harmless here, because only pages that
-are no longer wanted are cancelled.
+The #117 caveat applies: a flag store can hit a request that a worker has already taken, so a
+genuine failure can be reported as cancelled. Rule 4 then reschedules, so the page is requested
+again at most once per pass.
 
-**Known limit.** If the payload allocation itself fails on the null path, nothing is posted, and
-the page stays Pending (blank) until it leaves V and comes back. This happens only on
-out-of-memory.
+**Known limit.** If the payload allocation or the `PostMessageW` itself fails on the null path
+(out of memory, a full message queue, or process exit), nothing is posted, and the page stays
+Pending (blank) until it leaves V and comes back.
 
 ### 5.4 Memory
 
 - **Unchanged from today.** A visible page exists twice: as an L1 pixmap and as a D2D bitmap.
   High zoom still renders whole pages (no tiling).
 - **High zoom.** At 800% one page is much taller than the viewport, so V is usually 1–2 pages.
-- **Low zoom.** At 25%, about 10 pages are visible, which is above the L1 count cap of 5. The
-  visible pages are shown from the canvas's own bitmaps, so L1 eviction only disables prefetch;
-  it does not cause re-renders.
+- **Many visible pages.** When more pages are visible than the L1 count cap of 5 (a tall
+  window at 25%, for example), the visible pages are shown from the canvas's own bitmaps, so L1
+  eviction does not re-render them. It does disable prefetch, and it makes the §5.2 text request
+  rarer (it is submitted only for a page still in L1).
 - **Tab switch.** Handled by `set_view` (§3.4). #159 keeps all of V for a background strip tab
   (§7.4).
 
@@ -351,35 +391,37 @@ text-selection spec models. Page-by-page jumping stays available through the pag
 and the thumbnails.
 
 **Hand cursor.** `can_pan()` in the strip layout is true when the strip is taller than the
-viewport or the widest visible page is wider than it. The existing cursor rules then apply
-unchanged.
+viewport or `W` is wider than it. The existing cursor rules then apply unchanged.
 
 ### 6.2 Vertical scrollbar
 
-- `WS_VSCROLL` is set on the canvas window only in continuous mode, with `SIF_DISABLENOSCROLL`.
-  On a layout switch, the style is changed first (`SetWindowLongPtr` + `SetWindowPos` with
-  `SWP_FRAMECHANGED`), and only then does `apply_viewport` read `GetClientRect`. So the first fit
-  already uses the client width without (or with) the scrollbar.
-- Scrollbar units are rounded DIPs: `nMax` is the total height and `nPage` the viewport height.
-  67 M is well within `int`.
+- `WS_VSCROLL` is set on the canvas window only while the canvas shows the strip, and only
+  `apply_effective_layout` changes it (§3.4). The style is changed first (`SetWindowLongPtr` +
+  `SetWindowPos` with `SWP_FRAMECHANGED`), and only then does `apply_viewport` read
+  `GetClientRect`, so the first fit already uses the right client width. A paged tab, a null
+  view, and an empty canvas after the last tab closes have no scrollbar.
+- `SIF_DISABLENOSCROLL` keeps it visible while the content fits.
+- Scrollbar units are rounded DIPs: `nMin = 0`, `nMax = total − 1`, `nPage` = viewport height.
+  Win32's largest `nPos` is then `nMax − nPage + 1 = total − viewport`, the same as `scroll_y`'s
+  maximum. 67 M is well within `int`.
 - A thumb drag reads `GetScrollInfo(SIF_TRACKPOS)`, which is 32-bit. `WM_VSCROLL`'s
   `HIWORD(wParam)` is only 16-bit and wraps above 65535.
 - The scrollbar arrows act as ↑/↓, and track clicks act as PgUp/PgDn.
-- Every `SB_THUMBTRACK` reschedules; §5.2's cancellation keeps the queue bounded. A re-layout
+- Every `SB_THUMBTRACK` reschedules; §5.2's cancellation keeps live work bounded. A re-layout
   during the drag ends it (§4.5).
 
 ### 6.3 Navigation
 
-An explicit navigation sets the current page directly (§4.6), runs synchronously in the canvas,
-and is followed by a `Navigate` kick, which only reschedules.
+An explicit navigation sets the current page directly and pins it (§4.6), runs synchronously in
+the canvas, and is followed by a `Navigate` kick, which only reschedules.
 
 | Source | Continuous behaviour |
 |---|---|
-| Ctrl+G / page box, thumbnail click, outline click (`navigate_click`) | `scroll_y = top(p) − G`, clamped; current page = p. No anchor is installed. |
+| Ctrl+G / page box, thumbnail click, outline click (`navigate_click`) | `scroll_y = anchor(p)`, clamped; current page = p. No anchor object is installed. Runs even when p is already the current page (§3.4). |
 | End | bottom; current page = last |
-| Home | top; current page = 0 |
+| Home | top (`scroll_y = 0 = anchor(0)`); current page = 0 |
 | Find Next/Prev, cross-tab result row (`scroll_into_view`) | No scroll if the hit quad is fully visible. Otherwise, centre it vertically (the `pan_y_for_hit` rule, computed in document coordinates). Current page = the hit's page. |
-| Session restore | top of the saved page; current page = that page |
+| Session restore | `scroll_y = anchor(saved page)`; current page = that page |
 | Print | reads the current page; unchanged |
 
 Because positions do not wait for a render, the two right-page residuals recorded on #50 do not
@@ -400,7 +442,7 @@ in reading order.
   - The page under the cursor, looked up in document coordinates, becomes the selection's page.
   - A press in a gap, or outside every page, starts **no** gesture. In Chars mode it clears the
     selection, as a click without a drag does today. The hand tool's drag-pan is unaffected.
-- **Selection: drag.** Points map into the **start page's** placement, and
+- **Selection: drag.** Points map into the **start page's** placement (its `x_i` and `top`), and
   `canvas_dip_to_page_point` keeps clamping them to that page's rect, whatever page is under the
   cursor. So the selection stops at the start page's start or end.
 - **Selection: text and painting.**
@@ -416,7 +458,8 @@ in reading order.
 - The preference is stored at `HKCU\SOFTWARE\LitePDF\Settings` as DWORD `ContinuousScroll`, a
   sibling of the MRU key `SOFTWARE\LitePDF\MRU`.
 - A missing value means the default: 0 in PR 1–3, 1 from PR 4.
-- It is read once at start-up, and written when the menu item is toggled (PR 3 onward).
+- It is read once at start-up, and written when the menu item is toggled (PR 3 onward). A
+  registry change while the app runs takes effect at the next start.
 - `session.json` is **unchanged**. Its parser rejects unknown keys, so a new key would make an
   older build drop the whole session.
 
@@ -425,33 +468,40 @@ in reading order.
 - **Menu item (PR 3).** View menu: `&Continuous Scroll` below `&Two-Page Spread`, checked when the
   preference is on, with no accelerator. It is greyed when no document is open, or when the
   format missed the §4.4 gate.
-- **Effective layout per tab:**
+- **Effective layout per tab** (`EffectiveLayout`):
 
 | Condition | Layout |
 |---|---|
 | spread on in that tab | paged spread |
-| else preference on (and the format passed §4.4) | continuous |
+| else preference on and the format passed §4.4 | continuous |
 | else | paged single |
 
 - **Choosing Continuous Scroll in a spread tab** turns the preference on and turns that tab's
   spread off. Turning spread on does not change the preference, and turning it off returns to
-  the preference's layout.
-- **Every layout switch** first does the reset in §3.4.
-- **Paged → continuous.** `scroll_y = top(cur) + in-page offset`. The offset is 0 when the page
-  fits, and otherwise is how far the page has been scrolled. The current page is unchanged (this
-  counts as navigation intent).
-- **Continuous → paged.** The current page becomes the derived page. Paged `pan_y` =
-  −(in-page offset), clamped, and `pan_x` = the effective `pan_x`. The pan is set before the
-  render is kicked. The switch cleared the anchor, so the paged completion path only re-clamps
-  the pan and the position survives.
+  the preference's layout. Changing the preference re-applies the effective layout to the active
+  tab only; a background tab picks it up at its next `on_tab_switch`.
+- **Every layout switch** goes through `apply_effective_layout`, which first does the reset in
+  §3.4.
+- **Position carry, within one tab** (spread toggle, menu item):
+  - **Paged → continuous.** `scroll_y = anchor(cur) + in-page offset`, where the offset is how
+    far the page has been scrolled into (0 when the page fits). So a page that fits lands exactly
+    where navigating to it would put it. The current page is unchanged and pinned (§4.6).
+  - **Continuous → paged.** The current page becomes the derived page. Paged `pan_y` =
+    −(in-page offset), clamped, and `pan_x` = `pan_x_eff`. The pan is set before the render is
+    kicked. The switch cleared the anchor, so the paged completion path only re-clamps the pan
+    and the position survives.
+- **A tab switch does not carry position** between tabs: the incoming tab restores its own
+  (§7.4).
 
 ### 7.4 Tab state
 
 - `Tab` keeps the strip position in memory only, as (page, fraction) plus the desired `pan_x`,
-  rather than a raw `scroll_y`. A background tab whose viewport or DPI changed then returns to
-  the same place after re-layout.
-- #159 (PR 3): in continuous mode `shown_pages` returns all of V, and `retain_l1_pages` takes a
-  set, capped at the L1 count cap.
+  rather than a raw `scroll_y`. It is written by `on_tab_switch`'s outgoing snapshot (beside
+  `pan_x/pan_y` today) and restored by a `TabSwitch` kick. A background tab whose viewport or DPI
+  changed then returns to the same place after re-layout. A same-index switch restores nothing
+  (its kick is `Navigate`).
+- #159 (PR 3): in continuous mode the trim keeps all of V, through the new set-taking overload;
+  `shown_pages` is unchanged, and a strip-specific helper returns V, capped at the L1 count cap.
 - The thumbnail highlight follows the derived current page through the existing observer. §5.2
   step 4 bounds the queued thumbnail work during a fast scroll.
 
@@ -461,29 +511,33 @@ Every PR leaves paged single and paged spread behaviour, and the existing tests,
 (§9.2).
 
 1. **Foundations** (no user-visible change):
-   - `StripLayout`, `StripScroll`, `StripSchedule` and `StripCompletion`, with unit tests;
+   - `StripLayout`, `StripScroll`, `StripSchedule`, `StripCompletion` and `EffectiveLayout`, with
+     unit tests;
+   - the `DocumentView` continuous flag (no refit on a page change), with its test;
    - `page_sizes()`, the §9.4 fixtures, and the §4.4 gate measurement;
-   - `request_page_render` (releases the pin) and `cancel_thumbnail_renders`;
+   - `request_page_render` (releases the pin), `l1_holds`, `cancel_thumbnail_renders`;
    - `ViewPrefs`, default off;
-   - the started-render counter.
+   - the started-render counter and the §9.4 in-process scheduling test harness.
 2. **The strip renders and scrolls**, reachable only through the registry value:
-   - `PageBitmapSet` and painting;
-   - every shared entry point of §3.4, including the `KickReason` classification;
+   - `PageBitmapSet`, painting and the `WM_USER_STRIP_DONE` handler;
+   - every shared entry point of §3.4, including `apply_effective_layout` and the `KickReason`
+     classification;
    - wheel, keys, drag, PgDn, Home/End and the scrollbar;
-   - scheduling, cancellation and the thumbnail cancel;
+   - scheduling, promotion, cancellation and the thumbnail cancel;
    - the derived current page and its side effects, including the text request;
    - re-layout on zoom, resize and DPI change;
    - navigation (go-to-page, thumbnails, outline, restore) and Find navigation in strip
      coordinates;
-   - layout transitions and tab state.
+   - layout transitions (through the two-page toggle) and tab state;
+   - the two `ux-probe.ps1` probes and the PR 2 smoke rows of §9.3.
 3. **Overlays and the menu item:**
    - search hits on every visible page;
    - selection on the page under the cursor, and the cursor rules;
-   - #159 retaining V (`retain_l1_pages` with a set);
+   - #159 retaining V (the set-taking overloads);
    - the `&Continuous Scroll` menu item.
 4. **Default on and release readiness:**
    - the default flipped to 1;
-   - the memory and fast-scroll measurements;
+   - the memory measurement and the GUI drag check (§9.4);
    - smoke updated (§9.3) and `docs/SMOKE-CHECKLIST.md`;
    - CHANGELOG `[Unreleased]` entries.
 
@@ -495,40 +549,43 @@ bumps it.
 ### 9.1 Unit tests (pure headers and core)
 
 - **`StripLayout`**
-  - prefix sums;
+  - prefix sums and `anchor(i)`;
   - page-at-y at a gap, at the first page's top, at the last page's bottom;
   - `double` precision at 10,000 pages × 800%, with a control case that fails under `float`;
   - the visible range;
-  - mixed-width horizontal placement.
+  - mixed-width horizontal placement, including a page wider than the viewport but narrower
+    than `W`.
 - **`StripScroll`**
   - clamping;
   - viewport-top preservation across re-layout;
-  - the derived current page: ties, the navigation-intent pin, resumption on scroll input;
+  - the derived current page: bottom → last, top → 0, ties, the navigation pin surviving a
+    re-layout and ending on scroll input;
   - desired vs effective `pan_x` when a wide page leaves V and comes back.
 - **`StripSchedule`**
-  - V and P;
+  - V and P; promotion of a P1-pending page entering V;
   - count room and byte room;
   - travel direction;
-  - the cancel set, with cancelled pages back to None;
+  - the cancel set and both cancel transitions (to None, to Ready-stale);
   - the thumbnail cancel only when V changed;
-  - the text request on a current-page change;
-  - full reschedule on a scale change.
+  - the text request: on the predicted current page's P0, and as a P1 only when `l1_holds`;
+  - full reschedule on a scale change, keeping stale bitmaps.
 - **`StripCompletion`**
   - epoch mismatch;
   - a page that is not Pending;
   - stale seq;
-  - cancelled vs failed;
-  - success.
-- **`KickReason` dispatch.** The pure mapping from reason to (refit, re-layout, reschedule,
-  restyle, layout switch) is a table test.
+  - cancelled (with and without a stale bitmap) vs failed;
+  - success, recreate-target and other bitmap failures.
+- **`KickReason` dispatch** and **`EffectiveLayout`.** Table tests, including Spread off with the
+  preference on, and a same-index tab switch mapping to `Navigate`.
 - **`ViewPrefs`.** A registry round trip under a test subkey, as the `MruList` tests do.
 - **`DocumentView`**
   - no refit on a page change in continuous mode;
   - a token is returned;
   - `request_page_render` releases the pin: after `trim_l1_for_background(0)`, a rendered page 5
     is admitted to L1;
-  - `page_sizes()`;
-  - `retain_l1_pages` with a set (PR 3).
+  - `l1_holds`;
+  - `page_sizes()`, including the size-failure fallbacks;
+  - the set-taking `retain_l1_pages` overload (PR 3).
 
 ### 9.2 Regression
 
@@ -547,50 +604,68 @@ In PR 1–3, the existing tests that pin single-page behaviour are not edited an
 - `test_session_state`
 - `test_render_engine_cancel`
 
-Any unavoidable edit is justified line by line in the PR body. The suite size is read from
-`ctest -N` at the time, never hard-coded.
+New APIs are added as overloads or new functions, never by changing a signature these tests call
+(`retain_l1_pages`, `trim_l1_for_background`, `shown_pages`). Any unavoidable edit is justified
+line by line in the PR body. The suite size is read from `ctest -N` at the time, never
+hard-coded.
 
 ### 9.3 GUI smoke (pixel-free oracles first)
 
-New `ux-probe.ps1` probes:
+New `ux-probe.ps1` probes (PR 2):
 
 - the canvas's scrollbar state (`GetScrollInfo` on a standard scrollbar, read cross-process; PR 2
   checks first that the probe returns the canvas's real range, against a known document);
 - the page-box text.
 
-Scripted on a 50+ page fixture:
+Scripted on a 50+ page fixture, with `ContinuousScroll=1` set before launch:
 
 | Action | Expected |
 |---|---|
-| wheel to the bottom | scroll pos = max; page box = last page |
-| Ctrl+G 30 | page box = 30; scroll pos = top(30) − G |
-| toggle layout (registry, then menu from PR 3) | position kept |
-| paged mode (negative control) | no `WS_VSCROLL` |
+| wheel to the bottom | scroll pos = `nMax − nPage + 1`; page box = last page |
+| Ctrl+G 30 (index 29) | page box = 30; scroll pos = `anchor(29)` |
+| Ctrl+G to the current page while mid-page | scroll pos moves to that page's anchor |
+| two-page on, then off, from mid-page | after off: same page box, same in-page offset (±1 DIP) |
+| a tab with two-page on (negative control) | no `WS_VSCROLL` on the canvas |
+| switch back to a strip tab | `WS_VSCROLL` present |
 | cold start in continuous mode | `LitePDF cold-start:` line present |
 
-From PR 4 onward, existing smoke steps that test paged behaviour set the preference off
-explicitly. Otherwise they would silently run in continuous mode and test something else.
+PR 3 adds the same transition row through the menu item. From PR 4 onward, existing smoke steps
+that test paged behaviour set the preference off explicitly. Otherwise they would silently run in
+continuous mode and test something else.
 
 ### 9.4 Fixtures and measurement gates
 
 **New fixtures (PR 1).** Generated by scripts under `scripts/`, like the existing ones:
 
-- a 1000-page PDF (today's `large.pdf` has 500 pages);
+- a 1000-page PDF (today's `large.pdf` has 500 pages) and a 10,000-page PDF for the §4.4
+  measurement;
 - a multi-chapter EPUB (≥ 200 chapters);
 - a CBZ of ≥ 300 images.
 
 The existing `sample.epub` (1.5 KB) and `sample.cbz` (18 KB) cannot produce a failing reading
 for a 100 ms gate.
 
-**The started-render counter** counts main-view renders (`bypass_cache == false`) that pass
-checkpoint A, i.e. that actually begin rasterising. Cancelled-before-start requests and P3
-thumbnails are not counted.
+**The started-render counter** counts main-view renders (`bypass_cache == false`) that miss L1,
+i.e. that actually build a display list or rasterise. Requests skipped at checkpoint A, L1 hits
+(including §5.2 text requests served from L1) and P3 thumbnails are not counted. It is read
+in-process by tests.
+
+**Scheduling gate (PR 1, in-process).** A worker throughput figure cannot test cancellation, so
+the gate holds the workers instead, using the #49 test seam (hold the single worker inside the
+first callback):
+
+1. Build a `DocumentView` on the 1000-page fixture with one worker, and hold that worker.
+2. Drive `StripSchedule` through 1000 successive viewports, top to bottom, as a drag would.
+3. Assert that the live (non-cancelled) queued requests never exceed |V| + |P| + 1.
+4. Release the worker and drain. Assert that started renders ≤ |final V| + |final P| + 1.
+5. Mutation check: with the cancel step removed, step 4's count exceeds the bound by hundreds.
 
 | Gate | PR | Condition |
 |---|---|---|
-| Page sizing | 1 | Measured on the new fixtures: 1000-page PDF ≤ 16 ms; EPUB and CBZ ≤ 100 ms each. A miss disables continuous for that format, and a follow-up issue is filed. |
+| Page sizing | 1 | Measured on the new fixtures: 1000-page PDF ≤ 16 ms; EPUB and CBZ ≤ 100 ms each. A miss disables continuous for that format, and a follow-up issue is filed. The 10,000-page figure is recorded. |
+| Scheduling | 1 | The in-process test above, plus its mutation check. |
 | Memory | 4 | Scroll down 10 pages at 800%: peak private bytes ≤ 1.25 × paged mode's 10 × PgDn (the #49 recipe). CPU time per scroll step is recorded beside it, as the L1-hit oracle (#49): a P0 miss shows as a second full render. |
-| Fast scroll | 4 | Drag the thumb from the top to the bottom of the 1000-page fixture in 1 s, run once with the thumbnails pane closed and once open: started renders ≤ 20 in each run. After the drag, queued P3 ≤ the number of visible thumbnail rows. With the token cancel removed (mutation check), the count exceeds the gate. |
+| GUI drag | 4 | A real `SendInput` thumb drag from top to bottom of the 1000-page fixture (a posted `WM_VSCROLL` sets no track position), with the thumbnails pane closed and open. Oracle: within 5 s of release the page box shows the last page and the process is idle (CPU below 2% for 1 s). A sanity check, not a count gate. |
 | Existing CI | every PR | benchmark regression check; exe size gates (smoke 12 MB, bench 19 MB); `smoke-test.ps1` including the cold-start line |
 
 ### 9.5 Phase acceptance
@@ -602,11 +677,14 @@ thumbnails are not counted.
 ## 10. Out of scope / known limits
 
 - The two-column continuous strip (#167) and cross-page selection (#168).
-- Tiled rendering at high zoom: whole pages are rendered, as today.
+- Tiled rendering at high zoom: whole pages are rendered, as today. A page above the device's
+  maximum bitmap size shows as Failed (§5.3 rule 3).
 - A horizontal scrollbar, and cursor-anchored zoom.
 - Autoscroll while drag-selecting.
-- Lazy or estimated page sizing: a format that misses the §4.4 gate stays paged.
-- A lost null completion on payload OOM leaves a page blank until it re-enters V (§5.3).
+- Lazy or estimated page sizing: a format that misses the §4.4 gate stays paged; sizing a very
+  large document is O(N) on the UI thread (§4.4).
+- A null completion that cannot be posted leaves a page blank until it re-enters V (§5.3).
+- Changing the registry value while the app runs takes effect at the next start (§7.2).
 
 ## 11. Risk and review
 
@@ -614,7 +692,9 @@ thumbnails are not counted.
   completion path) and PR 3 (overlay coordinates). PR 1 is mostly pure math.
 - **Review.** Each PR's gate tier is set by risk at that gate (`risk-tiered-review`).
 
-## 12. Design review record (Fable, before the spec was written)
+## 12. Review record
+
+### 12.1 Fable design review (before the spec was written)
 
 A Fable review of the brainstorming draft at `5a40d5e` found 15 issues and raised 7 questions.
 No finding was discarded. Each is resolved in this spec:
@@ -628,7 +708,7 @@ No finding was discarded. Each is resolved in this spec:
 | F5 a new request path does not release the #159 pin | §3.3, §9.1 |
 | F6 the cancel transition is undefined | §5.1, §5.2 step 3, §5.3 rule 2 |
 | F7 #98 text prefetch never fires in the strip | §5.2 text prefetch |
-| F8 late paged completions and a carried anchor after a layout switch | §3.4 layout switch row, §7.3 |
+| F8 late paged completions and a carried anchor after a layout switch | §3.4 layout-switch reset, §7.3 |
 | F9 no `ColdStartTimer` marks in the strip → smoke throws once default-on | §3.4, §9.3 |
 | F10 gates that can only pass; no 1000-page fixture; counter undefined | §9.4 |
 | F11 no thumbnail cancel in the strip | §5.2 step 4 |
@@ -638,3 +718,35 @@ No finding was discarded. Each is resolved in this spec:
 | F15 re-layout during a thumb drag | §4.5, §6.2 |
 | U6 "paged code is not modified" is impossible as a code boundary | U6 rewritten; §3.4 |
 | Questions: drag clamp; memory gate attribution; `WS_VSCROLL` timing; search start page; hand cursor; page 0 size failure; the "decision 4" citation | §7.1; §9.4; §6.2; §6.3; §6.1; §4.4; §6.1 |
+
+### 12.2 Spec gate, round 1 (Full tier: Opus slot 1, Sonnet slot 2, at `2e9381b`)
+
+Opus raised 16 findings and 1 question; Sonnet raised 8 important and 5 minor findings and 4
+questions. Every anchor was verified against the code; none was discarded. Overlaps are merged:
+
+| Finding (lens) | Resolution |
+|---|---|
+| `navigate_click` returns early on the same page (Opus F3, Sonnet 1) | §3.4 `navigate_click` row; §6.3; §9.3 row |
+| No owner for layout switches; tab switch across layouts; spread off (Opus F4, F12, Sonnet 2) | §3.4 `apply_effective_layout`, Spread row; `EffectiveLayout`; §6.2; §7.3 |
+| Registry read once vs the PR 2 transition smoke row (Opus F7, Sonnet 3) | §9.3 uses the two-page toggle; §7.2, §10 |
+| `CreateBitmap` / render-target failure in the strip handler (Opus F2, Sonnet 4) | §5.3 rule 3; §10 |
+| Ctrl+G oracle off by one (Sonnet 5) | §4.2 indexing; §9.3 |
+| `top(cur)` vs `top(p) − G` (Sonnet 6) | §4.2 `anchor(i)`; §6.3; §7.3 |
+| Fast-scroll gate measures throughput, has no channel, vacuous mutation (Opus F6, Sonnet 7, Opus question) | §9.4 in-process scheduling gate; GUI drag as a sanity check with `SendInput` |
+| Rule 4 is live, not defensive; P1-pending pages never promoted (Opus F10, Sonnet 8) | §5.2 step 1 promotion; §5.3 rule 4 reschedules |
+| Ready-stale has no transition (Opus F1) | §5.1 `stale_bitmap`, cancel transitions |
+| Same-index `TabSwitch` refits (Opus F5) | §3.4 `on_tab_switch` row, `Navigate`; §7.4 |
+| Wheel to the bottom reports N−k at low zoom (Opus F8) | §4.6 rules 1-2 |
+| Text request re-rasterises (Opus F9, Sonnet question 1) | §5.2 text prefetch (`l1_holds`, P0-carried); §5.4 |
+| Pin vs re-layout (Opus F11) | §4.6 navigation intent |
+| Readout refresh on refitting kicks (Opus F13) | §3.4 reasons preamble and rows |
+| Horizontal origin of a mid-width overflowing page (Opus F14) | §4.2 `x_i` |
+| PR 3 API change vs unedited tests (Opus F15) | §3.3 overloads; §9.2 |
+| Scrollbar `nMax` off by one (Opus F16) | §6.2 |
+| `page_sizes` "only cur ±1" is false (Opus, Sonnet M1) | §2; §4.4 |
+| `resubmit`/`discard` prose loose (Opus, Sonnet M2) | §3.4 rows |
+| Counter definition contradicts itself (Sonnet M3) | §9.4 |
+| 25% arithmetic (Sonnet M4) | §5.4 |
+| PR placement of the flag and the probes (Sonnet M5) | §8 |
+| Queue-size claim; flag store vs `engine->cancel`; null post failure (Opus negatives) | §5.2 step 3; §3.3; §5.3 known limit |
+| Large-document sizing time; message id (Sonnet questions 2, 3) | §4.4, §10; §3.3 |
