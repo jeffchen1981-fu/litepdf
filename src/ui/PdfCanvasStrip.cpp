@@ -55,43 +55,49 @@ struct StripMeta {
 // it again. Unlike the paged message, a null result carries its identity too.
 // Returns true iff the message was posted.
 //
+// When the escrow clone fails, the pixmap is dropped here on worker_ctx and the
+// render is posted as a null result, so the UI thread still settles the page
+// (spec 5.3 rule 4 or 5) instead of leaving it Pending.
+//
 // Spec 5.3 known limit: when the payload allocation or PostMessageW fails,
 // nothing is posted, and the page stays Pending until it leaves V. A post that
 // succeeds but is never dispatched leaks the payload exactly as #74 describes
 // for the paged message: the canvas HWND dies only at process exit.
 bool post_strip_done(HWND target, fz_pixmap* pix, fz_context* worker_ctx,
                      StripCompletionMeta id) {
-    if (!pix) {
-        auto* meta = new (std::nothrow) StripMeta{};
-        if (!meta) return false;
-        meta->id = id;
-        if (!PostMessageW(target, WM_USER_STRIP_DONE, 0,
-                          reinterpret_cast<LPARAM>(meta))) {
-            delete meta;
-            return false;
+    if (pix) {
+        // The escrow keeps the Document's lock table and the root context
+        // alive, so the UI thread can drop the pixmap even after the tab has
+        // closed (#61).
+        litepdf::core::EscrowContext escrow =
+            litepdf::core::EscrowContext::clone_from(worker_ctx);
+        if (escrow.valid()) {
+            // Allocate BEFORE moving the escrow in, so the failure path still
+            // owns it.
+            auto* meta = new (std::nothrow) StripMeta{};
+            if (!meta) {
+                fz_drop_pixmap(escrow.get(), pix);
+                return false;   // `escrow` drops its context, then the table
+            }
+            meta->escrow = std::move(escrow);
+            meta->id     = id;
+            if (!PostMessageW(target, WM_USER_STRIP_DONE,
+                              reinterpret_cast<WPARAM>(pix),
+                              reinterpret_cast<LPARAM>(meta))) {
+                fz_drop_pixmap(meta->escrow.get(), pix);
+                delete meta;
+                return false;
+            }
+            return true;
         }
-        return true;
-    }
-    // The escrow keeps the Document's lock table and the root context alive, so
-    // the UI thread can drop the pixmap even after the tab has closed (#61).
-    litepdf::core::EscrowContext escrow =
-        litepdf::core::EscrowContext::clone_from(worker_ctx);
-    if (!escrow.valid()) {
         fz_drop_pixmap(worker_ctx, pix);
-        return false;
+        // Fall through: the pixmap is gone, but the identity is still posted.
     }
-    // Allocate BEFORE moving the escrow in, so the failure path still owns it.
     auto* meta = new (std::nothrow) StripMeta{};
-    if (!meta) {
-        fz_drop_pixmap(escrow.get(), pix);
-        return false;   // `escrow` drops its context, then the table
-    }
-    meta->escrow = std::move(escrow);
-    meta->id     = id;
-    if (!PostMessageW(target, WM_USER_STRIP_DONE,
-                      reinterpret_cast<WPARAM>(pix),
+    if (!meta) return false;
+    meta->id = id;
+    if (!PostMessageW(target, WM_USER_STRIP_DONE, 0,
                       reinterpret_cast<LPARAM>(meta))) {
-        fz_drop_pixmap(meta->escrow.get(), pix);
         delete meta;
         return false;
     }
@@ -531,26 +537,35 @@ void PdfCanvas::strip_on_done(WPARAM w, LPARAM l) {
             const int stride = fz_pixmap_stride(ectx, pix);
             unsigned char* samples = fz_pixmap_samples(ectx, pix);
 
-            BitmapResult result = BitmapResult::Ok;
-            ComPtr<ID2D1Bitmap> bmp;
             create_render_target();
             if (!impl_->rt) {
+                // No render target at all. The page goes to None and waits for
+                // the next strip change (an input, a kick, a resize) to schedule
+                // it again, as the paged handler stops here. Rescheduling now
+                // would resubmit every visible page on every completion, a loop
+                // at message speed for as long as no target can be created.
                 fz_drop_pixmap(ectx, pix);
+                set.state.slots()[id.page] =
+                    after_bitmap(pending, BitmapResult::RecreateOrNoTarget);
+                prune_page(id.page);
+                if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+                return;
+            }
+
+            BitmapResult result = BitmapResult::Ok;
+            ComPtr<ID2D1Bitmap> bmp;
+            D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                                  D2D1_ALPHA_MODE_IGNORE));
+            HRESULT hr = impl_->rt->CreateBitmap(
+                D2D1::SizeU(static_cast<UINT32>(w_px),
+                            static_cast<UINT32>(h_px)),
+                samples, static_cast<UINT32>(stride), &props, &bmp);
+            fz_drop_pixmap(ectx, pix);
+            if (hr == D2DERR_RECREATE_TARGET) {
                 result = BitmapResult::RecreateOrNoTarget;
-            } else {
-                D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
-                    D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
-                                      D2D1_ALPHA_MODE_IGNORE));
-                HRESULT hr = impl_->rt->CreateBitmap(
-                    D2D1::SizeU(static_cast<UINT32>(w_px),
-                                static_cast<UINT32>(h_px)),
-                    samples, static_cast<UINT32>(stride), &props, &bmp);
-                fz_drop_pixmap(ectx, pix);
-                if (hr == D2DERR_RECREATE_TARGET) {
-                    result = BitmapResult::RecreateOrNoTarget;
-                } else if (FAILED(hr)) {
-                    result = BitmapResult::OtherFailure;
-                }
+            } else if (FAILED(hr)) {
+                result = BitmapResult::OtherFailure;
             }
 
             // The slot first. Rescheduling while the matched slot is still
@@ -570,9 +585,12 @@ void PdfCanvas::strip_on_done(WPARAM w, LPARAM l) {
                 }
             } else {
                 // OtherFailure turns a Pending page holding a stale bitmap into
-                // Failed; RecreateOrNoTarget into None.
+                // Failed; D2DERR_RECREATE_TARGET into None.
                 prune_page(id.page);
                 if (result == BitmapResult::RecreateOrNoTarget) {
+                    // The device was lost: the target is rebuilt on the next
+                    // create_render_target, so the lost pages are rescheduled at
+                    // once, as the paged handler resubmits its page.
                     discard_render_target();
                     strip_reschedule();
                 }

@@ -112,7 +112,7 @@ These run in both layouts. Each gets a strip branch; its paged branch keeps toda
 |---|---|---|
 | `MainWindow::kick_render(page)`, 21 call sites | `apply_viewport` (refit), refresh the zoom readout, then `request_render_with_prefetch` (or two P0s in a spread) | Gains a `KickReason` argument. The paged branch ignores it. The strip branch dispatches by reason, per the table below. |
 | `MainWindow::navigate_click(page)` | `change_current_page`; **returns early if the page did not change**; Top anchor; kick | The strip branch runs **first, before the early return**: strip navigation (§6.3), then a `Navigate` kick. Going to the derived current page while mid-page therefore scrolls to its top. |
-| `MainWindow::on_tab_switch` | snapshot, `set_view`, pan, `set_dual_page`, `set_viewport`, kick | Calls `apply_effective_layout` (below) right after `set_view`. `apply_effective_layout` takes the place of today's `set_dual_page` call, after `set_pan` and `set_invert_chrome`. Same-index calls (`new_index == old_index`) kick with `Navigate`, not `TabSwitch`. |
+| `MainWindow::on_tab_switch` | snapshot, `set_view`, pan, `set_dual_page`, `set_viewport`, kick | Calls `apply_effective_layout` (below). `apply_effective_layout` takes the place of today's `set_dual_page` call, after `set_pan` and `set_invert_chrome`. Same-index calls (`new_index == old_index`) kick with `Navigate`, not `TabSwitch`. |
 | `MainWindow::apply_effective_layout(tab)` (new) | — | The **only** owner of layout switches. Computes `EffectiveLayout` for the tab (or `PagedSingle` for a null view) and, if it differs from the canvas's current layout, does the layout-switch reset below and sets or clears `WS_VSCROLL` (§6.2). Called from `on_tab_switch`, the two-page toggle (both directions), the Continuous Scroll menu item, and tab close. The reset and the carry run only for a switch into or out of the strip; a paged single ↔ spread switch keeps today's `set_dual_page` path (U6). |
 | `PdfCanvas::apply_viewport` | refit from the current page, then `set_viewport` | Called only for the reasons that refit (below). |
 | `PdfCanvas::resubmit_current_page` (Ctrl+wheel zoom; `on_size`, `on_paint` and the completion handler on `D2DERR_RECREATE_TARGET`) | resubmit the current page | Re-layout (§4.5), then reschedule. |
@@ -372,8 +372,11 @@ The handler first calls `on_completion_arrived` (§3.4), then decides, in order:
    - success → Ready at the Pending entry's submitted scale and polarity; invalidate that page's
      rect. If those differ from the view's (a change the cancel missed), the page is Ready-stale
      and the next pass re-requests it;
-   - no render target could be created, or `D2DERR_RECREATE_TARGET` → `discard_render_target`,
-     the page → None, reschedule;
+   - `D2DERR_RECREATE_TARGET` → `discard_render_target`, the page → None, reschedule;
+   - no render target could be created → the page → None, with no reschedule: the next strip
+     change (an input, a kick, a resize) schedules it again, as the paged handler stops there.
+     Rescheduling at once would resubmit every visible page on every completion, at message
+     speed, for as long as no target can be created;
    - any other failure (for example a bitmap above the device's maximum size) → Failed;
 4. null and `cancelled` → the cancel transition (§5.1), then reschedule. Usually the §5.2 sweep
    has already done this and rule 2 drops the completion; this rule covers a flag set after the
@@ -385,6 +388,9 @@ The handler first calls `on_completion_arrived` (§3.4), then decides, in order:
 The #117 caveat applies: a flag store can hit a request that a worker has already taken, so a
 genuine failure can be reported as cancelled. Rule 4 then reschedules, so the page is requested
 again at most once per pass.
+
+A pixmap whose escrow clone fails on the worker is dropped there and posted as a null result
+with its identity, so rule 4 or 5 settles the page.
 
 **Known limit.** If the payload allocation or the `PostMessageW` itself fails on the null path
 (out of memory, a full message queue, or process exit), nothing is posted, and the page stays
