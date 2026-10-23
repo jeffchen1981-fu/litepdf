@@ -458,7 +458,7 @@ the canvas, and is followed by a `Navigate` kick, which only reschedules.
 | Ctrl+G / page box, thumbnail click, outline click (`navigate_click`) | `scroll_y = anchor(p)`, clamped; current page = p. No anchor object is installed. Runs even when p is already the current page (§3.4). |
 | End | bottom; current page = last |
 | Home | top (`scroll_y = 0 = anchor(0)`); current page = 0 |
-| Find Next/Prev, cross-tab result row (`scroll_into_view`) | No scroll if the hit quad is fully visible. Otherwise, centre it vertically (the `pan_y_for_hit` rule, computed in document coordinates). Current page = the hit's page. |
+| Find Next/Prev, cross-tab result row (`scroll_into_view`) | No scroll if the hit quad is fully visible (with the 24-DIP margin paged mode uses). Otherwise, centre it vertically (the `pan_y_for_hit` rule, computed in document coordinates). Current page = the hit's page. |
 | Session restore | `scroll_y = anchor(saved page)`; current page = that page |
 | Print | reads the current page; unchanged |
 

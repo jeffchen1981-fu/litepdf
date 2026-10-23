@@ -63,6 +63,16 @@ struct StripPos {
     double fraction = 0;
 };
 
+// A tab's saved strip position (spec 4.5, 7.4): the viewport-top point, relative to
+// the layout so it survives a zoom change, and the shared horizontal pan. `zoom_pct`
+// is the zoom the pan was saved at, so a restore after a zoom or DPI change can
+// scale it.
+struct StripTabState {
+    StripPos top;
+    double desired_pan_x = 0;
+    double zoom_pct = 1;
+};
+
 class StripLayout {
 public:
     StripLayout() = default;
