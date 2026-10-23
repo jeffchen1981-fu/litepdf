@@ -795,9 +795,7 @@ void PdfCanvas::strip_paint() {
     }
     // #135: record the overlay this paint draws, as the paged on_paint does, so
     // on_search_hits_changed compares the next search update against the screen.
-    // The strip draws no hits in PR 2 (PR 3 will): without this, hits a paged
-    // paint left here would make every search update repaint the whole strip.
-    impl_->painted_hits.clear();
+    impl_->painted_hits = overlay_hits();
     bool drew_bitmap = false;
 
     impl_->rt->BeginDraw();
@@ -860,6 +858,17 @@ void PdfCanvas::strip_paint() {
                         border_brush.Get(), 1.0f);
                 }
             }
+        }
+
+        // Search hits over every visible page (spec 7.1), whatever its bitmap
+        // state: a hit is placed from its page's rect. One PDF point is
+        // zoom_pct DIPs, as in paged mode; the layout's zoom is the one
+        // page_rect uses. overlay_hits() already checked the source and both
+        // fill brushes.
+        const float pct = static_cast<float>(sv.layout().zoom_pct());
+        for (const auto& hit : impl_->painted_hits) {
+            const StripPageRect r = sv.page_rect(static_cast<int>(hit.page));
+            paint_hit(hit, static_cast<float>(r.x), static_cast<float>(r.y), pct);
         }
     }
 

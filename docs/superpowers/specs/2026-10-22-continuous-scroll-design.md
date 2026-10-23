@@ -483,7 +483,9 @@ in reading order.
 
 - **Search hits.** `hits_fn(page)` is called for every page in V, and quad origins come from that
   page's viewport rect. The current-hit style is unchanged. #135's overlay-diff repaint works
-  per page rect, with the same diff rule.
+  per page rect, with the same diff rule. In practice the diff compares the union of V's hits and
+  repaints the whole canvas, since a Direct2D window target redraws all of it; a search update for
+  a page outside V costs no repaint.
 - **Selection: press.**
   - The page under the cursor, looked up in document coordinates, becomes the selection's page.
   - A press in a gap, or outside every page, starts **no** gesture. In Chars mode it clears the
@@ -494,7 +496,8 @@ in reading order.
 - **Selection: text and painting.**
   - Text comes from the #98 slot when the start page is the current page and its text is ready;
     otherwise it is built synchronously (cost recorded in R4 of the selection spec).
-  - A selection is painted whenever its page is visible.
+  - A selection is painted whenever its page is visible. Hits and the selection are placed from
+    the page's rect (page sizes × zoom), so they do not wait for the page's bitmap.
   - Select All selects the current page, as today. Copy is unchanged. There is no autoscroll
     during a drag (none exists today).
 - **Cursor.** An I-beam over any page rect, an arrow over gaps; the hand-cursor rule is in §6.1.

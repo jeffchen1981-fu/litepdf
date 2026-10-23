@@ -454,6 +454,13 @@ private:
     // ask this, so the two cannot disagree about what is on screen.
     std::vector<litepdf::core::SearchSession::Hit> overlay_hits() const;
 
+    // Draws one search hit: the current-hit fill and stroke when it is the
+    // current hit, else the other-hit fill. (ox, oy) is the page's top-left in
+    // canvas DIPs and `pct` the DIPs per PDF point; the caller has checked
+    // that the render target and both fill brushes exist (overlay_hits does).
+    void paint_hit(const litepdf::core::SearchSession::Hit& hit,
+                   float ox, float oy, float pct);
+
     // The selection on_paint draws, or null.
     const litepdf::core::TextSelection* painted_selection() const noexcept;
 

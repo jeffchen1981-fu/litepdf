@@ -11,6 +11,7 @@
 #include "ui/detail/HitOverlay.hpp"
 #include "ui/detail/ViewportMath.hpp"
 #include "ui/detail/SelectionDrag.hpp"
+#include "ui/detail/StripOverlay.hpp"
 
 #include <d2d1.h>
 #include <d2d1_1.h>
@@ -534,6 +535,16 @@ bool PdfCanvas::single_page_placement(Placement& out) const {
 }
 
 std::vector<litepdf::core::SearchSession::Hit> PdfCanvas::overlay_hits() const {
+    // The strip (#55, spec 7.1): the hits of every visible page. They are placed
+    // from the pages' rects, so they need no bitmap (only the brushes, which a
+    // render target brings, and the hits source).
+    if (layout() == LayoutKind::Strip) {
+        if (!strip_active() || !impl_->hits_fn
+            || !impl_->brush_hit_other_fill || !impl_->brush_hit_current_fill) {
+            return {};
+        }
+        return strip_overlay_hits(impl_->strip_view.visible(), impl_->hits_fn);
+    }
     // Only over THIS view's bitmap of THIS page, and only in single-page mode
     // (spec §4.4; R17 left spread mode without an overlay).
     Placement pl;
@@ -543,6 +554,30 @@ std::vector<litepdf::core::SearchSession::Hit> PdfCanvas::overlay_hits() const {
         return {};
     }
     return impl_->hits_fn(static_cast<std::size_t>(impl_->view->current_page()));
+}
+
+void PdfCanvas::paint_hit(const litepdf::core::SearchSession::Hit& hit,
+                          float ox, float oy, float pct) {
+    const auto& q = hit.geom;
+    const D2D1_RECT_F r = quad_bounds_dip(q, ox, oy, pct);
+
+    const bool is_current =
+        impl_->current_hit.has_value()
+        && impl_->current_hit->page == hit.page
+        && impl_->current_hit->geom.ul_x == q.ul_x
+        && impl_->current_hit->geom.ul_y == q.ul_y
+        && impl_->current_hit->geom.lr_x == q.lr_x
+        && impl_->current_hit->geom.lr_y == q.lr_y;
+
+    if (is_current) {
+        impl_->rt->FillRectangle(r, impl_->brush_hit_current_fill.Get());
+        if (impl_->brush_hit_current_stroke) {
+            impl_->rt->DrawRectangle(
+                r, impl_->brush_hit_current_stroke.Get(), 1.0f);
+        }
+    } else {
+        impl_->rt->FillRectangle(r, impl_->brush_hit_other_fill.Get());
+    }
 }
 
 const litepdf::core::TextSelection* PdfCanvas::painted_selection() const noexcept {
@@ -2007,26 +2042,7 @@ void PdfCanvas::on_paint() {
 
             // overlay_hits() already checked the source and both fill brushes.
             for (const auto& hit : impl_->painted_hits) {
-                const auto& q = hit.geom;
-                const D2D1_RECT_F r = quad_bounds_dip(q, ox, oy, pct);
-
-                const bool is_current =
-                    impl_->current_hit.has_value()
-                    && impl_->current_hit->page == hit.page
-                    && impl_->current_hit->geom.ul_x == q.ul_x
-                    && impl_->current_hit->geom.ul_y == q.ul_y
-                    && impl_->current_hit->geom.lr_x == q.lr_x
-                    && impl_->current_hit->geom.lr_y == q.lr_y;
-
-                if (is_current) {
-                    impl_->rt->FillRectangle(r, impl_->brush_hit_current_fill.Get());
-                    if (impl_->brush_hit_current_stroke) {
-                        impl_->rt->DrawRectangle(
-                            r, impl_->brush_hit_current_stroke.Get(), 1.0f);
-                    }
-                } else {
-                    impl_->rt->FillRectangle(r, impl_->brush_hit_other_fill.Get());
-                }
+                paint_hit(hit, ox, oy, pct);
             }
 
             // The selection, after the hits so it reads as the active thing.
