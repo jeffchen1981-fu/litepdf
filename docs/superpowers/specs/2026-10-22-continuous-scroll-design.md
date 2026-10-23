@@ -379,8 +379,8 @@ The handler first calls `on_completion_arrived` (§3.4), then decides, in order:
    has already done this and rule 2 drops the completion; this rule covers a flag set after the
    last sweep;
 5. null and not cancelled → Failed. Paint a white page with a thin border, and do not retry
-   automatically. The page is re-requested when it leaves V and comes back, or on a zoom or
-   invert change.
+   automatically. The page is re-requested once it leaves V (as a prefetch while it is in P,
+   or at P0 when it re-enters V), or on a zoom or invert change (§5.1).
 
 The #117 caveat applies: a flag store can hit a request that a worker has already taken, so a
 genuine failure can be reported as cancelled. Rule 4 then reschedules, so the page is requested
