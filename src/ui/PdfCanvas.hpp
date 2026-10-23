@@ -231,7 +231,9 @@ public:
     // MainWindow::kick_render's strip branch, after it has refit and refreshed
     // the zoom readout as `a` asks: build the strip layout if there is none,
     // else re-layout at the view's zoom when `a.relayout`; apply `restore` when
-    // non-null; restyle when `a.restyle`; then recompute the current page,
+    // non-null; when this call built the layout and `restore` is null, navigate
+    // to the view's current page (spec 7.4); restyle when `a.restyle`; then
+    // recompute the current page,
     // update the scrollbar and reschedule. No-op unless the strip is shown.
     void strip_kick(const StripKickActions& a, const StripTabState* restore);
 
@@ -256,7 +258,8 @@ public:
     // --- Phase 6 Task 9: search hit overlay ---
 
     // Source for overlay hits. PdfCanvas calls this each paint to fetch
-    // the hits for the currently visible page. Non-owning; caller must
+    // the hits for the pages on screen: the shown page when paged, every
+    // visible page when the strip is shown. Non-owning; caller must
     // ensure the lambda stays valid while set (or call set_hits_source(nullptr)
     // before the lambda's captures become invalid).
     using HitsFn = std::function<std::vector<litepdf::core::SearchSession::Hit>(std::size_t page)>;
@@ -451,8 +454,10 @@ private:
 
     // The search hits on_paint draws over the page right now: empty in spread
     // mode, over another view's or page's bitmap, before the render target
-    // exists, or with no hits source. on_paint and on_search_hits_changed both
-    // ask this, so the two cannot disagree about what is on screen.
+    // exists, or with no hits source. In the strip it is the hits of every page
+    // in V, with no bitmap condition (spec 7.1); strip_paint draws them too.
+    // on_paint and on_search_hits_changed both ask this, so the two cannot
+    // disagree about what is on screen.
     std::vector<litepdf::core::SearchSession::Hit> overlay_hits() const;
 
     // Draws one search hit: the current-hit fill and stroke when it is the
@@ -528,8 +533,9 @@ private:
 
     // update_cursor outside WM_SETCURSOR: when a gesture ends normally (a
     // selection drag or click, or a pan), and when space goes down or up with
-    // the pointer still. Does nothing unless the pointer is over this window
-    // or this window holds the capture.
+    // the pointer still, and at the end of every strip change (content moved
+    // under a still pointer). Does nothing unless the pointer is over this
+    // window or this window holds the capture.
     void refresh_cursor();
 
     // --- #55: the continuous strip (PdfCanvasStrip.cpp) ---
@@ -553,7 +559,7 @@ private:
     void strip_update_scrollbar();
 
     // The common tail of every strip change: recompute the current page, update
-    // the scrollbar, reschedule, and invalidate. strip_after_change,
+    // the scrollbar, reschedule, invalidate, and refresh the cursor. strip_after_change,
     // strip_update_scrollbar and strip_reschedule return at once unless the
     // strip is shown and has a layout.
     void strip_after_change();

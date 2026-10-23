@@ -77,7 +77,7 @@
 
 // Next free ID: 40067. Reserve 40067-40070 for future Phase 8.x cleanups.
 
-// #52: text selection. A fresh block, leaving the 40066-40070 reservation alone.
+// #52: text selection. A fresh block, outside the Phase 8.x reservation (now 40067-40070).
 #define IDM_EDIT_COPY        40071   // Ctrl+C
 #define IDM_EDIT_SELECT_ALL  40072   // Ctrl+A
 

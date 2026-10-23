@@ -1363,7 +1363,9 @@ try {
     # Rows 19-20: Select All and Copy in the strip (spec 7.1). IDM_EDIT_COPY = 40071,
     # IDM_EDIT_SELECT_ALL = 40072. Both go through the clipboard, which is the user's:
     # its text is saved first and put back in finally.
-    $stripClipSaved = Get-Clipboard -Raw
+    # A clipboard another process holds throws; treat it as empty rather than abort.
+    $stripClipSaved = $null
+    try { $stripClipSaved = Get-Clipboard -Raw } catch { $stripClipSaved = $null }
     try {
         # Row 19: Select All selects the current page -- the one the page box shows --
         # and Copy copies that page's text only. strip-1000.pdf's page n holds
@@ -1382,7 +1384,8 @@ try {
         $deadline = (Get-Date).AddSeconds(5)
         while ((Get-Date) -lt $deadline) {
             Start-Sleep -Milliseconds 100
-            $clip = Get-Clipboard -Raw
+            $clip = $null
+            try { $clip = Get-Clipboard -Raw } catch { $clip = $null }
             if ($null -ne $clip -and $clip.Contains("Strip page 30 of 1000.")) { break }
         }
         if ($null -eq $clip -or -not $clip.Contains("Strip page 30 of 1000.")) {
@@ -1418,7 +1421,8 @@ try {
         $ms = (& $uxProbe menu-state 40071 2>&1 | Out-String)
         $msObj = $null
         try { $msObj = $ms | ConvertFrom-Json -ErrorAction Stop } catch { $msObj = $null }
-        $clip = Get-Clipboard -Raw
+        $clip = $null
+        try { $clip = Get-Clipboard -Raw } catch { $clip = $null }
         if ($null -eq $msObj -or -not $msObj.items.'40071'.found -or -not $msObj.items.'40071'.grayed) {
             throw "Select All on a page with no text: Copy is not grayed: $ms"
         }

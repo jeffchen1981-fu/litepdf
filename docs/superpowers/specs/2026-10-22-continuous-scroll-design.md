@@ -136,7 +136,7 @@ changes the zoom calls `refresh_zoom_readout` in the same message, as the paged 
 | `TabSwitch` | `on_tab_switch` (863), different index only | A refit event: `apply_viewport`, refresh the readout, restore the tab's strip position (§7.4), re-layout, reschedule |
 | `Restore` | session restore (1118) | A refit event (refresh the readout), then navigate to the saved page (§6.3), then reschedule |
 | `Restyle` | invert colours (1727) | Cancel all, keep bitmaps as stale, reschedule (§5.2) |
-| `Spread` | two-page toggle (1745) and the Continuous Scroll menu item: a within-tab layout switch `apply_effective_layout` has applied | `apply_effective_layout` has already run, in either direction. Turning spread on leaves the strip: the kick is paged. Turning it off with the preference on enters the strip: refit, refresh the readout, re-layout, reschedule — **not** a tab-position restore, which would overwrite the §7.3 carry `apply_effective_layout` just applied. |
+| `Spread` | two-page toggle (1745) and the Continuous Scroll menu item: a within-tab layout switch `apply_effective_layout` has applied | `apply_effective_layout` has already run, in either direction. Turning spread on leaves the strip: the kick is paged. Turning it off with the preference on enters the strip: refit, refresh the readout, re-layout, reschedule — **not** a tab-position restore, which would overwrite the §7.3 carry `apply_effective_layout` just applied. The Continuous Scroll menu item behaves the same way: turning the preference off leaves the strip (the kick is paged); turning it on, or choosing it in a spread tab, enters the strip (refit, refresh the readout, re-layout, reschedule, no tab-position restore). |
 
 A new `kick_render` call site must pick a reason. A call that defaults to one would compile, and
 would silently do the wrong thing in the strip.
@@ -575,7 +575,7 @@ strip").
 - A tab that enters the strip with no saved strip position starts at its current page: when
   `strip_kick` builds a fresh layout and has no `restore`, it navigates to the view's current page
   (scroll = `anchor(page)`, pinned, §6.3), so a background paged tab that meets the turned-on
-  preference at its next `on_tab_switch` keeps its page. A first open (page 0) is unaffected. A tab
+  preference at its next `on_tab_switch` keeps its page. A first open lands at scroll 0 with page 0 current, as before, and page 0 stays pinned until the first scroll input. A tab
   left in the strip that comes back paged (the preference was turned off meanwhile) snapshots
   `pan_x = pan_y = 0` when the canvas showed the strip, and lands at its current page's top. The
   in-page offset is not carried across a background tab's layout change (§10).

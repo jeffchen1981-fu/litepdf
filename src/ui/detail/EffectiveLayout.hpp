@@ -119,7 +119,9 @@ inline StripKickActions strip_kick_actions(KickReason r) noexcept {
             a.restyle = true;
             break;
         case KickReason::Spread:
-            // Spread turned off, entering the strip. apply_effective_layout has
+            // A within-tab layout switch, entering the strip: spread turned off,
+            // or the Continuous Scroll menu item turned on (it can also leave the
+            // strip, which is the paged branch). apply_effective_layout has
             // already applied the 7.3 carry; restoring the tab's stored position
             // would overwrite it.
             a.refit = true;
