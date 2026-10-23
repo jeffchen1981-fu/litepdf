@@ -82,4 +82,32 @@ inline float spread_pan_y_for(const CarriedPosition& c, double left_top_in_union
                      static_cast<float>(union_h), static_cast<float>(vp_h));
 }
 
+// The vertical geometry of a paged spread's painted union (PdfCanvas::content_extent
+// and on_paint's dual branch, on one axis). Each page sits in a slot `slot_h` high
+// at place_bitmap's pan-0 y: centred when it fits, 0 when it overflows. The union
+// spans both pages; when it overflows the slot, on_paint shifts it by -union_top
+// so pan 0 shows the union's top edge. `right_h < 0` means there is no right page.
+struct SpreadVertical {
+    double left_top_in_union = 0;  // the left page's top below the union's top edge
+    double union_h = 0;
+};
+
+inline SpreadVertical spread_vertical(double left_h, double right_h,
+                                      double slot_h) noexcept {
+    auto page_y = [slot_h](double h) { return h <= slot_h ? (slot_h - h) * 0.5 : 0.0; };
+    const double left_y = page_y(left_h);
+    double top = left_y;
+    double bottom = left_y + left_h;
+    if (right_h >= 0.0) {
+        const double right_y = page_y(right_h);
+        top = std::min(top, right_y);
+        bottom = std::max(bottom, right_y + right_h);
+    }
+    SpreadVertical out;
+    out.union_h = std::max(0.0, bottom - top);
+    const double base_y = out.union_h > slot_h ? -top : 0.0;
+    out.left_top_in_union = left_y + base_y;
+    return out;
+}
+
 }  // namespace litepdf::ui

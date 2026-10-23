@@ -66,6 +66,13 @@ inline bool is_stale(const PageSlot& s, float scale, bool invert) noexcept {
     return s.kind == PageStateKind::Ready && (s.scale != scale || s.invert != invert);
 }
 
+// The canvas keeps a page's bitmap exactly while this holds: Ready, or Pending
+// over its previous (stale) bitmap.
+inline bool slot_holds_bitmap(const PageSlot& s) noexcept {
+    return s.kind == PageStateKind::Ready ||
+           (s.kind == PageStateKind::Pending && s.has_stale_bitmap);
+}
+
 // spec 5.1: a cancelled Pending page falls back to its stale bitmap (Ready at the
 // stale parameters, so still stale) or to None. Other states are unchanged.
 inline PageSlot cancel_transition(const PageSlot& s) noexcept {
