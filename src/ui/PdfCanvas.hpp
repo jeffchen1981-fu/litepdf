@@ -247,6 +247,11 @@ public:
     // current page when the strip is not shown or not laid out.
     int strip_top_visible_page() const;
 
+    // (#159, #55) The pages a background strip tab keeps in L1: the strip's
+    // visible pages, at most `cap` (the view's L1 count), the current page
+    // first. Empty unless the strip is shown and laid out.
+    std::vector<int> strip_retained_pages(std::size_t cap) const;
+
     // --- Phase 6 Task 9: search hit overlay ---
 
     // Source for overlay hits. PdfCanvas calls this each paint to fetch

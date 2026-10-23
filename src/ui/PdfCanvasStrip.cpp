@@ -420,6 +420,11 @@ int PdfCanvas::strip_top_visible_page() const {
     return impl_->strip_view.top_visible_page();
 }
 
+std::vector<int> PdfCanvas::strip_retained_pages(std::size_t cap) const {
+    if (!strip_active()) return {};
+    return impl_->strip_view.retained_for_background(cap);
+}
+
 // ---------------------------------------------------------------------------
 // Current page, scrollbar, scheduling
 

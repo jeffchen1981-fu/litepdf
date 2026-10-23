@@ -543,6 +543,10 @@ void DocumentView::trim_l1_for_background(int page, int other_page) {
                                   other_page);
 }
 
+void DocumentView::trim_l1_for_background(const std::vector<int>& pages) {
+    impl_->cache->retain_l1_pages(render_scale(), impl_->invert_colors, pages);
+}
+
 std::size_t DocumentView::l1_entry_count() const {
     return impl_->cache->l1_size();
 }

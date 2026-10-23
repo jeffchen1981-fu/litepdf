@@ -811,7 +811,17 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
                     auto& v = *outgoing->view;
                     const auto shown = litepdf::ui::shown_pages(
                         v.current_page(), v.page_count(), v.dual_page());
-                    v.trim_l1_for_background(shown.first, shown.second);
+                    // The canvas still shows the outgoing view here (its
+                    // set_view is below), so a strip tab's visible pages are
+                    // read from it. A paged tab keeps its shown pages, as
+                    // before.
+                    const bool strip_shown =
+                        canvas_ && canvas_->layout() == litepdf::ui::LayoutKind::Strip;
+                    const std::vector<int> strip_pages =
+                        strip_shown ? canvas_->strip_retained_pages(v.l1_capacity())
+                                    : std::vector<int>{};
+                    v.trim_l1_for_background(litepdf::ui::background_retain_pages(
+                        strip_shown, strip_pages, shown));
                 }
             }
         }

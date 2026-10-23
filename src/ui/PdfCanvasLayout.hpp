@@ -12,6 +12,8 @@
 //
 // Both are unit-tested without any UI dependency (test_dual_page_layout.cpp).
 
+#include <vector>
+
 namespace litepdf::ui {
 
 inline int dual_page_compute_left(int page, int page_count) noexcept {
@@ -52,6 +54,20 @@ inline ShownPages shown_pages(int current_page, int page_count,
     if (!dual_page) return {current_page, -1};
     const int left = dual_page_compute_left(current_page, page_count);
     return {left, dual_page_compute_right(left, page_count)};
+}
+
+// (#159, #55) The pages a tab keeps in L1 when it goes to the background:
+// `strip_pages` (the continuous strip's visible pages) when the strip is shown
+// and has any, else the shown pages -- `{first}` or `{first, second}`, never a
+// -1 entry. An empty strip set (a minimized window shows no pages) falls back
+// to the current page on purpose: keeping the page the tab will show again
+// beats emptying L1.
+inline std::vector<int> background_retain_pages(bool strip_shown,
+                                                const std::vector<int>& strip_pages,
+                                                ShownPages shown) {
+    if (strip_shown && !strip_pages.empty()) return strip_pages;
+    if (shown.second < 0) return std::vector<int>{shown.first};
+    return std::vector<int>{shown.first, shown.second};
 }
 
 // Forward / backward navigation step in spread mode. Pure logic; both
