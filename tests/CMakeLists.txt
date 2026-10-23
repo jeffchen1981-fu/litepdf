@@ -98,7 +98,19 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_cli_args.cpp             # #100 strict CLI argument parsing
     unit/test_text_prefetch_engine.cpp # #98
     unit/test_text_prefetch_view.cpp   # #98
+    unit/test_render_engine_counter.cpp # #55 renders_started
     unit/test_mupdf_error_state.cpp    # #146 rule outside Document
+    unit/test_strip_layout.cpp         # #55 PR 1 Task 1
+    unit/test_strip_scroll.cpp         # #55 PR 1 Task 2
+    unit/test_strip_carry.cpp          # #55 PR 1 Task 3
+    unit/test_strip_schedule.cpp       # #55 PR 1 Task 4
+    unit/test_strip_completion.cpp     # #55 PR 1 Task 5
+    unit/test_effective_layout.cpp     # #55 PR 1 Task 6
+    unit/test_document_view_strip.cpp  # #55 PR 1 Task 7
+    unit/test_view_prefs.cpp           # #55 PR 1 Task 9
+    unit/test_strip_fixtures.cpp       # #55 PR 1 Task 10
+    unit/test_cli_args_page_sizes.cpp  # #55 PR 1 Task 10
+    unit/test_strip_schedule_engine.cpp # #55 PR 1 Task 11
     # The CLI helpers under test are compiled straight into the test binary
     # (they are not part of litepdf_core). All are MuPDF-header-free and
     # resolve their fz_* calls through the litepdf::mupdf dependency that

@@ -29,17 +29,22 @@
 //      declaring SearchSession AFTER Document in Impl so it destructs
 //      FIRST.
 
+#include <atomic>
 #include <cstddef>
 #include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string_view>
+#include <vector>
 
 #include <windows.h>  // HINSTANCE / HWND — Phase 7 Task 8 ensure_thumb_pane.
 
 #include "core/Document.hpp"
 #include "core/PageCache.hpp"     // kDefaultL1BudgetBytes (MuPDF-free)
+// (#55) RenderEngine::RenderToken is a nested type and cannot be
+// forward-declared. RenderEngine.hpp is MuPDF-free.
+#include "core/RenderEngine.hpp"
 #include "core/TextSelection.hpp"
 
 // Forward decls — keep this header MuPDF-free. Callers that need to
@@ -94,7 +99,23 @@ public:
 
     int  page_count() const;
     int  current_page() const noexcept;
-    bool set_current_page(int idx);  // clamps to [0, page_count-1]
+    // Clamps to [0, page_count-1]. A change drops the text slot and, unless
+    // the view is continuous or the zoom is Custom, re-derives the fit for
+    // the new page.
+    bool set_current_page(int idx);
+
+    // (#55) The continuous-scroll strip. While on, a page change does not
+    // re-derive the fit: the whole strip has one zoom, refit only at fit
+    // events (spec §4.3). Default off. UI thread only.
+    void set_continuous(bool on) noexcept;
+    bool continuous() const noexcept;
+
+    // (#55) Every page's size, sized once and kept for the life of the view
+    // (spec §4.4). A page whose size cannot be read takes page 0's size, and
+    // page 0 unreadable gives US Letter (612 x 792 pt); a size failure never
+    // throws. Those stand-ins are this list's own: the prefetch plan's size
+    // cache (#49) still sees such a page as unknown. UI thread only.
+    const std::vector<PageSize>& page_sizes();
 
     ZoomMode zoom_mode() const noexcept;
 
@@ -222,6 +243,21 @@ public:
     void request_render_with_prefetch(int page, RenderCb on_current_complete,
                                       TextCb on_text = {});
 
+    // (#55) One strip page render at `priority`, at the current render scale
+    // and polarity. Releases the background L1 pin first, as both requests
+    // above do (#159), and cancels nothing. `cancel_flag` becomes the
+    // returned token's flag: storing true to it cancels the request, with no
+    // live engine needed (#117). Iff `on_text` is given and
+    // wants_text_prefetch(page), the request also asks for the page's text,
+    // as request_render_with_prefetch's P0 does (#98).
+    RenderEngine::RenderToken request_page_render(
+        int page, int priority, RenderCb on_complete,
+        std::shared_ptr<std::atomic<bool>> cancel_flag, TextCb on_text = {});
+
+    // (#55) Cancel queued thumbnail renders (P3) only; the strip's P0 and P1
+    // requests run on.
+    void cancel_thumbnail_renders();
+
     // ------------------------------------------------------------------
     // (#98) The per-tab text slot: at most one text page, the current
     // page's (spec §3.5). Dropped on a page change; dies with the tab. A
@@ -252,10 +288,20 @@ public:
     // a worker, cancelled ones included. Test observability only.
     [[nodiscard]] std::size_t queued_render_count() const noexcept;
 
+    // (#55) Renders this view's engine has started: not cancelled before a
+    // worker took them, not served from L1, not thumbnails. Test observability
+    // only.
+    [[nodiscard]] std::size_t renders_started() const noexcept;
+
     // (#159) L1 entries this view's cache holds, and whether one is `page` at
     // the current render scale and polarity. Test observability only.
     [[nodiscard]] std::size_t l1_entry_count() const;
     [[nodiscard]] bool l1_holds(int page) const;
+
+    // (#55) Whether L1 holds `page` at the current render scale and polarity.
+    // Unlike l1_holds it leaves the entry's LRU recency alone, so the strip
+    // scheduler can ask without reordering L1 (PageCache::l1_contains).
+    [[nodiscard]] bool l1_contains(int page) const;
 
     // UI thread's own fz_context clone (D3). Stays valid for the
     // lifetime of the DocumentView. Use for fz_drop_pixmap on refs

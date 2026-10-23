@@ -140,6 +140,12 @@ public:
     // dropped by the post-build re-check. Test observability only.
     [[nodiscard]] std::size_t text_builds_started() const noexcept;
 
+    // (#55) Renders the workers have started: requests with bypass_cache false
+    // that passed the pre-MuPDF cancel check and missed L1, so they build or
+    // reuse a display list and rasterise. Cancelled requests, L1 hits and
+    // bypass_cache (thumbnail) requests are not counted. Test observability only.
+    [[nodiscard]] std::size_t renders_started() const noexcept;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

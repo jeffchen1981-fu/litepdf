@@ -30,8 +30,10 @@ jobs:
           }
           Write-Host "[OK] PS 5.1 parse guard passed"
 
-      - name: Install reportlab (pinned)
-        run: pip install "reportlab==4.4.10"
+      - name: Install reportlab + Pillow (pinned)
+        # Pillow's bundled zlib compresses the strip CBZ's PNGs, so its version
+        # is part of that fixture's byte identity (generate-strip-fixtures.py).
+        run: pip install "reportlab==4.4.10" "Pillow==12.2.0"
 
       - name: Fixture determinism check
         shell: pwsh
@@ -45,6 +47,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "large-fixture determinism check failed (exit $LASTEXITCODE)" }
           python scripts/generate-cjk-fixture.py --check
           if ($LASTEXITCODE -ne 0) { throw "cjk-fixture determinism check failed (exit $LASTEXITCODE)" }
+          python scripts/generate-strip-fixtures.py --check
+          if ($LASTEXITCODE -ne 0) { throw "strip-fixture determinism check failed (exit $LASTEXITCODE)" }
 
       - name: Configure
         run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release

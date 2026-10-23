@@ -12,10 +12,12 @@ struct CliOptions {
     const char* path = nullptr;
     int  render_page = -1;       // 0-based; -1 = not rendering
     bool benchmark = false;
-    int  iterations = 5;         // 25 with --bench-selection unless given
+    int  iterations = 5;         // 25 with --bench-selection, 9 with
+                                 // --bench-page-sizes, unless given
     bool json = false;
     bool bench_selection = false;
     int  selection_page = -1;    // 0-based; -1 = every page
+    bool bench_page_sizes = false;   // #55: times DocumentView::page_sizes()
 };
 
 // Parses `argv[1]` as the file and `argv[2..]` as options into `out`. Returns

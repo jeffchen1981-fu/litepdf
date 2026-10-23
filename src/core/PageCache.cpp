@@ -142,6 +142,12 @@ fz_pixmap* PageCache::get_pixmap(int page_num, float scale, bool invert) {
     return fz_keep_pixmap(impl_->ctx, it->second.pix);
 }
 
+bool PageCache::l1_contains(int page_num, float scale, bool invert) const {
+    // No LRU move and no fz_keep_pixmap: see the declaration.
+    std::lock_guard<std::mutex> lk(impl_->mtx);
+    return impl_->l1_map.find(L1Key{page_num, scale, invert}) != impl_->l1_map.end();
+}
+
 void PageCache::put_pixmap(int page_num, float scale, bool invert, fz_pixmap* pix) {
     if (!pix) return;  // no-op on null; nothing to take ownership of
     const std::size_t bytes = pixmap_bytes(impl_->ctx, pix);

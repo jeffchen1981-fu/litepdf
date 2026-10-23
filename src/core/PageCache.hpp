@@ -69,6 +69,11 @@ public:
     fz_pixmap* get_pixmap(int page_num, float scale, bool invert = false);
     void       put_pixmap(int page_num, float scale, bool invert, fz_pixmap* pix);
 
+    // (#55) Whether L1 holds (page_num, scale, invert). Under the mutex, but
+    // unlike get_pixmap it neither refreshes the entry's LRU recency nor keeps
+    // the pixmap: a scheduler query must not reorder L1.
+    bool l1_contains(int page_num, float scale, bool invert) const;
+
     // L2 — display list, zoom-independent, keyed by page_num.
     // (Phase 8 D8) L2 stays single-key — display lists are polarity-
     // independent, and keying L2 by invert would (a) duplicate identical
