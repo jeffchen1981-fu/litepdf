@@ -217,6 +217,19 @@ public:
     // update the scrollbar and reschedule. No-op unless the strip is shown.
     void strip_kick(const StripKickActions& a, const StripTabState* restore);
 
+    // Explicit navigation in the strip (spec 6.3): scroll to `page`'s anchor,
+    // clamped, make it the current page and pin it (spec 4.6), then recompute,
+    // update the scrollbar and reschedule. Runs even when `page` is already the
+    // current page, so going there mid-page scrolls back to its top. No page
+    // anchor is installed. The caller follows with a Navigate kick. No-op unless
+    // the strip is shown and laid out.
+    void strip_navigate(int page);
+
+    // The search start page in the strip (spec 6.3, #140): the first page on
+    // screen, else the current page when only a gap is showing. The view's
+    // current page when the strip is not shown or not laid out.
+    int strip_top_visible_page() const;
+
     // --- Phase 6 Task 9: search hit overlay ---
 
     // Source for overlay hits. PdfCanvas calls this each paint to fetch
@@ -299,6 +312,11 @@ public:
     // EXCEPT the already-visible one, so the caller (MainWindow) must
     // follow this with kick_render -- both to render and to bind that
     // anchor to the submission it opens.
+    //
+    // In the strip (spec 6.3) it scrolls the strip itself and installs no
+    // anchor: no scroll when the quad is inside the viewport by the same 24 DIP
+    // margin, else the quad is centred vertically; the hit's page becomes the
+    // current page either way. The caller's Navigate kick then only reschedules.
     void scroll_into_view(const litepdf::core::SearchSession::Hit& h);
 
     // --- #52: text selection ---

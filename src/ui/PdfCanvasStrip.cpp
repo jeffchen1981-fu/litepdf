@@ -258,6 +258,23 @@ void PdfCanvas::strip_kick(const StripKickActions& a, const StripTabState* resto
 }
 
 // ---------------------------------------------------------------------------
+// Navigation (spec 6.3)
+
+void PdfCanvas::strip_navigate(int page) {
+    if (!strip_active()) return;
+    // Scrolls to the anchor and pins the page; strip_after_change then makes it
+    // the current page (the pin keeps it through the recompute).
+    impl_->strip_view.navigate(page);
+    strip_after_change();
+}
+
+int PdfCanvas::strip_top_visible_page() const {
+    if (!impl_ || !impl_->view) return 0;
+    if (!strip_active()) return impl_->view->current_page();
+    return impl_->strip_view.top_visible_page();
+}
+
+// ---------------------------------------------------------------------------
 // Current page, scrollbar, scheduling
 
 bool PdfCanvas::set_strip_current_page(int page) {

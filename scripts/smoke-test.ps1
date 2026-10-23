@@ -947,6 +947,78 @@ try {
     }
     Write-Host "[OK] continuous strip: one-page document: page $($cs.page) > max $($cs.max), wheel and End keep pos 0 and page box 1"
     Stop-LitePDF -Process $procStrip -Step "strip one page"
+    Start-Sleep -Milliseconds 500
+
+    # Rows 10-12: navigation in strip coordinates (spec 6.3, 4.5). A fresh large.pdf
+    # launch at FitWidth, so z = viewport width in DIPs / 612, every page is
+    # h = 792 z DIPs tall and page i's scroll anchor is i x (h + 8) (spec 4.2).
+    $procStrip = Start-StripLaunch -Fixture $largeFixture -Step "strip navigation"
+    $stripZoomOf = { param($s) ($s.client_w * 96.0 / $s.dpi) / 612.0 }
+    $stripAnchor = { param($i, $z) $i * (792.0 * $z + 8.0) }
+
+    # Row 10: Ctrl+G 30 (spec 9.3). The page box is the Ctrl+G target, and both run
+    # navigate_click. The strip scrolls to page index 29's anchor at once.
+    & $uxProbe page-box-go 30 | Out-Null
+    $st = Wait-StripState -Until {
+        param($cs, $pb)
+        $pb.text -eq "30" -and
+            [Math]::Abs($cs.pos - [Math]::Round((& $stripAnchor 29 (& $stripZoomOf $cs)))) -le 1
+    }
+    if ($null -eq $st.cs -or $null -eq $st.pb) { throw "Ctrl+G 30 in the strip: probe failed: $(Format-StripState $st)" }
+    $navAnchor = [Math]::Round((& $stripAnchor 29 (& $stripZoomOf $st.cs)))
+    if ($st.pb.text -ne "30" -or [Math]::Abs($st.cs.pos - $navAnchor) -gt 1) {
+        throw "Ctrl+G 30 in the strip: expected page box 30 and pos $navAnchor (+/- 1): $(Format-StripState $st)"
+    }
+    Write-Host "[OK] continuous strip: Ctrl+G 30 -> page box 30, pos $($st.cs.pos) = anchor(29) $navAnchor"
+
+    # Row 11: Ctrl+G to the current page while mid-page (spec 9.3, 3.4). Two wheel
+    # notches move 96 DIPs (48 per notch at the default 3 lines) and leave page 30
+    # current; going to page 30 again must scroll back to its anchor, which a
+    # paged-style "same page, nothing to do" early return would not.
+    $posBefore = $st.cs.pos
+    & $uxProbe canvas-wheel -120 2 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) [Math]::Abs($cs.pos - ($posBefore + 96)) -le 1 }
+    if ($null -eq $st.cs -or [Math]::Abs($st.cs.pos - ($posBefore + 96)) -gt 1 -or $st.pb.text -ne "30") {
+        throw "two wheel notches from anchor(29): expected pos $($posBefore + 96) (+/- 1) and page box 30: $(Format-StripState $st)"
+    }
+    & $uxProbe page-box-go 30 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) [Math]::Abs($cs.pos - $navAnchor) -le 1 -and $pb.text -eq "30" }
+    if ($null -eq $st.cs -or [Math]::Abs($st.cs.pos - $navAnchor) -gt 1 -or $st.pb.text -ne "30") {
+        throw "Ctrl+G to the current page mid-page: expected pos $navAnchor (+/- 1) and page box 30: $(Format-StripState $st)"
+    }
+    Write-Host "[OK] continuous strip: Ctrl+G 30 again from mid-page -> pos $($st.cs.pos) = anchor(29)"
+
+    # Row 12: a resize keeps the viewport-top point (spec 4.5). Two more notches put
+    # the viewport top mid-page, d0 DIPs below page 29's top, which no anchor is: a
+    # "re-navigate to the current page" implementation would also pass from an
+    # anchor. After a narrower window refits FitWidth to z1, the same point of
+    # page 29 is at the top: pos = anchor1(29) + 8 + d0 x z1 / z0.
+    $posBefore = $st.cs.pos
+    & $uxProbe canvas-wheel -120 2 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) [Math]::Abs($cs.pos - ($posBefore + 96)) -le 1 }
+    if ($null -eq $st.cs -or [Math]::Abs($st.cs.pos - ($posBefore + 96)) -gt 1 -or $st.pb.text -ne "30") {
+        throw "two more wheel notches: expected pos $($posBefore + 96) (+/- 1) and page box 30: $(Format-StripState $st)"
+    }
+    $pos0 = [double]$st.cs.pos
+    $z0 = & $stripZoomOf $st.cs
+    $cw0 = $st.cs.client_w
+    $d0 = $pos0 - ((& $stripAnchor 29 $z0) + 8.0)
+    & $uxProbe resize -100 0 | Out-Null
+    $resizeExpected = { param($s) $z1 = & $stripZoomOf $s; (& $stripAnchor 29 $z1) + 8.0 + $d0 * $z1 / $z0 }
+    $st = Wait-StripState -Until {
+        param($cs, $pb)
+        $cs.client_w -ne $cw0 -and $pb.text -eq "30" -and
+            [Math]::Abs($cs.pos - [Math]::Round((& $resizeExpected $cs))) -le 2
+    }
+    if ($null -eq $st.cs -or $st.cs.client_w -eq $cw0) {
+        throw "resize -100 0: the canvas width did not change: $(Format-StripState $st)"
+    }
+    $posExpected = [Math]::Round((& $resizeExpected $st.cs))
+    if ($st.pb.text -ne "30" -or [Math]::Abs($st.cs.pos - $posExpected) -gt 2) {
+        throw "resize keeps the viewport-top point: expected page box 30 and pos $posExpected (+/- 2) (pos0 $pos0, z0 $z0, d0 $d0): $(Format-StripState $st)"
+    }
+    Write-Host "[OK] continuous strip: resize keeps the viewport-top point: pos $pos0 -> $($st.cs.pos) (expected $posExpected), page box 30"
+    Stop-LitePDF -Process $procStrip -Step "strip navigation"
 } finally {
     if ($null -ne $procStrip -and -not $procStrip.HasExited) {
         Stop-Process -Id $procStrip.Id -Force -ErrorAction SilentlyContinue

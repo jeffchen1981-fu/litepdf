@@ -422,6 +422,14 @@ void MainWindow::refresh_zoom_readout() {
 void MainWindow::navigate_click(int page) {
     auto* v = active_view();
     if (!v || !canvas_) return;
+    // #55, spec 3.4 / 6.3: the strip navigates in its own coordinates, before
+    // the paged early return below, so going to the current page while mid-page
+    // scrolls back to its anchor. No PageAnchor; the kick only reschedules.
+    if (canvas_->layout() == litepdf::ui::LayoutKind::Strip) {
+        canvas_->strip_navigate(page);
+        kick_render(page, litepdf::ui::KickReason::Navigate);
+        return;
+    }
     const int  total   = v->page_count();
     const bool spread  = canvas_->dual_page();
     const auto canon   = [&](int p) {
@@ -1132,8 +1140,19 @@ void MainWindow::restore_on_tab_ready(const std::filesystem::path& opened) {
         // disagree until the user's first navigation. This one IS a navigation,
         // so it installs Top -- a restored tab has no pan to preserve
         // (SessionTab carries path, page and zoom, not a scroll offset).
-        canvas_->change_current_page(st.page);
-        canvas_->set_pending_anchor(litepdf::ui::PageAnchor::top());
+        //
+        // #55, spec 3.4 Restore row: the strip navigates in its own coordinates
+        // and installs no PageAnchor. This first navigation makes the saved page
+        // the view's current page, so every fit below and the kick's refit use
+        // it (DocumentView::set_viewport fits the current page); its scroll is
+        // clamped against the pre-refit layout and is replaced after the kick.
+        const bool strip = canvas_->layout() == litepdf::ui::LayoutKind::Strip;
+        if (strip) {
+            canvas_->strip_navigate(st.page);
+        } else {
+            canvas_->change_current_page(st.page);
+            canvas_->set_pending_anchor(litepdf::ui::PageAnchor::top());
+        }
         switch (st.zoom_mode) {
             case litepdf::core::SessionZoom::Custom:
                 v->set_zoom_pct(st.zoom_scale);   // no viewport needed
@@ -1157,6 +1176,11 @@ void MainWindow::restore_on_tab_ready(const std::filesystem::path& opened) {
             }
         }
         kick_render(st.page, litepdf::ui::KickReason::Restore);
+        // The exact anchor on the final layout: the Restore kick refit and
+        // re-laid out the strip, and a navigation before it would have clamped
+        // anchor(page) against the shorter pre-refit layout (a high Custom zoom
+        // near the end of a document). Ends in a reschedule.
+        if (strip) canvas_->strip_navigate(st.page);
     }
     restore_pending_path_.clear();
     ++restore_index_;
@@ -2261,7 +2285,13 @@ void MainWindow::on_find_open() {
 namespace {
 // (#140) The page on screen, as the page a search scans first and Find
 // Next / Find Previous start from (the spread's left page in two-page mode).
-std::size_t find_start_page(const litepdf::core::DocumentView& v) {
+// In the strip (#55, spec 6.3) it is the top visible page, not the current
+// page, so every page on screen is scanned first, in reading order.
+std::size_t find_start_page(const litepdf::core::DocumentView& v,
+                            const litepdf::ui::PdfCanvas* canvas) {
+    if (canvas && canvas->layout() == litepdf::ui::LayoutKind::Strip) {
+        return static_cast<std::size_t>(canvas->strip_top_visible_page());
+    }
     return static_cast<std::size_t>(litepdf::ui::search_start_page(
         v.current_page(), v.page_count(), v.dual_page()));
 }
@@ -2281,7 +2311,7 @@ void MainWindow::on_find_query_changed(const std::wstring& q, bool mc,
         return;
     }
     if (find_bar_) find_bar_->set_invalid_pattern(false);
-    v->search().set_query(q, f, find_start_page(*v));
+    v->search().set_query(q, f, find_start_page(*v, canvas_.get()));
     update_find_counter();
     if (canvas_) {
         canvas_->set_current_hit(std::nullopt);
@@ -2292,7 +2322,7 @@ void MainWindow::on_find_query_changed(const std::wstring& q, bool mc,
 void MainWindow::on_find_next() {
     auto* v = active_view();
     if (!v || !canvas_) return;
-    auto h = v->search().next(find_start_page(*v));
+    auto h = v->search().next(find_start_page(*v, canvas_.get()));
     if (!h) return;
     canvas_->set_current_hit(*h);
     canvas_->scroll_into_view(*h);
@@ -2305,7 +2335,7 @@ void MainWindow::on_find_next() {
 void MainWindow::on_find_prev() {
     auto* v = active_view();
     if (!v || !canvas_) return;
-    auto h = v->search().prev(find_start_page(*v));
+    auto h = v->search().prev(find_start_page(*v, canvas_.get()));
     if (!h) return;
     canvas_->set_current_hit(*h);
     canvas_->scroll_into_view(*h);

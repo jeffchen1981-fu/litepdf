@@ -444,6 +444,21 @@ bool PdfCanvas::dual_page() const noexcept {
 void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     if (!impl_ || !impl_->view || !hwnd_) return;
 
+    // #55, spec 6.3: the strip places the hit in document coordinates at once,
+    // so there is nothing for a completion to correct and no PageAnchor. The
+    // caller's Navigate kick only reschedules.
+    if (layout() == LayoutKind::Strip) {
+        const float q_min_y_pt = std::min({ h.geom.ul_y, h.geom.ur_y,
+                                            h.geom.ll_y, h.geom.lr_y });
+        const float q_max_y_pt = std::max({ h.geom.ul_y, h.geom.ur_y,
+                                            h.geom.ll_y, h.geom.lr_y });
+        impl_->strip_view.scroll_hit_into_view(static_cast<int>(h.page),
+                                               static_cast<double>(q_min_y_pt),
+                                               static_cast<double>(q_max_y_pt));
+        strip_after_change();
+        return;
+    }
+
     const int  target_pg  = static_cast<int>(h.page);
     const bool page_moved = change_current_page(target_pg);
 
