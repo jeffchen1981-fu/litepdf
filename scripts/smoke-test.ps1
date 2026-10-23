@@ -718,6 +718,22 @@ function Get-StripExpectedHeight {
 # the current zoom (next_preset, with its 1e-4 tolerance).
 $stripZoomPresets = @(0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0)
 
+# The wheel rows derive one notch's step from the system's lines-per-notch setting,
+# as the canvas does: 16 DIP per line (ScrollMath.hpp kWheelLineDip), so 48 DIP at
+# the default 3 lines. 0 turns the wheel off and 0xFFFFFFFF scrolls a screen per
+# notch; neither has a fixed step, so they are refused here, before anything is
+# launched or written, rather than failing later with a misleading delta.
+$stripProbe = Read-UxProbeJson -Probe canvas-scroll
+if ($null -eq $stripProbe -or $null -eq $stripProbe.wheel_lines) {
+    throw "canvas-scroll probe reported no wheel_lines: $($stripProbe | ConvertTo-Json -Compress)"
+}
+$stripWheelLines = [int64]$stripProbe.wheel_lines
+if ($stripWheelLines -le 0 -or $stripWheelLines -eq 4294967295) {
+    throw "smoke strip rows need a lines-per-notch wheel setting (SPI_GETWHEELSCROLLLINES = $stripWheelLines; 0 is off, 4294967295 is one screen at a time)"
+}
+$stripNotchDip = [double]($stripWheelLines * 16)
+Write-Host "continuous strip: wheel scroll lines $stripWheelLines, $stripNotchDip DIP per notch"
+
 $stripErr = Join-Path $repoRoot "timings-strip.log"
 if (Test-Path $stripErr) { Remove-Item $stripErr -Force }
 $procStrip = $null
@@ -803,7 +819,10 @@ try {
     }
     Write-Host "[OK] continuous strip: Zoom In re-laid out to $($cs.max + 1) DIPs (zoom $stripZoom2)"
 
-    # Row 4: Invert Colors, twice, keeps the strip.
+    # Row 4: Invert Colors, twice, keeps the strip. A liveness row: no probe reads
+    # the polarity, and two toggles end where they started, so there is no state to
+    # poll for. Give the posted commands time to run, then check that the process
+    # is alive and the strip's scroll bar is still there.
     & $uxProbe send-cmd 40061 2 | Out-Null   # IDM_VIEW_INVERT x2
     Start-Sleep -Milliseconds 500
     $procStrip.Refresh()
@@ -858,10 +877,12 @@ try {
 
     # Row 6: wheel to the bottom (spec 9.3). 272 notches per message is about
     # 13,000 DIPs at the default 3 lines, so 200 messages cover large.pdf's strip
-    # at any window width. At the bottom the scroll position is the largest one
-    # Win32 allows and the derived current page is the last (spec 4.6 rule 1).
+    # at any window width; a smaller lines setting sends proportionally more. At the
+    # bottom the scroll position is the largest one Win32 allows and the derived
+    # current page is the last (spec 4.6 rule 1).
     $procStrip = Start-StripLaunch -Fixture $largeFixture -Step "strip input"
-    & $uxProbe canvas-wheel -32640 200 | Out-Null
+    $bottomMessages = [int][Math]::Ceiling(200 * 48.0 / $stripNotchDip)
+    & $uxProbe canvas-wheel -32640 $bottomMessages | Out-Null
     $st = Wait-StripState -TimeoutSeconds 10 -Until {
         param($cs, $pb)
         $cs.pos -eq ($cs.max - $cs.page + 1) -and $pb.text -eq "500"
@@ -972,14 +993,15 @@ try {
     Write-Host "[OK] continuous strip: Ctrl+G 30 -> page box 30, pos $($st.cs.pos) = anchor(29) $navAnchor"
 
     # Row 11: Ctrl+G to the current page while mid-page (spec 9.3, 3.4). Two wheel
-    # notches move 96 DIPs (48 per notch at the default 3 lines) and leave page 30
-    # current; going to page 30 again must scroll back to its anchor, which a
+    # notches move 2 x $stripNotchDip DIPs (96 at the default 3 lines) and leave
+    # page 30 current; going to page 30 again must scroll back to its anchor, which a
     # paged-style "same page, nothing to do" early return would not.
     $posBefore = $st.cs.pos
     & $uxProbe canvas-wheel -120 2 | Out-Null
-    $st = Wait-StripState -Until { param($cs, $pb) [Math]::Abs($cs.pos - ($posBefore + 96)) -le 1 }
-    if ($null -eq $st.cs -or [Math]::Abs($st.cs.pos - ($posBefore + 96)) -gt 1 -or $st.pb.text -ne "30") {
-        throw "two wheel notches from anchor(29): expected pos $($posBefore + 96) (+/- 1) and page box 30: $(Format-StripState $st)"
+    $twoNotchPos = $posBefore + 2 * $stripNotchDip
+    $st = Wait-StripState -Until { param($cs, $pb) [Math]::Abs($cs.pos - $twoNotchPos) -le 1 }
+    if ($null -eq $st.cs -or [Math]::Abs($st.cs.pos - $twoNotchPos) -gt 1 -or $st.pb.text -ne "30") {
+        throw "two wheel notches from anchor(29): expected pos $twoNotchPos (+/- 1) and page box 30: $(Format-StripState $st)"
     }
     & $uxProbe page-box-go 30 | Out-Null
     $st = Wait-StripState -Until { param($cs, $pb) [Math]::Abs($cs.pos - $navAnchor) -le 1 -and $pb.text -eq "30" }
@@ -995,9 +1017,10 @@ try {
     # page 29 is at the top: pos = anchor1(29) + 8 + d0 x z1 / z0.
     $posBefore = $st.cs.pos
     & $uxProbe canvas-wheel -120 2 | Out-Null
-    $st = Wait-StripState -Until { param($cs, $pb) [Math]::Abs($cs.pos - ($posBefore + 96)) -le 1 }
-    if ($null -eq $st.cs -or [Math]::Abs($st.cs.pos - ($posBefore + 96)) -gt 1 -or $st.pb.text -ne "30") {
-        throw "two more wheel notches: expected pos $($posBefore + 96) (+/- 1) and page box 30: $(Format-StripState $st)"
+    $twoNotchPos = $posBefore + 2 * $stripNotchDip
+    $st = Wait-StripState -Until { param($cs, $pb) [Math]::Abs($cs.pos - $twoNotchPos) -le 1 }
+    if ($null -eq $st.cs -or [Math]::Abs($st.cs.pos - $twoNotchPos) -gt 1 -or $st.pb.text -ne "30") {
+        throw "two more wheel notches: expected pos $twoNotchPos (+/- 1) and page box 30: $(Format-StripState $st)"
     }
     $pos0 = [double]$st.cs.pos
     $z0 = & $stripZoomOf $st.cs
@@ -1030,8 +1053,8 @@ try {
     # Row 13: two-page on, then off, from mid-page (spec 9.3, deviation 6). At a
     # Custom zoom two presets above FitWidth the spread overflows the viewport, so
     # the in-page offset has somewhere to go; page 30 (index 29) is a spread's left
-    # page. Three wheel notches (144 DIPs at the default 3 lines) put the viewport
-    # top mid-page.
+    # page. Three wheel notches (3 x $stripNotchDip DIPs, 144 at the default 3
+    # lines) put the viewport top mid-page.
     $cs = Read-UxProbeJson -Probe canvas-scroll
     if ($null -eq $cs) { throw "precondition: canvas-scroll probe failed before Zoom In" }
     $zFit = ($cs.client_w * 96.0 / $cs.dpi) / 612.0
@@ -1057,9 +1080,10 @@ try {
         throw "Ctrl+G 30 at zoom $zCustom : expected page box 30 and pos $customAnchor (+/- 1): $(Format-StripState $st)"
     }
     & $uxProbe canvas-wheel -120 3 | Out-Null
-    $st = Wait-StripState -Until { param($cs, $pb) [Math]::Abs($cs.pos - ($customAnchor + 144)) -le 1 }
-    if ($null -eq $st.cs -or [Math]::Abs($st.cs.pos - ($customAnchor + 144)) -gt 1 -or $st.pb.text -ne "30") {
-        throw "three wheel notches from anchor(29): expected pos $($customAnchor + 144) (+/- 1) and page box 30: $(Format-StripState $st)"
+    $threeNotchPos = $customAnchor + 3 * $stripNotchDip
+    $st = Wait-StripState -Until { param($cs, $pb) [Math]::Abs($cs.pos - $threeNotchPos) -le 1 }
+    if ($null -eq $st.cs -or [Math]::Abs($st.cs.pos - $threeNotchPos) -gt 1 -or $st.pb.text -ne "30") {
+        throw "three wheel notches from anchor(29): expected pos $threeNotchPos (+/- 1) and page box 30: $(Format-StripState $st)"
     }
     $midPos = $st.cs.pos
     & $uxProbe send-cmd 40062 | Out-Null
@@ -1076,8 +1100,8 @@ try {
     # toggles posted back to back from one process must end in the strip -- the
     # opposite of where it starts, so a burst that was never processed cannot pass.
     # A wheel notch posted after the burst is a FIFO marker: posted messages to one
-    # thread are dequeued in order, so once the strip has moved by its 48 DIPs (the
-    # default 3 lines) from the carried position, the whole burst has run. Then
+    # thread are dequeued in order, so once the strip has moved by one notch
+    # ($stripNotchDip DIPs, 48 at the default 3 lines) from the carried position, the whole burst has run. Then
     # nothing late -- a strip completion, a paged completion, a reschedule -- may
     # flip the state or the range. One more toggle leaves the strip, and nothing
     # may bring the bar back.
@@ -1087,7 +1111,7 @@ try {
     $toggleBurst = 11
     & $uxProbe send-cmd 40062 $toggleBurst | Out-Null
     & $uxProbe canvas-wheel -120 1 | Out-Null
-    $markerPos = $midPos + 48
+    $markerPos = $midPos + $stripNotchDip
     $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll -and [Math]::Abs($cs.pos - $markerPos) -le 1 }
     if ($null -eq $st.cs -or -not $st.cs.vscroll -or [Math]::Abs($st.cs.pos - $markerPos) -gt 1 -or $st.pb.text -ne "30") {
         throw "$toggleBurst two-page toggles from the spread, then a wheel notch: expected the strip, page box 30 and pos $markerPos (+/- 1) within 5 s: $(Format-StripState $st)"
@@ -1217,9 +1241,10 @@ try {
         throw "Ctrl+G 30 at FitWidth: expected page box 30 and pos $([Math]::Round($fitAnchor0)) (+/- 1): $(Format-StripState $st)"
     }
     & $uxProbe canvas-wheel -120 3 | Out-Null
-    $st = Wait-StripState -Until { param($cs, $pb) [Math]::Abs($cs.pos - ([Math]::Round($fitAnchor0) + 144)) -le 1 }
-    if ($null -eq $st.cs -or [Math]::Abs($st.cs.pos - ([Math]::Round($fitAnchor0) + 144)) -gt 1 -or $st.pb.text -ne "30") {
-        throw "three wheel notches at FitWidth: expected pos $([Math]::Round($fitAnchor0) + 144) (+/- 1) and page box 30: $(Format-StripState $st)"
+    $fitNotchPos = [Math]::Round($fitAnchor0) + 3 * $stripNotchDip
+    $st = Wait-StripState -Until { param($cs, $pb) [Math]::Abs($cs.pos - $fitNotchPos) -le 1 }
+    if ($null -eq $st.cs -or [Math]::Abs($st.cs.pos - $fitNotchPos) -gt 1 -or $st.pb.text -ne "30") {
+        throw "three wheel notches at FitWidth: expected pos $fitNotchPos (+/- 1) and page box 30: $(Format-StripState $st)"
     }
     $fitPos0 = [double]$st.cs.pos
     $offset0 = $fitPos0 - ($fitAnchor0 + 8.0)

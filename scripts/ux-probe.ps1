@@ -14,7 +14,7 @@
 #   ux-probe.ps1 cross-tab-find                           - Post WM_COMMAND IDM_CROSS_TAB_FIND (40045) — show ResultsPanel
 #   ux-probe.ps1 results-panel-state                      - JSON dump of ResultsPanel child state (present/visible/rect)
 #   ux-probe.ps1 send-cmd <id> [count]                    - Post WM_COMMAND <id> to the main window <count> times (default 1), back to back
-#   ux-probe.ps1 canvas-scroll                            - JSON dump of the canvas scrollbar: present/vscroll/min/max/page/pos/client_w/client_h/dpi
+#   ux-probe.ps1 canvas-scroll                            - JSON dump of the canvas scrollbar: present/vscroll/min/max/page/pos/client_w/client_h/dpi/wheel_lines
 #   ux-probe.ps1 page-box                                 - JSON dump of the status-bar page box: present/text
 #   ux-probe.ps1 page-box-go <n>                          - Type <n> into the page box and post VK_RETURN to it
 #   ux-probe.ps1 canvas-wheel <delta> [count]             - Post <count> WM_MOUSEWHEEL (default 1) of <delta> to the canvas centre
@@ -73,6 +73,7 @@ public static extern bool ReadProcessMemory(IntPtr proc, IntPtr addr, byte[] buf
 [DllImport("user32.dll")] public static extern bool GetScrollInfo(IntPtr h, int bar, ref SCROLLINFO si);
 [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] public static extern IntPtr GetWindowLongPtr(IntPtr h, int index);
 [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
+[DllImport("user32.dll", EntryPoint="SystemParametersInfoW")] public static extern bool SystemParametersInfo(uint action, uint param, ref uint pv, uint winIni);
 [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
 [DllImport("user32.dll", EntryPoint="SendMessageW", CharSet=CharSet.Unicode)]
 public static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, System.Text.StringBuilder l);
@@ -352,9 +353,20 @@ function Find-PageBox([IntPtr]$main) {
   return Find-ChildByClass $sb 'Edit'
 }
 
+function Get-WheelLines {
+  # SPI_GETWHEELSCROLLLINES (0x0068): the lines per wheel notch the canvas reads. 0xFFFFFFFF
+  # (4294967295) is "one screen at a time". A system setting, so it is read even when the
+  # window is missing; the canvas falls back to 3 when the query fails, and so does this.
+  $lines = [uint32]3
+  [void][W.U32]::SystemParametersInfo(0x0068, 0, [ref]$lines, 0)
+  return [int64]$lines
+}
+
 function Canvas-Scroll([IntPtr]$main) {
-  # One line of JSON; a missing window reports present=false and zeros (the find-bar-state contract).
-  $zero = '{"present":false,"vscroll":false,"min":0,"max":0,"page":0,"pos":0,"client_w":0,"client_h":0,"dpi":0}'
+  # One line of JSON; a missing window reports present=false and zeros (the find-bar-state
+  # contract), plus wheel_lines, which does not depend on the window.
+  $wheelLines = Get-WheelLines
+  $zero = '{"present":false,"vscroll":false,"min":0,"max":0,"page":0,"pos":0,"client_w":0,"client_h":0,"dpi":0,"wheel_lines":' + $wheelLines + '}'
   if ($main -eq [IntPtr]::Zero) { Write-Output $zero; return }
   $cv = Find-Canvas $main
   if ($cv -eq [IntPtr]::Zero) { Write-Output $zero; return }
@@ -376,6 +388,7 @@ function Canvas-Scroll([IntPtr]$main) {
     client_w = [int]($r.Right - $r.Left)
     client_h = [int]($r.Bottom - $r.Top)
     dpi      = [int][W.U32]::GetDpiForWindow($cv)
+    wheel_lines = $wheelLines
   }
   Write-Output ($obj | ConvertTo-Json -Compress)
 }
