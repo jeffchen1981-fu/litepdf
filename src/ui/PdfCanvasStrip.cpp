@@ -786,6 +786,11 @@ void PdfCanvas::strip_paint() {
         ValidateRect(hwnd_, nullptr);   // nothing to do; the next paint retries
         return;
     }
+    // #135: record the overlay this paint draws, as the paged on_paint does, so
+    // on_search_hits_changed compares the next search update against the screen.
+    // The strip draws no hits in PR 2 (PR 3 will): without this, hits a paged
+    // paint left here would make every search update repaint the whole strip.
+    impl_->painted_hits.clear();
     bool drew_bitmap = false;
 
     impl_->rt->BeginDraw();
