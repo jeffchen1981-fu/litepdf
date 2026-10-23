@@ -233,6 +233,15 @@ void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
     // close path the outgoing view has already been destroyed by TabList::remove,
     // which is why cancel_gesture never touches it.
     cancel_gesture();
+    // #55, spec 3.4: in the strip, the same view keeps everything -- no epoch
+    // bump, no reset (a same-index tab switch). Another view cancels the strip's
+    // requests (flag store) and forgets its pages and position; the incoming
+    // tab's position comes with its TabSwitch kick (spec 7.4).
+    if (layout() == LayoutKind::Strip) {
+        if (view == impl_->view) return;
+        impl_->strip_set.clear();
+        impl_->strip_view.reset();
+    }
     // Per-render escrow (see PdfCanvas::post_render_done) is now the
     // lifetime mechanism for in-flight pixmaps — a canvas-level
     // orphan_ctx clone is no longer needed. The canvas just repoints
@@ -528,6 +537,8 @@ const litepdf::core::TextSelection* PdfCanvas::painted_selection() const noexcep
 }
 
 bool PdfCanvas::can_select_all() const {
+    // #55: Select All and selection stay off in the strip until PR 3 (spec 7.1).
+    if (layout() == LayoutKind::Strip) return false;
     if (!impl_ || !impl_->view || impl_->dual_page) return false;
     // A drag owns the selection. A stale one does not -- select_all ends it
     // first, as the next press would. That matters because Edit's
@@ -1063,6 +1074,9 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // Parent just repositioned us. Invalidate so on_paint rebuilds the rt.
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
+        case WM_USER_STRIP_DONE:
+            strip_on_done(w, l);   // #55, spec 5.3 (PdfCanvasStrip.cpp)
+            return 0;
         case WM_USER_TEXT_READY: {
             // Adopt first: every return below frees the meta, and a handle that
             // is not offered is destroyed with it.
@@ -1264,6 +1278,13 @@ void PdfCanvas::create_render_target() {
 }
 
 void PdfCanvas::discard_render_target() {
+    // #55, spec 3.4: the strip's bitmaps belong to this target too. Ready pages
+    // go to None, a Pending page loses its stale bitmap and stays Pending; the
+    // caller's resubmit_current_page (or the DPI Layout kick) reschedules.
+    if (layout() == LayoutKind::Strip) {
+        impl_->strip_set.state.drop_bitmaps();
+        impl_->strip_set.bitmaps.clear();
+    }
     // Brushes first — they're device-bound to the rt.
     impl_->brush_hit_other_fill.Reset();
     impl_->brush_hit_current_fill.Reset();
@@ -1278,6 +1299,16 @@ void PdfCanvas::discard_render_target() {
 }
 
 void PdfCanvas::resubmit_current_page() {
+    // #55, spec 3.4: the strip re-lays out at the view's zoom (spec 4.5) and
+    // reschedules; it has no current-page render of its own.
+    if (layout() == LayoutKind::Strip) {
+        if (!impl_->view) return;
+        if (impl_->strip_view.has_layout()) {
+            impl_->strip_view.relayout(impl_->view->zoom_pct());
+        }
+        strip_after_change();
+        return;
+    }
     if (!impl_->view) return;
     HWND target = hwnd_;
     const std::uint64_t epoch = impl_->view_epoch;
@@ -1763,10 +1794,21 @@ void PdfCanvas::on_size(int w, int h) {
             impl_->last_size = sz;
         }
     }
+    // #55: after the target resize, never instead of it. The strip keeps its
+    // viewport-top point; only the clamp can move it (spec 4.5).
+    if (layout() == LayoutKind::Strip) {
+        const DipSize vp = strip_viewport_dip();
+        impl_->strip_view.set_viewport(vp.w, vp.h);
+        strip_after_change();
+    }
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void PdfCanvas::on_paint() {
+    if (layout() == LayoutKind::Strip) {   // #55 (PdfCanvasStrip.cpp)
+        strip_paint();
+        return;
+    }
     create_render_target();
     if (!impl_->rt) {
         ValidateRect(hwnd_, nullptr);  // nothing to do

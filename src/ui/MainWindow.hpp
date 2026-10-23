@@ -12,6 +12,7 @@
 #include "app/CrossTabSearch.hpp"
 #include "core/MruList.hpp"
 #include "core/SessionStore.hpp" // Phase 12: SessionState + save_session
+#include "core/ViewPrefs.hpp"    // #55: the continuous-scroll preference
 #include "ui/FindBar.hpp"
 #include "ui/OutlinePane.hpp"
 #include "ui/PdfCanvas.hpp"
@@ -137,6 +138,15 @@ private:
     // Tab-switch handler registered with TabManager.
     void on_tab_switch(int new_index, int old_index);
 
+    // #55, spec 3.4 / 7.3: the only owner of layout switches. Computes the
+    // layout `tab` should show (PagedSingle for a null tab or view -- the last
+    // tab closed), sets the view's continuous flag to match, and, for a switch
+    // into or out of the strip, runs the canvas's layout-switch reset; a paged
+    // single <-> spread switch keeps set_dual_page (spec deviation 2). The caller
+    // kicks the render. `carry_position` carries the reader's position across a
+    // switch within one tab (spec 7.3).
+    void apply_effective_layout(litepdf::core::Tab* tab, bool carry_position);
+
     // Tab-close handler registered with TabManager (from middle-click).
     void on_tab_close_request(int index);
 
@@ -221,6 +231,9 @@ private:
     // FindBar::show_or_focus grows a second arg. For now each reopen
     // inherits whatever checkbox state the bar keeps internally.
     litepdf::core::MruList        mru_;
+    // #55: view preferences (the continuous-scroll preference), loaded once at
+    // construction beside the MRU.
+    litepdf::core::ViewPrefs      view_prefs_;
     bool                          log_timings_ = false;
 
     // ---- Phase 12: crash-safe session persistence -----------------------

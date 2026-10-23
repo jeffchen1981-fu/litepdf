@@ -55,8 +55,8 @@ std::wstring title_base() {
 
 constexpr UINT WM_USER_OPEN_OK       = WM_USER + 1;
 constexpr UINT WM_USER_OPEN_FAILED   = WM_USER + 2;
-// WM_USER + 3 to + 5 are WM_USER_RENDER_DONE, WM_USER_RENDER_DONE_RIGHT and
-// WM_USER_TEXT_READY, reserved by PdfCanvas.
+// WM_USER + 3 to + 6 are WM_USER_RENDER_DONE, WM_USER_RENDER_DONE_RIGHT,
+// WM_USER_TEXT_READY and WM_USER_STRIP_DONE, reserved by PdfCanvas.
 // Phase 8 Task 1: encrypted-PDF password handshake. Worker thread can't
 // run a modal dialog (no message pump, no parent HWND), so on
 // OpenError::NeedsPassword the worker posts this message carrying the
@@ -175,6 +175,7 @@ MainWindow::MainWindow()
     : search_dispatcher_(
           std::make_unique<litepdf::app::ThreadPoolDispatcher>(2)) {
     mru_.load();
+    view_prefs_.load();   // #55: ContinuousScroll; missing or invalid -> off
     // Phase 12: resolve %LOCALAPPDATA%\LitePDF (creates it + crashes\).
     // Empty on failure => session persistence silently disabled everywhere.
     app_data_dir_ = litepdf::app::app_data_dir();
@@ -331,9 +332,23 @@ void MainWindow::open_tab_async(std::filesystem::path path) {
 void MainWindow::kick_render(int page, litepdf::ui::KickReason reason) {
     // Only the continuous strip consults the reason; both paged branches below
     // behave as before. Every call site still names one (no default argument).
-    (void)reason;
     auto* view = active_view();
     if (!view || !canvas_) return;
+
+    // #55, spec 3.4: the strip branch, by reason. It submits through the
+    // canvas's own scheduler, so it opens no paged submission batch: the paged
+    // next_render_seq binds page anchors the strip does not use.
+    if (canvas_->layout() == litepdf::ui::LayoutKind::Strip) {
+        const auto a = litepdf::ui::strip_kick_actions(reason);
+        if (a.refit) canvas_->apply_viewport();
+        // #57: a zoom change reaches the readout in the same message.
+        if (a.refresh_readout) refresh_zoom_readout();
+        // The active tab's stored strip position when `a.restore_tab_position`
+        // (spec 7.4). Tabs do not store one yet, so there is none to restore.
+        const litepdf::ui::StripTabState* restore_ptr = nullptr;
+        canvas_->strip_kick(a, restore_ptr);
+        return;
+    }
 
     HWND target = canvas_->hwnd();
     // Stamp every render with the canvas epoch at submit time so a result
@@ -800,10 +815,11 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
         canvas_->set_invert_chrome(incoming && incoming->view
                                        ? incoming->view->invert_colors()
                                        : false);
-        // (Phase 8 D10) Same per-tab carry for two-page-spread layout.
-        canvas_->set_dual_page(incoming && incoming->view
-                                   ? incoming->view->dual_page()
-                                   : false);
+        // (Phase 8 D10) Same per-tab carry for two-page-spread layout, and
+        // (#55) the continuous strip: the incoming tab's effective layout, or
+        // PagedSingle when no tab is left. After set_pan and set_invert_chrome,
+        // which do not depend on the layout (spec 3.4, deviation 3).
+        apply_effective_layout(incoming, false);
     }
 
     if (outline_) {
@@ -879,6 +895,28 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
     update_find_counter();
 
     schedule_session_save();  // Phase 12: active tab / open set changed
+}
+
+void MainWindow::apply_effective_layout(litepdf::core::Tab* tab, bool carry_position) {
+    if (!canvas_) return;
+    auto* v = tab ? tab->view.get() : nullptr;
+    const litepdf::ui::LayoutKind target =
+        v ? litepdf::ui::effective_layout(
+                true, v->dual_page(), view_prefs_.continuous_scroll(),
+                litepdf::ui::strip_format_ok(v->source_path(), v->page_count()))
+          : litepdf::ui::LayoutKind::PagedSingle;
+    // On every call, a strip-to-strip tab switch included: the canvas layout
+    // does not change, but the incoming view still needs the flag (spec 4.3).
+    if (v) v->set_continuous(target == litepdf::ui::LayoutKind::Strip);
+    const litepdf::ui::LayoutKind current = canvas_->layout();
+    const bool strip_involved = target == litepdf::ui::LayoutKind::Strip ||
+                                current == litepdf::ui::LayoutKind::Strip;
+    if (strip_involved && target != current) {
+        canvas_->switch_layout(target, carry_position);
+    } else {
+        // Paged single <-> spread: today's path (spec deviation 2).
+        canvas_->set_dual_page(target == litepdf::ui::LayoutKind::PagedSpread);
+    }
 }
 
 void MainWindow::on_tab_close_request(int index) {
@@ -1738,7 +1776,10 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     auto* v = active_view();
                     if (!v) return 0;
                     v->set_dual_page(!v->dual_page());
-                    if (canvas_) canvas_->set_dual_page(v->dual_page());
+                    // #55: through the layout owner, so turning spread off
+                    // with the continuous preference on enters the strip, and
+                    // turning it on leaves it (spec 3.4).
+                    apply_effective_layout(tabs_ ? tabs_->active_tab() : nullptr, true);
                     int p = v->current_page();
                     if (v->dual_page()) {
                         p = litepdf::ui::dual_page_compute_left(

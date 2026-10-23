@@ -86,6 +86,8 @@ struct DocumentView::Impl {
     // to tell which way the reader is going: the page it last ran for (-1
     // before the first) and the direction of the last real move.
     std::size_t            l1_budget     = kDefaultL1BudgetBytes;
+    // (#55) The L1 entry count the cache was built with, for l1_capacity().
+    std::size_t            l1_capacity   = 5;
     int                    last_prefetch_page = -1;
     TravelDirection        travel        = TravelDirection::Forward;
     // (#49) Page sizes request_render_with_prefetch has looked up, so a page
@@ -180,6 +182,7 @@ DocumentView::DocumentView(Document doc,
     : impl_(std::make_unique<Impl>()) {
     impl_->doc = std::move(doc);
     impl_->l1_budget = l1_budget_bytes;
+    impl_->l1_capacity = l1_capacity;
     impl_->text_wanted = std::make_shared<std::atomic<int>>(-1);   // #98
 
     // Clone the UI-thread ctx and a dedicated cache_ctx BEFORE
@@ -554,6 +557,14 @@ bool DocumentView::l1_holds(int page) const {
 
 bool DocumentView::l1_contains(int page) const {
     return impl_->cache->l1_contains(page, render_scale(), impl_->invert_colors);
+}
+
+std::size_t DocumentView::l1_capacity() const noexcept {
+    return impl_->l1_capacity;
+}
+
+std::size_t DocumentView::l1_budget_bytes() const noexcept {
+    return impl_->l1_budget;
 }
 
 bool DocumentView::has_text_for(int page) const noexcept {

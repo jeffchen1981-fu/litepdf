@@ -614,6 +614,205 @@ Write-Host "[OK] thumb pane hidden via F4 toggle (process alive)"
 Stop-LitePDF -Process $proc6 -Step "thumb-pane"
 Start-Sleep -Milliseconds 500
 
+# ------------------------------------------------------- #55 continuous strip ----
+# With HKCU\SOFTWARE\LitePDF\Settings\ContinuousScroll = 1 a document opens as one
+# vertical strip of pages, and the canvas has a vertical scroll bar whose range is
+# the strip's height in DIPs (spec 6.2). The oracles are the scroll bar's range and
+# the status-bar page box, read through ux-probe; no pixels. The preference is the
+# user's own setting, so its prior value (or its absence) is put back in finally.
+$largeFixture = Join-Path $repoRoot "tests/fixtures/large.pdf"
+if (-not (Test-Path $largeFixture)) {
+    throw "fixture not found at $largeFixture"
+}
+$stripKey = "HKCU:\SOFTWARE\LitePDF\Settings"
+$stripHadKey = Test-Path $stripKey
+$stripHadValue = $false
+$stripPriorValue = $null
+$stripPriorKind = $null
+if ($stripHadKey) {
+    $stripKeyItem = Get-Item $stripKey
+    if ($stripKeyItem.GetValueNames() -contains "ContinuousScroll") {
+        $stripHadValue = $true
+        $stripPriorValue = $stripKeyItem.GetValue("ContinuousScroll")
+        $stripPriorKind = $stripKeyItem.GetValueKind("ContinuousScroll")
+    }
+}
+
+# One probe reading, parsed; $null when the probe printed something else.
+function Read-UxProbeJson {
+    param([string]$Probe)
+    $raw = & $uxProbe $Probe 2>&1 | Out-String
+    try { return ($raw | ConvertFrom-Json -ErrorAction Stop) } catch { return $null }
+}
+
+# large.pdf is 500 US Letter pages (612 x 792 pt). At zoom z the strip is
+# G + 500 x (792 z + G) DIPs tall, G = 8 (spec 4.2), and the scroll bar's
+# nMax + 1 is that height rounded (spec 6.2).
+function Get-StripExpectedHeight {
+    param([double]$Zoom)
+    return 8.0 + 500.0 * (792.0 * $Zoom + 8.0)
+}
+
+# core/detail/ZoomMath.hpp's kZoomPresets: Zoom In goes to the first one above
+# the current zoom (next_preset, with its 1e-4 tolerance).
+$stripZoomPresets = @(0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0)
+
+$stripErr = Join-Path $repoRoot "timings-strip.log"
+if (Test-Path $stripErr) { Remove-Item $stripErr -Force }
+$procStrip = $null
+try {
+    if (-not $stripHadKey) { New-Item -Path $stripKey -Force | Out-Null }
+    Set-ItemProperty -Path $stripKey -Name ContinuousScroll -Value 1 -Type DWord
+
+    # Row 1: cold start in continuous mode. The scroll bar appears only while the
+    # canvas shows the strip, so polling for it proves this run really is the strip.
+    Write-Host "Launching for continuous strip smoke: $exe $largeFixture --log-timings"
+    $procStrip = Start-Process -FilePath $exe `
+        -ArgumentList @($largeFixture, "--log-timings") `
+        -RedirectStandardError $stripErr `
+        -PassThru -NoNewWindow
+    $null = $procStrip.Handle
+    $deadlineStrip = (Get-Date).AddSeconds(5)
+    $hwndStrip = [IntPtr]::Zero
+    while ((Get-Date) -lt $deadlineStrip) {
+        Start-Sleep -Milliseconds 100
+        if ($procStrip.HasExited) {
+            throw "litepdf.exe exited during continuous strip startup (code $($procStrip.ExitCode))"
+        }
+        $procStrip.Refresh()
+        if ($procStrip.MainWindowHandle -ne [IntPtr]::Zero) {
+            $hwndStrip = $procStrip.MainWindowHandle
+            break
+        }
+    }
+    if ($hwndStrip -eq [IntPtr]::Zero) {
+        throw "litepdf.exe did not create a main window for the continuous strip smoke"
+    }
+    $csRaw = Wait-UxProbeState -Probe canvas-scroll -Until { param($s) $s.present -and $s.vscroll }
+    $cs = $null
+    try { $cs = $csRaw | ConvertFrom-Json -ErrorAction Stop } catch { }
+    if ($null -eq $cs) { throw "canvas-scroll probe failed: $csRaw" }
+    if (-not $cs.vscroll) {
+        throw "the canvas has no vertical scroll bar 5 s after opening large.pdf with ContinuousScroll = 1: $csRaw"
+    }
+    Write-Host "[OK] continuous strip: canvas scroll bar shown"
+
+    # Row 2: the scroll bar shows the strip's real range (spec 9.3's probe
+    # self-check). FitWidth on Letter: z = viewport width in DIPs / 612. The
+    # reading is polled until it matches, since the range is set by the open's
+    # render kick, which may run after the scroll bar style appears.
+    $stripZoom = 0.0
+    $stripExpected = 0.0
+    $csRaw = Wait-UxProbeState -Probe canvas-scroll -Until {
+        param($s)
+        if (-not ($s.present -and $s.vscroll -and $s.dpi -gt 0)) { return $false }
+        $z = ($s.client_w * 96.0 / $s.dpi) / 612.0
+        return [Math]::Abs(($s.max + 1) - (Get-StripExpectedHeight -Zoom $z)) -le 2
+    }
+    $cs = $null
+    try { $cs = $csRaw | ConvertFrom-Json -ErrorAction Stop } catch { }
+    if ($null -eq $cs -or $cs.dpi -le 0) { throw "canvas-scroll probe failed: $csRaw" }
+    $stripZoom = ($cs.client_w * 96.0 / $cs.dpi) / 612.0
+    $stripExpected = Get-StripExpectedHeight -Zoom $stripZoom
+    if ([Math]::Abs(($cs.max + 1) - $stripExpected) -gt 2) {
+        throw "strip scroll range: max + 1 = $($cs.max + 1), expected $stripExpected (+/- 2) at zoom $stripZoom : $csRaw"
+    }
+    $vpH = [Math]::Round($cs.client_h * 96.0 / $cs.dpi)
+    if ([Math]::Abs($cs.page - $vpH) -gt 1) {
+        throw "strip scroll page: $($cs.page), expected the viewport height $vpH (+/- 1) DIPs: $csRaw"
+    }
+    Write-Host "[OK] continuous strip: scroll range $($cs.max + 1) DIPs (expected $stripExpected), page $($cs.page)"
+
+    # Row 3: Zoom In re-lays out the strip at the next preset.
+    $maxBefore = $cs.max
+    & $uxProbe send-cmd 40010 | Out-Null   # IDM_ZOOM_IN
+    $csRaw = Wait-UxProbeState -Probe canvas-scroll -Until { param($s) $s.present -and $s.max -ne $maxBefore }
+    $cs = $null
+    try { $cs = $csRaw | ConvertFrom-Json -ErrorAction Stop } catch { }
+    if ($null -eq $cs) { throw "canvas-scroll probe failed after Zoom In: $csRaw" }
+    if ($cs.max -eq $maxBefore) { throw "the strip's scroll range did not change after Zoom In: $csRaw" }
+    $stripZoom2 = $null
+    foreach ($preset in $stripZoomPresets) {
+        if ($preset -gt $stripZoom + 1e-4) { $stripZoom2 = $preset; break }
+    }
+    if ($null -eq $stripZoom2) { throw "no zoom preset above $stripZoom" }
+    $stripExpected2 = Get-StripExpectedHeight -Zoom $stripZoom2
+    if ([Math]::Abs(($cs.max + 1) - $stripExpected2) -gt 2) {
+        throw "strip scroll range after Zoom In: max + 1 = $($cs.max + 1), expected $stripExpected2 (+/- 2) at zoom $stripZoom2 : $csRaw"
+    }
+    Write-Host "[OK] continuous strip: Zoom In re-laid out to $($cs.max + 1) DIPs (zoom $stripZoom2)"
+
+    # Row 4: Invert Colors, twice, keeps the strip.
+    & $uxProbe send-cmd 40061 2 | Out-Null   # IDM_VIEW_INVERT x2
+    Start-Sleep -Milliseconds 500
+    $procStrip.Refresh()
+    if ($procStrip.HasExited) {
+        throw "litepdf.exe exited after Invert Colors in the strip (exit code $($procStrip.ExitCode))"
+    }
+    $cs = Read-UxProbeJson -Probe canvas-scroll
+    if ($null -eq $cs -or -not $cs.vscroll) {
+        throw "the canvas lost its scroll bar after Invert Colors twice"
+    }
+    Write-Host "[OK] continuous strip: Invert Colors twice keeps the strip"
+
+    # Row 5: closing the last tab removes the scroll bar. Precondition first: no
+    # scroll bar is also the paged state, so the bar must be there before the close.
+    $cs = Read-UxProbeJson -Probe canvas-scroll
+    if ($null -eq $cs -or -not ($cs.present -and $cs.vscroll)) {
+        throw "precondition: the strip's scroll bar is not shown before the tab close"
+    }
+    & $uxProbe send-cmd 40030 | Out-Null   # IDM_TAB_CLOSE
+    $csRaw = Wait-UxProbeState -Probe canvas-scroll -Until { param($s) $s.present -and -not $s.vscroll }
+    $cs = $null
+    try { $cs = $csRaw | ConvertFrom-Json -ErrorAction Stop } catch { }
+    if ($null -eq $cs -or -not $cs.present) { throw "canvas-scroll probe failed after closing the last tab: $csRaw" }
+    if ($cs.vscroll) { throw "the canvas still has a scroll bar after closing the last tab: $csRaw" }
+    $pbRaw = Wait-UxProbeState -Probe page-box -Until { param($s) $s.present -and $s.text -eq "" }
+    $pb = $null
+    try { $pb = $pbRaw | ConvertFrom-Json -ErrorAction Stop } catch { }
+    if ($null -eq $pb -or -not $pb.present) { throw "page-box probe failed after closing the last tab: $pbRaw" }
+    if ($pb.text -ne "") { throw "the page box still reads '$($pb.text)' after closing the last tab" }
+    $procStrip.Refresh()
+    if ($procStrip.HasExited) {
+        throw "litepdf.exe exited after closing the last strip tab (exit code $($procStrip.ExitCode))"
+    }
+    Write-Host "[OK] continuous strip: closing the last tab removes the scroll bar"
+
+    Stop-LitePDF -Process $procStrip -Step "continuous strip"
+    Start-Sleep -Milliseconds 500  # allow stderr buffers to flush
+
+    # Row 1, continued: the strip marks the cold-start timer's bitmap points too.
+    if (-not (Test-Path $stripErr)) { throw "no stderr log produced at $stripErr" }
+    $stripLines = Get-Content $stripErr
+    $stripTiming = $stripLines | Where-Object { $_ -match "LitePDF cold-start:" } | Select-Object -First 1
+    if (-not $stripTiming) {
+        Write-Host "stderr contents:"
+        $stripLines | ForEach-Object { Write-Host "  $_" }
+        throw "no 'LitePDF cold-start:' line found in the continuous strip run's stderr"
+    }
+    Write-Host "[OK] continuous strip: timing line: $stripTiming"
+} finally {
+    if ($null -ne $procStrip -and -not $procStrip.HasExited) {
+        Stop-Process -Id $procStrip.Id -Force -ErrorAction SilentlyContinue
+        [void]$procStrip.WaitForExit(5000)
+    }
+    if ($stripHadValue) {
+        $stripRestoreKind = "DWord"
+        if ($null -ne $stripPriorKind) { $stripRestoreKind = $stripPriorKind.ToString() }
+        Set-ItemProperty -Path $stripKey -Name ContinuousScroll -Value $stripPriorValue -Type $stripRestoreKind
+    } elseif (Test-Path $stripKey) {
+        Remove-ItemProperty -Path $stripKey -Name ContinuousScroll -ErrorAction SilentlyContinue
+        if (-not $stripHadKey) {
+            $stripKeyItem = Get-Item $stripKey
+            if ($stripKeyItem.ValueCount -eq 0 -and $stripKeyItem.SubKeyCount -eq 0) {
+                Remove-Item -Path $stripKey -Force
+            }
+        }
+    }
+    Remove-Item $stripErr -Force -ErrorAction SilentlyContinue
+}
+Start-Sleep -Milliseconds 500
+
 # ---------------------------------------------------------------- Phase 8 ----
 # Open-path liveness for the Tier 3 formats: ePub, CBZ, encrypted PDF.
 # The encrypted launch leaves the password modal blocking on user input —

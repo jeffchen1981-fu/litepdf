@@ -280,8 +280,8 @@ public:
     // when the build fails; callers must tolerate that.
     [[nodiscard]] Document::TextPage text_for(int page);
 
-    // The page whose text a queued P0 may still build, -1 for none. Test
-    // observability only; nothing in the product reads it.
+    // The page whose text a queued P0 may still build, -1 for none. Read by
+    // the continuous strip's text request (#55, spec 5.2) and by the tests.
     [[nodiscard]] int pending_text_page() const noexcept;
 
     // (#49) Render requests queued in this view's engine and not yet taken by
@@ -302,6 +302,12 @@ public:
     // Unlike l1_holds it leaves the entry's LRU recency alone, so the strip
     // scheduler can ask without reordering L1 (PageCache::l1_contains).
     [[nodiscard]] bool l1_contains(int page) const;
+
+    // (#55) The L1 limits this view was constructed with: the entry count and
+    // the byte budget. The strip scheduler reads them so prefetch only fills
+    // what L1 can hold beside the visible pages (spec 5.2).
+    [[nodiscard]] std::size_t l1_capacity() const noexcept;
+    [[nodiscard]] std::size_t l1_budget_bytes() const noexcept;
 
     // UI thread's own fz_context clone (D3). Stays valid for the
     // lifetime of the DocumentView. Use for fz_drop_pixmap on refs
