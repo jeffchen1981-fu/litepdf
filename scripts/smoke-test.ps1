@@ -1101,10 +1101,10 @@ try {
     # opposite of where it starts, so a burst that was never processed cannot pass.
     # A wheel notch posted after the burst is a FIFO marker: posted messages to one
     # thread are dequeued in order, so once the strip has moved by one notch
-    # ($stripNotchDip DIPs, 48 at the default 3 lines) from the carried position, the whole burst has run. Then
-    # nothing late -- a strip completion, a paged completion, a reschedule -- may
-    # flip the state or the range. One more toggle leaves the strip, and nothing
-    # may bring the bar back.
+    # ($stripNotchDip DIPs, 48 at the default 3 lines) from the carried position,
+    # the whole burst has run. Then nothing late -- a strip completion, a paged
+    # completion, a reschedule -- may flip the state or the range. One more toggle
+    # leaves the strip, and nothing may bring the bar back.
     & $uxProbe send-cmd 40062 | Out-Null
     $st = Wait-StripState -Until { param($cs, $pb) -not $cs.vscroll }
     if ($null -eq $st.cs -or $st.cs.vscroll) { throw "precondition: two-page on did not leave the strip: $(Format-StripState $st)" }
