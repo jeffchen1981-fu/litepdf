@@ -205,10 +205,11 @@ public:
     LayoutKind layout() const noexcept;
 
     // The layout-switch reset of spec 3.4, for a switch into or out of the strip
-    // (a paged single <-> spread switch keeps set_dual_page). Cancels the old
-    // layout's work, drops every bitmap, bumps the render epoch, sets the
-    // dual-page flag for `next` and adds or removes WS_VSCROLL, so a fit read
-    // after it already sees the right client width. The caller kicks a render.
+    // (a paged single <-> spread switch keeps set_dual_page). Cancels any live
+    // gesture first (without committing it), then the old layout's work, drops
+    // every bitmap, bumps the render epoch, sets the dual-page flag for `next`
+    // and adds or removes WS_VSCROLL, so a fit read after it already sees the
+    // right client width. The caller kicks a render.
     //
     // `carry_position` (a switch within one tab: the two-page toggle) carries the
     // reader's position (spec 7.3, deviation 1): (page, in-page offset) and the
@@ -463,6 +464,20 @@ private:
 
     // The selection on_paint draws, or null.
     const litepdf::core::TextSelection* painted_selection() const noexcept;
+
+    // Fills `sel`'s quads with the selection brush. (ox, oy) is the page's
+    // top-left in canvas DIPs and `pct` the DIPs per PDF point; draws nothing
+    // without the brush. Paged on_paint and the strip (#55) both call it.
+    void paint_selection_quads(const litepdf::core::TextSelection& sel,
+                               float ox, float oy, float pct);
+
+    // Starts a selection gesture on `page`, drawn at `pl`: clears the committed
+    // selection, takes `text` as the drag's text, captures the mouse, and in
+    // Word or Line mode selects at press time (spec §4.2). The caller has
+    // checked that `text` is valid and no gesture is live. The paged press and
+    // the strip's press on the page under the cursor (#55, spec 7.1) share it.
+    void begin_selection(int page, const Placement& pl, litepdf::core::SelectMode mode,
+                         int x_px, int y_px, litepdf::core::Document::TextPage text);
 
     // #52 selection gestures. The state machine is ui/detail/SelectionDrag.hpp;
     // spec §4.2 has the message ordering these depend on.

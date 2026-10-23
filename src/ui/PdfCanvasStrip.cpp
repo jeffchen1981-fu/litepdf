@@ -173,6 +173,11 @@ bool PdfCanvas::strip_active() const noexcept {
 
 void PdfCanvas::switch_layout(LayoutKind next, bool carry_position) {
     if (!impl_) return;
+    // spec 3.4: a layout switch ends any live gesture, without committing. The
+    // set_dual_page call below cancels only when the dual flag changes, which a
+    // single <-> strip switch does not, and a drag's placement belongs to the
+    // outgoing layout.
+    cancel_gesture();
     const bool was_strip = impl_->strip;
 
     // spec 7.3, deviation 1: the carry is captured FIRST, before anything below
@@ -455,6 +460,12 @@ void PdfCanvas::strip_after_change() {
                                             v->l1_contains(c), sub);
     }
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+    // spec 7.1: Windows sends no WM_SETCURSOR when content scrolls under a still
+    // pointer, so a wheel, key, scroll bar or kick that moves a gap or a page
+    // under it would keep the old shape until the next mouse move.
+    // refresh_cursor acts only when the pointer is over the canvas or the
+    // canvas holds the capture.
+    refresh_cursor();
 }
 
 void PdfCanvas::strip_update_scrollbar() {
@@ -869,6 +880,14 @@ void PdfCanvas::strip_paint() {
         for (const auto& hit : impl_->painted_hits) {
             const StripPageRect r = sv.page_rect(static_cast<int>(hit.page));
             paint_hit(hit, static_cast<float>(r.x), static_cast<float>(r.y), pct);
+        }
+
+        // The selection, after the hits so it reads as the active thing, on its
+        // own page whenever that page is visible (spec 7.1), placed the same way.
+        const litepdf::core::TextSelection* sel = painted_selection();
+        if (sel && sel->page >= visible.first && sel->page <= visible.last) {
+            const StripPageRect r = sv.page_rect(sel->page);
+            paint_selection_quads(*sel, static_cast<float>(r.x), static_cast<float>(r.y), pct);
         }
     }
 

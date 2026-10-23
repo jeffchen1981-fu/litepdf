@@ -1300,6 +1300,83 @@ try {
     }
     Write-Host "[OK] continuous strip: FitWidth two-page round trip scales the carry: pos $fitPos0 -> $($st.cs.pos) (predicted $fitPredicted; zoom $z0 -> $z1 -> back)"
     Stop-LitePDF -Process $procStrip -Step "strip carry at FitWidth"
+    Start-Sleep -Milliseconds 500
+
+    # Rows 19-20: Select All and Copy in the strip (spec 7.1). IDM_EDIT_COPY = 40071,
+    # IDM_EDIT_SELECT_ALL = 40072. Both go through the clipboard, which is the user's:
+    # its text is saved first and put back in finally.
+    $stripClipSaved = Get-Clipboard -Raw
+    try {
+        # Row 19: Select All selects the current page -- the one the page box shows --
+        # and Copy copies that page's text only. strip-1000.pdf's page n holds
+        # "Strip page n of 1000.", so the next page's text is told apart.
+        $procStrip = Start-StripLaunch -Fixture $strip1000 -Step "strip select all"
+        $clipMarker = "litepdf-smoke-marker-$([guid]::NewGuid().ToString('N'))"
+        Set-Clipboard -Value $clipMarker
+        & $uxProbe page-box-go 30 | Out-Null
+        $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll -and $pb.text -eq "30" }
+        if ($null -eq $st.cs -or -not $st.cs.vscroll -or $st.pb.text -ne "30") {
+            throw "Ctrl+G 30 in strip-1000.pdf: expected the strip and page box 30: $(Format-StripState $st)"
+        }
+        & $uxProbe send-cmd 40072 | Out-Null
+        & $uxProbe send-cmd 40071 | Out-Null
+        $clip = $null
+        $deadline = (Get-Date).AddSeconds(5)
+        while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 100
+            $clip = Get-Clipboard -Raw
+            if ($null -ne $clip -and $clip.Contains("Strip page 30 of 1000.")) { break }
+        }
+        if ($null -eq $clip -or -not $clip.Contains("Strip page 30 of 1000.")) {
+            throw "Select All + Copy on strip page 30: the clipboard does not hold 'Strip page 30 of 1000.' within 5 s: '$clip'"
+        }
+        if ($clip.Contains("Strip page 31")) {
+            throw "Select All + Copy on strip page 30: the clipboard holds page 31's text too: '$clip'"
+        }
+        Write-Host "[OK] continuous strip: Select All + Copy on page 30 copies 'Strip page 30 of 1000.' and nothing of page 31"
+        Stop-LitePDF -Process $procStrip -Step "strip select all"
+        Start-Sleep -Milliseconds 500
+
+        # Row 20: Select All on a page with no text (a guard, not a fail-first row).
+        # strip-images.cbz's pages are images: Select All must build no selection,
+        # so Copy stays grayed and leaves the clipboard alone. Nothing is expected to
+        # change, so a FIFO barrier (Status Bar, 40064: the canvas height changes)
+        # shows that both commands have run before the oracle is read.
+        $stripImages = Join-Path $repoRoot "tests/fixtures/strip-images.cbz"
+        if (-not (Test-Path $stripImages)) { throw "fixture not found at $stripImages" }
+        $procStrip = Start-StripLaunch -Fixture $stripImages -Step "strip select all, no text"
+        $clipMarker = "litepdf-smoke-marker-$([guid]::NewGuid().ToString('N'))"
+        Set-Clipboard -Value $clipMarker
+        $cs = Read-UxProbeJson -Probe canvas-scroll
+        if ($null -eq $cs -or -not $cs.vscroll) { throw "precondition: strip-images.cbz is not in the strip: $($cs | ConvertTo-Json -Compress)" }
+        $barrierH = $cs.client_h
+        & $uxProbe send-cmd 40072 | Out-Null
+        & $uxProbe send-cmd 40071 | Out-Null
+        & $uxProbe send-cmd 40064 | Out-Null
+        $st = Wait-StripState -Until { param($c, $pb) $c.client_h -ne $barrierH }
+        if ($null -eq $st.cs -or $st.cs.client_h -eq $barrierH) {
+            throw "FIFO barrier: the canvas height did not change after Status Bar: $(Format-StripState $st)"
+        }
+        $ms = (& $uxProbe menu-state 40071 2>&1 | Out-String)
+        $msObj = $null
+        try { $msObj = $ms | ConvertFrom-Json -ErrorAction Stop } catch { $msObj = $null }
+        $clip = Get-Clipboard -Raw
+        if ($null -eq $msObj -or -not $msObj.items.'40071'.found -or -not $msObj.items.'40071'.grayed) {
+            throw "Select All on a page with no text: Copy is not grayed: $ms"
+        }
+        if ($clip -ne $clipMarker) {
+            throw "Select All + Copy on a page with no text changed the clipboard: '$clip'"
+        }
+        & $uxProbe send-cmd 40064 | Out-Null
+        $st = Wait-StripState -Until { param($c, $pb) $c.client_h -eq $barrierH }
+        if ($null -eq $st.cs -or $st.cs.client_h -ne $barrierH) {
+            throw "FIFO barrier: the status bar did not come back: $(Format-StripState $st)"
+        }
+        Write-Host "[OK] continuous strip: Select All + Copy on a page with no text: Copy grayed, clipboard unchanged"
+        Stop-LitePDF -Process $procStrip -Step "strip select all, no text"
+    } finally {
+        if ($null -ne $stripClipSaved) { Set-Clipboard -Value $stripClipSaved } else { Set-Clipboard -Value $null }
+    }
 } finally {
     if ($null -ne $procStrip -and -not $procStrip.HasExited) {
         Stop-Process -Id $procStrip.Id -Force -ErrorAction SilentlyContinue
