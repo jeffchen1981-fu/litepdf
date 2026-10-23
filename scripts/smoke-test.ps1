@@ -919,12 +919,15 @@ try {
     Start-Sleep -Milliseconds 500
 
     # Row 8: a fling through 1000 pages, 400 wheel messages back to back from one
-    # process. This checks the model, not the pixels: no pixel-free signal says a
-    # page's bitmap was accepted, so the final pages' paint is a manual check.
+    # process at the default 3 lines; like Row 6, a smaller lines setting sends
+    # proportionally more. This checks the model, not the pixels: no pixel-free
+    # signal says a page's bitmap was accepted, so the final pages' paint is a
+    # manual check.
     $strip1000 = Join-Path $repoRoot "tests/fixtures/strip-1000.pdf"
     if (-not (Test-Path $strip1000)) { throw "fixture not found at $strip1000" }
     $procStrip = Start-StripLaunch -Fixture $strip1000 -Step "strip fling"
-    & $uxProbe canvas-wheel -32640 400 | Out-Null
+    $flingMessages = [int][Math]::Ceiling(400 * 48.0 / $stripNotchDip)
+    & $uxProbe canvas-wheel -32640 $flingMessages | Out-Null
     $st = Wait-StripState -TimeoutSeconds 10 -Until {
         param($cs, $pb)
         $pb.text -eq "1000" -and $cs.pos -eq ($cs.max - $cs.page + 1)
