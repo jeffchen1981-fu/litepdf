@@ -530,8 +530,9 @@ strip").
   spread off. Turning spread on does not change the preference, and turning it off returns to
   the preference's layout. Changing the preference re-applies the effective layout to the active
   tab only; a background tab picks it up at its next `on_tab_switch`.
-- **Every layout switch** goes through `apply_effective_layout`, which first does the reset in
-  §3.4.
+- **Every layout switch** goes through `apply_effective_layout`. The §3.4 reset and the carry
+  below run only for a switch into or out of the strip; a paged single ↔ spread switch keeps
+  today's `set_dual_page` path (§3.4).
 - **Position carry, within one tab** (spread toggle, menu item). The carried value is
   (page, in-page offset in DIP), captured before the reset (§3.4):
   - **From paged single.** page = the current page; offset = how far the page has been scrolled
@@ -542,13 +543,16 @@ strip").
   - **From the strip.** page = the derived current page; offset = viewport top − `top(page)`,
     clamped to [0, the page's height].
   - **Into the strip.** `scroll_y = anchor(page)` when the offset is 0, else `top(page) + offset` (the offset is measured from the page's top). A page that fits lands exactly where
-    navigating to it would put it. The current page is the carried page, pinned (§4.6).
+    navigating to it would put it. The current page is the carried page, pinned (§4.6). The
+    outgoing horizontal pan (paged single's `pan_x`; 0 from a spread), scaled by the zoom
+    ratio, becomes the strip's desired `pan_x`; only `pan_x_eff` clamps it.
   - **Into paged single.** Paged `pan_y` = −offset, clamped; `pan_x` = `pan_x_eff`.
   - **Into paged spread.** The spread containing the page; `pan_y` = −(the left page's top in
     the union + offset), clamped to the union; `pan_x` = 0, because the union's horizontal layout
     differs from the strip's.
   - Into either paged layout, the pan is set before the render is kicked. The switch cleared the
-    anchor, so the paged completion path only re-clamps the pan and the position survives.
+    anchor, so the paged completion path only re-clamps the pan and the position survives
+    (except unequal-height spreads, §10).
   - Every carry is applied after the new layout's fit: the current page is set to the carried
     page, the viewport refits, and the offset is scaled by the zoom ratio (after / before), so a
     fit change does not shift the reader.
@@ -763,6 +767,10 @@ first callback):
 - Changing the registry value while the app runs takes effect at the next start (§7.2).
 - A text build the worker skips because a P0 is queued (#98 skip rule 3) is not retried; a press
   on that page builds its text synchronously, as in paged mode (§5.2).
+- A carry into a spread whose right page is taller than its left can be cut short: the left
+  page's completion re-clamps the pan against the left bitmap alone (`content_extent`,
+  `apply_anchor` in `PdfCanvas.cpp`) before the right one lands, so §7.3's "the position
+  survives" does not hold for unequal-height spreads. A follow-up issue is filed with PR 2.
 
 ## 11. Risk and review
 
