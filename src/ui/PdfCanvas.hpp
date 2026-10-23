@@ -9,11 +9,14 @@
 #include "core/Document.hpp"
 #include "core/SearchSession.hpp"
 #include "ui/detail/CompletionMath.hpp"
+#include "ui/detail/EffectiveLayout.hpp"
 #include "ui/detail/PageAnchor.hpp"
 #include "ui/detail/ScrollMath.hpp"
 #include "core/TextSelection.hpp"
 #include "ui/detail/ViewportMath.hpp"
 #include "ui/detail/SelectionDrag.hpp"
+#include "ui/detail/StripCarry.hpp"
+#include "ui/detail/StripLayout.hpp"
 
 // Forward-decl so the header stays COM-free. ComPtr in .cpp only.
 struct ID2D1Factory;
@@ -44,7 +47,7 @@ namespace litepdf::ui {
 // from a superseded view (issue #35), from a submission a newer batch has
 // superseded, from a page the user has left, and a right-slot pixmap
 // arriving while the layout is single-page.
-// Must match the reservation in MainWindow.cpp (WM_USER + 3 to + 5).
+// Must match the reservation in MainWindow.cpp (WM_USER + 3 to + 6).
 inline constexpr UINT WM_USER_RENDER_DONE = WM_USER + 3;
 // (Phase 8 D10) Same payload as WM_USER_RENDER_DONE but the bitmap
 // lands in the RIGHT slot of the two-page spread layout instead of the
@@ -54,6 +57,13 @@ inline constexpr UINT WM_USER_RENDER_DONE_RIGHT = WM_USER + 4;
 // heap TextMeta { core::Document::TextPage text; std::uint64_t epoch; }, freed
 // by the handler; WPARAM is unused. Posted by PdfCanvas::post_text_ready.
 inline constexpr UINT WM_USER_TEXT_READY = WM_USER + 5;
+// (#55) A continuous-strip page render finished. WPARAM = fz_pixmap* (the
+// worker's shipping ref) or null; LPARAM = a heap StripMeta { core::EscrowContext
+// escrow; StripCompletionMeta id; }, allocated for a null result too, so every
+// completion carries its {epoch, page, seq, cancelled} identity (spec 5.3). The
+// escrow is empty for a null result. Same escrow discipline as
+// WM_USER_RENDER_DONE. Posted from PdfCanvasStrip.cpp.
+inline constexpr UINT WM_USER_STRIP_DONE = WM_USER + 6;
 
 class PdfCanvas {
 public:
@@ -70,9 +80,11 @@ public:
     // Pass nullptr to clear.
     void set_view(litepdf::core::DocumentView* view);
 
-    // Monotonic render epoch. Bumped on every set_view so that an
-    // in-flight render submitted for a now-superseded view can be told
-    // apart from one submitted for the current view. Callers capture this
+    // Monotonic render epoch. Bumped on every set_view to another view (and
+    // on every paged set_view), and on every layout switch into or out of the
+    // strip (#55), so that an in-flight render submitted for a now-superseded
+    // view or layout can be told apart from one submitted for the current one.
+    // A same-view set_view in the strip does not bump. Callers capture this
     // at submit time and pass it to post_render_done; the completion
     // handler drops pixmaps whose epoch no longer matches (issue #35).
     std::uint64_t render_epoch() const noexcept;
@@ -185,6 +197,56 @@ public:
     void set_dual_page(bool on);
     bool dual_page() const noexcept;
 
+    // --- #55: continuous scroll ---
+
+    // The layout on screen: Strip while the canvas shows the continuous strip,
+    // else PagedSpread or PagedSingle from the dual-page flag. Derived, so a
+    // paged single <-> spread toggle through set_dual_page keeps it right.
+    LayoutKind layout() const noexcept;
+
+    // The layout-switch reset of spec 3.4, for a switch into or out of the strip
+    // (a paged single <-> spread switch keeps set_dual_page). Cancels the old
+    // layout's work, drops every bitmap, bumps the render epoch, sets the
+    // dual-page flag for `next` and adds or removes WS_VSCROLL, so a fit read
+    // after it already sees the right client width. The caller kicks a render.
+    //
+    // `carry_position` (a switch within one tab: the two-page toggle) carries the
+    // reader's position (spec 7.3, deviation 1): (page, in-page offset) and the
+    // horizontal pan are captured from the old layout before anything changes,
+    // all geometry from the view's page sizes x its zoom (never from bitmaps, so
+    // a switch before the last render landed still carries); after the reset the
+    // carried page becomes current (a spread's left page), the viewport refits
+    // for the new layout, and the offset and pan are scaled by the zoom ratio
+    // (after / before) and applied -- into the strip by building its layout
+    // here. False (a tab switch) skips both: the incoming tab restores its own
+    // position with its TabSwitch kick (spec 7.4).
+    void switch_layout(LayoutKind next, bool carry_position);
+
+    // The strip's per-tab state for MainWindow's outgoing tab snapshot (spec
+    // 7.4): StripViewport::save() while the strip is shown and laid out, else
+    // empty.
+    std::optional<StripTabState> strip_tab_state() const;
+
+    // MainWindow::kick_render's strip branch, after it has refit and refreshed
+    // the zoom readout as `a` asks: build the strip layout if there is none,
+    // else re-layout at the view's zoom when `a.relayout`; apply `restore` when
+    // non-null; restyle when `a.restyle`; then recompute the current page,
+    // update the scrollbar and reschedule. No-op unless the strip is shown.
+    void strip_kick(const StripKickActions& a, const StripTabState* restore);
+
+    // Explicit navigation in the strip (spec 6.3): scroll to `page`'s anchor,
+    // clamped, make it the current page and pin it (spec 4.6), then recompute,
+    // update the scrollbar and reschedule. Runs even when `page` is already the
+    // current page, so going there mid-page scrolls back to its top. No page
+    // anchor is installed. The caller follows with a Navigate kick. No-op unless
+    // the strip is shown and laid out.
+    void strip_navigate(int page);
+
+    // The search start page in the strip (spec 6.3, #140): the first page on
+    // screen, else the current page when only a gap is showing. The view's
+    // current page when the strip is not shown or not laid out.
+    int strip_top_visible_page() const;
+
     // --- Phase 6 Task 9: search hit overlay ---
 
     // Source for overlay hits. PdfCanvas calls this each paint to fetch
@@ -267,6 +329,11 @@ public:
     // EXCEPT the already-visible one, so the caller (MainWindow) must
     // follow this with kick_render -- both to render and to bind that
     // anchor to the submission it opens.
+    //
+    // In the strip (spec 6.3) it scrolls the strip itself and installs no
+    // anchor: no scroll when the quad is inside the viewport by the same 24 DIP
+    // margin, else the quad is centred vertically; the hit's page becomes the
+    // current page either way. The caller's Navigate kick then only reschedules.
     void scroll_into_view(const litepdf::core::SearchSession::Hit& h);
 
     // --- #52: text selection ---
@@ -425,6 +492,8 @@ private:
     // when pan_by drops every step (#120). Deliberately NOT stale-aware: a
     // captured pan gets no WM_SETCURSOR, so a drag begun in that window would
     // keep the arrow after the render lands and the pan works again.
+    // In the strip (#55) it answers from StripViewport::can_pan: the strip is
+    // taller or wider than the viewport.
     bool can_pan() const;
 
     // WM_SETCURSOR for the client area.
@@ -435,6 +504,67 @@ private:
     // the pointer still. Does nothing unless the pointer is over this window
     // or this window holds the capture.
     void refresh_cursor();
+
+    // --- #55: the continuous strip (PdfCanvasStrip.cpp) ---
+
+    // The client size in DIPs: the client rect divided by dpi / 96. Needs no
+    // render target.
+    struct DipSize { double w; double h; };
+    DipSize strip_viewport_dip() const;
+
+    // WM_PAINT in the strip (spec 4.2, 5.1).
+    void strip_paint();
+
+    // WM_USER_STRIP_DONE (spec 5.3).
+    void strip_on_done(WPARAM w, LPARAM l);
+
+    // One scheduling pass (spec 5.2), then the bitmaps of the pages whose slot no
+    // longer holds one are released.
+    void strip_reschedule();
+
+    // The scrollbar from the viewport model (spec 6.2).
+    void strip_update_scrollbar();
+
+    // The common tail of every strip change: recompute the current page, update
+    // the scrollbar, reschedule, and invalidate. strip_after_change,
+    // strip_update_scrollbar and strip_reschedule return at once unless the
+    // strip is shown and has a layout.
+    void strip_after_change();
+
+    // The strip's current-page setter: DocumentView::set_current_page, and the
+    // page-change observer only when the page changed (spec 4.6) -- without
+    // change_current_page's cancel_gesture (spec 3.4). Returns whether it changed.
+    bool set_strip_current_page(int page);
+
+    // The strip is shown and laid out.
+    bool strip_active() const noexcept;
+
+    // Builds the strip layout from the view's page sizes at its zoom, keeping
+    // the viewport model's current viewport size.
+    void strip_build_layout();
+
+    // switch_layout's carry (spec 7.3, deviation 1), around its reset. The
+    // capture reads the layout still on screen; `pan_before` receives its
+    // horizontal pan (0 from a spread). The apply runs once the reset has set
+    // the dual-page flag and the scroll bar style for `next`.
+    CarriedPosition capture_layout_carry(double& pan_before);
+    void apply_layout_carry(LayoutKind next, CarriedPosition c, double pan_before,
+                            double zoom_before);
+
+    // The strip's input (spec 6.1, 6.2): the strip branches of on_wheel_scroll,
+    // on_hwheel_scroll, on_key_down and pan_by, and WM_VSCROLL. Each moves the
+    // StripViewport and ends in strip_after_change, moved or not, which derives
+    // the current page (spec 4.6). No-ops unless the strip is shown and laid out.
+    LRESULT strip_on_wheel(int delta);
+    LRESULT strip_on_hwheel(int raw_delta, HWheelSource src);
+    LRESULT strip_on_key(WPARAM key);
+    LRESULT strip_pan_by(float dx, float dy);
+    LRESULT strip_on_vscroll(WPARAM w);
+
+    // A re-layout during a scrollbar thumb drag ends the drag logically (spec
+    // 4.5): called after the re-layout's SetScrollInfo, it marks a live drag dead
+    // so its queued track positions are ignored until SB_ENDSCROLL.
+    void strip_end_thumb_drag() noexcept;
 
     HWND hwnd_ = nullptr;
     bool log_timings_ = false;

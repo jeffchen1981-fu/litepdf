@@ -97,11 +97,15 @@ private:
     bool pinned_ = false;
 };
 
+// A page within this of the viewport width counts as fitting: FitWidth's float
+// zoom (fit_percentage) puts the fitted page up to ~2e-5 DIP over the width.
+inline constexpr double kStripFitTolDip = 1e-3;
+
 // clamp_pan (ViewportMath.hpp) in double: a widest page that fits the viewport
-// -> 0, else clamp to [vp_w - widest, 0]. NaN -> 0.
+// (within kStripFitTolDip) -> 0, else clamp to [vp_w - widest, 0]. NaN -> 0.
 inline double effective_pan_x(double desired, double widest, double vp_w) noexcept {
     if (!(desired == desired)) return 0.0;
-    if (!(widest > vp_w)) return 0.0;
+    if (!(widest > vp_w + kStripFitTolDip)) return 0.0;
     const double lo = vp_w - widest;
     if (desired < lo) return lo;
     if (desired > 0.0) return 0.0;
@@ -116,11 +120,12 @@ inline double apply_pan_x_delta(double desired, double delta, double widest,
                            vp_w);
 }
 
-// spec 4.2: a page no wider than the viewport is centred; a wider one sits at the
-// shared pan, centred inside the widest page's span.
+// spec 4.2: a page no wider than the viewport (within kStripFitTolDip) is
+// centred; a wider one sits at the shared pan, centred inside the widest page's
+// span.
 inline double page_x(double page_w, double widest, double pan_x_eff,
                      double vp_w) noexcept {
-    if (page_w <= vp_w) return (vp_w - page_w) / 2.0;
+    if (page_w <= vp_w + kStripFitTolDip) return (vp_w - page_w) / 2.0;
     return pan_x_eff + (widest - page_w) / 2.0;
 }
 

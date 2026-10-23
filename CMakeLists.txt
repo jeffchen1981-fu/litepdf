@@ -127,6 +127,7 @@ add_executable(litepdf WIN32
     src/ui/MainWindow.cpp
     src/ui/OutlinePane.cpp
     src/ui/PdfCanvas.cpp
+    src/ui/PdfCanvasStrip.cpp    # #55 continuous strip
     src/ui/ResultsPanel.cpp      # Phase 6 Task 13
     src/ui/Splitter.cpp          # Phase 6 Task 12
     src/ui/StatusBar.cpp         # PR-B Task 2

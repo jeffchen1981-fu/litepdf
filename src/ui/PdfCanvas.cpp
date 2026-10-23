@@ -6,6 +6,7 @@
 #include "core/EscrowContext.hpp"
 #include "ui/ColdStartTimer.hpp"
 #include "ui/Clipboard.hpp"
+#include "ui/PdfCanvasImpl.hpp"
 #include "ui/PdfCanvasLayout.hpp"
 #include "ui/detail/HitOverlay.hpp"
 #include "ui/detail/ViewportMath.hpp"
@@ -227,138 +228,22 @@ bool PdfCanvas::post_render_done_right(HWND target,
                                  pix, worker_ctx, epoch, page, seq);
 }
 
-struct PdfCanvas::Impl {
-    ComPtr<ID2D1Factory>          factory;
-    ComPtr<ID2D1HwndRenderTarget> rt;
-    ComPtr<ID2D1Bitmap>           current_bitmap;  // Task 6 populates
-    D2D1_SIZE_U                   last_size = { 0, 0 };
-    litepdf::core::DocumentView*  view = nullptr;  // non-owning
-    // Monotonic render epoch, bumped on every set_view. Renders carry the
-    // epoch they were submitted under; a completion whose epoch != this is
-    // from a superseded view and is dropped, not painted (issue #35).
-    std::uint64_t                 view_epoch = 0;
-    // Monotonic submission counter, bumped once per submission BATCH by
-    // next_render_seq(). Both halves of a spread carry the same value. Unlike
-    // view_epoch it does not survive being compared across views -- it exists
-    // only to tell two submissions of the SAME page apart, which is what a
-    // same-page zoom or resize produces and what (epoch, page, slot) cannot
-    // distinguish.
-    std::uint64_t                 next_seq = 0;
-    // Where the next left/single completion should put the page. Empty for a
-    // same-page re-render, which must KEEP the current pan. See
-    // ui/detail/PageAnchor.hpp for the lifetime rule.
-    AnchorSlot                    anchor;
-    // Leftover wheel delta below one full notch. High-resolution wheels and
-    // precision touchpads deliver |delta| < WHEEL_DELTA; without this the
-    // canvas would either round every fragment up to a full notch or drop it.
-    // See ui/detail/ScrollMath.hpp.
-    int                           wheel_residual = 0;
-    // The horizontal wheel's own leftover delta (#56), in "rightward" units
-    // (see rightward_delta). Separate from wheel_residual so a diagonal
-    // touchpad swipe cannot feed horizontal motion into a vertical notch, and
-    // cleared only by bitmap_is_stale() -- never by the pending-flip latch,
-    // since this axis never turns the page.
-    int                           hwheel_residual = 0;
-    // Non-zero between a wheel-driven page flip and the completion that lands the
-    // new page. Without it, every further notch in that window flips again:
-    // the pan and the bitmap still describe the OLD page, so apply_wheel keeps
-    // reporting "already at the edge" and a brisk scroll walks several pages
-    // without showing any of them. Cleared by the completion handler and by
-    // set_view.
-    //
-    // It holds the SEQ of the flip's submission batch, not a bare flag, for two
-    // reasons found in review. (a) A bare flag cleared by any completion could be
-    // released by a stale one, and several stale P0s can be outstanding at once,
-    // so "at most one extra flip" was not a bound anyone had proved. (b) If the
-    // flip's completion is never posted at all -- post_render_done_impl returns
-    // without posting on a clone failure, an allocation failure or a PostMessageW
-    // failure -- a flag would latch forever and the wheel would be dead for the
-    // rest of the session. Keyed by seq, the block lasts only while the flip's
-    // batch is still the newest submitted, so any later render (a keystroke, a
-    // zoom, a resize) releases it even when no completion ever arrives.
-    std::uint64_t                 wheel_flip_seq = 0;   // 0 = nothing pending
-    // The view_epoch that current_bitmap was created under. set_view does NOT
-    // drop current_bitmap on a non-null swap -- only on the null one (see
-    // set_view's null-view branch) -- so after a tab switch the canvas is
-    // still holding, and still painting, the OUTGOING document's page until
-    // the incoming render lands. Anything that MEASURES that bitmap has to
-    // know it belongs to a different document; see scroll_into_view (Task 6).
-    std::uint64_t                 bitmap_epoch = 0;
-    // ...and which PAGE it shows. navigate_to_page's single-page branch does not
-    // drop current_bitmap either, so between a page turn and its completion the
-    // canvas is holding the OUTGOING page of the SAME document -- an epoch check
-    // alone would call that bitmap trustworthy. Both fields are set together.
-    int                           bitmap_page  = -1;
-    // Pan offset in canvas DIPs. An axis whose content fits the viewport is
-    // centered and its pan is 0; an axis that overflows uses a TOP-LEFT
-    // origin with the pan clamped to [viewport - content, 0]. Re-anchored and
-    // re-clamped by apply_anchor when a completion lands -- never zeroed
-    // unconditionally; see ui/detail/PageAnchor.hpp.
-    float                         pan_x = 0.0f;
-    float                         pan_y = 0.0f;
-
-    // --- Phase 6 Task 9: search hit overlay ---
-    // Device-bound brushes. Created in create_render_target, released
-    // in discard_render_target (mirroring the rt lifecycle).
-    ComPtr<ID2D1SolidColorBrush>  brush_hit_other_fill;
-    ComPtr<ID2D1SolidColorBrush>  brush_hit_current_fill;
-    ComPtr<ID2D1SolidColorBrush>  brush_hit_current_stroke;
-
-    // #52: selection fill. Device-bound like the hit brushes above.
-    ComPtr<ID2D1SolidColorBrush>  brush_selection_fill;
-
-    // #52: the one live mouse gesture. Its gesture() is the single source of
-    // truth for "is a drag in progress" -- there is no separate flag (spec §4.2).
-    GestureState                  gesture;
-    ClickCounter                  clicks;
-    // The page's text, held only while a selection gesture is live.
-    // Escrow-backed, so it stays safe to drop even if closing the tab destroys
-    // its Document mid-drag (spec §3.3).
-    litepdf::core::Document::TextPage drag_text;
-    // The selection being dragged out. Painted INSTEAD of the view's committed
-    // selection while a gesture is live, and simply discarded on cancel --
-    // which is what leaves a double click's committed word intact when a
-    // following drag is cancelled.
-    std::optional<litepdf::core::TextSelection> live_selection;
-
-    // Hits source and current-hit marker. hits_fn may be null if the
-    // owner hasn't wired search yet — paint loop treats that as "no
-    // overlay". current_hit is std::nullopt when no hit is selected.
-    PdfCanvas::HitsFn             hits_fn;
-    std::optional<litepdf::core::SearchSession::Hit> current_hit;
-    // #135: the hits the last paint drew -- overlay_hits() as of that paint --
-    // so on_search_hits_changed can tell whether another paint would differ.
-    std::vector<litepdf::core::SearchSession::Hit> painted_hits;
-
-    // (Phase 8 D7) chrome polarity. Default off (light); flipped on
-    // Ctrl+Shift+I via the active view's set_invert_colors handler.
-    bool                          invert_chrome = false;
-
-    // (Phase 8 D10) two-page-spread layout state. The right slot
-    // bitmap is populated by WM_USER_RENDER_DONE_RIGHT handler when
-    // dual_page is on. Reset to null both on dual→single transition
-    // and on every page-change in dual mode (the left slot's
-    // current_bitmap is also reset on page-change).
-    bool                          dual_page = false;
-    ComPtr<ID2D1Bitmap>           right_bitmap;
-
-    // --- Phase 7 Task 7: page-change observer ---
-    // Fired by change_current_page() after a real page transition, and
-    // by set_view() when a non-null view is installed (so a freshly
-    // switched tab's listener learns the page immediately, not "stale
-    // until first PgDn"). May be null — checked at the fire site.
-    PdfCanvas::PageChangedCb      on_page_changed;
-    // Fired after a successful Ctrl+wheel zoom so the owner can persist it.
-    PdfCanvas::ZoomChangedCb      on_zoom_changed;
-    // Fired at the entry of the render-completion arm (#57).
-    PdfCanvas::CompletionArrivedCb on_completion_arrived;
-};
-
 void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
     // #52: end any gesture FIRST, before `view` replaces impl_->view. On the tab
     // close path the outgoing view has already been destroyed by TabList::remove,
     // which is why cancel_gesture never touches it.
     cancel_gesture();
+    // #55, spec 3.4: in the strip, the same view keeps everything -- no epoch
+    // bump, no reset (a same-index tab switch). Another view cancels the strip's
+    // requests (flag store) and forgets its pages and position; the incoming
+    // tab's position comes with its TabSwitch kick (spec 7.4).
+    if (layout() == LayoutKind::Strip) {
+        if (view == impl_->view) return;
+        impl_->strip_set.clear();
+        impl_->strip_view.reset();
+        // spec 4.5: a tab switch during a thumb drag counts as a re-layout.
+        strip_end_thumb_drag();
+    }
     // Per-render escrow (see PdfCanvas::post_render_done) is now the
     // lifetime mechanism for in-flight pixmaps — a canvas-level
     // orphan_ctx clone is no longer needed. The canvas just repoints
@@ -559,6 +444,21 @@ bool PdfCanvas::dual_page() const noexcept {
 void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     if (!impl_ || !impl_->view || !hwnd_) return;
 
+    // #55, spec 6.3: the strip places the hit in document coordinates at once,
+    // so there is nothing for a completion to correct and no PageAnchor. The
+    // caller's Navigate kick only reschedules.
+    if (layout() == LayoutKind::Strip) {
+        const float q_min_y_pt = std::min({ h.geom.ul_y, h.geom.ur_y,
+                                            h.geom.ll_y, h.geom.lr_y });
+        const float q_max_y_pt = std::max({ h.geom.ul_y, h.geom.ur_y,
+                                            h.geom.ll_y, h.geom.lr_y });
+        impl_->strip_view.scroll_hit_into_view(static_cast<int>(h.page),
+                                               static_cast<double>(q_min_y_pt),
+                                               static_cast<double>(q_max_y_pt));
+        strip_after_change();
+        return;
+    }
+
     const int  target_pg  = static_cast<int>(h.page);
     const bool page_moved = change_current_page(target_pg);
 
@@ -654,6 +554,8 @@ const litepdf::core::TextSelection* PdfCanvas::painted_selection() const noexcep
 }
 
 bool PdfCanvas::can_select_all() const {
+    // #55: Select All and selection stay off in the strip until PR 3 (spec 7.1).
+    if (layout() == LayoutKind::Strip) return false;
     if (!impl_ || !impl_->view || impl_->dual_page) return false;
     // A drag owns the selection. A stale one does not -- select_all ends it
     // first, as the next press would. That matters because Edit's
@@ -793,6 +695,10 @@ void PdfCanvas::on_left_button_down(bool is_double_click_message, int x_px, int 
     // slot in that mode, so a drag would compute points with single-page
     // geometry and build an invisible selection Ctrl+C would still copy (spec §1).
     if (!impl_->view || impl_->dual_page || !own_bitmap()) return;
+    // #55: no selection in the strip until PR 3 (spec 7.1). Defensive: every
+    // paged render submitter is strip-guarded, so own_bitmap() should already
+    // be false here, but a selection must never start in the strip.
+    if (layout() == LayoutKind::Strip) return;
     Placement pl;
     if (!single_page_placement(pl)) return;
 
@@ -936,6 +842,10 @@ void PdfCanvas::on_middle_button_up(int x_px, int y_px) {
 }
 
 bool PdfCanvas::can_pan() const {
+    // #55, spec 6.1: the strip is taller or wider than the viewport.
+    if (layout() == LayoutKind::Strip) {
+        return strip_active() && impl_->strip_view.can_pan();
+    }
     ContentBox box{};
     if (!content_extent(box)) return false;   // nothing painted yet
     const D2D1_SIZE_F vp = impl_->rt->GetSize();
@@ -945,7 +855,9 @@ bool PdfCanvas::can_pan() const {
 void PdfCanvas::update_cursor() {
     bool over_page = false;
     Placement pl;
-    if (!impl_->dual_page && own_bitmap() && single_page_placement(pl)) {
+    // #55: the strip has no I-beam until it has selection (PR 3, spec 7.1).
+    if (!impl_->dual_page && layout() != LayoutKind::Strip && own_bitmap() &&
+        single_page_placement(pl)) {
         POINT pt;
         if (GetCursorPos(&pt) && ScreenToClient(hwnd_, &pt)) {
             const float dpi = static_cast<float>(GetDpiForWindow(hwnd_));
@@ -1179,6 +1091,11 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // without it "the horizontal scroll action may be repeated".
             // Returned with no document open too, for the same reason.
             return TRUE;
+        case WM_VSCROLL:
+            // #55, spec 6.2: the canvas has a scroll bar only while it shows the
+            // strip (PdfCanvasStrip.cpp).
+            if (layout() == LayoutKind::Strip) return strip_on_vscroll(w);
+            break;
         case WM_DPICHANGED_BEFOREPARENT:
             // DPI is changing. Discard render target; next paint rebuilds at new DPI.
             // Both slot bitmaps are sized for the OLD DPI and are bound to the
@@ -1188,6 +1105,9 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         case WM_DPICHANGED_AFTERPARENT:
             // Parent just repositioned us. Invalidate so on_paint rebuilds the rt.
             InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        case WM_USER_STRIP_DONE:
+            strip_on_done(w, l);   // #55, spec 5.3 (PdfCanvasStrip.cpp)
             return 0;
         case WM_USER_TEXT_READY: {
             // Adopt first: every return below frees the meta, and a handle that
@@ -1390,6 +1310,13 @@ void PdfCanvas::create_render_target() {
 }
 
 void PdfCanvas::discard_render_target() {
+    // #55, spec 3.4: the strip's bitmaps belong to this target too. Ready pages
+    // go to None, a Pending page loses its stale bitmap and stays Pending; the
+    // caller's resubmit_current_page (or the DPI Layout kick) reschedules.
+    if (layout() == LayoutKind::Strip) {
+        impl_->strip_set.state.drop_bitmaps();
+        impl_->strip_set.bitmaps.clear();
+    }
     // Brushes first — they're device-bound to the rt.
     impl_->brush_hit_other_fill.Reset();
     impl_->brush_hit_current_fill.Reset();
@@ -1404,6 +1331,17 @@ void PdfCanvas::discard_render_target() {
 }
 
 void PdfCanvas::resubmit_current_page() {
+    // #55, spec 3.4: the strip re-lays out at the view's zoom (spec 4.5) and
+    // reschedules; it has no current-page render of its own.
+    if (layout() == LayoutKind::Strip) {
+        if (!impl_->view) return;
+        if (impl_->strip_view.has_layout()) {
+            impl_->strip_view.relayout(impl_->view->zoom_pct());
+        }
+        strip_after_change();
+        strip_end_thumb_drag();   // spec 4.5: after the SetScrollInfo above
+        return;
+    }
     if (!impl_->view) return;
     HWND target = hwnd_;
     const std::uint64_t epoch = impl_->view_epoch;
@@ -1498,6 +1436,9 @@ bool PdfCanvas::content_extent(ContentBox& out) const {
 }
 
 LRESULT PdfCanvas::pan_by(float dx, float dy) {
+    // #55, spec 6.1: a drag scrolls the strip; bitmap_is_stale() describes the
+    // paged bitmap and is not consulted there.
+    if (layout() == LayoutKind::Strip) return strip_pan_by(dx, dy);
     // The bitmap on screen may still be the OUTGOING tab's or page's (#120).
     // Right after a tab switch, clamping here would measure the incoming tab's
     // restored pan against the outgoing page -- to 0 on both axes if that one
@@ -1531,6 +1472,9 @@ bool PdfCanvas::bitmap_is_stale() const {
 }
 
 LRESULT PdfCanvas::on_wheel_scroll(int delta) {
+    // #55, spec 6.1: the strip scrolls and never flips, so neither guard below
+    // applies to it.
+    if (layout() == LayoutKind::Strip) return strip_on_wheel(delta);
     if (!impl_ || !impl_->view) return 0;
 
     // A flip is already on its way. Until its pixmap lands, pan_y and the
@@ -1628,6 +1572,7 @@ LRESULT PdfCanvas::on_wheel_scroll(int delta) {
 }
 
 LRESULT PdfCanvas::on_hwheel_scroll(int raw_delta, HWheelSource src) {
+    if (layout() == LayoutKind::Strip) return strip_on_hwheel(raw_delta, src);   // #55
     if (!impl_ || !impl_->view) return 0;
 
     // The bitmap on screen may still be the OUTGOING tab's or page's: a tab
@@ -1814,6 +1759,7 @@ void PdfCanvas::navigate_to_page(int target, PageAnchor anchor) {
 }
 
 LRESULT PdfCanvas::on_key_down(WPARAM key) {
+    if (layout() == LayoutKind::Strip) return strip_on_key(key);   // #55, spec 6.1
     if (!impl_->view) return 0;
 
     const int cur     = impl_->view->current_page();
@@ -1889,10 +1835,22 @@ void PdfCanvas::on_size(int w, int h) {
             impl_->last_size = sz;
         }
     }
+    // #55: after the target resize, never instead of it. The strip keeps its
+    // viewport-top point; only the clamp can move it (spec 4.5).
+    if (layout() == LayoutKind::Strip) {
+        const DipSize vp = strip_viewport_dip();
+        impl_->strip_view.set_viewport(vp.w, vp.h);
+        strip_after_change();
+        strip_end_thumb_drag();   // spec 4.5: after the SetScrollInfo above
+    }
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void PdfCanvas::on_paint() {
+    if (layout() == LayoutKind::Strip) {   // #55 (PdfCanvasStrip.cpp)
+        strip_paint();
+        return;
+    }
     create_render_target();
     if (!impl_->rt) {
         ValidateRect(hwnd_, nullptr);  // nothing to do

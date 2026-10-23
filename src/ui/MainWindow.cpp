@@ -55,8 +55,8 @@ std::wstring title_base() {
 
 constexpr UINT WM_USER_OPEN_OK       = WM_USER + 1;
 constexpr UINT WM_USER_OPEN_FAILED   = WM_USER + 2;
-// WM_USER + 3 to + 5 are WM_USER_RENDER_DONE, WM_USER_RENDER_DONE_RIGHT and
-// WM_USER_TEXT_READY, reserved by PdfCanvas.
+// WM_USER + 3 to + 6 are WM_USER_RENDER_DONE, WM_USER_RENDER_DONE_RIGHT,
+// WM_USER_TEXT_READY and WM_USER_STRIP_DONE, reserved by PdfCanvas.
 // Phase 8 Task 1: encrypted-PDF password handshake. Worker thread can't
 // run a modal dialog (no message pump, no parent HWND), so on
 // OpenError::NeedsPassword the worker posts this message carrying the
@@ -175,6 +175,7 @@ MainWindow::MainWindow()
     : search_dispatcher_(
           std::make_unique<litepdf::app::ThreadPoolDispatcher>(2)) {
     mru_.load();
+    view_prefs_.load();   // #55: ContinuousScroll; missing or invalid -> off
     // Phase 12: resolve %LOCALAPPDATA%\LitePDF (creates it + crashes\).
     // Empty on failure => session persistence silently disabled everywhere.
     app_data_dir_ = litepdf::app::app_data_dir();
@@ -328,9 +329,31 @@ void MainWindow::open_tab_async(std::filesystem::path path) {
     }).detach();
 }
 
-void MainWindow::kick_render(int page) {
+void MainWindow::kick_render(int page, litepdf::ui::KickReason reason) {
+    // Only the continuous strip consults the reason; both paged branches below
+    // behave as before. Every call site still names one (no default argument).
     auto* view = active_view();
     if (!view || !canvas_) return;
+
+    // #55, spec 3.4: the strip branch, by reason. It submits through the
+    // canvas's own scheduler, so it opens no paged submission batch: the paged
+    // next_render_seq binds page anchors the strip does not use.
+    if (canvas_->layout() == litepdf::ui::LayoutKind::Strip) {
+        const auto a = litepdf::ui::strip_kick_actions(reason);
+        if (a.refit) canvas_->apply_viewport();
+        // #57: a zoom change reaches the readout in the same message.
+        if (a.refresh_readout) refresh_zoom_readout();
+        // The active tab's stored strip position when `a.restore_tab_position`
+        // (spec 7.4): only a TabSwitch kick restores, and only a tab that last
+        // left while the strip showed it has one.
+        const litepdf::ui::StripTabState* restore_ptr = nullptr;
+        if (a.restore_tab_position && tabs_) {
+            auto* tab = tabs_->active_tab();
+            if (tab && tab->strip_state) restore_ptr = &tab->strip_state.value();
+        }
+        canvas_->strip_kick(a, restore_ptr);
+        return;
+    }
 
     HWND target = canvas_->hwnd();
     // Stamp every render with the canvas epoch at submit time so a result
@@ -404,6 +427,14 @@ void MainWindow::refresh_zoom_readout() {
 void MainWindow::navigate_click(int page) {
     auto* v = active_view();
     if (!v || !canvas_) return;
+    // #55, spec 3.4 / 6.3: the strip navigates in its own coordinates, before
+    // the paged early return below, so going to the current page while mid-page
+    // scrolls back to its anchor. No PageAnchor; the kick only reschedules.
+    if (canvas_->layout() == litepdf::ui::LayoutKind::Strip) {
+        canvas_->strip_navigate(page);
+        kick_render(page, litepdf::ui::KickReason::Navigate);
+        return;
+    }
     const int  total   = v->page_count();
     const bool spread  = canvas_->dual_page();
     const auto canon   = [&](int p) {
@@ -421,7 +452,7 @@ void MainWindow::navigate_click(int page) {
     if (view_moves) {
         canvas_->set_pending_anchor(litepdf::ui::PageAnchor::top());
     }
-    kick_render(page);
+    kick_render(page, litepdf::ui::KickReason::Navigate);
 }
 
 HWND MainWindow::left_pane_hwnd() const {
@@ -641,7 +672,7 @@ void MainWindow::toggle_outline() {
     // on_tab_switch's outgoing-snapshot writes outline_visible back into
     // the active Tab when the user switches away -- that's the single
     // source of truth, so we don't write it here.
-    if (auto* view = active_view()) kick_render(view->current_page());
+    if (auto* view = active_view()) kick_render(view->current_page(), litepdf::ui::KickReason::Layout);
 }
 
 void MainWindow::on_toggle_status_bar() {
@@ -658,7 +689,7 @@ void MainWindow::set_status_bar_visible(bool visible) {
     // The canvas just changed height. Its own WM_SIZE resubmits only when the
     // render target has to be recreated, so without this a fit mode would keep
     // the fit it derived for the old height.
-    if (auto* view = active_view()) kick_render(view->current_page());
+    if (auto* view = active_view()) kick_render(view->current_page(), litepdf::ui::KickReason::Layout);
 }
 
 void MainWindow::on_goto_page() {
@@ -727,7 +758,7 @@ void MainWindow::toggle_thumbs() {
     }
     on_layout();
     // Canvas width may have changed — recompute fit-zoom + resubmit.
-    kick_render(v->current_page());
+    kick_render(v->current_page(), litepdf::ui::KickReason::Layout);
 }
 
 void MainWindow::on_outline_navigate(int page) {
@@ -752,6 +783,10 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
             auto p = canvas_ ? canvas_->pan() : PdfCanvas::Pan{0.0f, 0.0f};
             outgoing->pan_x = p.x;
             outgoing->pan_y = p.y;
+            // #55, spec 7.4: the strip's position, before set_view resets it;
+            // empty when the canvas shows a paged layout.
+            outgoing->strip_state = canvas_ ? canvas_->strip_tab_state()
+                                            : std::nullopt;
             outgoing->outline_visible = outline_ && outline_->visible();
             // Phase 7 Task 8 / D11: snapshot outgoing tab's thumb-pane
             // visibility into the Tab struct. Live pane->visible() is
@@ -797,10 +832,11 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
         canvas_->set_invert_chrome(incoming && incoming->view
                                        ? incoming->view->invert_colors()
                                        : false);
-        // (Phase 8 D10) Same per-tab carry for two-page-spread layout.
-        canvas_->set_dual_page(incoming && incoming->view
-                                   ? incoming->view->dual_page()
-                                   : false);
+        // (Phase 8 D10) Same per-tab carry for two-page-spread layout, and
+        // (#55) the continuous strip: the incoming tab's effective layout, or
+        // PagedSingle when no tab is left. After set_pan and set_invert_chrome,
+        // which do not depend on the layout (spec 3.4, deviation 3).
+        apply_effective_layout(incoming, false);
     }
 
     if (outline_) {
@@ -860,7 +896,7 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
             static_cast<float>(rc.right - rc.left),
             static_cast<float>(rc.bottom - rc.top),
             static_cast<float>(dpi));
-        kick_render(incoming->view->current_page());
+        kick_render(incoming->view->current_page(), litepdf::ui::tab_switch_reason(new_index, old_index));
     } else if (canvas_) {
         InvalidateRect(canvas_->hwnd(), nullptr, FALSE);
     }
@@ -876,6 +912,28 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
     update_find_counter();
 
     schedule_session_save();  // Phase 12: active tab / open set changed
+}
+
+void MainWindow::apply_effective_layout(litepdf::core::Tab* tab, bool carry_position) {
+    if (!canvas_) return;
+    auto* v = tab ? tab->view.get() : nullptr;
+    const litepdf::ui::LayoutKind target =
+        v ? litepdf::ui::effective_layout(
+                true, v->dual_page(), view_prefs_.continuous_scroll(),
+                litepdf::ui::strip_format_ok(v->source_path(), v->page_count()))
+          : litepdf::ui::LayoutKind::PagedSingle;
+    // On every call, a strip-to-strip tab switch included: the canvas layout
+    // does not change, but the incoming view still needs the flag (spec 4.3).
+    if (v) v->set_continuous(target == litepdf::ui::LayoutKind::Strip);
+    const litepdf::ui::LayoutKind current = canvas_->layout();
+    const bool strip_involved = target == litepdf::ui::LayoutKind::Strip ||
+                                current == litepdf::ui::LayoutKind::Strip;
+    if (strip_involved && target != current) {
+        canvas_->switch_layout(target, carry_position);
+    } else {
+        // Paged single <-> spread: today's path (spec deviation 2).
+        canvas_->set_dual_page(target == litepdf::ui::LayoutKind::PagedSpread);
+    }
 }
 
 void MainWindow::on_tab_close_request(int index) {
@@ -1091,8 +1149,19 @@ void MainWindow::restore_on_tab_ready(const std::filesystem::path& opened) {
         // disagree until the user's first navigation. This one IS a navigation,
         // so it installs Top -- a restored tab has no pan to preserve
         // (SessionTab carries path, page and zoom, not a scroll offset).
-        canvas_->change_current_page(st.page);
-        canvas_->set_pending_anchor(litepdf::ui::PageAnchor::top());
+        //
+        // #55, spec 3.4 Restore row: the strip navigates in its own coordinates
+        // and installs no PageAnchor. This first navigation makes the saved page
+        // the view's current page, so every fit below and the kick's refit use
+        // it (DocumentView::set_viewport fits the current page); its scroll is
+        // clamped against the pre-refit layout and is replaced after the kick.
+        const bool strip = canvas_->layout() == litepdf::ui::LayoutKind::Strip;
+        if (strip) {
+            canvas_->strip_navigate(st.page);
+        } else {
+            canvas_->change_current_page(st.page);
+            canvas_->set_pending_anchor(litepdf::ui::PageAnchor::top());
+        }
         switch (st.zoom_mode) {
             case litepdf::core::SessionZoom::Custom:
                 v->set_zoom_pct(st.zoom_scale);   // no viewport needed
@@ -1115,7 +1184,12 @@ void MainWindow::restore_on_tab_ready(const std::filesystem::path& opened) {
                 break;
             }
         }
-        kick_render(st.page);
+        kick_render(st.page, litepdf::ui::KickReason::Restore);
+        // The exact anchor on the final layout: the Restore kick refit and
+        // re-laid out the strip, and a navigation before it would have clamped
+        // anchor(page) against the shorter pre-refit layout (a high Custom zoom
+        // near the end of a document). Ends in a reschedule.
+        if (strip) canvas_->strip_navigate(st.page);
     }
     restore_pending_path_.clear();
     ++restore_index_;
@@ -1251,7 +1325,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 on_layout();
                 // #109: the canvas just changed height. Re-derive the fit on
                 // every move, the cadence WM_SIZE already accepts for drags.
-                if (auto* view = active_view()) kick_render(view->current_page());
+                if (auto* view = active_view()) kick_render(view->current_page(), litepdf::ui::KickReason::Layout);
             });
 
             // PR-B: bottom status bar. Created before the first on_layout so
@@ -1315,7 +1389,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 on_layout();
                 // #109: the canvas just changed width, so FitWidth must be
                 // re-derived -- on every move, like the results splitter.
-                if (auto* view = active_view()) kick_render(view->current_page());
+                if (auto* view = active_view()) kick_render(view->current_page(), litepdf::ui::KickReason::Layout);
             });
 
             // Seed left_pane_width_px_ to ~250 dip — matches the prior
@@ -1407,7 +1481,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 // Recompute FitWidth (or whatever mode) scale for the new
                 // viewport and resubmit. We resubmit on every WM_SIZE;
                 // the brief stutter during drag-resize is acceptable.
-                kick_render(view->current_page());
+                kick_render(view->current_page(), litepdf::ui::KickReason::Layout);
             }
             // Phase 12: maximize/restore are discrete geometry changes that
             // skip WM_EXITSIZEMOVE (no drag). Persist them (debounced). The
@@ -1487,7 +1561,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // bitmap against the pre-DPI-change canvas height, leaving a
             // stale render until the next navigation or resize.
             if (auto* view = active_view(); view && canvas_) {
-                kick_render(view->current_page());
+                kick_render(view->current_page(), litepdf::ui::KickReason::Layout);
             }
             return 0;
         }
@@ -1724,7 +1798,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     if (!v) return 0;
                     v->set_invert_colors(!v->invert_colors());
                     if (canvas_) canvas_->set_invert_chrome(v->invert_colors());
-                    kick_render(v->current_page());
+                    kick_render(v->current_page(), litepdf::ui::KickReason::Restyle);
                     return 0;
                 }
                 case IDM_VIEW_DUAL_PAGE: {
@@ -1735,14 +1809,17 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     auto* v = active_view();
                     if (!v) return 0;
                     v->set_dual_page(!v->dual_page());
-                    if (canvas_) canvas_->set_dual_page(v->dual_page());
+                    // #55: through the layout owner, so turning spread off
+                    // with the continuous preference on enters the strip, and
+                    // turning it on leaves it (spec 3.4).
+                    apply_effective_layout(tabs_ ? tabs_->active_tab() : nullptr, true);
                     int p = v->current_page();
                     if (v->dual_page()) {
                         p = litepdf::ui::dual_page_compute_left(
                                 p, v->page_count());
                         if (canvas_) canvas_->change_current_page(p);   // snap: no anchor
                     }
-                    kick_render(p);
+                    kick_render(p, litepdf::ui::KickReason::Spread);
                     return 0;
                 }
                 case IDM_TAB_CLOSE:
@@ -1828,14 +1905,14 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 case IDM_ZOOM_IN:
                     if (auto* view = active_view();
                         view && view->zoom_in()) {
-                        kick_render(view->current_page());
+                        kick_render(view->current_page(), litepdf::ui::KickReason::Zoom);
                         schedule_session_save();  // Phase 12: zoom changed
                     }
                     return 0;
                 case IDM_ZOOM_OUT:
                     if (auto* view = active_view();
                         view && view->zoom_out()) {
-                        kick_render(view->current_page());
+                        kick_render(view->current_page(), litepdf::ui::KickReason::Zoom);
                         schedule_session_save();  // Phase 12: zoom changed
                     }
                     return 0;
@@ -1851,7 +1928,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                         view->set_viewport(static_cast<float>(rc.right - rc.left),
                                            static_cast<float>(rc.bottom - rc.top),
                                            static_cast<float>(dpi));
-                        kick_render(view->current_page());
+                        kick_render(view->current_page(), litepdf::ui::KickReason::Zoom);
                         schedule_session_save();  // Phase 12: zoom mode changed
                     }
                     return 0;
@@ -2217,7 +2294,13 @@ void MainWindow::on_find_open() {
 namespace {
 // (#140) The page on screen, as the page a search scans first and Find
 // Next / Find Previous start from (the spread's left page in two-page mode).
-std::size_t find_start_page(const litepdf::core::DocumentView& v) {
+// In the strip (#55, spec 6.3) it is the top visible page, not the current
+// page, so every page on screen is scanned first, in reading order.
+std::size_t find_start_page(const litepdf::core::DocumentView& v,
+                            const litepdf::ui::PdfCanvas* canvas) {
+    if (canvas && canvas->layout() == litepdf::ui::LayoutKind::Strip) {
+        return static_cast<std::size_t>(canvas->strip_top_visible_page());
+    }
     return static_cast<std::size_t>(litepdf::ui::search_start_page(
         v.current_page(), v.page_count(), v.dual_page()));
 }
@@ -2237,7 +2320,7 @@ void MainWindow::on_find_query_changed(const std::wstring& q, bool mc,
         return;
     }
     if (find_bar_) find_bar_->set_invalid_pattern(false);
-    v->search().set_query(q, f, find_start_page(*v));
+    v->search().set_query(q, f, find_start_page(*v, canvas_.get()));
     update_find_counter();
     if (canvas_) {
         canvas_->set_current_hit(std::nullopt);
@@ -2248,24 +2331,24 @@ void MainWindow::on_find_query_changed(const std::wstring& q, bool mc,
 void MainWindow::on_find_next() {
     auto* v = active_view();
     if (!v || !canvas_) return;
-    auto h = v->search().next(find_start_page(*v));
+    auto h = v->search().next(find_start_page(*v, canvas_.get()));
     if (!h) return;
     canvas_->set_current_hit(*h);
     canvas_->scroll_into_view(*h);
     // scroll_into_view may have switched the current page; kick a
     // render for the (possibly new) page.
-    kick_render(v->current_page());
+    kick_render(v->current_page(), litepdf::ui::KickReason::Navigate);
     update_find_counter();
 }
 
 void MainWindow::on_find_prev() {
     auto* v = active_view();
     if (!v || !canvas_) return;
-    auto h = v->search().prev(find_start_page(*v));
+    auto h = v->search().prev(find_start_page(*v, canvas_.get()));
     if (!h) return;
     canvas_->set_current_hit(*h);
     canvas_->scroll_into_view(*h);
-    kick_render(v->current_page());
+    kick_render(v->current_page(), litepdf::ui::KickReason::Navigate);
     update_find_counter();
 }
 
@@ -2359,7 +2442,7 @@ void MainWindow::on_cross_tab_find() {
     results_panel_->show_and_focus_edit();
     on_layout();
     // #109: the panel took height from the canvas; a fit mode must follow.
-    if (auto* view = active_view()) kick_render(view->current_page());
+    if (auto* view = active_view()) kick_render(view->current_page(), litepdf::ui::KickReason::Layout);
 }
 
 void MainWindow::on_toggle_results() {
@@ -2384,7 +2467,7 @@ void MainWindow::on_toggle_results() {
     }
     on_layout();
     // #109: either direction changes the canvas height.
-    if (auto* view = active_view()) kick_render(view->current_page());
+    if (auto* view = active_view()) kick_render(view->current_page(), litepdf::ui::KickReason::Layout);
 }
 
 void MainWindow::on_results_query(const std::wstring& q, bool mc, bool ww,
@@ -2475,7 +2558,7 @@ void MainWindow::on_results_row_click(std::size_t idx) {
     // the only installer.
     canvas_->set_current_hit(sh);
     canvas_->scroll_into_view(sh);
-    kick_render(v->current_page());
+    kick_render(v->current_page(), litepdf::ui::KickReason::Navigate);
 }
 
 void MainWindow::on_results_close() {
@@ -2488,7 +2571,7 @@ void MainWindow::on_results_close() {
     if (cross_tab_) cross_tab_->clear();
     on_layout();
     // #109: the canvas gets the panel's height back.
-    if (auto* view = active_view()) kick_render(view->current_page());
+    if (auto* view = active_view()) kick_render(view->current_page(), litepdf::ui::KickReason::Layout);
     if (canvas_) SetFocus(canvas_->hwnd());
 }
 

@@ -5,6 +5,9 @@
 // MainWindow (PR 2) feeds effective_layout the tab's state and consults
 // strip_kick_actions only when the tab's layout is the strip.
 
+#include <cstddef>
+#include <filesystem>
+
 namespace litepdf::ui {
 
 enum class LayoutKind { PagedSingle, PagedSpread, Strip };
@@ -19,6 +22,24 @@ inline LayoutKind effective_layout(bool has_view, bool spread,
     if (spread) return LayoutKind::PagedSpread;
     if (pref_continuous && format_ok) return LayoutKind::Strip;
     return LayoutKind::PagedSingle;
+}
+
+// The formats whose page sizes were measured cheap enough for the strip (spec 4.4,
+// 7.3), by case-insensitive extension, and a document with at least one page.
+inline bool strip_format_ok(const std::filesystem::path& source, int page_count) {
+    if (page_count < 1) return false;
+    const std::filesystem::path::string_type ext = source.extension().native();
+    auto equals = [&ext](const char* want) {
+        std::size_t i = 0;
+        for (; want[i] != '\0'; ++i) {
+            if (i >= ext.size()) return false;
+            const auto c = ext[i];
+            const auto lower = (c >= 'A' && c <= 'Z') ? static_cast<decltype(c)>(c - 'A' + 'a') : c;
+            if (lower != static_cast<decltype(c)>(want[i])) return false;
+        }
+        return i == ext.size();
+    };
+    return equals(".pdf") || equals(".epub") || equals(".cbz") || equals(".svg");
 }
 
 enum class KickReason {

@@ -13,6 +13,15 @@
 #   ux-probe.ps1 find-open                                - Post WM_COMMAND IDM_FIND (40042) — convenience wrapper
 #   ux-probe.ps1 cross-tab-find                           - Post WM_COMMAND IDM_CROSS_TAB_FIND (40045) — show ResultsPanel
 #   ux-probe.ps1 results-panel-state                      - JSON dump of ResultsPanel child state (present/visible/rect)
+#   ux-probe.ps1 send-cmd <id> [count]                    - Post WM_COMMAND <id> to the main window <count> times (default 1), back to back
+#   ux-probe.ps1 canvas-scroll                            - JSON dump of the canvas scrollbar: present/vscroll/min/max/page/pos/client_w/client_h/dpi/wheel_lines
+#   ux-probe.ps1 page-box                                 - JSON dump of the status-bar page box: present/text
+#   ux-probe.ps1 page-box-go <n>                          - Type <n> into the page box and post VK_RETURN to it
+#   ux-probe.ps1 canvas-wheel <delta> [count]             - Post <count> WM_MOUSEWHEEL (default 1) of <delta> to the canvas centre
+#   ux-probe.ps1 canvas-key <vk_hex>                      - Post WM_KEYDOWN/UP <vk_hex> to the canvas (Home/End/PgUp/PgDn are canvas keys)
+#
+# The probe is per-monitor DPI aware (see below), so every size it reports is in physical
+# pixels; divide by dpi / 96 for DIPs.
 
 param(
   [Parameter(Mandatory=$true, Position=0)] [string] $Action,
@@ -60,9 +69,29 @@ public static extern bool ReadProcessMemory(IntPtr proc, IntPtr addr, byte[] buf
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
 [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flag);
 [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+[DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+[DllImport("user32.dll")] public static extern bool GetScrollInfo(IntPtr h, int bar, ref SCROLLINFO si);
+[DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] public static extern IntPtr GetWindowLongPtr(IntPtr h, int index);
+[DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
+[DllImport("user32.dll", EntryPoint="SystemParametersInfoW")] public static extern bool SystemParametersInfo(uint action, uint param, ref uint pv, uint winIni);
+[DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+[DllImport("user32.dll", EntryPoint="SendMessageW", CharSet=CharSet.Unicode)]
+public static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, System.Text.StringBuilder l);
+[DllImport("user32.dll", EntryPoint="SendMessageW", CharSet=CharSet.Unicode)]
+public static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, string l);
 [StructLayout(LayoutKind.Sequential)]
 public struct RECT { public int Left, Top, Right, Bottom; }
+[StructLayout(LayoutKind.Sequential)]
+public struct POINT { public int X, Y; }
+[StructLayout(LayoutKind.Sequential)]
+public struct SCROLLINFO { public uint cbSize, fMask; public int nMin, nMax; public uint nPage; public int nPos, nTrackPos; }
 "@
+
+# litepdf is PerMonitorV2; powershell.exe is DPI-unaware, so without this GetClientRect is
+# virtualised (halved at 200 %) while GetDpiForWindow still reports the real DPI.
+# -4 = DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2. smoke-test.ps1 runs this script in-process
+# many times; a repeat call returns false harmlessly, so the result is ignored.
+[void][W.U32]::SetProcessDpiAwarenessContext([IntPtr](-4))
 
 function Get-LitePdfHwnd {
   $hwnd = [W.U32]::FindWindow('LitePDFMainWindow', $null)
@@ -309,6 +338,77 @@ function Tab-Enum([IntPtr]$parent) {
   Write-Output $json
 }
 
+function Find-ChildByClass([IntPtr]$parent, [string]$cls) {
+  # The name argument is [NullString]::Value, never [String]::Empty: PS 5.1 marshals ""
+  # as a title filter that matches only empty-titled windows, so a control that shows
+  # text (the page box) would never be found.
+  return [W.U32]::FindWindowEx($parent, [IntPtr]::Zero, $cls, [NullString]::Value)
+}
+
+function Find-Canvas([IntPtr]$main) { return Find-ChildByClass $main 'LitePDFPdfCanvas' }
+
+function Find-PageBox([IntPtr]$main) {
+  $sb = Find-ChildByClass $main 'msctls_statusbar32'
+  if ($sb -eq [IntPtr]::Zero) { return [IntPtr]::Zero }
+  return Find-ChildByClass $sb 'Edit'
+}
+
+function Get-WheelLines {
+  # SPI_GETWHEELSCROLLLINES (0x0068): the lines per wheel notch the canvas reads. 0xFFFFFFFF
+  # (4294967295) is "one screen at a time". A system setting, so it is read even when the
+  # window is missing; the canvas falls back to 3 when the query fails, and so does this.
+  $lines = [uint32]3
+  [void][W.U32]::SystemParametersInfo(0x0068, 0, [ref]$lines, 0)
+  return [int64]$lines
+}
+
+function Canvas-Scroll([IntPtr]$main) {
+  # One line of JSON; a missing window reports present=false and zeros (the find-bar-state
+  # contract), plus wheel_lines, which does not depend on the window.
+  $wheelLines = Get-WheelLines
+  $zero = '{"present":false,"vscroll":false,"min":0,"max":0,"page":0,"pos":0,"client_w":0,"client_h":0,"dpi":0,"wheel_lines":' + $wheelLines + '}'
+  if ($main -eq [IntPtr]::Zero) { Write-Output $zero; return }
+  $cv = Find-Canvas $main
+  if ($cv -eq [IntPtr]::Zero) { Write-Output $zero; return }
+  $GWL_STYLE = -16; $WS_VSCROLL = 0x00200000; $SB_VERT = 1; $SIF_ALL = 0x17
+  $style = [W.U32]::GetWindowLongPtr($cv, $GWL_STYLE).ToInt64()
+  $si = New-Object W.U32+SCROLLINFO
+  $si.cbSize = [System.Runtime.InteropServices.Marshal]::SizeOf([type][W.U32+SCROLLINFO])
+  $si.fMask = $SIF_ALL
+  [void][W.U32]::GetScrollInfo($cv, $SB_VERT, [ref]$si)
+  $r = New-Object W.U32+RECT
+  [void][W.U32]::GetClientRect($cv, [ref]$r)
+  $obj = [ordered]@{
+    present  = $true
+    vscroll  = [bool](($style -band $WS_VSCROLL) -ne 0)
+    min      = [int]$si.nMin
+    max      = [int]$si.nMax
+    page     = [int]$si.nPage
+    pos      = [int]$si.nPos
+    client_w = [int]($r.Right - $r.Left)
+    client_h = [int]($r.Bottom - $r.Top)
+    dpi      = [int][W.U32]::GetDpiForWindow($cv)
+    wheel_lines = $wheelLines
+  }
+  Write-Output ($obj | ConvertTo-Json -Compress)
+}
+
+function Read-PageBoxText([IntPtr]$edit) {
+  # WM_GETTEXT is one of the few messages Windows marshals across processes; the buffer is
+  # a StringBuilder on this side, never a raw pointer into litepdf (#155).
+  $WM_GETTEXT = 0x000D
+  $sb = New-Object System.Text.StringBuilder 256
+  [void][W.U32]::SendMessage($edit, $WM_GETTEXT, [IntPtr]256, $sb)
+  return $sb.ToString()
+}
+
+function Post-Key([IntPtr]$hwnd, [int]$vk) {
+  # No SetForegroundWindow or sleeps: posted straight to the target window.
+  $WM_KEYDOWN = 0x0100; $WM_KEYUP = 0x0101
+  [void][W.U32]::PostMessage($hwnd, $WM_KEYDOWN, [IntPtr]$vk, [IntPtr]1)
+  [void][W.U32]::PostMessage($hwnd, $WM_KEYUP, [IntPtr]$vk, [IntPtr]([int64]3221225473))  # 0xC0000001
+}
+
 # --- Dispatch ---
 switch ($Action) {
   'capture' {
@@ -373,13 +473,91 @@ switch ($Action) {
   }
   'send-cmd' {
     # PostMessage WM_COMMAND with the given control ID (e.g. 40020 for IDM_MRU_1)
-    if (-not $Arg1) { Write-Error "Usage: send-cmd <id>"; exit 1 }
+    # Optional count (default 1): the posts run back to back from this one process with no
+    # waits, so a race row really sends them without a gap.
+    if (-not $Arg1) { Write-Error "Usage: send-cmd <id> [count]"; exit 1 }
     $id = [int]$Arg1
+    $count = 1
+    if ($Rest) { $count = [int]$Rest[0] }
     $h = Get-LitePdfHwnd
     if ($h -eq [IntPtr]::Zero) { Write-Error "litepdf window not found"; exit 1 }
     $WM_COMMAND = 0x0111
-    [void][W.U32]::PostMessage($h, $WM_COMMAND, [IntPtr]$id, [IntPtr]0)
-    Write-Host "Posted WM_COMMAND id=$id to HWND 0x$($h.ToInt64().ToString('X8'))"
+    for ($i = 0; $i -lt $count; $i++) {
+      [void][W.U32]::PostMessage($h, $WM_COMMAND, [IntPtr]$id, [IntPtr]0)
+    }
+    if ($count -eq 1) {
+      Write-Host "Posted WM_COMMAND id=$id to HWND 0x$($h.ToInt64().ToString('X8'))"
+    } else {
+      Write-Host "Posted WM_COMMAND id=$id x$count to HWND 0x$($h.ToInt64().ToString('X8'))"
+    }
+  }
+  'canvas-scroll' {
+    # Canvas scrollbar state: stdout is exactly one line of JSON; a missing window reports
+    # present=false rather than a non-zero exit.
+    Canvas-Scroll (Get-LitePdfHwnd)
+  }
+  'page-box' {
+    $h = Get-LitePdfHwnd
+    $edit = [IntPtr]::Zero
+    if ($h -ne [IntPtr]::Zero) { $edit = Find-PageBox $h }
+    if ($edit -eq [IntPtr]::Zero) {
+      Write-Output '{"present":false,"text":""}'
+      exit 0
+    }
+    $obj = [ordered]@{ present = $true; text = (Read-PageBoxText $edit) }
+    Write-Output ($obj | ConvertTo-Json -Compress)
+  }
+  'page-box-go' {
+    # Type <n> into the status-bar page box and press Enter in it. WM_SETTEXT is marshalled
+    # across processes (a string, not a raw pointer); the box's subclass commits on
+    # VK_RETURN (StatusBar.cpp status_bar_edit_subclass).
+    if (-not $Arg1) { Write-Error "Usage: page-box-go <n>"; exit 1 }
+    $h = Get-LitePdfHwnd
+    if ($h -eq [IntPtr]::Zero) { Write-Error "litepdf window not found"; exit 1 }
+    $edit = Find-PageBox $h
+    if ($edit -eq [IntPtr]::Zero) { Write-Error "page box not found"; exit 1 }
+    $WM_SETTEXT = 0x000C
+    [void][W.U32]::SendMessage($edit, $WM_SETTEXT, [IntPtr]::Zero, [string]$Arg1)
+    Post-Key $edit 0x0D
+    Write-Host "Posted page-box-go $Arg1 to HWND 0x$($edit.ToInt64().ToString('X8'))"
+  }
+  'canvas-wheel' {
+    # Post <count> WM_MOUSEWHEEL to the canvas: wParam = delta << 16 as a 32-bit value
+    # (keystate 0), lParam = the canvas centre in screen coordinates.
+    if (-not $Arg1) { Write-Error "Usage: canvas-wheel <delta> [count]"; exit 1 }
+    $delta = [int]$Arg1
+    $count = 1
+    if ($Rest) { $count = [int]$Rest[0] }
+    $h = Get-LitePdfHwnd
+    if ($h -eq [IntPtr]::Zero) { Write-Error "litepdf window not found"; exit 1 }
+    $cv = Find-Canvas $h
+    if ($cv -eq [IntPtr]::Zero) { Write-Error "canvas not found"; exit 1 }
+    $r = New-Object W.U32+RECT
+    [void][W.U32]::GetClientRect($cv, [ref]$r)
+    $pt = New-Object W.U32+POINT
+    $pt.X = [int](($r.Right - $r.Left) / 2)
+    $pt.Y = [int](($r.Bottom - $r.Top) / 2)
+    [void][W.U32]::ClientToScreen($cv, [ref]$pt)
+    $WM_MOUSEWHEEL = 0x020A
+    # Build both words as unsigned 32-bit values in int64 so a negative delta or a
+    # negative screen coordinate is not sign-extended into the high half.
+    $wp = [IntPtr]([int64]((([int64]$delta -band 0xFFFF) * 65536)))
+    $lp = [IntPtr]([int64]((([int64]$pt.Y -band 0xFFFF) * 65536) + ([int64]$pt.X -band 0xFFFF)))
+    for ($i = 0; $i -lt $count; $i++) {
+      [void][W.U32]::PostMessage($cv, $WM_MOUSEWHEEL, $wp, $lp)
+    }
+    Write-Host "Posted WM_MOUSEWHEEL delta=$delta x$count to HWND 0x$($cv.ToInt64().ToString('X8'))"
+  }
+  'canvas-key' {
+    # Key goes to the canvas, not the main window: Home/End/PgUp/PgDn are canvas keys.
+    if (-not $Arg1) { Write-Error "Usage: canvas-key <vk_hex>"; exit 1 }
+    $vk = [Convert]::ToInt32($Arg1, 16)
+    $h = Get-LitePdfHwnd
+    if ($h -eq [IntPtr]::Zero) { Write-Error "litepdf window not found"; exit 1 }
+    $cv = Find-Canvas $h
+    if ($cv -eq [IntPtr]::Zero) { Write-Error "canvas not found"; exit 1 }
+    Post-Key $cv $vk
+    Write-Host "Posted VK 0x$($vk.ToString('X2')) to canvas HWND 0x$($cv.ToInt64().ToString('X8'))"
   }
   'find-dialog' {
     # Look for an active dialog (class "#32770") that's a child of the litepdf top-level window

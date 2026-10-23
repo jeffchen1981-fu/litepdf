@@ -112,8 +112,8 @@ These run in both layouts. Each gets a strip branch; its paged branch keeps toda
 |---|---|---|
 | `MainWindow::kick_render(page)`, 21 call sites | `apply_viewport` (refit), refresh the zoom readout, then `request_render_with_prefetch` (or two P0s in a spread) | Gains a `KickReason` argument. The paged branch ignores it. The strip branch dispatches by reason, per the table below. |
 | `MainWindow::navigate_click(page)` | `change_current_page`; **returns early if the page did not change**; Top anchor; kick | The strip branch runs **first, before the early return**: strip navigation (§6.3), then a `Navigate` kick. Going to the derived current page while mid-page therefore scrolls to its top. |
-| `MainWindow::on_tab_switch` | snapshot, `set_view`, pan, `set_dual_page`, `set_viewport`, kick | Calls `apply_effective_layout` (below) right after `set_view`. Same-index calls (`new_index == old_index`) kick with `Navigate`, not `TabSwitch`. |
-| `MainWindow::apply_effective_layout(tab)` (new) | — | The **only** owner of layout switches. Computes `EffectiveLayout` for the tab (or `PagedSingle` for a null view) and, if it differs from the canvas's current layout, does the layout-switch reset below and sets or clears `WS_VSCROLL` (§6.2). Called from `on_tab_switch`, the two-page toggle (both directions), the Continuous Scroll menu item, and tab close. |
+| `MainWindow::on_tab_switch` | snapshot, `set_view`, pan, `set_dual_page`, `set_viewport`, kick | Calls `apply_effective_layout` (below). `apply_effective_layout` takes the place of today's `set_dual_page` call, after `set_pan` and `set_invert_chrome`. Same-index calls (`new_index == old_index`) kick with `Navigate`, not `TabSwitch`. |
+| `MainWindow::apply_effective_layout(tab)` (new) | — | The **only** owner of layout switches. Computes `EffectiveLayout` for the tab (or `PagedSingle` for a null view) and, if it differs from the canvas's current layout, does the layout-switch reset below and sets or clears `WS_VSCROLL` (§6.2). Called from `on_tab_switch`, the two-page toggle (both directions), the Continuous Scroll menu item, and tab close. The reset and the carry run only for a switch into or out of the strip; a paged single ↔ spread switch keeps today's `set_dual_page` path (U6). |
 | `PdfCanvas::apply_viewport` | refit from the current page, then `set_viewport` | Called only for the reasons that refit (below). |
 | `PdfCanvas::resubmit_current_page` (Ctrl+wheel zoom; `on_size`, `on_paint` and the completion handler on `D2DERR_RECREATE_TARGET`) | resubmit the current page | Re-layout (§4.5), then reschedule. |
 | `PdfCanvas::discard_render_target` (`WM_DPICHANGED_BEFOREPARENT`, `D2DERR_RECREATE_TARGET`) | reset both slot bitmaps and the render target | Also drops every `PageBitmapSet` bitmap: Ready → None, and a Pending page loses its stale bitmap but stays Pending. On the recreate path `resubmit_current_page` follows and reschedules; on the DPI path the DPI `Layout` kick (`MainWindow.cpp:1490`) does. |
@@ -253,8 +253,10 @@ a re-layout. Without this, the track position and the re-layout would fight over
 - **When it is recomputed.** After every scroll input and every re-layout. The observer fires
   only when the value changes.
 - **Navigation intent.** An explicit navigation (§6.3) sets the current page to its target
-  directly. That pin survives re-layouts and ends at the next scroll input (wheel, keys, drag,
-  scrollbar) or the next navigation. While it holds, recomputation keeps the pinned page.
+  directly. That pin survives re-layouts and ends at the next **vertical** scroll input (wheel,
+  ↑/↓, PgUp/PgDn, vertical drag, scrollbar) or the next navigation. Horizontal input (←/→,
+  Shift or tilt wheel, a horizontal drag) keeps it: it cannot change which page is on screen.
+  While the pin holds, recomputation keeps the pinned page.
 - **Side effects of a change:**
 
 | Side effect | Continuous mode |
@@ -372,8 +374,11 @@ The handler first calls `on_completion_arrived` (§3.4), then decides, in order:
    - success → Ready at the Pending entry's submitted scale and polarity; invalidate that page's
      rect. If those differ from the view's (a change the cancel missed), the page is Ready-stale
      and the next pass re-requests it;
-   - no render target could be created, or `D2DERR_RECREATE_TARGET` → `discard_render_target`,
-     the page → None, reschedule;
+   - `D2DERR_RECREATE_TARGET` → `discard_render_target`, the page → None, reschedule;
+   - no render target could be created → the page → None, with no reschedule: the next strip
+     change (an input, a kick, a resize) schedules it again, as the paged handler stops there.
+     Rescheduling at once would resubmit every visible page on every completion, at message
+     speed, for as long as no target can be created;
    - any other failure (for example a bitmap above the device's maximum size) → Failed;
 4. null and `cancelled` → the cancel transition (§5.1), then reschedule. Usually the §5.2 sweep
    has already done this and rule 2 drops the completion; this rule covers a flag set after the
@@ -385,6 +390,9 @@ The handler first calls `on_completion_arrived` (§3.4), then decides, in order:
 The #117 caveat applies: a flag store can hit a request that a worker has already taken, so a
 genuine failure can be reported as cancelled. Rule 4 then reschedules, so the page is requested
 again at most once per pass.
+
+A pixmap whose escrow clone fails on the worker is dropped there and posted as a null result
+with its identity, so rule 4 or 5 settles the page.
 
 **Known limit.** If the payload allocation or the `PostMessageW` itself fails on the null path
 (out of memory, a full message queue, or process exit), nothing is posted, and the page stays
@@ -458,7 +466,7 @@ the canvas, and is followed by a `Navigate` kick, which only reschedules.
 | Ctrl+G / page box, thumbnail click, outline click (`navigate_click`) | `scroll_y = anchor(p)`, clamped; current page = p. No anchor object is installed. Runs even when p is already the current page (§3.4). |
 | End | bottom; current page = last |
 | Home | top (`scroll_y = 0 = anchor(0)`); current page = 0 |
-| Find Next/Prev, cross-tab result row (`scroll_into_view`) | No scroll if the hit quad is fully visible. Otherwise, centre it vertically (the `pan_y_for_hit` rule, computed in document coordinates). Current page = the hit's page. |
+| Find Next/Prev, cross-tab result row (`scroll_into_view`) | No scroll if the hit quad is fully visible (with the 24-DIP margin paged mode uses). Otherwise, centre it vertically (the `pan_y_for_hit` rule, computed in document coordinates). Current page = the hit's page. |
 | Session restore | `scroll_y = anchor(saved page)`; current page = that page |
 | Print | reads the current page; unchanged |
 
@@ -522,8 +530,9 @@ strip").
   spread off. Turning spread on does not change the preference, and turning it off returns to
   the preference's layout. Changing the preference re-applies the effective layout to the active
   tab only; a background tab picks it up at its next `on_tab_switch`.
-- **Every layout switch** goes through `apply_effective_layout`, which first does the reset in
-  §3.4.
+- **Every layout switch** goes through `apply_effective_layout`. The §3.4 reset and the carry
+  below run only for a switch into or out of the strip; a paged single ↔ spread switch keeps
+  today's `set_dual_page` path (§3.4).
 - **Position carry, within one tab** (spread toggle, menu item). The carried value is
   (page, in-page offset in DIP), captured before the reset (§3.4):
   - **From paged single.** page = the current page; offset = how far the page has been scrolled
@@ -534,13 +543,19 @@ strip").
   - **From the strip.** page = the derived current page; offset = viewport top − `top(page)`,
     clamped to [0, the page's height].
   - **Into the strip.** `scroll_y = anchor(page)` when the offset is 0, else `top(page) + offset` (the offset is measured from the page's top). A page that fits lands exactly where
-    navigating to it would put it. The current page is the carried page, pinned (§4.6).
+    navigating to it would put it. The current page is the carried page, pinned (§4.6). The
+    outgoing horizontal pan (paged single's `pan_x`; 0 from a spread), scaled by the zoom
+    ratio, becomes the strip's desired `pan_x`; only `pan_x_eff` clamps it.
   - **Into paged single.** Paged `pan_y` = −offset, clamped; `pan_x` = `pan_x_eff`.
   - **Into paged spread.** The spread containing the page; `pan_y` = −(the left page's top in
     the union + offset), clamped to the union; `pan_x` = 0, because the union's horizontal layout
     differs from the strip's.
   - Into either paged layout, the pan is set before the render is kicked. The switch cleared the
-    anchor, so the paged completion path only re-clamps the pan and the position survives.
+    anchor, so the paged completion path only re-clamps the pan and the position survives
+    (except unequal-height spreads, §10).
+  - Every carry is applied after the new layout's fit: the current page is set to the carried
+    page, the viewport refits, and the offset is scaled by the zoom ratio (after / before), so a
+    fit change does not shift the reader.
 - **A tab switch does not carry position** between tabs: the incoming tab restores its own
   (§7.4).
 
@@ -681,7 +696,7 @@ Scripted on a 50+ page fixture, with `ContinuousScroll=1` set before launch:
 | wheel to the bottom | scroll pos = `nMax − nPage + 1`; page box = last page |
 | Ctrl+G 30 (index 29) | page box = 30; scroll pos = `anchor(29)` |
 | Ctrl+G to the current page while mid-page | scroll pos moves to that page's anchor |
-| two-page on, then off, from mid-page | after off: same page box, same in-page offset (±1 DIP) |
+| two-page on, then off, from mid-page at a Custom zoom where the spread overflows, on a left page (page 30) | after off: same page box, same in-page offset (±1 DIP) |
 | a tab with two-page on (negative control) | no `WS_VSCROLL` on the canvas |
 | switch back to a strip tab | `WS_VSCROLL` present |
 | cold start in continuous mode | `WS_VSCROLL` present first (so the run really is the strip), then the `LitePDF cold-start:` line present |
@@ -752,6 +767,10 @@ first callback):
 - Changing the registry value while the app runs takes effect at the next start (§7.2).
 - A text build the worker skips because a P0 is queued (#98 skip rule 3) is not retried; a press
   on that page builds its text synchronously, as in paged mode (§5.2).
+- A carry into a spread whose right page is taller than its left can be cut short: the left
+  page's completion re-clamps the pan against the left bitmap alone (`content_extent`,
+  `apply_anchor` in `PdfCanvas.cpp`) before the right one lands, so §7.3's "the position
+  survives" does not hold for unequal-height spreads. A follow-up issue is filed with PR 2.
 
 ## 11. Risk and review
 
