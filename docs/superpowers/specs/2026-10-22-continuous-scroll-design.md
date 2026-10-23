@@ -253,8 +253,10 @@ a re-layout. Without this, the track position and the re-layout would fight over
 - **When it is recomputed.** After every scroll input and every re-layout. The observer fires
   only when the value changes.
 - **Navigation intent.** An explicit navigation (§6.3) sets the current page to its target
-  directly. That pin survives re-layouts and ends at the next scroll input (wheel, keys, drag,
-  scrollbar) or the next navigation. While it holds, recomputation keeps the pinned page.
+  directly. That pin survives re-layouts and ends at the next **vertical** scroll input (wheel,
+  ↑/↓, PgUp/PgDn, vertical drag, scrollbar) or the next navigation. Horizontal input (←/→,
+  Shift or tilt wheel, a horizontal drag) keeps it: it cannot change which page is on screen.
+  While the pin holds, recomputation keeps the pinned page.
 - **Side effects of a change:**
 
 | Side effect | Continuous mode |

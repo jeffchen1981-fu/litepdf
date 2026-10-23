@@ -583,7 +583,9 @@ LRESULT PdfCanvas::strip_pan_by(float dx, float dy) {
     if (!strip_active()) return 0;
     // Grab-and-drag: the content follows the pointer, so a downward drag shows
     // what is above, and a rightward one moves the pages right, as in paged mode.
-    impl_->strip_view.scroll_by(-static_cast<double>(dy));
+    // Only a vertical component is a scroll input: a purely horizontal drag
+    // keeps the navigation pin, like the other horizontal input (spec 4.6).
+    if (dy != 0.0f) impl_->strip_view.scroll_by(-static_cast<double>(dy));
     impl_->strip_view.pan_x_by(static_cast<double>(dx));
     strip_after_change();
     return 0;

@@ -10,9 +10,16 @@
 // set by the caller (client size in DIPs).
 //
 // INPUT vs CURRENT PAGE. scroll_by, scroll_to, key (but Home and End), pan_x_by
-// and scroll_to_pos only move the view and end the navigation pin (spec 4.6);
-// none of them derives the current page. The caller calls recompute_current()
-// after input, so it can tell whether the page changed.
+// and scroll_to_pos only move the view; none of them derives the current page.
+// Vertical input (scroll_by, scroll_to, scroll_to_pos, the LineUp/LineDown/
+// PageUp/PageDown keys) ends the navigation pin (spec 4.6); horizontal input
+// (pan_x_by, the Left/Right keys) keeps it, since it cannot change which page is
+// on screen. The caller calls recompute_current() after input, so it can tell
+// whether the page changed.
+//
+// Callers must also call recompute_current() after restore, relayout and
+// apply_carry, which move the view without deriving the current page (a pin
+// that apply_carry sets keeps its page through the recompute).
 
 #include <algorithm>
 #include <utility>
