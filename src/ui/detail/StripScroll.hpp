@@ -31,6 +31,10 @@ inline double relayout_scroll(const StripPos& top_point, const StripLayout& next
     return clamp_strip_scroll(next.y_of(top_point), next.total_height(), vp_h);
 }
 
+// Visible heights closer than this are a tie: at a fractional zoom, equal pages'
+// heights differ by rounding noise (a few 1e-12 DIP at 30 %).
+inline constexpr double kStripTieDip = 1e-6;
+
 // spec 4.6, in order: at max scroll -> the last page; at 0 -> page 0; else the page
 // with the largest visible height, ties to the lower index. Rules 1-2 apply only
 // when the strip is at least 1 DIP taller than the viewport; otherwise max
@@ -56,7 +60,7 @@ inline int derive_current_page(const StripLayout& l, double scroll_y, double vp_
     for (int p = r.first; p <= r.last; ++p) {
         const double t = l.top(p);
         const double vis = std::min(t + l.height(p), y1) - std::max(t, y0);
-        if (vis > best_h) {  // strict: ties keep the lower index
+        if (vis > best_h + kStripTieDip) {  // ties keep the lower index
             best_h = vis;
             best = p;
         }

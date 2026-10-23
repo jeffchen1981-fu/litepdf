@@ -70,3 +70,15 @@ TEST_CASE("StripCarry: offsets clamp to the page", "[ui][strip]") {
     CHECK(carry_from_paged_single(0, -5000, 0, 1000).offset_dip == Approx(1000.0));
     CHECK(carry_from_spread(0, 30, 40, 500).offset_dip == 0.0);
 }
+
+TEST_CASE("StripCarry: the carried scroll and pan clamp to what they land in",
+          "[ui][strip]") {
+    // Three 100 pt pages: total 332, vp 300, max scroll 32. top(2) + 50 = 274.
+    const StripLayout short_strip(std::vector<StripPageSize>(3, StripPageSize{100, 100}), 1.0);
+    CHECK(strip_scroll_for(short_strip, {2, 50}, 300) == Approx(32.0));
+
+    // The whole page scrolled past: the paged pan stops at the page's bottom.
+    CHECK(paged_pan_y_for({0, 1000}, 1000, 600) == Approx(-400.0f));
+    // The spread pan stops at the union's bottom.
+    CHECK(spread_pan_y_for({0, 500}, 40, 800, 600) == Approx(-200.0f));
+}

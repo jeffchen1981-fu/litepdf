@@ -454,6 +454,82 @@ TEST_CASE("StripSchedule: an identical second pass adds no prefetch", "[ui][stri
     CHECK(second.submit_p0.empty());
     CHECK(out.pages_at(1) == std::vector<int>{4});
     CHECK(s.slot(5) == nullptr);
+    // The prefetch in flight is left alone, not cancelled and sent again.
+    CHECK_FALSE(has(second.cancel, 4));
+    REQUIRE(s.slot(4) != nullptr);
+    CHECK(s.slot(4)->kind == PageStateKind::Pending);
+    CHECK_FALSE(s.slot(4)->cancel_flag->load());
+}
+
+TEST_CASE("StripSchedule: a resident prefetch page counts against L1 wherever it sits in P",
+          "[ui][strip]") {
+    // |V| = 4 of 5 entries, and page 6 (the far end of P) already holds the last.
+    StripRenderState s;
+    FakeSubmitter out;
+    s.slots()[6] = ready(1.0f);
+    const SchedulePlan plan = s.run_pass(input({0, 3}, {4, 6}), out);
+    CHECK(plan.submit_p1.empty());
+    CHECK(out.pages_at(1).empty());
+}
+
+TEST_CASE("StripSchedule: travelling up, the nearest prefetch page goes first",
+          "[ui][strip]") {
+    StripRenderState s;
+    FakeSubmitter out;
+    ScheduleInput in = input({5, 5}, {3, 4});
+    in.l1_capacity = 2;  // room for one beside V
+    const SchedulePlan plan = s.run_pass(in, out);
+    CHECK(plan.submit_p1 == std::vector<int>{4});
+}
+
+TEST_CASE("StripSchedule: prefetch stops at the first page that does not fit",
+          "[ui][strip]") {
+    StripRenderState s;
+    FakeSubmitter out;
+    ScheduleInput in = input({0, 3}, {4, 5});
+    in.l1_capacity = 10;
+    in.bytes_of = [](int page) { return page == 4 ? 2 * kGiB : kMiB; };
+    const SchedulePlan plan = s.run_pass(in, out);
+    CHECK(plan.submit_p1.empty());
+}
+
+TEST_CASE("StripSchedule: a failed prefetch page holds no L1 room", "[ui][strip]") {
+    StripRenderState s;
+    FakeSubmitter out;
+    s.slots()[4] = failed(1);
+    // |V| = 4 of 5 entries: page 4 has nothing resident, so page 5 gets the last.
+    const SchedulePlan plan = s.run_pass(input({0, 3}, {4, 5}), out);
+    CHECK(plan.submit_p1 == std::vector<int>{5});
+    CHECK(s.slot(4)->kind == PageStateKind::Failed);
+}
+
+TEST_CASE("StripSchedule: a page that failed at P0 and left V into P is prefetched in the same pass",
+          "[ui][strip]") {
+    StripRenderState s;
+    FakeSubmitter out;
+    s.slots()[4] = failed(0);
+    ScheduleInput in = input({5, 5}, {4, 4}, {0, 10});
+    in.previous_first_visible = 4;
+    in.previous_last_visible = 4;
+    const SchedulePlan plan = s.run_pass(in, out);
+    CHECK(has(plan.fail_reset, 4));
+    CHECK(plan.submit_p1 == std::vector<int>{4});
+    REQUIRE(s.slot(4) != nullptr);
+    CHECK(s.slot(4)->kind == PageStateKind::Pending);
+    CHECK(s.slot(4)->priority == 1);
+}
+
+TEST_CASE("StripSchedule: no text rides on P0 when the current page needs no render",
+          "[ui][strip]") {
+    StripRenderState s;
+    FakeSubmitter out;
+    s.slots()[3] = ready(1.0f);
+    ScheduleInput in = input({2, 4});
+    in.visible_by_area = {3, 2, 4};
+    const SchedulePlan plan = s.run_pass(in, out);
+    CHECK(plan.submit_p0 == std::vector<int>{2, 4});
+    CHECK(plan.text_on_p0 == -1);
+    for (const Submitted& x : out.submitted) CHECK_FALSE(x.with_text);
 }
 
 TEST_CASE("StripSchedule: a failed prefetch is not retried while it stays in P",

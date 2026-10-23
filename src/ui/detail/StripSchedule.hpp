@@ -21,7 +21,8 @@
 //               P pages already resident (Pending or Ready)
 //
 // Every rule after the sweep judges a swept page by its cancel-transition
-// result, so a swept page in V is requested again in the same pass.
+// result, so a swept page in V is requested again in the same pass; the submit
+// rules judge a reset failure as None, so it is requested in the same pass too.
 
 #include <algorithm>
 #include <atomic>
@@ -151,13 +152,22 @@ inline SchedulePlan plan_strip_pass(const std::map<int, PageSlot>& slots,
     const StripRange& p = in.prefetch;
     const StripRange& retain = in.retain;
 
-    // The state each later rule judges: a swept page counts as its cancel
-    // transition, an absent page as None.
+    // spec 5.1 / 5.3 rule 5: no automatic retry. A P0 failure is forgotten once
+    // the page is outside V; a P1 failure only when it enters V.
+    auto fail_resets = [&](const PageSlot& e, int page) {
+        const bool in_v = v.contains(page);
+        return e.kind == PageStateKind::Failed &&
+               ((!in_v && e.priority == 0) || (in_v && e.priority != 0));
+    };
+
+    // The state the submit rules judge: a swept page counts as its cancel
+    // transition, a reset failure and an absent page as None.
     auto effective = [&](int page) -> PageSlot {
         const auto it = slots.find(page);
         if (it == slots.end()) return {};
-        return strip_detail::swept(it->second) ? cancel_transition(it->second)
-                                               : it->second;
+        const PageSlot e = strip_detail::swept(it->second) ? cancel_transition(it->second)
+                                                           : it->second;
+        return fail_resets(e, page) ? PageSlot{} : e;
     };
 
     for (const auto& [page, slot] : slots) {
@@ -171,11 +181,7 @@ inline SchedulePlan plan_strip_pass(const std::map<int, PageSlot>& slots,
 
         const PageSlot e = strip_detail::swept(slot) ? cancel_transition(slot) : slot;
         const bool in_v = v.contains(page);
-        // spec 5.1 / 5.3 rule 5: no automatic retry. A P0 failure is forgotten
-        // once the page is outside V; a P1 failure only when it enters V.
-        if (e.kind == PageStateKind::Failed &&
-            ((!in_v && e.priority == 0) || (in_v && e.priority != 0)))
-            plan.fail_reset.push_back(page);
+        if (fail_resets(e, page)) plan.fail_reset.push_back(page);
         if (e.kind == PageStateKind::Pending) {
             const bool outside = !in_v && !p.contains(page);
             const bool promoted = in_v && e.priority != 0;
@@ -190,7 +196,7 @@ inline SchedulePlan plan_strip_pass(const std::map<int, PageSlot>& slots,
         switch (e.kind) {
         case PageStateKind::None: submit = true; break;
         case PageStateKind::Ready: submit = is_stale(e, in.scale, in.invert); break;
-        case PageStateKind::Failed: submit = e.priority != 0; break;
+        case PageStateKind::Failed: break;  // a P1 failure arrives reset, as None
         case PageStateKind::Pending: submit = e.priority != 0; break;
         }
         if (submit) plan.submit_p0.push_back(page);
@@ -198,7 +204,8 @@ inline SchedulePlan plan_strip_pass(const std::map<int, PageSlot>& slots,
 
     // P1: only what fits in L1 alongside V and the P pages already resident,
     // nearest page first. Counting the resident ones keeps a repeated pass from
-    // prefetching one page further each time.
+    // prefetching one page further each time; they are all counted before the
+    // first submit, wherever they sit in P.
     if (!p.empty()) {
         const std::size_t v_count = v.empty() ? 0 : static_cast<std::size_t>(v.last - v.first + 1);
         std::size_t v_bytes = 0;
@@ -212,16 +219,20 @@ inline SchedulePlan plan_strip_pass(const std::map<int, PageSlot>& slots,
         const int step = upward ? -1 : 1;
         const int start = upward ? p.last : p.first;
         const int end = upward ? p.first - 1 : p.last + 1;
+        auto resident = [](PageStateKind k) {
+            return k == PageStateKind::Pending || k == PageStateKind::Ready;
+        };
+        for (int page = p.first; page <= p.last; ++page) {
+            if (v.contains(page) || !resident(effective(page).kind)) continue;
+            const std::size_t need = in.bytes_of ? in.bytes_of(page) : 0;
+            entries_free = entries_free > 0 ? entries_free - 1 : 0;
+            bytes_free = bytes_free > need ? bytes_free - need : 0;
+        }
         for (int page = start; page != end; page += step) {
             if (v.contains(page)) continue;
-            const PageStateKind kind = effective(page).kind;
-            if (kind == PageStateKind::Failed) continue;  // nothing resident
+            // Failed holds nothing; a resident page is already counted.
+            if (effective(page).kind != PageStateKind::None) continue;
             const std::size_t need = in.bytes_of ? in.bytes_of(page) : 0;
-            if (kind != PageStateKind::None) {            // Pending or Ready
-                entries_free = entries_free > 0 ? entries_free - 1 : 0;
-                bytes_free = bytes_free > need ? bytes_free - need : 0;
-                continue;
-            }
             if (entries_free == 0 || need > bytes_free) break;
             plan.submit_p1.push_back(page);
             --entries_free;

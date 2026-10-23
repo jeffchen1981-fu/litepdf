@@ -247,7 +247,9 @@ a re-layout. Without this, the track position and the re-layout would fight over
   scrolling to the bottom would report a page several pages before the last. Rules 1-2 apply
   only when the strip is at least 1 DIP taller than the viewport; otherwise rule 3 decides.
   Both use a 0.5-DIP tolerance: "at its maximum" means within 0.5 DIP of `total − vp_h`, and
-  "== 0" means within 0.5 DIP of 0 (`StripScroll.hpp`'s `derive_current_page`).
+  "== 0" means within 0.5 DIP of 0 (`StripScroll.hpp`'s `derive_current_page`). Rule 3's
+  visible heights tie when they are within `kStripTieDip` (1e-6 DIP): at a fractional zoom,
+  equal fully-visible pages differ by rounding noise, which must not pick the winner.
 - **When it is recomputed.** After every scroll input and every re-layout. The observer fires
   only when the value changes.
 - **Navigation intent.** An explicit navigation (§6.3) sets the current page to its target
@@ -320,7 +322,9 @@ Run after every scroll or re-layout, after every kick, and after a §5.3 rule-4 
    Each page in P that is None gets **P1**, but only if it fits L1 alongside V: there must be
    `l1_capacity − |V|` entries free **and** `l1_budget − bytes(V)` bytes free. Otherwise it gets
    no prefetch, because a prefetched page would be evicted by the visible ones. This keeps #49's
-   "prefetch only what fits" rule.
+   "prefetch only what fits" rule. P pages already Pending or Ready count against that room
+   first, wherever they sit in P; then the None pages are submitted nearest first, stopping at
+   the first that does not fit. A page whose failure is reset this pass (§5.1) counts as None.
 3. **Cancel.** Pending pages not in V ∪ P are cancelled (flag store) and take their cancel
    transition (§5.1). A cancelled entry stays in the engine's heap until a worker pops it and
    skips it at checkpoint A; at most `num_workers` (2) requests a worker had already taken finish,

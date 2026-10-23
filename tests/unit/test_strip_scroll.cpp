@@ -84,6 +84,39 @@ TEST_CASE("StripScroll: a strip that fits the viewport is decided by visible hei
     CHECK(derive_current_page(l, 0, 700) == 2);
     // Near-fit: total - vp_h == 0.25 < 1, so neither rule 1 nor rule 2 fires.
     CHECK(derive_current_page(l, 0, 631.75) == 2);
+
+    // Here rule 1 would pick the last page: only rule 3 gives page 0.
+    const StripLayout tall_first({{100, 500}, {100, 50}, {100, 50}}, 1.0);
+    REQUIRE(tall_first.total_height() == 632.0);
+    CHECK(derive_current_page(tall_first, 0, 700) == 0);
+    CHECK(derive_current_page(tall_first, 0, 631.75) == 0);
+}
+
+TEST_CASE("StripScroll: rules 1 and 2 hold within half a DIP of either end",
+          "[ui][strip]") {
+    // total 924, vp 500, max scroll 424. Rule 3 alone would pick page 1 at the
+    // top (it shows 384 against 100) and page 0 at the bottom.
+    const StripLayout small_first({{100, 100}, {100, 800}}, 1.0);
+    REQUIRE(small_first.total_height() == 924.0);
+    CHECK(derive_current_page(small_first, 0, 500) == 0);
+    CHECK(derive_current_page(small_first, 0.4, 500) == 0);
+    CHECK(derive_current_page(small_first, 0.6, 500) == 1);
+
+    const StripLayout small_last({{100, 800}, {100, 100}}, 1.0);
+    CHECK(derive_current_page(small_last, 424, 500) == 1);
+    CHECK(derive_current_page(small_last, 423.6, 500) == 1);
+    CHECK(derive_current_page(small_last, 423.4, 500) == 0);
+}
+
+TEST_CASE("StripScroll: tied pages at a fractional zoom go to the lower index",
+          "[ui][strip]") {
+    // At 30 % pages 129-133 are all fully visible; their visible heights differ
+    // only by rounding (237.59999999999854 against 237.60000000000218).
+    const StripLayout l(std::vector<StripPageSize>(1000, StripPageSize{612, 792}), 0.3);
+    const StripRange r = l.visible(31520.3, 31520.3 + 1400);
+    REQUIRE(r.first <= 129);
+    REQUIRE(r.last >= 133);
+    CHECK(derive_current_page(l, 31520.3, 1400) == 129);
 }
 
 TEST_CASE("StripScroll: no pages means no current page", "[ui][strip]") {
@@ -145,4 +178,6 @@ TEST_CASE("StripScroll: page_x centres a narrow page and pans a wide one", "[ui]
     CHECK(page_x(1000, widest, pan, vp_w) == -200.0);
     CHECK(page_x(800, widest, pan, vp_w) == -100.0);
     CHECK(page_x(600, widest, pan, vp_w) == 0.0);   // exactly fits: centred
+    // The same page at another pan: still centred, the pan does not apply.
+    CHECK(page_x(600, widest, -300, vp_w) == 0.0);
 }
