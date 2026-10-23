@@ -22,6 +22,8 @@
 // that apply_carry sets keeps its page through the recompute).
 
 #include <algorithm>
+#include <cstddef>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -210,6 +212,26 @@ public:
         r.x = page_x(r.w, layout_.widest(visible()), pan_x_eff(), vp_w_);
         r.y = layout_.top(page) - scroll_y_;
         return r;
+    }
+
+    // spec 7.1: the page of V whose page_rect contains the viewport-relative point
+    // (left and top edges inclusive, right and bottom exclusive). Nullopt in a gap,
+    // beside a narrow page, or with no layout.
+    std::optional<int> page_at(double x, double y) const {
+        const StripRange v = visible();
+        for (int p = v.first; p <= v.last; ++p) {
+            const StripPageRect r = page_rect(p);
+            if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) return p;
+        }
+        return std::nullopt;
+    }
+
+    // spec 7.4: the pages a background tab keeps. V capped at the L1 count `cap`,
+    // largest visible area first, the current page first (visible_by_area's order).
+    std::vector<int> retained_for_background(std::size_t cap) const {
+        std::vector<int> out = visible_by_area();
+        if (out.size() > cap) out.resize(cap);
+        return out;
     }
 
     // spec 6.1: something to pan, vertically or horizontally. A page within

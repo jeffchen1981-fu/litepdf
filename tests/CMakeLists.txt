@@ -117,6 +117,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_strip_viewport_carry_pan.cpp # #55 PR 2 Task 8
     unit/test_strip_viewport_pin.cpp   # #55 PR 2 review, ruling 11
     unit/test_strip_fit_tolerance.cpp  # #55 PR 2 final review, FitWidth float noise
+    unit/test_strip_overlay.cpp        # #55 PR 3 Task 1
     # The CLI helpers under test are compiled straight into the test binary
     # (they are not part of litepdf_core). All are MuPDF-header-free and
     # resolve their fz_* calls through the litepdf::mupdf dependency that

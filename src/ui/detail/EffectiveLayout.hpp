@@ -24,6 +24,32 @@ inline LayoutKind effective_layout(bool has_view, bool spread,
     return LayoutKind::PagedSingle;
 }
 
+// spec 7.3: the View > Continuous scroll menu item. Enabled when the tab has a
+// view and its format passed the sizing gate; checked from the preference alone,
+// so it stays checked (and greyed) in a tab that cannot show the strip.
+struct ContinuousMenuState {
+    bool enabled = false;
+    bool checked = false;
+};
+
+inline ContinuousMenuState continuous_menu_state(bool has_view, bool format_ok,
+                                                 bool pref_on) noexcept {
+    return {has_view && format_ok, pref_on};
+}
+
+// spec 7.3: the preference and the tab's spread flag after choosing the menu item.
+// In a spread tab it turns the preference on and the spread off; otherwise it
+// flips the preference.
+struct ContinuousToggle {
+    bool pref_on = false;
+    bool spread_on = false;
+};
+
+inline ContinuousToggle continuous_toggle(bool pref_on, bool spread_on) noexcept {
+    if (spread_on) return {true, false};
+    return {!pref_on, false};
+}
+
 // The formats whose page sizes were measured cheap enough for the strip (spec 4.4,
 // 7.3), by case-insensitive extension, and a document with at least one page.
 inline bool strip_format_ok(const std::filesystem::path& source, int page_count) {
