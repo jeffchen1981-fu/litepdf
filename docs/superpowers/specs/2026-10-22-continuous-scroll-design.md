@@ -547,6 +547,9 @@ strip").
     differs from the strip's.
   - Into either paged layout, the pan is set before the render is kicked. The switch cleared the
     anchor, so the paged completion path only re-clamps the pan and the position survives.
+  - Every carry is applied after the new layout's fit: the current page is set to the carried
+    page, the viewport refits, and the offset is scaled by the zoom ratio (after / before), so a
+    fit change does not shift the reader.
 - **A tab switch does not carry position** between tabs: the incoming tab restores its own
   (§7.4).
 
@@ -687,7 +690,7 @@ Scripted on a 50+ page fixture, with `ContinuousScroll=1` set before launch:
 | wheel to the bottom | scroll pos = `nMax − nPage + 1`; page box = last page |
 | Ctrl+G 30 (index 29) | page box = 30; scroll pos = `anchor(29)` |
 | Ctrl+G to the current page while mid-page | scroll pos moves to that page's anchor |
-| two-page on, then off, from mid-page | after off: same page box, same in-page offset (±1 DIP) |
+| two-page on, then off, from mid-page at a Custom zoom where the spread overflows, on a left page (page 30) | after off: same page box, same in-page offset (±1 DIP) |
 | a tab with two-page on (negative control) | no `WS_VSCROLL` on the canvas |
 | switch back to a strip tab | `WS_VSCROLL` present |
 | cold start in continuous mode | `WS_VSCROLL` present first (so the run really is the strip), then the `LitePDF cold-start:` line present |

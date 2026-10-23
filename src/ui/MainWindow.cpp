@@ -344,8 +344,13 @@ void MainWindow::kick_render(int page, litepdf::ui::KickReason reason) {
         // #57: a zoom change reaches the readout in the same message.
         if (a.refresh_readout) refresh_zoom_readout();
         // The active tab's stored strip position when `a.restore_tab_position`
-        // (spec 7.4). Tabs do not store one yet, so there is none to restore.
+        // (spec 7.4): only a TabSwitch kick restores, and only a tab that last
+        // left while the strip showed it has one.
         const litepdf::ui::StripTabState* restore_ptr = nullptr;
+        if (a.restore_tab_position && tabs_) {
+            auto* tab = tabs_->active_tab();
+            if (tab && tab->strip_state) restore_ptr = &tab->strip_state.value();
+        }
         canvas_->strip_kick(a, restore_ptr);
         return;
     }
@@ -778,6 +783,10 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
             auto p = canvas_ ? canvas_->pan() : PdfCanvas::Pan{0.0f, 0.0f};
             outgoing->pan_x = p.x;
             outgoing->pan_y = p.y;
+            // #55, spec 7.4: the strip's position, before set_view resets it;
+            // empty when the canvas shows a paged layout.
+            outgoing->strip_state = canvas_ ? canvas_->strip_tab_state()
+                                            : std::nullopt;
             outgoing->outline_visible = outline_ && outline_->visible();
             // Phase 7 Task 8 / D11: snapshot outgoing tab's thumb-pane
             // visibility into the Tab struct. Live pane->visible() is

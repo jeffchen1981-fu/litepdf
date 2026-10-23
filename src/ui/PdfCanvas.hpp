@@ -15,6 +15,7 @@
 #include "core/TextSelection.hpp"
 #include "ui/detail/ViewportMath.hpp"
 #include "ui/detail/SelectionDrag.hpp"
+#include "ui/detail/StripCarry.hpp"
 #include "ui/detail/StripLayout.hpp"
 
 // Forward-decl so the header stays COM-free. ComPtr in .cpp only.
@@ -206,9 +207,23 @@ public:
     // layout's work, drops every bitmap, bumps the render epoch, sets the
     // dual-page flag for `next` and adds or removes WS_VSCROLL, so a fit read
     // after it already sees the right client width. The caller kicks a render.
-    // `carry_position` asks for the reader's position to be carried (spec 7.3);
-    // not implemented yet, so it is ignored.
+    //
+    // `carry_position` (a switch within one tab: the two-page toggle) carries the
+    // reader's position (spec 7.3, deviation 1): (page, in-page offset) and the
+    // horizontal pan are captured from the old layout before anything changes,
+    // all geometry from the view's page sizes x its zoom (never from bitmaps, so
+    // a switch before the last render landed still carries); after the reset the
+    // carried page becomes current (a spread's left page), the viewport refits
+    // for the new layout, and the offset and pan are scaled by the zoom ratio
+    // (after / before) and applied -- into the strip by building its layout
+    // here. False (a tab switch) skips both: the incoming tab restores its own
+    // position with its TabSwitch kick (spec 7.4).
     void switch_layout(LayoutKind next, bool carry_position);
+
+    // The strip's per-tab state for MainWindow's outgoing tab snapshot (spec
+    // 7.4): StripViewport::save() while the strip is shown and laid out, else
+    // empty.
+    std::optional<StripTabState> strip_tab_state() const;
 
     // MainWindow::kick_render's strip branch, after it has refit and refreshed
     // the zoom readout as `a` asks: build the strip layout if there is none,
@@ -519,6 +534,18 @@ private:
 
     // The strip is shown and laid out.
     bool strip_active() const noexcept;
+
+    // Builds the strip layout from the view's page sizes at its zoom, keeping
+    // the viewport model's current viewport size.
+    void strip_build_layout();
+
+    // switch_layout's carry (spec 7.3, deviation 1), around its reset. The
+    // capture reads the layout still on screen; `pan_before` receives its
+    // horizontal pan (0 from a spread). The apply runs once the reset has set
+    // the dual-page flag and the scroll bar style for `next`.
+    CarriedPosition capture_layout_carry(double& pan_before);
+    void apply_layout_carry(LayoutKind next, CarriedPosition c, double pan_before,
+                            double zoom_before);
 
     // The strip's input (spec 6.1, 6.2): the strip branches of on_wheel_scroll,
     // on_hwheel_scroll, on_key_down and pan_by, and WM_VSCROLL. Each moves the

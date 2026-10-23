@@ -224,6 +224,11 @@ public:
         tracker_.navigate(at.page);
     }
 
+    // spec 7.3: the horizontal pan a carry into the strip arrives with (the
+    // outgoing layout's pan, scaled by the zoom ratio). Stored as the desired
+    // pan, so only pan_x_eff clamps it. Not an input: the pin is kept.
+    void set_desired_pan_x(double x) noexcept { desired_pan_x_ = x; }
+
     // spec 7.4.
     StripTabState save() const {
         StripTabState s;

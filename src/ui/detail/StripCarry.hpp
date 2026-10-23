@@ -88,7 +88,10 @@ inline float spread_pan_y_for(const CarriedPosition& c, double left_top_in_union
 // spans both pages; when it overflows the slot, on_paint shifts it by -union_top
 // so pan 0 shows the union's top edge. `right_h < 0` means there is no right page.
 struct SpreadVertical {
-    double left_top_in_union = 0;  // the left page's top below the union's top edge
+    // The left page's top at pan 0, in the painted frame: below the union's top
+    // edge when the union overflows the slot (on_paint's base_y shift), else the
+    // page's slot-centred y.
+    double left_top_in_union = 0;
     double union_h = 0;
 };
 

@@ -12,6 +12,7 @@
 #include "core/detail/PrefetchPlan.hpp"
 #include "ui/ColdStartTimer.hpp"
 #include "ui/PdfCanvasImpl.hpp"
+#include "ui/PdfCanvasLayout.hpp"
 #include "ui/detail/ScrollMath.hpp"
 #include "ui/detail/StripCompletion.hpp"
 #include "ui/detail/StripScrollbar.hpp"
@@ -19,9 +20,12 @@
 
 #include <d2d1.h>
 #include <wrl/client.h>
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <new>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -168,20 +172,39 @@ bool PdfCanvas::strip_active() const noexcept {
 }
 
 void PdfCanvas::switch_layout(LayoutKind next, bool carry_position) {
-    // spec 7.3's carry is captured here first and applied after the fit (spec
-    // deviation 1); not implemented yet.
-    (void)carry_position;
     if (!impl_) return;
     const bool was_strip = impl_->strip;
+
+    // spec 7.3, deviation 1: the carry is captured FIRST, before anything below
+    // -- set_dual_page zeroes the paged pan, the reset forgets the strip's
+    // scroll -- changes the canvas. A tab switch carries nothing.
+    const bool carry = carry_position && impl_->view && impl_->view->page_count() > 0;
+    CarriedPosition carried{};
+    double pan_before  = 0.0;
+    double zoom_before = 0.0;
+    if (carry) {
+        zoom_before = impl_->view->zoom_pct();
+        carried = capture_layout_carry(pan_before);
+    }
 
     // Before anything below: SetWindowPos sends WM_SIZE synchronously, and
     // SetScrollInfo can set WS_VSCROLL on a window that lacks it, so no strip
     // code may still believe it is in charge once the strip is being left.
     impl_->strip = (next == LayoutKind::Strip);
     if (was_strip && !impl_->strip) impl_->strip_view.reset();
-    // A thumb drag in progress ends logically: its queued track messages are
-    // ignored until SB_ENDSCROLL (spec 4.5).
-    if (impl_->thumb_drag_live) impl_->thumb_drag_dead = true;
+    if (impl_->strip) {
+        // Entering the strip, no thumb drag can be in progress: paged layouts
+        // have no scroll bar. A drag that a switch out of the strip ended never
+        // delivered its SB_ENDSCROLL to the strip handler (the canvas was paged
+        // when it arrived), so its flags are cleared here, or the next drag would
+        // be ignored once.
+        impl_->thumb_drag_live = false;
+        impl_->thumb_drag_dead = false;
+    } else if (impl_->thumb_drag_live) {
+        // Leaving it, a thumb drag in progress ends logically: its queued track
+        // messages are ignored until SB_ENDSCROLL (spec 4.5).
+        impl_->thumb_drag_dead = true;
+    }
 
     // spec 3.4, the layout-switch reset: cancel the old layout's outstanding
     // work, forget the paged anchor and wheel latch, drop every bitmap, and bump
@@ -213,9 +236,138 @@ void PdfCanvas::switch_layout(LayoutKind next, bool carry_position) {
                          SWP_NOZORDER | SWP_NOACTIVATE);
         }
     }
-    // The layout itself is built by the kick that follows.
+    // Without a carry the layout itself is built by the kick that follows.
     if (impl_->strip) impl_->strip_view.reset();
+    // spec 7.3, deviation 1: applied after the new layout's fit.
+    if (carry) apply_layout_carry(next, carried, pan_before, zoom_before);
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+std::optional<StripTabState> PdfCanvas::strip_tab_state() const {
+    if (!strip_active()) return std::nullopt;
+    return impl_->strip_view.save();
+}
+
+void PdfCanvas::strip_build_layout() {
+    const auto& sizes = impl_->view->page_sizes();
+    std::vector<StripPageSize> strip_sizes;
+    strip_sizes.reserve(sizes.size());
+    for (const auto& s : sizes) {
+        strip_sizes.push_back(StripPageSize{s.width_pt, s.height_pt});
+    }
+    impl_->strip_view.build(std::move(strip_sizes), impl_->view->zoom_pct());
+}
+
+namespace {
+
+// A page's height and width in DIPs at `zoom`, from the view's page sizes; 0 for
+// an index outside them.
+double page_h_dip(const std::vector<litepdf::core::PageSize>& sizes, int page,
+                  double zoom) {
+    if (page < 0 || static_cast<std::size_t>(page) >= sizes.size()) return 0.0;
+    return static_cast<double>(sizes[static_cast<std::size_t>(page)].height_pt) * zoom;
+}
+
+double page_w_dip(const std::vector<litepdf::core::PageSize>& sizes, int page,
+                  double zoom) {
+    if (page < 0 || static_cast<std::size_t>(page) >= sizes.size()) return 0.0;
+    return static_cast<double>(sizes[static_cast<std::size_t>(page)].width_pt) * zoom;
+}
+
+// spread_vertical for the pair whose left page is `left`, at `zoom`, in a slot
+// `slot_h` DIPs high (on_paint's slot is the full canvas height).
+SpreadVertical spread_vertical_for(const std::vector<litepdf::core::PageSize>& sizes,
+                                   int left, int page_count, double zoom,
+                                   double slot_h) {
+    const int right = dual_page_compute_right(left, page_count);
+    const double h_right = right >= 0 ? page_h_dip(sizes, right, zoom) : -1.0;
+    return spread_vertical(page_h_dip(sizes, left, zoom), h_right, slot_h);
+}
+
+}  // namespace
+
+CarriedPosition PdfCanvas::capture_layout_carry(double& pan_before) {
+    auto* v = impl_->view;
+    pan_before = 0.0;
+    if (impl_->strip) {
+        // From the strip: the derived (or pinned) current page.
+        if (!impl_->strip_view.has_layout()) return CarriedPosition{v->current_page(), 0.0};
+        pan_before = impl_->strip_view.pan_x_eff();
+        return impl_->strip_view.carry();
+    }
+    // From a paged layout: the geometry on_paint would use, from the page sizes
+    // at the zoom on screen, never from the bitmaps -- a toggle that arrives
+    // before the previous layout's render landed still carries.
+    const auto& sizes  = v->page_sizes();
+    const double zoom  = v->zoom_pct();
+    const double vp_h  = strip_viewport_dip().h;
+    const int    total = v->page_count();
+    const double pan_y = impl_->pan_y;
+    if (impl_->dual_page) {
+        // From a spread: measured on the left page alone, in the painted frame.
+        const int left = dual_page_compute_left(v->current_page(), total);
+        const SpreadVertical sv = spread_vertical_for(sizes, left, total, zoom, vp_h);
+        return carry_from_spread(left, pan_y, sv.left_top_in_union,
+                                 page_h_dip(sizes, left, zoom));
+    }
+    // From paged single: a page that fits is centred, one that overflows starts
+    // at the viewport top.
+    const int    cur = v->current_page();
+    const double h   = page_h_dip(sizes, cur, zoom);
+    pan_before = impl_->pan_x;
+    return carry_from_paged_single(cur, pan_y, h <= vp_h ? (vp_h - h) / 2.0 : 0.0, h);
+}
+
+void PdfCanvas::apply_layout_carry(LayoutKind next, CarriedPosition c, double pan_before,
+                                   double zoom_before) {
+    auto* v = impl_->view;
+    const int total = v->page_count();
+    c.page = std::clamp(c.page, 0, total - 1);
+    // The carried page becomes current before the refit, which derives the fit
+    // from the current page: into a spread, the left page of its pair.
+    if (next == LayoutKind::Strip) {
+        set_strip_current_page(c.page);
+    } else if (next == LayoutKind::PagedSpread) {
+        change_current_page(dual_page_compute_left(c.page, total));
+    } else {
+        change_current_page(c.page);
+    }
+    // The new layout's fit (the strip's full width, a spread's half-width slot).
+    // The kick that follows refits again, to the same value.
+    apply_viewport();
+    const double zoom = v->zoom_pct();
+    const double k = zoom_before > 0.0 ? zoom / zoom_before : 1.0;
+    c.offset_dip *= k;
+    const double pan = pan_before * k;
+
+    const DipSize vp = strip_viewport_dip();
+    const auto& sizes = v->page_sizes();
+    switch (next) {
+        case LayoutKind::Strip: {
+            auto& sv = impl_->strip_view;
+            sv.set_viewport(vp.w, vp.h);
+            strip_build_layout();
+            sv.apply_carry(c);            // scroll to the position, pin the page
+            sv.set_desired_pan_x(pan);
+            break;
+        }
+        case LayoutKind::PagedSpread: {
+            // pan_x = 0: the union's horizontal layout differs from the strip's.
+            const int left = dual_page_compute_left(c.page, total);
+            const SpreadVertical sv = spread_vertical_for(sizes, left, total, zoom, vp.h);
+            impl_->pan_x = 0.0f;
+            impl_->pan_y = spread_pan_y_for(c, sv.left_top_in_union, sv.union_h, vp.h);
+            break;
+        }
+        case LayoutKind::PagedSingle:
+            // The switch cleared the anchor, so the paged completion only
+            // re-clamps these against the real bitmap (spec 7.3).
+            impl_->pan_x = clamp_pan(static_cast<float>(pan),
+                                     static_cast<float>(page_w_dip(sizes, c.page, zoom)),
+                                     static_cast<float>(vp.w));
+            impl_->pan_y = paged_pan_y_for(c, page_h_dip(sizes, c.page, zoom), vp.h);
+            break;
+    }
 }
 
 PdfCanvas::DipSize PdfCanvas::strip_viewport_dip() const {
@@ -238,13 +390,7 @@ void PdfCanvas::strip_kick(const StripKickActions& a, const StripTabState* resto
     const DipSize vp = strip_viewport_dip();
     sv.set_viewport(vp.w, vp.h);
     if (!sv.has_layout()) {
-        const auto& sizes = impl_->view->page_sizes();
-        std::vector<StripPageSize> strip_sizes;
-        strip_sizes.reserve(sizes.size());
-        for (const auto& s : sizes) {
-            strip_sizes.push_back(StripPageSize{s.width_pt, s.height_pt});
-        }
-        sv.build(std::move(strip_sizes), impl_->view->zoom_pct());
+        strip_build_layout();
     } else if (a.relayout) {
         sv.relayout(impl_->view->zoom_pct());   // spec 4.5
     }

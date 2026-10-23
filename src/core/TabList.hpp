@@ -14,8 +14,11 @@
 #include <cstddef>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
+
+#include "ui/detail/StripLayout.hpp"   // StripTabState; standard library only
 
 namespace litepdf::core {
 
@@ -38,6 +41,11 @@ struct Tab {
     // window inside the F4 handler — we defensively read the live
     // pane->visible() snapshot when switching away.
     bool  thumb_visible    = false;
+    // #55: the continuous strip's position (spec 7.4), saved by the outgoing
+    // snapshot while the strip shows this tab and restored by its TabSwitch
+    // kick. Empty when the tab last left a paged layout. In memory only: never
+    // written to session.json (spec 7.2).
+    std::optional<litepdf::ui::StripTabState> strip_state;
 
     // Out-of-line so DocumentView can stay forward-declared here: the
     // unique_ptr<DocumentView> member needs the full type to destroy.

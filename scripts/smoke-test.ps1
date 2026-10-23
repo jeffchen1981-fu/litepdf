@@ -1019,6 +1019,162 @@ try {
     }
     Write-Host "[OK] continuous strip: resize keeps the viewport-top point: pos $pos0 -> $($st.cs.pos) (expected $posExpected), page box 30"
     Stop-LitePDF -Process $procStrip -Step "strip navigation"
+    Start-Sleep -Milliseconds 500
+
+    # Rows 13-17: layout transitions and per-tab strip state (spec 7.3, 7.4, 9.3).
+    # One fresh large.pdf launch; the rows run in order, each starting from the
+    # state the previous one left. IDM_VIEW_DUAL_PAGE = 40062, IDM_ZOOM_IN = 40010,
+    # IDM_TAB_GOTO_1 = 40033, IDM_TAB_GOTO_2 = 40034.
+    $procStrip = Start-StripLaunch -Fixture $largeFixture -Step "strip transitions"
+
+    # Row 13: two-page on, then off, from mid-page (spec 9.3, deviation 6). At a
+    # Custom zoom two presets above FitWidth the spread overflows the viewport, so
+    # the in-page offset has somewhere to go; page 30 (index 29) is a spread's left
+    # page. Three wheel notches (144 DIPs at the default 3 lines) put the viewport
+    # top mid-page.
+    $cs = Read-UxProbeJson -Probe canvas-scroll
+    if ($null -eq $cs) { throw "precondition: canvas-scroll probe failed before Zoom In" }
+    $zFit = ($cs.client_w * 96.0 / $cs.dpi) / 612.0
+    $zCustom = $null
+    $above = 0
+    foreach ($preset in $stripZoomPresets) {
+        if ($preset -gt $zFit + 1e-4) {
+            $above++
+            if ($above -eq 2) { $zCustom = $preset; break }
+        }
+    }
+    if ($null -eq $zCustom) { throw "no second zoom preset above $zFit" }
+    & $uxProbe send-cmd 40010 2 | Out-Null
+    $zoomedMax = Get-StripExpectedHeight -Zoom $zCustom
+    $st = Wait-StripState -Until { param($cs, $pb) [Math]::Abs(($cs.max + 1) - $zoomedMax) -le 2 }
+    if ($null -eq $st.cs -or [Math]::Abs(($st.cs.max + 1) - $zoomedMax) -gt 2) {
+        throw "Zoom In twice: expected max + 1 = $zoomedMax (+/- 2) at zoom $zCustom : $(Format-StripState $st)"
+    }
+    $customAnchor = [Math]::Round(29 * (792.0 * $zCustom + 8.0))
+    & $uxProbe page-box-go 30 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $pb.text -eq "30" -and [Math]::Abs($cs.pos - $customAnchor) -le 1 }
+    if ($null -eq $st.cs -or $st.pb.text -ne "30" -or [Math]::Abs($st.cs.pos - $customAnchor) -gt 1) {
+        throw "Ctrl+G 30 at zoom $zCustom : expected page box 30 and pos $customAnchor (+/- 1): $(Format-StripState $st)"
+    }
+    & $uxProbe canvas-wheel -120 3 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) [Math]::Abs($cs.pos - ($customAnchor + 144)) -le 1 }
+    if ($null -eq $st.cs -or [Math]::Abs($st.cs.pos - ($customAnchor + 144)) -gt 1 -or $st.pb.text -ne "30") {
+        throw "three wheel notches from anchor(29): expected pos $($customAnchor + 144) (+/- 1) and page box 30: $(Format-StripState $st)"
+    }
+    $midPos = $st.cs.pos
+    & $uxProbe send-cmd 40062 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) -not $cs.vscroll }
+    if ($null -eq $st.cs -or $st.cs.vscroll) { throw "two-page on: the scroll bar stayed: $(Format-StripState $st)" }
+    & $uxProbe send-cmd 40062 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll -and $pb.text -eq "30" -and [Math]::Abs($cs.pos - $midPos) -le 1 }
+    if ($null -eq $st.cs -or -not $st.cs.vscroll -or $st.pb.text -ne "30" -or [Math]::Abs($st.cs.pos - $midPos) -gt 1) {
+        throw "two-page on, then off, from mid-page: expected the strip, page box 30 and pos $midPos (+/- 1): $(Format-StripState $st)"
+    }
+    Write-Host "[OK] continuous strip: two-page on, then off, from mid-page: page box 30, pos $midPos -> $($st.cs.pos)"
+
+    # Row 14: rapid toggling (Review Focus 1). Ten toggles posted back to back from
+    # one process end in the strip (an even count); then nothing late -- a strip
+    # completion, a paged completion, a reschedule -- may flip the state or the
+    # range. One more toggle leaves the strip, and nothing may bring the bar back.
+    & $uxProbe send-cmd 40062 10 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll -and $pb.text -ne "" }
+    if ($null -eq $st.cs -or -not $st.cs.vscroll -or $null -eq $st.pb -or $st.pb.text -eq "") {
+        throw "ten two-page toggles: expected the strip and a page box within 5 s: $(Format-StripState $st)"
+    }
+    $toggleMax = $st.cs.max
+    for ($i = 0; $i -lt 5; $i++) {
+        Start-Sleep -Milliseconds 100
+        $cs = Read-UxProbeJson -Probe canvas-scroll
+        if ($null -eq $cs -or -not $cs.vscroll -or $cs.max -ne $toggleMax) {
+            throw "after ten two-page toggles the strip changed (reading $($i + 1) of 5, max was $toggleMax): $($cs | ConvertTo-Json -Compress)"
+        }
+    }
+    $procStrip.Refresh()
+    if ($procStrip.HasExited) { throw "litepdf.exe exited after ten two-page toggles (exit code $($procStrip.ExitCode))" }
+    $toggleDumps = @(Get-NewCrashDumps)
+    if ($toggleDumps.Count -gt 0) { throw "ten two-page toggles left $($toggleDumps.Count) new crash dump(s)" }
+    & $uxProbe send-cmd 40062 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) -not $cs.vscroll }
+    if ($null -eq $st.cs -or $st.cs.vscroll) { throw "the eleventh toggle did not leave the strip: $(Format-StripState $st)" }
+    for ($i = 0; $i -lt 5; $i++) {
+        Start-Sleep -Milliseconds 100
+        $cs = Read-UxProbeJson -Probe canvas-scroll
+        if ($null -eq $cs -or $cs.vscroll) {
+            throw "the scroll bar came back after leaving the strip (reading $($i + 1) of 5): $($cs | ConvertTo-Json -Compress)"
+        }
+    }
+    Write-Host "[OK] continuous strip: ten rapid two-page toggles end in the strip (max $toggleMax, stable); one more leaves it for good"
+
+    # Row 15: a tab with two-page on has no scroll bar (spec 9.3). Tab 1 is in the
+    # spread now: back to the strip first. Then bookmarks.pdf is forwarded to the
+    # running instance as a second tab, which must enter the strip -- without that
+    # the row would pass in paged mode -- and two-page on removes the bar.
+    & $uxProbe send-cmd 40062 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll }
+    if ($null -eq $st.cs -or -not $st.cs.vscroll) { throw "precondition: tab 1 did not return to the strip: $(Format-StripState $st)" }
+    $bookmarksStrip = Join-Path $repoRoot "tests/fixtures/bookmarks.pdf"
+    $fwd = Start-Process -FilePath $exe -ArgumentList @($bookmarksStrip) -PassThru -NoNewWindow
+    $null = $fwd.Handle
+    if (-not $fwd.WaitForExit(5000)) { throw "the forwarding launch for bookmarks.pdf did not exit within 5 s" }
+    $deadline = (Get-Date).AddSeconds(5)
+    $tabs = $null
+    $cs = $null
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 100
+        $tabs = Read-UxProbeJson -Probe tab-enum
+        $cs = Read-UxProbeJson -Probe canvas-scroll
+        if ($null -ne $tabs -and $tabs.count -eq 2 -and $null -ne $cs -and $cs.vscroll) { break }
+    }
+    if ($null -eq $tabs -or $tabs.count -ne 2 -or $null -eq $cs -or -not $cs.vscroll) {
+        throw "forwarded bookmarks.pdf: expected 2 tabs and the strip within 5 s: tab-enum $($tabs | ConvertTo-Json -Compress), canvas-scroll $($cs | ConvertTo-Json -Compress)"
+    }
+    & $uxProbe send-cmd 40062 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) -not $cs.vscroll }
+    if ($null -eq $st.cs -or $st.cs.vscroll) { throw "two-page on in the second tab: the scroll bar stayed: $(Format-StripState $st)" }
+    Write-Host "[OK] continuous strip: the forwarded tab entered the strip; two-page on removes the scroll bar"
+
+    # Row 16: switching back to a strip tab restores the scroll bar (spec 9.3), and
+    # tab 1's own position: row 13's page and offset, which every carry since kept
+    # at the unchanged Custom zoom.
+    & $uxProbe send-cmd 40033 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll -and $pb.text -eq "30" -and [Math]::Abs($cs.pos - $midPos) -le 1 }
+    if ($null -eq $st.cs -or -not $st.cs.vscroll -or $st.pb.text -ne "30" -or [Math]::Abs($st.cs.pos - $midPos) -gt 1) {
+        throw "switch back to the strip tab: expected the scroll bar, page box 30 and pos $midPos (+/- 1): $(Format-StripState $st)"
+    }
+    Write-Host "[OK] continuous strip: switching back to the strip tab: scroll bar, page box 30, pos $($st.cs.pos)"
+
+    # Row 17: strip tab A at page 20, strip tab B keeps its own page (spec 9.3). Tab
+    # 2 is still in the spread: back to the strip, go to page 3 and record the
+    # position. Tab 1 goes to page 20; back on tab 2 without scrolling, both the
+    # page box and the position are tab 2's own. The page box alone follows
+    # DocumentView::current_page, which survives a lost scroll position.
+    & $uxProbe send-cmd 40034 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) -not $cs.vscroll }
+    if ($null -eq $st.cs -or $st.cs.vscroll) { throw "precondition: tab 2 is not in the spread: $(Format-StripState $st)" }
+    & $uxProbe send-cmd 40062 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll }
+    if ($null -eq $st.cs -or -not $st.cs.vscroll) { throw "precondition: tab 2 did not enter the strip: $(Format-StripState $st)" }
+    & $uxProbe page-box-go 3 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $pb.text -eq "3" }
+    if ($null -eq $st.cs -or $st.pb.text -ne "3") { throw "Ctrl+G 3 in tab 2: expected page box 3: $(Format-StripState $st)" }
+    $tab2Pos = $st.cs.pos
+    & $uxProbe send-cmd 40033 | Out-Null
+    # Tab 2 showed page 3 in the strip too: the switch has landed once the page box
+    # shows something else.
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll -and $pb.text -ne "3" }
+    if ($null -eq $st.cs -or -not $st.cs.vscroll -or $st.pb.text -eq "3") {
+        throw "precondition: tab 1 is not shown in the strip: $(Format-StripState $st)"
+    }
+    & $uxProbe page-box-go 20 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $pb.text -eq "20" }
+    if ($null -eq $st.cs -or $st.pb.text -ne "20") { throw "Ctrl+G 20 in tab 1: expected page box 20: $(Format-StripState $st)" }
+    & $uxProbe send-cmd 40034 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll -and $pb.text -eq "3" -and [Math]::Abs($cs.pos - $tab2Pos) -le 1 }
+    if ($null -eq $st.cs -or -not $st.cs.vscroll -or $st.pb.text -ne "3" -or [Math]::Abs($st.cs.pos - $tab2Pos) -gt 1) {
+        throw "strip tab B after tab A went to page 20: expected page box 3 (not 20) and pos $tab2Pos (+/- 1): $(Format-StripState $st)"
+    }
+    Write-Host "[OK] continuous strip: tab A at page 20, tab B keeps page 3 and pos $($st.cs.pos) (recorded $tab2Pos)"
+    Stop-LitePDF -Process $procStrip -Step "strip transitions"
 } finally {
     if ($null -ne $procStrip -and -not $procStrip.HasExited) {
         Stop-Process -Id $procStrip.Id -Force -ErrorAction SilentlyContinue
