@@ -212,9 +212,11 @@ public:
         return r;
     }
 
-    // spec 6.1: something to pan, vertically or horizontally.
+    // spec 6.1: something to pan, vertically or horizontally. A page within
+    // kStripFitTolDip of the viewport width fits (StripScroll.hpp).
     bool can_pan() const {
-        return layout_.total_height() > vp_h_ || layout_.widest(visible()) > vp_w_;
+        return layout_.total_height() > vp_h_ ||
+               layout_.widest(visible()) > vp_w_ + kStripFitTolDip;
     }
 
     // spec 7.3.
