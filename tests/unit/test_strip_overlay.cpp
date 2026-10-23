@@ -64,6 +64,16 @@ TEST_CASE("StripViewport: page_at finds the page under a point") {
     CHECK_FALSE(v.page_at(150, 50).has_value());
 }
 
+TEST_CASE("StripViewport: page_at ignores points outside the viewport") {
+    // Page 0 is {0, 8, 400, 200}: wider and taller than the 300x150 viewport.
+    StripViewport v = make(std::vector<StripPageSize>(2, StripPageSize{400, 200}), 300, 150);
+    CHECK(v.page_at(150, 50) == std::optional<int>(0));
+    CHECK_FALSE(v.page_at(350, 50).has_value());   // right of the viewport (scroll bar side)
+    CHECK_FALSE(v.page_at(150, 170).has_value());  // below the viewport
+    CHECK_FALSE(v.page_at(-1, 50).has_value());    // left of the viewport
+    CHECK(v.page_at(299.9, 50) == std::optional<int>(0));
+}
+
 TEST_CASE("StripViewport: retained_for_background caps the visible pages by area") {
     StripViewport v = make(sizes_b(), 300, 300);
     v.scroll_to(788);

@@ -216,8 +216,10 @@ public:
 
     // spec 7.1: the page of V whose page_rect contains the viewport-relative point
     // (left and top edges inclusive, right and bottom exclusive). Nullopt in a gap,
-    // beside a narrow page, or with no layout.
+    // beside a narrow page, with no layout, or outside the viewport (a page wider
+    // than the viewport must not claim the canvas's own scroll bar).
     std::optional<int> page_at(double x, double y) const {
+        if (x < 0 || x >= vp_w_ || y < 0 || y >= vp_h_) return std::nullopt;
         const StripRange v = visible();
         for (int p = v.first; p <= v.last; ++p) {
             const StripPageRect r = page_rect(p);
