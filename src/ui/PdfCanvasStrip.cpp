@@ -394,12 +394,20 @@ void PdfCanvas::strip_kick(const StripKickActions& a, const StripTabState* resto
     // depend on one having arrived since the layout switch.
     const DipSize vp = strip_viewport_dip();
     sv.set_viewport(vp.w, vp.h);
-    if (!sv.has_layout()) {
+    const bool built_here = !sv.has_layout();
+    if (built_here) {
         strip_build_layout();
     } else if (a.relayout) {
         sv.relayout(impl_->view->zoom_pct());   // spec 4.5
     }
-    if (restore) sv.restore(*restore);          // spec 7.4
+    if (restore) {
+        sv.restore(*restore);                   // spec 7.4
+    } else if (built_here) {
+        // spec 7.4: a tab entering the strip with no saved strip position starts
+        // at its current page (scroll = anchor, pinned), not at the top. A first
+        // open is unaffected: anchor(0) is scroll 0.
+        sv.navigate(impl_->view->current_page());
+    }
     if (a.restyle) {
         // spec 5.2: cancel every Pending request, keep the bitmaps as stale.
         impl_->strip_set.state.change_render_params();

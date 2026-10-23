@@ -147,6 +147,12 @@ private:
     // switch within one tab (spec 7.3).
     void apply_effective_layout(litepdf::core::Tab* tab, bool carry_position);
 
+    // #55, spec 7.3: the View > Continuous Scroll item's enabled / checked state,
+    // for the active tab. The one predicate both the WM_INITMENUPOPUP arm and the
+    // IDM_VIEW_CONTINUOUS handler read, so the handler refuses exactly when the
+    // item is greyed and a posted command cannot toggle it either (the #48 rule).
+    litepdf::ui::ContinuousMenuState continuous_item_state();
+
     // Tab-close handler registered with TabManager (from middle-click).
     void on_tab_close_request(int index);
 

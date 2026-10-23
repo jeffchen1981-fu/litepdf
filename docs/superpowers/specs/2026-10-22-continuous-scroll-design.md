@@ -136,7 +136,7 @@ changes the zoom calls `refresh_zoom_readout` in the same message, as the paged 
 | `TabSwitch` | `on_tab_switch` (863), different index only | A refit event: `apply_viewport`, refresh the readout, restore the tab's strip position (§7.4), re-layout, reschedule |
 | `Restore` | session restore (1118) | A refit event (refresh the readout), then navigate to the saved page (§6.3), then reschedule |
 | `Restyle` | invert colours (1727) | Cancel all, keep bitmaps as stale, reschedule (§5.2) |
-| `Spread` | two-page toggle (1745) | `apply_effective_layout` has already run, in either direction. Turning spread on leaves the strip: the kick is paged. Turning it off with the preference on enters the strip: refit, refresh the readout, re-layout, reschedule — **not** a tab-position restore, which would overwrite the §7.3 carry `apply_effective_layout` just applied. |
+| `Spread` | two-page toggle (1745) and the Continuous Scroll menu item: a within-tab layout switch `apply_effective_layout` has applied | `apply_effective_layout` has already run, in either direction. Turning spread on leaves the strip: the kick is paged. Turning it off with the preference on enters the strip: refit, refresh the readout, re-layout, reschedule — **not** a tab-position restore, which would overwrite the §7.3 carry `apply_effective_layout` just applied. |
 
 A new `kick_render` call site must pick a reason. A call that defaults to one would compile, and
 would silently do the wrong thing in the strip.
@@ -509,6 +509,8 @@ in reading order.
 - A missing value means the default: 0 in PR 1–3, 1 from PR 4.
 - It is read once at start-up, and written when the menu item is toggled (PR 3 onward). A
   registry change while the app runs takes effect at the next start.
+- A failed write (`ViewPrefs::save()` returns false) keeps the in-memory value for this session:
+  the menu item still applies the new layout, and the next start reads whatever the registry holds.
 - `session.json` is **unchanged**. Its parser rejects unknown keys, so a new key would make an
   older build drop the whole session.
 
@@ -516,7 +518,8 @@ in reading order.
 
 - **Menu item (PR 3).** View menu: `&Continuous Scroll` below `&Two-Page Spread`, checked when the
   preference is on, with no accelerator. It is greyed when no document is open, or when the
-  format missed the §4.4 gate.
+  format missed the §4.4 gate. The handler refuses exactly when the item is greyed, so a posted
+  command cannot toggle it either.
 - **Effective layout per tab** (`EffectiveLayout`):
 
 | Condition | Layout |
@@ -569,6 +572,13 @@ strip").
   `pan_x/pan_y` today) and restored by a `TabSwitch` kick. A background tab whose viewport or DPI
   changed then returns to the same place after re-layout. A same-index switch restores nothing
   (its kick is `Navigate`).
+- A tab that enters the strip with no saved strip position starts at its current page: when
+  `strip_kick` builds a fresh layout and has no `restore`, it navigates to the view's current page
+  (scroll = `anchor(page)`, pinned, §6.3), so a background paged tab that meets the turned-on
+  preference at its next `on_tab_switch` keeps its page. A first open (page 0) is unaffected. A tab
+  left in the strip that comes back paged (the preference was turned off meanwhile) snapshots
+  `pan_x = pan_y = 0` when the canvas showed the strip, and lands at its current page's top. The
+  in-page offset is not carried across a background tab's layout change (§10).
 - #159 (PR 3): in continuous mode the trim keeps all of V, through the new set-taking overload;
   `shown_pages` is unchanged, and a strip-specific helper returns V, capped at the L1 count cap.
 - The thumbnail highlight follows the derived current page through the existing observer. §5.2
@@ -768,6 +778,9 @@ first callback):
   large document is O(N) on the UI thread (§4.4).
 - A null completion that cannot be posted leaves a page blank until it re-enters V (§5.3).
 - Changing the registry value while the app runs takes effect at the next start (§7.2).
+- A background tab's layout change (the preference toggled while it was not shown) keeps its
+  current page but not the in-page offset: it re-enters the strip at `anchor(page)` or comes back
+  paged at its page's top (§7.4). Only a switch within the active tab carries the offset (§7.3).
 - A text build the worker skips because a P0 is queued (#98 skip rule 3) is not retried; a press
   on that page builds its text synchronously, as in paged mode (§5.2).
 - A carry into a spread whose right page is taller than its left can be cut short: the left

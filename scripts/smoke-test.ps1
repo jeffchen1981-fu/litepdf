@@ -676,7 +676,10 @@ function Format-StripState {
 function Start-StripLaunch {
     param(
         [string]$Fixture,
-        [string]$Step
+        [string]$Step,
+        # ContinuousScroll is 0: wait for the paged first page instead (no scroll bar,
+        # a page box reading 1).
+        [switch]$Paged
     )
     Write-Host "Launching for continuous strip smoke ($Step): $exe $Fixture"
     $p = Start-Process -FilePath $exe -ArgumentList @($Fixture) -PassThru -NoNewWindow
@@ -698,12 +701,67 @@ function Start-StripLaunch {
         Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
         throw "litepdf.exe did not create a main window for the $Step step"
     }
+    if ($Paged) {
+        $st = Wait-StripState -Until { param($cs, $pb) $cs.present -and -not $cs.vscroll -and $pb.text -eq "1" }
+        if ($null -eq $st.cs -or $st.cs.vscroll -or $st.pb.text -ne "1") {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            throw "the $Step launch shows no paged first page 5 s after opening $Fixture : $(Format-StripState $st)"
+        }
+        return $p
+    }
     $st = Wait-StripState -Until { param($cs, $pb) $cs.present -and $cs.vscroll -and $cs.page -gt 0 }
     if ($null -eq $st.cs -or -not ($st.cs.vscroll -and $st.cs.page -gt 0)) {
         Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
         throw "the $Step launch shows no laid-out strip 5 s after opening $Fixture : $(Format-StripState $st)"
     }
     return $p
+}
+
+# The ContinuousScroll value in the registry, as the menu item's write oracle; $null
+# when the value is absent.
+function Get-ContinuousPref {
+    $v = Get-ItemProperty -Path $stripKey -Name ContinuousScroll -ErrorAction SilentlyContinue
+    if ($null -eq $v) { return $null }
+    return $v.ContinuousScroll
+}
+
+# Polls the registry value until it equals $Expected or $TimeoutSeconds expires;
+# returns the last reading.
+function Wait-ContinuousPref {
+    param(
+        [int]$Expected,
+        [int]$TimeoutSeconds = 5
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $v = Get-ContinuousPref
+    while ((Get-Date) -lt $deadline -and $v -ne $Expected) {
+        Start-Sleep -Milliseconds 100
+        $v = Get-ContinuousPref
+    }
+    return $v
+}
+
+# One menu-state reading for the given command ids, parsed; $null when the probe
+# printed something else. Items are read as $ms.items.'<id>'.
+function Read-MenuState {
+    param([string[]]$Ids)
+    $raw = & $uxProbe menu-state @Ids 2>&1 | Out-String
+    try { return ($raw | ConvertFrom-Json -ErrorAction Stop) } catch { return $null }
+}
+
+# Forwards $Path to the running instance as another tab (single-instance forwarding).
+# The forwarder must exit 0 within 10 s; one still running at the deadline is killed,
+# so no stray instance outlives the run.
+function Send-ForwardedFile {
+    param([string]$Path)
+    $fwd = Start-Process -FilePath $exe -ArgumentList @($Path) -PassThru -NoNewWindow
+    $null = $fwd.Handle
+    if (-not $fwd.WaitForExit(10000)) {
+        Stop-Process -Id $fwd.Id -Force -ErrorAction SilentlyContinue
+        [void]$fwd.WaitForExit(5000)
+        throw "the forwarder for $Path did not exit within 10 s (killed)"
+    }
+    if ($fwd.ExitCode -ne 0) { throw "the forwarder for $Path exited with code $($fwd.ExitCode), expected 0" }
 }
 
 # large.pdf is 500 US Letter pages (612 x 792 pt). At zoom z the strip is
@@ -1377,6 +1435,183 @@ try {
     } finally {
         if ($null -ne $stripClipSaved) { Set-Clipboard -Value $stripClipSaved } else { Set-Clipboard -Value $null }
     }
+    Start-Sleep -Milliseconds 500
+
+    # Rows 21-23: the View > Continuous Scroll menu item (spec 7.2, 7.3, 9.3).
+    # IDM_VIEW_CONTINUOUS = 40066, IDM_VIEW_DUAL_PAGE = 40062, IDM_ZOOM_IN = 40010,
+    # IDM_TAB_CLOSE = 40030. One large.pdf launch with ContinuousScroll = 1; each row
+    # starts from the state the previous one left. The registry value is the oracle
+    # for the preference write, read with Get-ItemProperty.
+    Set-ItemProperty -Path $stripKey -Name ContinuousScroll -Value 1 -Type DWord
+    $procStrip = Start-StripLaunch -Fixture $largeFixture -Step "continuous menu item"
+
+    # Row 21: the transition through the menu item (spec 9.3). Zoom In twice puts the
+    # zoom two presets above FitWidth, so the page overflows the viewport and the
+    # in-page offset has somewhere to go (as in row 13); three wheel notches put the
+    # viewport top mid-page 30. The item turns the preference off (the paged layout)
+    # and on again (the strip), and the position comes back.
+    $cs = Read-UxProbeJson -Probe canvas-scroll
+    if ($null -eq $cs) { throw "precondition: canvas-scroll probe failed before Zoom In" }
+    $zFit = ($cs.client_w * 96.0 / $cs.dpi) / 612.0
+    $zMenu = $null
+    $above = 0
+    foreach ($preset in $stripZoomPresets) {
+        if ($preset -gt $zFit + 1e-4) {
+            $above++
+            if ($above -eq 2) { $zMenu = $preset; break }
+        }
+    }
+    if ($null -eq $zMenu) { throw "no second zoom preset above $zFit" }
+    & $uxProbe send-cmd 40010 2 | Out-Null
+    $menuMax = Get-StripExpectedHeight -Zoom $zMenu
+    $st = Wait-StripState -Until { param($cs, $pb) [Math]::Abs(($cs.max + 1) - $menuMax) -le 2 }
+    if ($null -eq $st.cs -or [Math]::Abs(($st.cs.max + 1) - $menuMax) -gt 2) {
+        throw "Zoom In twice: expected max + 1 = $menuMax (+/- 2) at zoom $zMenu : $(Format-StripState $st)"
+    }
+    $menuAnchor = [Math]::Round(29 * (792.0 * $zMenu + 8.0))
+    & $uxProbe page-box-go 30 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $pb.text -eq "30" -and [Math]::Abs($cs.pos - $menuAnchor) -le 1 }
+    if ($null -eq $st.cs -or $st.pb.text -ne "30" -or [Math]::Abs($st.cs.pos - $menuAnchor) -gt 1) {
+        throw "Ctrl+G 30 at zoom $zMenu : expected page box 30 and pos $menuAnchor (+/- 1): $(Format-StripState $st)"
+    }
+    & $uxProbe canvas-wheel -120 3 | Out-Null
+    $menuNotchPos = $menuAnchor + 3 * $stripNotchDip
+    $st = Wait-StripState -Until { param($cs, $pb) [Math]::Abs($cs.pos - $menuNotchPos) -le 1 }
+    if ($null -eq $st.cs -or [Math]::Abs($st.cs.pos - $menuNotchPos) -gt 1 -or $st.pb.text -ne "30") {
+        throw "three wheel notches from anchor(29): expected pos $menuNotchPos (+/- 1) and page box 30: $(Format-StripState $st)"
+    }
+    $menuPos = $st.cs.pos
+    & $uxProbe send-cmd 40066 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) -not $cs.vscroll }
+    if ($null -eq $st.cs -or $st.cs.vscroll) { throw "Continuous Scroll off: the scroll bar stayed: $(Format-StripState $st)" }
+    $pref = Wait-ContinuousPref -Expected 0
+    if ($pref -ne 0) { throw "Continuous Scroll off: the registry value is '$pref', expected 0" }
+    $ms = Read-MenuState -Ids @("40066")
+    if ($null -eq $ms -or -not $ms.items.'40066'.found -or $ms.items.'40066'.checked) {
+        throw "Continuous Scroll off: expected the item present and not checked: $($ms | ConvertTo-Json -Compress -Depth 5)"
+    }
+    & $uxProbe send-cmd 40066 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll -and $pb.text -eq "30" -and [Math]::Abs($cs.pos - $menuPos) -le 1 }
+    if ($null -eq $st.cs -or -not $st.cs.vscroll -or $st.pb.text -ne "30" -or [Math]::Abs($st.cs.pos - $menuPos) -gt 1) {
+        throw "Continuous Scroll off, then on, from mid-page: expected the strip, page box 30 and pos $menuPos (+/- 1): $(Format-StripState $st)"
+    }
+    $pref = Wait-ContinuousPref -Expected 1
+    if ($pref -ne 1) { throw "Continuous Scroll on: the registry value is '$pref', expected 1" }
+    Write-Host "[OK] continuous strip: the menu item off, then on, from mid-page: registry 0 then 1, page box 30, pos $menuPos -> $($st.cs.pos)"
+
+    # Row 22: from a two-page tab (Review Focus 2). Two-page on leaves the strip (the
+    # spread wins over the preference); the item then turns the spread off and keeps
+    # the preference on, so the strip returns, the preference stays 1, and the item
+    # reads checked while Two-Page Spread reads unchecked.
+    & $uxProbe send-cmd 40062 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) -not $cs.vscroll }
+    if ($null -eq $st.cs -or $st.cs.vscroll) { throw "precondition: two-page on did not leave the strip: $(Format-StripState $st)" }
+    & $uxProbe send-cmd 40066 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll -and $pb.text -eq "30" }
+    if ($null -eq $st.cs -or -not $st.cs.vscroll -or $st.pb.text -ne "30") {
+        throw "Continuous Scroll from a two-page tab: expected the strip and page box 30: $(Format-StripState $st)"
+    }
+    $pref = Get-ContinuousPref
+    if ($pref -ne 1) { throw "Continuous Scroll from a two-page tab: the registry value is '$pref', expected 1 (the item must not turn the preference off)" }
+    $ms = Read-MenuState -Ids @("40062", "40066")
+    if ($null -eq $ms -or -not $ms.items.'40062'.found -or $ms.items.'40062'.checked -or
+        -not $ms.items.'40066'.found -or -not $ms.items.'40066'.checked) {
+        throw "Continuous Scroll from a two-page tab: expected Two-Page Spread unchecked and Continuous Scroll checked: $($ms | ConvertTo-Json -Compress -Depth 5)"
+    }
+    Write-Host "[OK] continuous strip: the item from a two-page tab: the strip, page box 30, preference still 1, Two-Page unchecked, item checked"
+
+    # Row 23: no document greys the item and the handler refuses (the one enable
+    # predicate). The format half of the predicate has no fixture and is covered by
+    # the unit tests. A refused command changes nothing, so a FIFO barrier (Status
+    # Bar, 40064: the canvas height changes) shows that it ran before the oracle is
+    # read.
+    & $uxProbe send-cmd 40030 | Out-Null   # IDM_TAB_CLOSE
+    $pbRaw = Wait-UxProbeState -Probe page-box -Until { param($s) $s.present -and $s.text -eq "" }
+    $pb = $null
+    try { $pb = $pbRaw | ConvertFrom-Json -ErrorAction Stop } catch { }
+    if ($null -eq $pb -or -not $pb.present -or $pb.text -ne "") { throw "closing the last tab: the page box did not empty: $pbRaw" }
+    $ms = Read-MenuState -Ids @("40066")
+    if ($null -eq $ms -or -not $ms.items.'40066'.found -or -not $ms.items.'40066'.grayed) {
+        throw "no document: expected Continuous Scroll present and grayed: $($ms | ConvertTo-Json -Compress -Depth 5)"
+    }
+    $cs = Read-UxProbeJson -Probe canvas-scroll
+    if ($null -eq $cs) { throw "precondition: canvas-scroll probe failed with no document" }
+    $barrierH = $cs.client_h
+    & $uxProbe send-cmd 40066 | Out-Null
+    & $uxProbe send-cmd 40064 | Out-Null
+    $st = Wait-StripState -Until { param($c, $pb) $c.client_h -ne $barrierH }
+    if ($null -eq $st.cs -or $st.cs.client_h -eq $barrierH) {
+        throw "FIFO barrier: the canvas height did not change after Status Bar: $(Format-StripState $st)"
+    }
+    $pref = Get-ContinuousPref
+    if ($pref -ne 1) { throw "no document: the refused command changed the registry value to '$pref', expected 1" }
+    & $uxProbe send-cmd 40064 | Out-Null
+    $st = Wait-StripState -Until { param($c, $pb) $c.client_h -eq $barrierH }
+    if ($null -eq $st.cs -or $st.cs.client_h -ne $barrierH) {
+        throw "FIFO barrier: the status bar did not come back: $(Format-StripState $st)"
+    }
+    $procStrip.Refresh()
+    if ($procStrip.HasExited) { throw "litepdf.exe exited after the refused Continuous Scroll command (exit code $($procStrip.ExitCode))" }
+    Write-Host "[OK] continuous strip: with no document the item is grayed and the command changes nothing (registry 1)"
+    Stop-LitePDF -Process $procStrip -Step "continuous menu item"
+    Start-Sleep -Milliseconds 500
+
+    # Row 24: a background paged tab keeps its page when the preference turns on
+    # (Review Focus 3). A fresh launch with ContinuousScroll = 0: tab 1 is large.pdf
+    # at page 30, and simple.pdf is forwarded as tab 2 (the active one). The item
+    # turns the preference on: tab 2, the shown tab, enters the strip. Switching to
+    # tab 1, which has been paged and in the background, builds its strip at its
+    # current page 30: the scroll position is anchor(29) at FitWidth, not the top.
+    # Turning the preference off again and switching to tab 2 (last shown in the
+    # strip) lands in the paged layout on its page 1.
+    Set-ItemProperty -Path $stripKey -Name ContinuousScroll -Value 0 -Type DWord
+    $procStrip = Start-StripLaunch -Fixture $largeFixture -Step "continuous menu item, background tab" -Paged
+    & $uxProbe page-box-go 30 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $pb.text -eq "30" }
+    if ($null -eq $st.cs -or $st.pb.text -ne "30") { throw "Ctrl+G 30 in the paged tab: expected page box 30: $(Format-StripState $st)" }
+    $bgSimple = Join-Path $repoRoot "tests/fixtures/simple.pdf"
+    Send-ForwardedFile -Path $bgSimple
+    $deadline = (Get-Date).AddSeconds(5)
+    $tabs = $null
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 100
+        $tabs = Read-UxProbeJson -Probe tab-enum
+        if ($null -ne $tabs -and $tabs.count -eq 2 -and $tabs.active -eq 1) { break }
+    }
+    if ($null -eq $tabs -or $tabs.count -ne 2 -or $tabs.active -ne 1) {
+        throw "forwarded simple.pdf: expected 2 tabs and the second active within 5 s: tab-enum $($tabs | ConvertTo-Json -Compress)"
+    }
+    & $uxProbe send-cmd 40066 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll }
+    if ($null -eq $st.cs -or -not $st.cs.vscroll) { throw "Continuous Scroll on: tab 2 did not enter the strip: $(Format-StripState $st)" }
+    $pref = Wait-ContinuousPref -Expected 1
+    if ($pref -ne 1) { throw "Continuous Scroll on: the registry value is '$pref', expected 1" }
+    & $uxProbe send-cmd 40033 | Out-Null
+    $bgExpected = { param($s)
+        $z = ($s.client_w * 96.0 / $s.dpi) / 612.0
+        29 * (792.0 * $z + 8.0)
+    }
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll -and $pb.text -eq "30" -and [Math]::Abs($cs.pos - [Math]::Round((& $bgExpected $cs))) -le 1 }
+    if ($null -eq $st.cs) { throw "switch to the background tab: canvas-scroll probe failed: $(Format-StripState $st)" }
+    $bgPredicted = [Math]::Round((& $bgExpected $st.cs))
+    if (-not $st.cs.vscroll -or $st.pb.text -ne "30" -or [Math]::Abs($st.cs.pos - $bgPredicted) -gt 1) {
+        throw "the background paged tab entering the strip: expected the strip, page box 30 and pos $bgPredicted (+/- 1; anchor(29) at FitWidth): $(Format-StripState $st)"
+    }
+    Write-Host "[OK] continuous strip: the background paged tab entered the strip at its page: page box 30, pos $($st.cs.pos) (anchor(29) $bgPredicted)"
+    & $uxProbe send-cmd 40066 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) -not $cs.vscroll }
+    if ($null -eq $st.cs -or $st.cs.vscroll) { throw "Continuous Scroll off: tab 1 stayed in the strip: $(Format-StripState $st)" }
+    $pref = Wait-ContinuousPref -Expected 0
+    if ($pref -ne 0) { throw "Continuous Scroll off: the registry value is '$pref', expected 0" }
+    & $uxProbe send-cmd 40034 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) -not $cs.vscroll -and $pb.text -eq "1" }
+    if ($null -eq $st.cs -or $st.cs.vscroll -or $st.pb.text -ne "1") {
+        throw "tab 2, last shown in the strip, after the preference turned off: expected paged and page box 1: $(Format-StripState $st)"
+    }
+    $procStrip.Refresh()
+    if ($procStrip.HasExited) { throw "litepdf.exe exited during the background-tab row (exit code $($procStrip.ExitCode))" }
+    Write-Host "[OK] continuous strip: preference off, then tab 2 (last shown in the strip): paged, page box 1, process alive"
+    Stop-LitePDF -Process $procStrip -Step "continuous menu item, background tab"
 } finally {
     if ($null -ne $procStrip -and -not $procStrip.HasExited) {
         Stop-Process -Id $procStrip.Id -Force -ErrorAction SilentlyContinue

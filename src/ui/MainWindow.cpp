@@ -781,6 +781,13 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
     if (old_index >= 0) {
         if (auto* outgoing = tabs_->tab_at(old_index)) {
             auto p = canvas_ ? canvas_->pan() : PdfCanvas::Pan{0.0f, 0.0f};
+            // #55, spec 7.4: the strip's own position is strip_state below, and
+            // its pan is not a paged pan. A tab left in the strip that comes back
+            // paged (the preference turned off meanwhile) must land at its
+            // current page's top, so the paged pan snapshot is zero.
+            if (canvas_ && canvas_->layout() == litepdf::ui::LayoutKind::Strip) {
+                p = PdfCanvas::Pan{0.0f, 0.0f};
+            }
             outgoing->pan_x = p.x;
             outgoing->pan_y = p.y;
             // #55, spec 7.4: the strip's position, before set_view resets it;
@@ -944,6 +951,15 @@ void MainWindow::apply_effective_layout(litepdf::core::Tab* tab, bool carry_posi
         // Paged single <-> spread: today's path (spec deviation 2).
         canvas_->set_dual_page(target == litepdf::ui::LayoutKind::PagedSpread);
     }
+}
+
+litepdf::ui::ContinuousMenuState MainWindow::continuous_item_state() {
+    auto* v = active_view();
+    // Qualified: a member named like the free function would hide it.
+    return litepdf::ui::continuous_menu_state(
+        v != nullptr,
+        v && litepdf::ui::strip_format_ok(v->source_path(), v->page_count()),
+        view_prefs_.continuous_scroll());
 }
 
 void MainWindow::on_tab_close_request(int index) {
@@ -1682,6 +1698,16 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 EnableMenuItem(popup, IDM_VIEW_GOTO_PAGE,
                                MF_BYCOMMAND
                                | (can_goto ? MF_ENABLED : MF_GRAYED));
+                // #55: Continuous Scroll is greyed when the tab cannot show the
+                // strip, and checked from the preference alone. The same
+                // continuous_item_state() the command handler reads.
+                const auto cont = continuous_item_state();
+                EnableMenuItem(popup, IDM_VIEW_CONTINUOUS,
+                               MF_BYCOMMAND
+                               | (cont.enabled ? MF_ENABLED : MF_GRAYED));
+                CheckMenuItem(popup, IDM_VIEW_CONTINUOUS,
+                              MF_BYCOMMAND
+                              | (cont.checked ? MF_CHECKED : MF_UNCHECKED));
                 return 0;
             }
             // #52 Edit popup. TranslateAcceleratorW sends WM_INITMENUPOPUP
@@ -1830,6 +1856,27 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                         if (canvas_) canvas_->change_current_page(p);   // snap: no anchor
                     }
                     kick_render(p, litepdf::ui::KickReason::Spread);
+                    return 0;
+                }
+                case IDM_VIEW_CONTINUOUS: {
+                    // #55, spec 7.3: refuses exactly when the item is greyed, so a
+                    // posted command cannot toggle it either (the #48 rule).
+                    if (!continuous_item_state().enabled) return 0;
+                    auto* v = active_view();
+                    if (!v) return 0;
+                    const auto t = litepdf::ui::continuous_toggle(
+                        view_prefs_.continuous_scroll(), v->dual_page());
+                    view_prefs_.set_continuous_scroll(t.pref_on);
+                    // A failed write keeps the in-memory value for this session
+                    // (spec 7.2); the next start reads whatever the registry holds.
+                    view_prefs_.save();
+                    // The view's flag first, as IDM_VIEW_DUAL_PAGE does: the canvas
+                    // still reports the old layout when the carry captures.
+                    if (v->dual_page() != t.spread_on) v->set_dual_page(t.spread_on);
+                    apply_effective_layout(tabs_ ? tabs_->active_tab() : nullptr, true);
+                    // Spread: a within-tab layout switch apply_effective_layout has
+                    // applied (refit, readout, relayout; no tab-position restore).
+                    kick_render(v->current_page(), litepdf::ui::KickReason::Spread);
                     return 0;
                 }
                 case IDM_TAB_CLOSE:
