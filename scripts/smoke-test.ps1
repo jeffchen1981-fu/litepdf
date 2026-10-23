@@ -1232,10 +1232,34 @@ try {
     # z2 / z1 into the strip. Everything is derived from the probe's client sizes:
     # the spread's FitWidth is ((client_w DIPs - 8) / 2) / 612 (PdfCanvas::
     # apply_viewport's 8 DIP gutter). Unscaled carries land elsewhere.
+    #
+    # The round trip only tells a scaled carry from an unscaled one when the
+    # spread's pan clamps the offset: unclamped, the two scalings cancel and an
+    # unscaled build lands on the same pos. Whether the spread's page overflows at
+    # all depends on the window's aspect (a 1024x768 window at 100 % fits it with
+    # 5 DIPs to spare), so the row sets the window height first: the spread's
+    # overflow becomes about 0.35 of the offset the carry brings into it (the
+    # spread is a scroll bar wider than the strip, which only adds a few DIPs), and
+    # the clamp is asserted once the spread is shown.
     $procStrip = Start-StripLaunch -Fixture $largeFixture -Step "strip carry at FitWidth"
     $dipOf = { param($px, $s) $px * 96.0 / $s.dpi }
     $cs = Read-UxProbeJson -Probe canvas-scroll
     if ($null -eq $cs) { throw "precondition: canvas-scroll probe failed at FitWidth" }
+    $estZ0 = (& $dipOf $cs.client_w $cs) / 612.0
+    $estZ1 = (((& $dipOf $cs.client_w $cs) - 8.0) / 2.0) / 612.0
+    $estSpreadOffset = (3 * $stripNotchDip - 8.0) * $estZ1 / $estZ0
+    $targetH = 792.0 * $estZ1 - 0.35 * $estSpreadOffset
+    $deltaPx = [int][Math]::Round(($targetH - (& $dipOf $cs.client_h $cs)) * $cs.dpi / 96.0)
+    if ([Math]::Abs($deltaPx) -ge 2) {
+        # A unique name: Wait-StripState's own $cs would shadow $cs in the block.
+        $preResizeClientH = $cs.client_h
+        & $uxProbe resize 0 $deltaPx | Out-Null
+        $st = Wait-StripState -Until { param($c, $pb) $c.vscroll -and $c.client_h -ne $preResizeClientH }
+        if ($null -eq $st.cs -or -not $st.cs.vscroll -or $st.cs.client_h -eq $preResizeClientH) {
+            throw "precondition: resizing the window by $deltaPx px did not change the canvas height: $(Format-StripState $st)"
+        }
+        $cs = $st.cs
+    }
     $z0 = (& $dipOf $cs.client_w $cs) / 612.0
     $fitAnchor0 = 29 * (792.0 * $z0 + 8.0)
     & $uxProbe page-box-go 30 | Out-Null
@@ -1258,6 +1282,9 @@ try {
     $vpH = & $dipOf $st.cs.client_h $st.cs
     $h1 = 792.0 * $z1
     if ($h1 -le $vpH) { throw "precondition: the spread's page ($h1 DIPs at zoom $z1) fits the $vpH DIP viewport, so the carry has no offset to scale" }
+    if ($offset0 * $z1 / $z0 -le ($h1 - $vpH) + 2.0) {
+        throw "precondition: the carried offset ($($offset0 * $z1 / $z0) DIPs) does not clamp at the spread's overflow ($($h1 - $vpH) DIPs), so an unscaled carry would land on the same pos"
+    }
     $offsetSpread = [Math]::Min($offset0 * $z1 / $z0, $h1 - $vpH)
     & $uxProbe send-cmd 40062 | Out-Null
     $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll }
