@@ -207,7 +207,8 @@ struct PdfCanvas::Impl {
     PageBitmapSet                 strip_set;
     // A scrollbar thumb drag is in progress (live), and a re-layout or layout
     // switch has ended it logically (dead): the queued track messages are then
-    // ignored until SB_ENDSCROLL (spec 4.5). Task 6 handles the scrollbar.
+    // ignored until SB_ENDSCROLL (spec 4.5). Set by strip_on_vscroll and
+    // strip_end_thumb_drag, cleared by SB_ENDSCROLL.
     bool                          thumb_drag_live = false;
     bool                          thumb_drag_dead = false;
 };

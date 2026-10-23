@@ -241,6 +241,8 @@ void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
         if (view == impl_->view) return;
         impl_->strip_set.clear();
         impl_->strip_view.reset();
+        // spec 4.5: a tab switch during a thumb drag counts as a re-layout.
+        strip_end_thumb_drag();
     }
     // Per-render escrow (see PdfCanvas::post_render_done) is now the
     // lifetime mechanism for in-flight pixmaps — a canvas-level
@@ -678,6 +680,9 @@ void PdfCanvas::on_left_button_down(bool is_double_click_message, int x_px, int 
     // slot in that mode, so a drag would compute points with single-page
     // geometry and build an invisible selection Ctrl+C would still copy (spec §1).
     if (!impl_->view || impl_->dual_page || !own_bitmap()) return;
+    // #55: no selection in the strip until PR 3 (spec 7.1). current_bitmap can
+    // still hold a paged render there: the paged navigation paths submit one.
+    if (layout() == LayoutKind::Strip) return;
     Placement pl;
     if (!single_page_placement(pl)) return;
 
@@ -821,6 +826,10 @@ void PdfCanvas::on_middle_button_up(int x_px, int y_px) {
 }
 
 bool PdfCanvas::can_pan() const {
+    // #55, spec 6.1: the strip is taller or wider than the viewport.
+    if (layout() == LayoutKind::Strip) {
+        return strip_active() && impl_->strip_view.can_pan();
+    }
     ContentBox box{};
     if (!content_extent(box)) return false;   // nothing painted yet
     const D2D1_SIZE_F vp = impl_->rt->GetSize();
@@ -830,7 +839,9 @@ bool PdfCanvas::can_pan() const {
 void PdfCanvas::update_cursor() {
     bool over_page = false;
     Placement pl;
-    if (!impl_->dual_page && own_bitmap() && single_page_placement(pl)) {
+    // #55: the strip has no I-beam until it has selection (PR 3, spec 7.1).
+    if (!impl_->dual_page && layout() != LayoutKind::Strip && own_bitmap() &&
+        single_page_placement(pl)) {
         POINT pt;
         if (GetCursorPos(&pt) && ScreenToClient(hwnd_, &pt)) {
             const float dpi = static_cast<float>(GetDpiForWindow(hwnd_));
@@ -1064,6 +1075,11 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // without it "the horizontal scroll action may be repeated".
             // Returned with no document open too, for the same reason.
             return TRUE;
+        case WM_VSCROLL:
+            // #55, spec 6.2: the canvas has a scroll bar only while it shows the
+            // strip (PdfCanvasStrip.cpp).
+            if (layout() == LayoutKind::Strip) return strip_on_vscroll(w);
+            break;
         case WM_DPICHANGED_BEFOREPARENT:
             // DPI is changing. Discard render target; next paint rebuilds at new DPI.
             // Both slot bitmaps are sized for the OLD DPI and are bound to the
@@ -1307,6 +1323,7 @@ void PdfCanvas::resubmit_current_page() {
             impl_->strip_view.relayout(impl_->view->zoom_pct());
         }
         strip_after_change();
+        strip_end_thumb_drag();   // spec 4.5: after the SetScrollInfo above
         return;
     }
     if (!impl_->view) return;
@@ -1403,6 +1420,9 @@ bool PdfCanvas::content_extent(ContentBox& out) const {
 }
 
 LRESULT PdfCanvas::pan_by(float dx, float dy) {
+    // #55, spec 6.1: a drag scrolls the strip; bitmap_is_stale() describes the
+    // paged bitmap and is not consulted there.
+    if (layout() == LayoutKind::Strip) return strip_pan_by(dx, dy);
     // The bitmap on screen may still be the OUTGOING tab's or page's (#120).
     // Right after a tab switch, clamping here would measure the incoming tab's
     // restored pan against the outgoing page -- to 0 on both axes if that one
@@ -1436,6 +1456,9 @@ bool PdfCanvas::bitmap_is_stale() const {
 }
 
 LRESULT PdfCanvas::on_wheel_scroll(int delta) {
+    // #55, spec 6.1: the strip scrolls and never flips, so neither guard below
+    // applies to it.
+    if (layout() == LayoutKind::Strip) return strip_on_wheel(delta);
     if (!impl_ || !impl_->view) return 0;
 
     // A flip is already on its way. Until its pixmap lands, pan_y and the
@@ -1533,6 +1556,7 @@ LRESULT PdfCanvas::on_wheel_scroll(int delta) {
 }
 
 LRESULT PdfCanvas::on_hwheel_scroll(int raw_delta, HWheelSource src) {
+    if (layout() == LayoutKind::Strip) return strip_on_hwheel(raw_delta, src);   // #55
     if (!impl_ || !impl_->view) return 0;
 
     // The bitmap on screen may still be the OUTGOING tab's or page's: a tab
@@ -1719,6 +1743,7 @@ void PdfCanvas::navigate_to_page(int target, PageAnchor anchor) {
 }
 
 LRESULT PdfCanvas::on_key_down(WPARAM key) {
+    if (layout() == LayoutKind::Strip) return strip_on_key(key);   // #55, spec 6.1
     if (!impl_->view) return 0;
 
     const int cur     = impl_->view->current_page();
@@ -1800,6 +1825,7 @@ void PdfCanvas::on_size(int w, int h) {
         const DipSize vp = strip_viewport_dip();
         impl_->strip_view.set_viewport(vp.w, vp.h);
         strip_after_change();
+        strip_end_thumb_drag();   // spec 4.5: after the SetScrollInfo above
     }
     InvalidateRect(hwnd_, nullptr, FALSE);
 }

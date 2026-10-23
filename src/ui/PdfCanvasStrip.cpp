@@ -12,6 +12,7 @@
 #include "core/detail/PrefetchPlan.hpp"
 #include "ui/ColdStartTimer.hpp"
 #include "ui/PdfCanvasImpl.hpp"
+#include "ui/detail/ScrollMath.hpp"
 #include "ui/detail/StripCompletion.hpp"
 #include "ui/detail/StripScrollbar.hpp"
 #include "ui/detail/ViewportMath.hpp"
@@ -247,6 +248,7 @@ void PdfCanvas::strip_kick(const StripKickActions& a, const StripTabState* resto
         impl_->strip_set.state.change_render_params();
     }
     strip_after_change();
+    if (a.relayout) strip_end_thumb_drag();   // spec 4.5: after the SetScrollInfo above
 }
 
 // ---------------------------------------------------------------------------
@@ -344,6 +346,126 @@ void PdfCanvas::strip_reschedule() {
             ++it;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Input (spec 6.1, 6.2)
+//
+// Every input ends in strip_after_change, moved or not: a scroll input that hits
+// the clamp still ends a navigation pin, and the current page is recomputed after
+// every scroll input (spec 4.6). The observer fires only when the page changes,
+// so an input that moves nothing costs one scheduling pass.
+
+LRESULT PdfCanvas::strip_on_wheel(int delta) {
+    if (!strip_active()) return 0;
+    auto& sv = impl_->strip_view;
+    // No identity guard and no wheel_flip_seq latch: both hold the paged wheel
+    // while a page flip's render is pending, and the strip never flips (spec 6.1,
+    // "the wheel's two guards").
+    const int notches = consume_notches(delta, impl_->wheel_residual);
+    UINT lines = 3;   // the Windows default, and the value if the query fails
+    SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+    const float step = wheel_step_dip(notches, lines, static_cast<float>(sv.viewport_h()));
+    // A positive step is toward the top of the document.
+    sv.scroll_by(-static_cast<double>(step));
+    strip_after_change();
+    return 0;
+}
+
+LRESULT PdfCanvas::strip_on_hwheel(int raw_delta, HWheelSource src) {
+    if (!strip_active()) return 0;
+    auto& sv = impl_->strip_view;
+    const int notches =
+        consume_notches(rightward_delta(raw_delta, src), impl_->hwheel_residual);
+    // The settings paged mode reads: a tilt wheel's "characters", and the lines
+    // setting for Shift + the vertical wheel.
+    UINT units = 3;   // the Windows default, and the value if the query fails
+    SystemParametersInfoW(src == HWheelSource::Tilt ? SPI_GETWHEELSCROLLCHARS
+                                                    : SPI_GETWHEELSCROLLLINES,
+                          0, &units, 0);
+    const float step = wheel_step_dip(notches, units, static_cast<float>(sv.viewport_w()));
+    // A rightward step reveals the right side, so the desired pan decreases: the
+    // direction VK_RIGHT pans.
+    sv.pan_x_by(-static_cast<double>(step));
+    strip_after_change();
+    return 0;
+}
+
+LRESULT PdfCanvas::strip_on_key(WPARAM key) {
+    if (!strip_active()) return 0;
+    StripKey k;
+    switch (key) {
+        case VK_NEXT:  k = StripKey::PageDown; break;
+        case VK_PRIOR: k = StripKey::PageUp;   break;
+        case VK_HOME:  k = StripKey::Home;     break;
+        case VK_END:   k = StripKey::End;      break;
+        case VK_UP:    k = StripKey::LineUp;   break;
+        case VK_DOWN:  k = StripKey::LineDown; break;
+        case VK_LEFT:  k = StripKey::Left;     break;
+        case VK_RIGHT: k = StripKey::Right;    break;
+        default:       return 0;
+    }
+    impl_->strip_view.key(k);
+    strip_after_change();
+    return 0;
+}
+
+LRESULT PdfCanvas::strip_pan_by(float dx, float dy) {
+    if (!strip_active()) return 0;
+    // Grab-and-drag: the content follows the pointer, so a downward drag shows
+    // what is above, and a rightward one moves the pages right, as in paged mode.
+    impl_->strip_view.scroll_by(-static_cast<double>(dy));
+    impl_->strip_view.pan_x_by(static_cast<double>(dx));
+    strip_after_change();
+    return 0;
+}
+
+LRESULT PdfCanvas::strip_on_vscroll(WPARAM w) {
+    if (LOWORD(w) == SB_ENDSCROLL) {
+        // The end of any scroll bar interaction, a thumb drag's included. Before
+        // the strip_active check, so the latch never outlives the interaction
+        // that set it, laid out or not.
+        impl_->thumb_drag_live = false;
+        impl_->thumb_drag_dead = false;
+        // A drag a re-layout ended leaves the thumb where the pointer let go:
+        // put it back at the position.
+        strip_update_scrollbar();
+        return 0;
+    }
+    if (!strip_active() || !hwnd_) return 0;
+    auto& sv = impl_->strip_view;
+    switch (LOWORD(w)) {
+        // The arrows act as the arrow keys, a click in the track as PgUp / PgDn.
+        case SB_LINEUP:   sv.key(StripKey::LineUp);   break;
+        case SB_LINEDOWN: sv.key(StripKey::LineDown); break;
+        case SB_PAGEUP:   sv.key(StripKey::PageUp);   break;
+        case SB_PAGEDOWN: sv.key(StripKey::PageDown); break;
+        case SB_TOP:      sv.key(StripKey::Home);     break;
+        case SB_BOTTOM:   sv.key(StripKey::End);      break;
+        case SB_THUMBTRACK:
+        case SB_THUMBPOSITION: {
+            impl_->thumb_drag_live = true;
+            // A re-layout ended this drag (spec 4.5): its track positions belong
+            // to the old layout, so they are ignored until SB_ENDSCROLL.
+            if (impl_->thumb_drag_dead) return 0;
+            // The 32-bit track position. HIWORD(w) is 16-bit and wraps above
+            // 65535 DIPs, a few dozen pages in (spec 6.2).
+            SCROLLINFO si{};
+            si.cbSize = sizeof(si);
+            si.fMask  = SIF_TRACKPOS;
+            if (!GetScrollInfo(hwnd_, SB_VERT, &si)) return 0;
+            sv.scroll_to_pos(si.nTrackPos);
+            break;
+        }
+        default:
+            return 0;
+    }
+    strip_after_change();
+    return 0;
+}
+
+void PdfCanvas::strip_end_thumb_drag() noexcept {
+    if (impl_ && impl_->thumb_drag_live) impl_->thumb_drag_dead = true;
 }
 
 // ---------------------------------------------------------------------------

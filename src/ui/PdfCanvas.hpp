@@ -502,6 +502,21 @@ private:
     // The strip is shown and laid out.
     bool strip_active() const noexcept;
 
+    // The strip's input (spec 6.1, 6.2): the strip branches of on_wheel_scroll,
+    // on_hwheel_scroll, on_key_down and pan_by, and WM_VSCROLL. Each moves the
+    // StripViewport and ends in strip_after_change, moved or not, which derives
+    // the current page (spec 4.6). No-ops unless the strip is shown and laid out.
+    LRESULT strip_on_wheel(int delta);
+    LRESULT strip_on_hwheel(int raw_delta, HWheelSource src);
+    LRESULT strip_on_key(WPARAM key);
+    LRESULT strip_pan_by(float dx, float dy);
+    LRESULT strip_on_vscroll(WPARAM w);
+
+    // A re-layout during a scrollbar thumb drag ends the drag logically (spec
+    // 4.5): called after the re-layout's SetScrollInfo, it marks a live drag dead
+    // so its queued track positions are ignored until SB_ENDSCROLL.
+    void strip_end_thumb_drag() noexcept;
+
     HWND hwnd_ = nullptr;
     bool log_timings_ = false;
     struct Impl;

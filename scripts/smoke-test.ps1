@@ -645,6 +645,67 @@ function Read-UxProbeJson {
     try { return ($raw | ConvertFrom-Json -ErrorAction Stop) } catch { return $null }
 }
 
+# Re-reads the canvas scroll bar and the page box every 100 ms until $Until
+# (param($cs, $pb)) accepts both or $TimeoutSeconds expires. Returns the last
+# pair as { cs, pb }; either is $null when its probe printed something else.
+function Wait-StripState {
+    param(
+        [scriptblock]$Until,
+        [int]$TimeoutSeconds = 5
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $last = [pscustomobject]@{ cs = $null; pb = $null }
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 100
+        $cs = Read-UxProbeJson -Probe canvas-scroll
+        $pb = Read-UxProbeJson -Probe page-box
+        $last = [pscustomobject]@{ cs = $cs; pb = $pb }
+        if ($null -ne $cs -and $null -ne $pb -and (& $Until $cs $pb)) { break }
+    }
+    return $last
+}
+
+function Format-StripState {
+    param($State)
+    return "canvas-scroll $($State.cs | ConvertTo-Json -Compress), page-box $($State.pb | ConvertTo-Json -Compress)"
+}
+
+# Launches litepdf on $Fixture (ContinuousScroll is already 1) and waits until the
+# canvas shows a laid-out strip: the scroll bar is there and its page is set, which
+# paged mode never does. Returns the process; stops it before throwing.
+function Start-StripLaunch {
+    param(
+        [string]$Fixture,
+        [string]$Step
+    )
+    Write-Host "Launching for continuous strip smoke ($Step): $exe $Fixture"
+    $p = Start-Process -FilePath $exe -ArgumentList @($Fixture) -PassThru -NoNewWindow
+    $null = $p.Handle
+    $deadline = (Get-Date).AddSeconds(5)
+    $hwnd = [IntPtr]::Zero
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 100
+        if ($p.HasExited) {
+            throw "litepdf.exe exited during the $Step startup (code $($p.ExitCode))"
+        }
+        $p.Refresh()
+        if ($p.MainWindowHandle -ne [IntPtr]::Zero) {
+            $hwnd = $p.MainWindowHandle
+            break
+        }
+    }
+    if ($hwnd -eq [IntPtr]::Zero) {
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+        throw "litepdf.exe did not create a main window for the $Step step"
+    }
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.present -and $cs.vscroll -and $cs.page -gt 0 }
+    if ($null -eq $st.cs -or -not ($st.cs.vscroll -and $st.cs.page -gt 0)) {
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+        throw "the $Step launch shows no laid-out strip 5 s after opening $Fixture : $(Format-StripState $st)"
+    }
+    return $p
+}
+
 # large.pdf is 500 US Letter pages (612 x 792 pt). At zoom z the strip is
 # G + 500 x (792 z + G) DIPs tall, G = 8 (spec 4.2), and the scroll bar's
 # nMax + 1 is that height rounded (spec 6.2).
@@ -791,6 +852,101 @@ try {
         throw "no 'LitePDF cold-start:' line found in the continuous strip run's stderr"
     }
     Write-Host "[OK] continuous strip: timing line: $stripTiming"
+
+    # Rows 6-9: input in the strip (spec 6.1, 6.2, 4.6). Each fixture gets a fresh
+    # launch; the wheel and the keys are posted to the canvas by ux-probe.
+
+    # Row 6: wheel to the bottom (spec 9.3). 272 notches per message is about
+    # 13,000 DIPs at the default 3 lines, so 200 messages cover large.pdf's strip
+    # at any window width. At the bottom the scroll position is the largest one
+    # Win32 allows and the derived current page is the last (spec 4.6 rule 1).
+    $procStrip = Start-StripLaunch -Fixture $largeFixture -Step "strip input"
+    & $uxProbe canvas-wheel -32640 200 | Out-Null
+    $st = Wait-StripState -TimeoutSeconds 10 -Until {
+        param($cs, $pb)
+        $cs.pos -eq ($cs.max - $cs.page + 1) -and $pb.text -eq "500"
+    }
+    if ($null -eq $st.cs -or $st.cs.pos -ne ($st.cs.max - $st.cs.page + 1)) {
+        throw "wheel to the bottom: the scroll position is not max - page + 1: $(Format-StripState $st)"
+    }
+    if ($st.pb.text -ne "500") {
+        throw "wheel to the bottom: the page box reads '$($st.pb.text)', expected 500: $(Format-StripState $st)"
+    }
+    Write-Host "[OK] continuous strip: wheel to the bottom: pos $($st.cs.pos) = max - page + 1, page box 500"
+
+    # Row 7: Home, then PgDn. Precondition first: in paged mode pos and page are both
+    # 0, so the checks below would pass there too.
+    $cs = Read-UxProbeJson -Probe canvas-scroll
+    if ($null -eq $cs -or -not ($cs.present -and $cs.vscroll -and $cs.page -gt 0)) {
+        throw "precondition: the strip is not shown before Home: $($cs | ConvertTo-Json -Compress)"
+    }
+    & $uxProbe canvas-key 0x24 | Out-Null   # VK_HOME
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.pos -eq 0 -and $pb.text -eq "1" }
+    if ($null -eq $st.cs -or $st.cs.pos -ne 0 -or $st.pb.text -ne "1") {
+        throw "Home in the strip: expected pos 0 and page box 1: $(Format-StripState $st)"
+    }
+    & $uxProbe canvas-key 0x22 | Out-Null   # VK_NEXT (PgDn)
+    $st = Wait-StripState -Until {
+        param($cs, $pb)
+        [Math]::Abs($cs.pos - [Math]::Round(0.9 * $cs.page)) -le 1
+    }
+    if ($null -eq $st.cs -or [Math]::Abs($st.cs.pos - [Math]::Round(0.9 * $st.cs.page)) -gt 1) {
+        throw "PgDn in the strip: expected pos = 0.9 x page (+/- 1): $(Format-StripState $st)"
+    }
+    Write-Host "[OK] continuous strip: Home -> pos 0, page box 1; PgDn -> pos $($st.cs.pos) (page $($st.cs.page))"
+    Stop-LitePDF -Process $procStrip -Step "strip input"
+    Start-Sleep -Milliseconds 500
+
+    # Row 8: a fling through 1000 pages, 400 wheel messages back to back from one
+    # process. This checks the model, not the pixels: no pixel-free signal says a
+    # page's bitmap was accepted, so the final pages' paint is a manual check.
+    $strip1000 = Join-Path $repoRoot "tests/fixtures/strip-1000.pdf"
+    if (-not (Test-Path $strip1000)) { throw "fixture not found at $strip1000" }
+    $procStrip = Start-StripLaunch -Fixture $strip1000 -Step "strip fling"
+    & $uxProbe canvas-wheel -32640 400 | Out-Null
+    $st = Wait-StripState -TimeoutSeconds 10 -Until {
+        param($cs, $pb)
+        $pb.text -eq "1000" -and $cs.pos -eq ($cs.max - $cs.page + 1)
+    }
+    if ($null -eq $st.cs -or $st.pb.text -ne "1000" -or $st.cs.pos -ne ($st.cs.max - $st.cs.page + 1)) {
+        throw "fling through strip-1000.pdf: expected page box 1000 and pos = max - page + 1 within 10 s: $(Format-StripState $st)"
+    }
+    $procStrip.Refresh()
+    if ($procStrip.HasExited) {
+        throw "litepdf.exe exited after the fling (exit code $($procStrip.ExitCode))"
+    }
+    Write-Host "[OK] continuous strip: fling through 1000 pages: page box 1000, pos $($st.cs.pos) = max - page + 1"
+    Stop-LitePDF -Process $procStrip -Step "strip fling"
+    Start-Sleep -Milliseconds 500
+
+    # Row 9: a one-page document. sample.svg is 200 x 100 pt, so at FitWidth the
+    # strip is vp_w / 2 + 16 DIPs tall, shorter than the canvas: the bar stays with a
+    # disabled range (Windows stores page clamped to max + 1), and neither the wheel
+    # nor End may move anything.
+    $svgFixture = Join-Path $repoRoot "tests/fixtures/sample.svg"
+    if (-not (Test-Path $svgFixture)) { throw "fixture not found at $svgFixture" }
+    $procStrip = Start-StripLaunch -Fixture $svgFixture -Step "strip one page"
+    $st = Wait-StripState -Until { param($cs, $pb) $pb.text -eq "1" }
+    if ($null -eq $st.cs -or -not $st.cs.vscroll -or $st.cs.page -le $st.cs.max -or $st.pb.text -ne "1") {
+        throw "one-page strip: expected vscroll, page > max and page box 1: $(Format-StripState $st)"
+    }
+    & $uxProbe canvas-wheel -120 3 | Out-Null
+    & $uxProbe canvas-key 0x23 | Out-Null   # VK_END
+    # Nothing is expected to change, so there is no state to poll for: give the
+    # posted messages time to run, then read.
+    Start-Sleep -Milliseconds 500
+    $cs = Read-UxProbeJson -Probe canvas-scroll
+    $pb = Read-UxProbeJson -Probe page-box
+    $st = [pscustomobject]@{ cs = $cs; pb = $pb }
+    if ($null -eq $cs -or $null -eq $pb -or $cs.pos -ne 0 -or $pb.text -ne "1") {
+        throw "one-page strip after the wheel and End: expected pos 0 and page box 1: $(Format-StripState $st)"
+    }
+    $procStrip.Refresh()
+    if ($procStrip.HasExited) {
+        throw "litepdf.exe exited after input on a one-page strip (exit code $($procStrip.ExitCode))"
+    }
+    Write-Host "[OK] continuous strip: one-page document: page $($cs.page) > max $($cs.max), wheel and End keep pos 0 and page box 1"
+    Stop-LitePDF -Process $procStrip -Step "strip one page"
 } finally {
     if ($null -ne $procStrip -and -not $procStrip.HasExited) {
         Stop-Process -Id $procStrip.Id -Force -ErrorAction SilentlyContinue
