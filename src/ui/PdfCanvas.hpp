@@ -80,9 +80,11 @@ public:
     // Pass nullptr to clear.
     void set_view(litepdf::core::DocumentView* view);
 
-    // Monotonic render epoch. Bumped on every set_view so that an
-    // in-flight render submitted for a now-superseded view can be told
-    // apart from one submitted for the current view. Callers capture this
+    // Monotonic render epoch. Bumped on every set_view to another view (and
+    // on every paged set_view), and on every layout switch into or out of the
+    // strip (#55), so that an in-flight render submitted for a now-superseded
+    // view or layout can be told apart from one submitted for the current one.
+    // A same-view set_view in the strip does not bump. Callers capture this
     // at submit time and pass it to post_render_done; the completion
     // handler drops pixmaps whose epoch no longer matches (issue #35).
     std::uint64_t render_epoch() const noexcept;
@@ -490,6 +492,8 @@ private:
     // when pan_by drops every step (#120). Deliberately NOT stale-aware: a
     // captured pan gets no WM_SETCURSOR, so a drag begun in that window would
     // keep the arrow after the render lands and the pan works again.
+    // In the strip (#55) it answers from StripViewport::can_pan: the strip is
+    // taller or wider than the viewport.
     bool can_pan() const;
 
     // WM_SETCURSOR for the client area.

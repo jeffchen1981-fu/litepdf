@@ -695,8 +695,9 @@ void PdfCanvas::on_left_button_down(bool is_double_click_message, int x_px, int 
     // slot in that mode, so a drag would compute points with single-page
     // geometry and build an invisible selection Ctrl+C would still copy (spec §1).
     if (!impl_->view || impl_->dual_page || !own_bitmap()) return;
-    // #55: no selection in the strip until PR 3 (spec 7.1). current_bitmap can
-    // still hold a paged render there: the paged navigation paths submit one.
+    // #55: no selection in the strip until PR 3 (spec 7.1). Defensive: every
+    // paged render submitter is strip-guarded, so own_bitmap() should already
+    // be false here, but a selection must never start in the strip.
     if (layout() == LayoutKind::Strip) return;
     Placement pl;
     if (!single_page_placement(pl)) return;
