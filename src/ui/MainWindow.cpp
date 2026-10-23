@@ -328,7 +328,10 @@ void MainWindow::open_tab_async(std::filesystem::path path) {
     }).detach();
 }
 
-void MainWindow::kick_render(int page) {
+void MainWindow::kick_render(int page, litepdf::ui::KickReason reason) {
+    // Only the continuous strip consults the reason; both paged branches below
+    // behave as before. Every call site still names one (no default argument).
+    (void)reason;
     auto* view = active_view();
     if (!view || !canvas_) return;
 
@@ -421,7 +424,7 @@ void MainWindow::navigate_click(int page) {
     if (view_moves) {
         canvas_->set_pending_anchor(litepdf::ui::PageAnchor::top());
     }
-    kick_render(page);
+    kick_render(page, litepdf::ui::KickReason::Navigate);
 }
 
 HWND MainWindow::left_pane_hwnd() const {
@@ -641,7 +644,7 @@ void MainWindow::toggle_outline() {
     // on_tab_switch's outgoing-snapshot writes outline_visible back into
     // the active Tab when the user switches away -- that's the single
     // source of truth, so we don't write it here.
-    if (auto* view = active_view()) kick_render(view->current_page());
+    if (auto* view = active_view()) kick_render(view->current_page(), litepdf::ui::KickReason::Layout);
 }
 
 void MainWindow::on_toggle_status_bar() {
@@ -658,7 +661,7 @@ void MainWindow::set_status_bar_visible(bool visible) {
     // The canvas just changed height. Its own WM_SIZE resubmits only when the
     // render target has to be recreated, so without this a fit mode would keep
     // the fit it derived for the old height.
-    if (auto* view = active_view()) kick_render(view->current_page());
+    if (auto* view = active_view()) kick_render(view->current_page(), litepdf::ui::KickReason::Layout);
 }
 
 void MainWindow::on_goto_page() {
@@ -727,7 +730,7 @@ void MainWindow::toggle_thumbs() {
     }
     on_layout();
     // Canvas width may have changed — recompute fit-zoom + resubmit.
-    kick_render(v->current_page());
+    kick_render(v->current_page(), litepdf::ui::KickReason::Layout);
 }
 
 void MainWindow::on_outline_navigate(int page) {
@@ -860,7 +863,7 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
             static_cast<float>(rc.right - rc.left),
             static_cast<float>(rc.bottom - rc.top),
             static_cast<float>(dpi));
-        kick_render(incoming->view->current_page());
+        kick_render(incoming->view->current_page(), litepdf::ui::tab_switch_reason(new_index, old_index));
     } else if (canvas_) {
         InvalidateRect(canvas_->hwnd(), nullptr, FALSE);
     }
@@ -1115,7 +1118,7 @@ void MainWindow::restore_on_tab_ready(const std::filesystem::path& opened) {
                 break;
             }
         }
-        kick_render(st.page);
+        kick_render(st.page, litepdf::ui::KickReason::Restore);
     }
     restore_pending_path_.clear();
     ++restore_index_;
@@ -1251,7 +1254,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 on_layout();
                 // #109: the canvas just changed height. Re-derive the fit on
                 // every move, the cadence WM_SIZE already accepts for drags.
-                if (auto* view = active_view()) kick_render(view->current_page());
+                if (auto* view = active_view()) kick_render(view->current_page(), litepdf::ui::KickReason::Layout);
             });
 
             // PR-B: bottom status bar. Created before the first on_layout so
@@ -1315,7 +1318,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 on_layout();
                 // #109: the canvas just changed width, so FitWidth must be
                 // re-derived -- on every move, like the results splitter.
-                if (auto* view = active_view()) kick_render(view->current_page());
+                if (auto* view = active_view()) kick_render(view->current_page(), litepdf::ui::KickReason::Layout);
             });
 
             // Seed left_pane_width_px_ to ~250 dip — matches the prior
@@ -1407,7 +1410,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 // Recompute FitWidth (or whatever mode) scale for the new
                 // viewport and resubmit. We resubmit on every WM_SIZE;
                 // the brief stutter during drag-resize is acceptable.
-                kick_render(view->current_page());
+                kick_render(view->current_page(), litepdf::ui::KickReason::Layout);
             }
             // Phase 12: maximize/restore are discrete geometry changes that
             // skip WM_EXITSIZEMOVE (no drag). Persist them (debounced). The
@@ -1487,7 +1490,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // bitmap against the pre-DPI-change canvas height, leaving a
             // stale render until the next navigation or resize.
             if (auto* view = active_view(); view && canvas_) {
-                kick_render(view->current_page());
+                kick_render(view->current_page(), litepdf::ui::KickReason::Layout);
             }
             return 0;
         }
@@ -1724,7 +1727,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     if (!v) return 0;
                     v->set_invert_colors(!v->invert_colors());
                     if (canvas_) canvas_->set_invert_chrome(v->invert_colors());
-                    kick_render(v->current_page());
+                    kick_render(v->current_page(), litepdf::ui::KickReason::Restyle);
                     return 0;
                 }
                 case IDM_VIEW_DUAL_PAGE: {
@@ -1742,7 +1745,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                                 p, v->page_count());
                         if (canvas_) canvas_->change_current_page(p);   // snap: no anchor
                     }
-                    kick_render(p);
+                    kick_render(p, litepdf::ui::KickReason::Spread);
                     return 0;
                 }
                 case IDM_TAB_CLOSE:
@@ -1828,14 +1831,14 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 case IDM_ZOOM_IN:
                     if (auto* view = active_view();
                         view && view->zoom_in()) {
-                        kick_render(view->current_page());
+                        kick_render(view->current_page(), litepdf::ui::KickReason::Zoom);
                         schedule_session_save();  // Phase 12: zoom changed
                     }
                     return 0;
                 case IDM_ZOOM_OUT:
                     if (auto* view = active_view();
                         view && view->zoom_out()) {
-                        kick_render(view->current_page());
+                        kick_render(view->current_page(), litepdf::ui::KickReason::Zoom);
                         schedule_session_save();  // Phase 12: zoom changed
                     }
                     return 0;
@@ -1851,7 +1854,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                         view->set_viewport(static_cast<float>(rc.right - rc.left),
                                            static_cast<float>(rc.bottom - rc.top),
                                            static_cast<float>(dpi));
-                        kick_render(view->current_page());
+                        kick_render(view->current_page(), litepdf::ui::KickReason::Zoom);
                         schedule_session_save();  // Phase 12: zoom mode changed
                     }
                     return 0;
@@ -2254,7 +2257,7 @@ void MainWindow::on_find_next() {
     canvas_->scroll_into_view(*h);
     // scroll_into_view may have switched the current page; kick a
     // render for the (possibly new) page.
-    kick_render(v->current_page());
+    kick_render(v->current_page(), litepdf::ui::KickReason::Navigate);
     update_find_counter();
 }
 
@@ -2265,7 +2268,7 @@ void MainWindow::on_find_prev() {
     if (!h) return;
     canvas_->set_current_hit(*h);
     canvas_->scroll_into_view(*h);
-    kick_render(v->current_page());
+    kick_render(v->current_page(), litepdf::ui::KickReason::Navigate);
     update_find_counter();
 }
 
@@ -2359,7 +2362,7 @@ void MainWindow::on_cross_tab_find() {
     results_panel_->show_and_focus_edit();
     on_layout();
     // #109: the panel took height from the canvas; a fit mode must follow.
-    if (auto* view = active_view()) kick_render(view->current_page());
+    if (auto* view = active_view()) kick_render(view->current_page(), litepdf::ui::KickReason::Layout);
 }
 
 void MainWindow::on_toggle_results() {
@@ -2384,7 +2387,7 @@ void MainWindow::on_toggle_results() {
     }
     on_layout();
     // #109: either direction changes the canvas height.
-    if (auto* view = active_view()) kick_render(view->current_page());
+    if (auto* view = active_view()) kick_render(view->current_page(), litepdf::ui::KickReason::Layout);
 }
 
 void MainWindow::on_results_query(const std::wstring& q, bool mc, bool ww,
@@ -2475,7 +2478,7 @@ void MainWindow::on_results_row_click(std::size_t idx) {
     // the only installer.
     canvas_->set_current_hit(sh);
     canvas_->scroll_into_view(sh);
-    kick_render(v->current_page());
+    kick_render(v->current_page(), litepdf::ui::KickReason::Navigate);
 }
 
 void MainWindow::on_results_close() {
@@ -2488,7 +2491,7 @@ void MainWindow::on_results_close() {
     if (cross_tab_) cross_tab_->clear();
     on_layout();
     // #109: the canvas gets the panel's height back.
-    if (auto* view = active_view()) kick_render(view->current_page());
+    if (auto* view = active_view()) kick_render(view->current_page(), litepdf::ui::KickReason::Layout);
     if (canvas_) SetFocus(canvas_->hwnd());
 }
 

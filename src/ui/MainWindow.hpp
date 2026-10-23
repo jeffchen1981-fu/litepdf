@@ -20,6 +20,7 @@
 #include "ui/StatusBar.hpp"
 #include "ui/TabManager.hpp"
 #include "ui/VerticalSplitter.hpp"
+#include "ui/detail/EffectiveLayout.hpp"
 #include "ui/detail/PostCoalescer.hpp"
 
 namespace litepdf::app { class ThreadPoolDispatcher; }
@@ -67,7 +68,7 @@ private:
 
     // Open a new tab for `path` asynchronously (one request -> one tab).
     void open_tab_async(std::filesystem::path path);
-    void kick_render(int page);  // recompute zoom, submit render, post to canvas
+    void kick_render(int page, litepdf::ui::KickReason reason);  // recompute zoom, submit render, post to canvas
 
     // #57: push the active view's live zoom percentage to the status bar.
     // No-op without a status bar or an active view (the empty state is
