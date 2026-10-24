@@ -38,10 +38,11 @@ Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab i
 - **Thumbnails** — lazy-rendered side pane (F4)
 - **Invert colors** — per-tab dark-mode toggle (Ctrl+Shift+I, Phase 8)
 - **Two-page spread** — book-style side-by-side layout with cover-page rule (Ctrl+Shift+D, Phase 8)
+- **Continuous scroll** — pages in one vertical strip with a scroll bar, on by default; View → Continuous Scroll switches back to one page at a time and is remembered. Two-page spread still shows two pages at a time. XPS and FB2 documents stay one page at a time (v1.6.0)
 - **Print** — standard `PrintDlgEx` with page range, copies, scale modes (fit / actual / custom %), auto-rotate, and mid-job cancel (Ctrl+P, Phase 8.5)
 - **CJK rendering** — Chinese / Japanese / Korean text renders from your installed Windows fonts (no bundled CJK font), keeping `litepdf.exe` ~7 MB (v1.2.0)
 - **Zoom** — Zoom In / Out / Reset actually change what you see, at the right resolution on high-DPI displays (Ctrl+= / Ctrl+- / Ctrl+0, v1.3.0)
-- **Mouse-wheel scrolling** — scrolls within a page and turns the page at the edge, honouring your system's lines-per-notch setting; Ctrl+wheel zooms (v1.3.0). Shift+wheel, a tilt wheel or a sideways touchpad swipe scrolls a zoomed-in page left and right (v1.4.0)
+- **Mouse-wheel scrolling** — scrolls within a page and turns the page at the edge, honouring your system's lines-per-notch setting; Ctrl+wheel zooms (v1.3.0). Shift+wheel, a tilt wheel or a sideways touchpad swipe scrolls a zoomed-in page left and right (v1.4.0). In continuous scroll the wheel moves through the pages without turning them
 - **Page indicator** — status bar showing the current page and page count, with a box you can type a page into (v1.3.0). It also shows the current zoom percentage, and View → Status Bar hides it (v1.4.0). Ctrl+G (View → Go to Page) puts the cursor in the box, showing the bar if it is hidden (v1.5.0)
 - **Text selection and copy** — drag to select, double-click for a word, triple-click for a line; Ctrl+C copies and Ctrl+A selects the page (v1.4.0)
 - **Hand-tool panning** — middle-drag, or hold Space and drag, to move a zoomed-in page (v1.4.0)
@@ -69,8 +70,9 @@ Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab i
 | Ctrl+= / Ctrl+-    | Zoom in / out                       |
 | Ctrl+0             | Reset zoom                          |
 | Ctrl+G             | Go to page (focus the page box)     |
-| PgDn / PgUp        | Next / previous page (or pair in spread mode) |
-| Arrow keys         | Pan a zoomed-in page                |
+| PgDn / PgUp        | Next / previous page (or pair in spread mode); one screen down / up in continuous scroll |
+| Home / End         | First / last page (top / bottom of the document in continuous scroll) |
+| Arrow keys         | Pan a zoomed-in page (↑ / ↓ scroll the pages in continuous scroll) |
 | Space + drag       | Pan a zoomed-in page (middle-drag also pans) |
 | Shift + wheel      | Scroll a zoomed-in page sideways (a tilt wheel or touchpad also works) |
 
