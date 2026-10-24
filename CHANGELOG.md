@@ -9,32 +9,46 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-10-24 — Continuous scroll
+
 ### Added
 
 - Pages now scroll as one continuous vertical strip with a vertical scroll
   bar, and this is on by default. View → Continuous Scroll turns it off and
-  on again, and litepdf remembers the choice. In continuous scroll the mouse
-  wheel moves through the pages without turning them, PgDn and PgUp scroll by
-  most of a screen, Home and End go to the top and bottom of the document,
-  and the page box, Ctrl+G, the thumbnails and the outline jump to the top of
-  a page. Two-page spread (Ctrl+Shift+D) still shows two pages at a time in
-  that tab; turning it off returns to the layout Continuous Scroll selects.
-  Search highlights the hits on every page on screen, and Find starts from the
-  top page on screen. A drag selection stays within the page it started on,
-  and Select All selects the current page. XPS, FB2 and CBZ documents stay one
-  page at a time (#55).
+  on again, and litepdf remembers the choice; in a tab showing two pages,
+  choosing it turns two-page spread off and continuous scroll on. In
+  continuous scroll the mouse wheel moves through the pages without turning
+  them, PgDn and PgUp scroll by most of a screen, Home and End go to the top
+  and bottom of the document, and the page box, Ctrl+G, the thumbnails and
+  the outline jump to the top of a page, or as near to it as the end of the
+  document allows. Two-page spread (Ctrl+Shift+D) still shows two pages at a
+  time in that tab; turning it off returns to the layout Continuous Scroll
+  selects. Search highlights the hits on every page on screen, and Find
+  starts from the top page on screen. A drag selection stays within the page
+  it started on, and Select All selects the current page. XPS, FB2 and CBZ
+  documents stay one page at a time (#55).
+- In continuous scroll, a tab you switch away from keeps the rendered images
+  of the pages on screen (up to five), not only the page it shows. At the
+  800% zoom level on a 200% display, scrolling a 500-page Letter document,
+  litepdf's memory rises to about 2.1 GiB around each page boundary, where it
+  holds two pages' images at once, against about 1.7 GiB when paging one page
+  at a time; the most it reaches, stepping up the zoom levels to 800%, is
+  about 2.1 GiB rather than 2.6 GiB (#55).
 
 ### Changed
 
-- Turning to a page of a PDF for the first time no longer makes the window
-  wait while litepdf reads that page's annotations and images from the file.
-  To choose which neighbouring pages to prepare, litepdf looks up the size of
-  the page and of its two neighbours while the window waits, and each lookup
-  used to load the whole page. On a test PDF with twelve images and twenty
+- In one-page-at-a-time view, turning to a page of a PDF for the first time
+  no longer makes the window wait while litepdf reads that page's
+  annotations and images from the file. To choose which neighbouring pages
+  to prepare, litepdf looks up the size of the page and of its two
+  neighbours while the window waits, and each lookup used to load the whole
+  page. On a test PDF with twelve images and twenty
   links on every page, read from an SSD with nothing cached, one lookup took
   about 1 ms typically and up to about 50 ms, for up to three pages per turn.
   It now takes the size from the page's own entry in the file, which litepdf
-  normally holds in memory from the moment the document opens (#165).
+  normally holds in memory from the moment the document opens. Continuous
+  scroll looks up the size of every page the same way when a tab first shows
+  the strip: about 0.4 ms for all the pages of a 1,000-page test PDF (#165).
 
 ## [1.5.6] — 2026-10-20 — Less memory at high zoom and in background tabs
 
@@ -703,7 +717,7 @@ and Phase 12 (release hardening: crash-safe session restore).
 
 [Compare initial commit…0.0.1-phase0](https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.1-phase0)
 
-[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.5.6...HEAD
+[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.6.0...HEAD
 [0.0.12-phase10]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.12-phase10
 [0.0.11-phase9]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.11-phase9
 [0.0.10-phase8.5]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.10-phase8.5
