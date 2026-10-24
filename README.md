@@ -70,7 +70,7 @@ Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab i
 | Ctrl+= / Ctrl+-    | Zoom in / out                       |
 | Ctrl+0             | Reset zoom                          |
 | Ctrl+G             | Go to page (focus the page box)     |
-| PgDn / PgUp        | Next / previous page (or pair in spread mode); one screen down / up in continuous scroll |
+| PgDn / PgUp        | Next / previous page (or pair in spread mode); most of a screen down / up in continuous scroll |
 | Home / End         | First / last page (top / bottom of the document in continuous scroll) |
 | Arrow keys         | Pan a zoomed-in page (↑ / ↓ scroll the pages in continuous scroll) |
 | Space + drag       | Pan a zoomed-in page (middle-drag also pans) |

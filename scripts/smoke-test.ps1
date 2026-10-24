@@ -156,8 +156,14 @@ trap {
     break
 }
 
+# The rest of the script runs inside one try, whose finally puts the user's
+# ContinuousScroll value back. The trap restores too, but a stopped pipeline
+# (Ctrl+C) runs finally blocks and cuts off the trap's calls. The body is not
+# indented, to keep the rows where they were.
+try {
+
 # Every row that does not set the preference itself runs in the default layout
-# (spec 9.3). After the trap, so a failure from here on reaches the restore.
+# (spec 9.3).
 Set-SmokeDefaultPref
 
 # Ends a step by killing its litepdf instance. Stop-Process says nothing when
@@ -734,7 +740,7 @@ function Format-StripState {
     return "canvas-scroll $($State.cs | ConvertTo-Json -Compress), page-box $($State.pb | ConvertTo-Json -Compress)"
 }
 
-# Launches litepdf on $Fixture (ContinuousScroll is already 1) and waits until the
+# Launches litepdf on $Fixture (the caller has set ContinuousScroll) and waits until the
 # canvas shows a laid-out strip: the scroll bar is there and its page is set, which
 # paged mode never does. Returns the process; stops it before throwing.
 function Start-StripLaunch {
@@ -1798,5 +1804,8 @@ if ($newDumps.Count -gt 0) {
 }
 Write-Host "[OK] no new crash dumps in $crashDir"
 
-Restore-ContinuousPref
 Write-Host "[OK] smoke test passed."
+
+} finally {
+    Restore-ContinuousPref
+}

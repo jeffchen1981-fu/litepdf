@@ -61,3 +61,25 @@ TEST_CASE("ViewPrefs: a value of the wrong type is ignored", "[view_prefs]") {
     REQUIRE(prefs.continuous_scroll() == ViewPrefs::kContinuousScrollDefault);
     delete_test_key();
 }
+
+// With the default on, a REG_SZ that misreads as non-zero cannot tell an ignored
+// value from a misread one, so this string's four bytes are all zero: read as a
+// DWORD it would turn the preference off.
+TEST_CASE("ViewPrefs: a string value that reads as zero is ignored", "[view_prefs]") {
+    delete_test_key();
+    HKEY hkey = nullptr;
+    REQUIRE(RegCreateKeyExW(HKEY_CURRENT_USER, kTestKey, 0, nullptr,
+                            REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr,
+                            &hkey, nullptr) == ERROR_SUCCESS);
+    const wchar_t zeros[2] = {L'\0', L'\0'};
+    static_assert(sizeof(zeros) == sizeof(DWORD), "must pass the size check");
+    REQUIRE(RegSetValueExW(hkey, L"ContinuousScroll", 0, REG_SZ,
+                           reinterpret_cast<const BYTE*>(zeros), sizeof(zeros))
+            == ERROR_SUCCESS);
+    RegCloseKey(hkey);
+
+    ViewPrefs prefs(kTestKey);
+    prefs.load();
+    REQUIRE(prefs.continuous_scroll());
+    delete_test_key();
+}
