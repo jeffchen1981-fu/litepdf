@@ -784,7 +784,9 @@ two runs per layout; the paged arm ends at page 11's top after 10 PgDn, the stri
   both pages, and one step of retain range after it. Never more than two bitmaps exist. On the
   measured GPU each D2D bitmap costs its size in private bytes as well as in GPU-dedicated
   memory: every release step drops private bytes by 474.3 MiB and GPU-dedicated memory by
-  473.4 MiB at once, with no CPU (no L1 eviction). So the per-step private-bytes sample carries
+  473.4 MiB at once, with no CPU (no L1 eviction), while the working set does not change: the
+  private bytes are commit charge reserved for the GPU allocation, not a copy in RAM (measured
+  in litepdf by a follow-up investigation). So the per-step private-bytes sample carries
   exactly the second-bitmap cost of §5.4, and its structural ratio is
   (base + 2 pixmaps + 2 bitmaps) / (base + 2 pixmaps + 1 bitmap) ≈ 1.31.
 - **Why it is accepted.** The straddle step needs both bitmaps to paint, so no prefetch or
