@@ -717,7 +717,10 @@ Scripted on a 50+ page fixture, with `ContinuousScroll=1` set before launch:
 
 PR 3 adds the same transition row through the menu item. From PR 4 onward, existing smoke steps
 that test paged behaviour set the preference off explicitly. Otherwise they would silently run in
-continuous mode and test something else.
+continuous mode and test something else. The smoke run captures the value before its first launch,
+runs every row that does not set it in the default, and restores the value at the end and on
+failure. Only the strip section's rows test paged behaviour, and each sets the preference itself:
+0 for paged single, or 1 with Two-Page Spread on for the paged spread.
 
 ### 9.4 Fixtures and measurement gates
 
