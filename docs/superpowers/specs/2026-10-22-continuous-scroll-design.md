@@ -760,9 +760,43 @@ first callback):
 |---|---|---|
 | Page sizing | 1 | Measured on the new fixtures: 1000-page PDF ≤ 16 ms; EPUB and CBZ ≤ 100 ms each. A miss disables continuous for that format, and a follow-up issue is filed. The 10,000-page figure is recorded. |
 | Scheduling | 1 | The in-process test above, plus its mutation check. |
-| Memory | 4 | Scroll down 10 pages at 800%: peak private bytes ≤ 1.25 × paged mode's 10 × PgDn (the #49 recipe). CPU time per scroll step is recorded beside it, as the L1-hit oracle (#49): a P0 miss shows as a second full render. |
+| Memory | 4 | Scroll down 10 pages at 800%: peak private bytes — the lifetime peak and the largest sample after each scroll step — ≤ 1.25 × paged mode's 10 × PgDn (the #49 recipe). CPU time per scroll step is recorded beside it, as the L1-hit oracle (#49): a P0 miss shows as a second full render. |
 | GUI drag | 4 | A real `SendInput` thumb drag from top to bottom of the 1000-page fixture (a posted `WM_VSCROLL` sets no track position), with the thumbnails pane closed and open. Oracle: within 5 s of release the page box shows the last page and the process is idle (CPU below 2% for 1 s). A sanity check, not a count gate. |
 | Existing CI | every PR | benchmark regression check; exe size gates (smoke 12 MB, bench 19 MB); `smoke-test.ps1` including the cold-start line |
+
+**Memory gate, measured in PR 4** (`large.pdf`, 500 Letter pages, 800%, DPI 192; same outer
+window, client 1574×982 paged and 1540×982 strip, the difference being the strip's scroll bar;
+two runs per layout; the paged arm ends at page 11's top after 10 PgDn, the strip arm at
+`anchor(10)` after 144 PgDn):
+
+| Reading | Paged | Strip | Ratio |
+|---|---|---|---|
+| Lifetime peak private bytes | 2,658.6 / 2,626.0 MiB | 2,127.4 / 2,149.3 MiB | ≤ 0.82: pass |
+| Largest private-bytes sample after a scroll step | 1,710.0 / 1,677.5 MiB | 2,127.4 / 2,137.9 MiB | 1.24–1.27: **miss, accepted by the user's ruling** |
+| Time-averaged private bytes over the scroll | 1,688 / 1,630 MiB | 1,676 / 1,691 MiB | ≈ 1.0 |
+| GPU dedicated memory, largest sample | 496.7 MiB | 969.9 MiB | recorded, not gated |
+| CPU per scroll step, median / max | 391–484 / 500–547 ms | 0 / 516–531 ms | no P0-miss signature |
+
+- **What the excess is.** At 800% on a 200% display one Letter page is a 473.3 MiB bitmap, and
+  L1 (1 GiB) holds two pages in both layouts. Around each page boundary the strip holds a
+  second D2D page bitmap for about three PgDn steps: the step where the next page enters the
+  prefetch range and its P1 completion creates a bitmap, the step where the viewport straddles
+  both pages, and one step of retain range after it. Never more than two bitmaps exist. On the
+  measured GPU each D2D bitmap costs its size in private bytes as well as in GPU-dedicated
+  memory: every release step drops private bytes by 474.3 MiB and GPU-dedicated memory by
+  473.4 MiB at once, with no CPU (no L1 eviction). So the per-step private-bytes sample carries
+  exactly the second-bitmap cost of §5.4, and its structural ratio is
+  (base + 2 pixmaps + 2 bitmaps) / (base + 2 pixmaps + 1 bitmap) ≈ 1.31.
+- **Why it is accepted.** The straddle step needs both bitmaps to paint, so no prefetch or
+  retain change lowers the maximum; only tiled rendering would, which §5.4 and §10 exclude. The
+  strip's highest sample stays below paged mode's own lifetime peak (the paged page turn holds
+  two bitmaps for a moment, and its zoom-up holds two pages in L1), and the time-averaged use is
+  the same. The ratio crosses 1.25 only where one page reaches about a third of the L1 budget:
+  800% on a display scaled 175% or more, Letter, A4 or larger.
+- **Bias of the two readings.** The lifetime peak includes the zoom-up to 800%, where paged mode
+  also renders a neighbour at every step and the strip does not, so it leans toward passing.
+  The after-idle samples miss paged mode's momentary two-bitmap page turn but see the strip's
+  three-step plateau, so they lean against the strip.
 
 ### 9.5 Phase acceptance
 
