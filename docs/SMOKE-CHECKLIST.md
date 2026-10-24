@@ -15,6 +15,19 @@ Build: `cmake --build build --target litepdf --config Release` → `build\Releas
 - [ ] Cold-start to first page < 1 s on an HDD-class machine
 - [ ] Open encrypted.pdf (password `test`), epub, cbz — all render
 
+## Continuous scroll (#55)
+- [ ] With no `HKCU\SOFTWARE\LitePDF\Settings\ContinuousScroll` value, a PDF opens as a vertical strip with a scroll bar, and View → Continuous Scroll is checked
+- [ ] View → Continuous Scroll off shows the same page one at a time; relaunch → still off; on again → the strip at the same page
+- [ ] Wheel, PgDn/PgUp, Home/End and the arrow keys scroll; the page box follows the page in view
+- [ ] Drag the scroll bar thumb from top to bottom of `tests\fixtures\strip-1000.pdf` with the thumbnails pane (F4) open: the last page shows within 5 s and the window stays responsive
+- [ ] Ctrl+wheel zoom keeps the top of the window on the same place in the document
+- [ ] Ctrl+Shift+D in a strip tab shows the paged spread; pressing it again returns to the strip at the same page
+- [ ] Find highlights the hits on every page on screen; F3 moves through hits on later pages
+- [ ] A drag selection that runs into the next page stops at the end of the page it started on; Ctrl+C copies it
+- [ ] Thumbnail and outline clicks jump to the top of the page
+- [ ] Two strip tabs keep their own positions across tab switches
+- [ ] An `.xps` file opens one page at a time, with View → Continuous Scroll greyed
+
 ## Phase 12 hardening
 - [ ] session.json appears under %LOCALAPPDATA%\LitePDF after opening a doc + 2 s
 - [ ] Change ONLY zoom (no page change), wait 2 s => new zoom persisted in session.json

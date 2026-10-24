@@ -86,10 +86,67 @@ function Write-NewCrashDumps {
     foreach ($name in $Names) { Write-Host "  $name" }
 }
 
+# #55: HKCU\SOFTWARE\LitePDF\Settings\ContinuousScroll picks the layout every launch
+# opens in (spec 7.2). It is the user's own setting, so capture it before the first
+# launch; the run puts it back at the end and on failure.
+$stripKey = "HKCU:\SOFTWARE\LitePDF\Settings"
+$stripHadKey = Test-Path $stripKey
+$stripHadValue = $false
+$stripPriorValue = $null
+$stripPriorKind = $null
+if ($stripHadKey) {
+    $stripKeyItem = Get-Item $stripKey
+    if ($stripKeyItem.GetValueNames() -contains "ContinuousScroll") {
+        $stripHadValue = $true
+        $stripPriorValue = $stripKeyItem.GetValue("ContinuousScroll")
+        $stripPriorKind = $stripKeyItem.GetValueKind("ContinuousScroll")
+    }
+}
+
+# The ContinuousScroll value in the registry, as the menu item's write oracle; $null
+# when the value is absent.
+function Get-ContinuousPref {
+    $v = Get-ItemProperty -Path $stripKey -Name ContinuousScroll -ErrorAction SilentlyContinue
+    if ($null -eq $v) { return $null }
+    return $v.ContinuousScroll
+}
+
+# Removes the value, so the next launch opens in the default layout. Does nothing
+# when the key does not exist (a CI runner has none) or once the user's value has
+# been put back: Windows PowerShell runs a finally before the script's trap, and
+# the latch keeps the result the same in either order.
+$prefRestored = $false
+function Set-SmokeDefaultPref {
+    if ($script:prefRestored -or -not (Test-Path $stripKey)) { return }
+    Remove-ItemProperty -Path $stripKey -Name ContinuousScroll -ErrorAction SilentlyContinue
+}
+
+# Puts the user's value back as it was before the run (or removes it), and removes
+# the key if the run created it and it is empty. A second call does nothing.
+function Restore-ContinuousPref {
+    if ($script:prefRestored) { return }
+    if ($stripHadValue) {
+        if (-not (Test-Path $stripKey)) { New-Item -Path $stripKey -Force | Out-Null }
+        $stripRestoreKind = "DWord"
+        if ($null -ne $stripPriorKind) { $stripRestoreKind = $stripPriorKind.ToString() }
+        Set-ItemProperty -Path $stripKey -Name ContinuousScroll -Value $stripPriorValue -Type $stripRestoreKind
+    } elseif (Test-Path $stripKey) {
+        Remove-ItemProperty -Path $stripKey -Name ContinuousScroll -ErrorAction SilentlyContinue
+        if (-not $stripHadKey) {
+            $stripKeyItem = Get-Item $stripKey
+            if ($stripKeyItem.ValueCount -eq 0 -and $stripKeyItem.SubKeyCount -eq 0) {
+                Remove-Item -Path $stripKey -Force
+            }
+        }
+    }
+    $script:prefRestored = $true
+}
+
 # A failing step throws, which skips the check at the end of the script, so list
 # new dumps here too: a crash is often why the step failed. break rethrows the
-# step's error.
+# step's error. The ContinuousScroll value is put back first.
 trap {
+    try { Restore-ContinuousPref } catch { }
     if (($null -ne $crashBaseline) -and -not $crashDumpsChecked) {
         try {
             $newDumps = @(Get-NewCrashDumps)
@@ -98,6 +155,16 @@ trap {
     }
     break
 }
+
+# The rest of the script runs inside one try, whose finally puts the user's
+# ContinuousScroll value back. The trap restores too, but a stopped pipeline
+# (Ctrl+C) runs finally blocks and cuts off the trap's calls. The body is not
+# indented, to keep the rows where they were.
+try {
+
+# Every row that does not set the preference itself runs in the default layout
+# (spec 9.3).
+Set-SmokeDefaultPref
 
 # Ends a step by killing its litepdf instance. Stop-Process says nothing when
 # the process has already gone, so a crash after the step's checks passed went
@@ -591,6 +658,22 @@ if ($hwnd6 -eq [IntPtr]::Zero) {
 # fire F4 — ensures DocumentView is fully constructed.
 Start-Sleep -Seconds 1
 
+# #55: the rows outside the strip section run in the default layout, the strip
+# (spec 9.3). Check both halves: the value is absent, not a leftover 1, and the
+# canvas really shows the strip.
+$thumbPref = Get-ContinuousPref
+if ($null -ne $thumbPref) {
+    Stop-Process -Id $proc6.Id -Force -ErrorAction SilentlyContinue
+    throw "precondition: the thumb-pane row must run in the default layout, but ContinuousScroll is '$thumbPref'"
+}
+$thumbScroll = Wait-UxProbeState -Probe canvas-scroll -Until { param($s) $s.present -and $s.vscroll }
+$thumbCs = $null
+try { $thumbCs = $thumbScroll | ConvertFrom-Json -ErrorAction Stop } catch { }
+if ($null -eq $thumbCs -or -not $thumbCs.vscroll) {
+    Stop-Process -Id $proc6.Id -Force -ErrorAction SilentlyContinue
+    throw "precondition: the thumb-pane row must run in the strip (the default), but the canvas has no scroll bar: $thumbScroll"
+}
+
 # Post IDM_VIEW_THUMBS (40060). First press lazy-creates the ThumbnailPane,
 # kicks off ThumbnailRenderer for visible rows, and shows the pane.
 & $uxProbe send-cmd 40060 | Out-Null
@@ -618,24 +701,11 @@ Start-Sleep -Milliseconds 500
 # With HKCU\SOFTWARE\LitePDF\Settings\ContinuousScroll = 1 a document opens as one
 # vertical strip of pages, and the canvas has a vertical scroll bar whose range is
 # the strip's height in DIPs (spec 6.2). The oracles are the scroll bar's range and
-# the status-bar page box, read through ux-probe; no pixels. The preference is the
-# user's own setting, so its prior value (or its absence) is put back in finally.
+# the status-bar page box, read through ux-probe; no pixels. Each row sets the
+# preference it needs; finally hands the default back to the rows after it.
 $largeFixture = Join-Path $repoRoot "tests/fixtures/large.pdf"
 if (-not (Test-Path $largeFixture)) {
     throw "fixture not found at $largeFixture"
-}
-$stripKey = "HKCU:\SOFTWARE\LitePDF\Settings"
-$stripHadKey = Test-Path $stripKey
-$stripHadValue = $false
-$stripPriorValue = $null
-$stripPriorKind = $null
-if ($stripHadKey) {
-    $stripKeyItem = Get-Item $stripKey
-    if ($stripKeyItem.GetValueNames() -contains "ContinuousScroll") {
-        $stripHadValue = $true
-        $stripPriorValue = $stripKeyItem.GetValue("ContinuousScroll")
-        $stripPriorKind = $stripKeyItem.GetValueKind("ContinuousScroll")
-    }
 }
 
 # One probe reading, parsed; $null when the probe printed something else.
@@ -670,7 +740,7 @@ function Format-StripState {
     return "canvas-scroll $($State.cs | ConvertTo-Json -Compress), page-box $($State.pb | ConvertTo-Json -Compress)"
 }
 
-# Launches litepdf on $Fixture (ContinuousScroll is already 1) and waits until the
+# Launches litepdf on $Fixture (the caller has set ContinuousScroll) and waits until the
 # canvas shows a laid-out strip: the scroll bar is there and its page is set, which
 # paged mode never does. Returns the process; stops it before throwing.
 function Start-StripLaunch {
@@ -715,14 +785,6 @@ function Start-StripLaunch {
         throw "the $Step launch shows no laid-out strip 5 s after opening $Fixture : $(Format-StripState $st)"
     }
     return $p
-}
-
-# The ContinuousScroll value in the registry, as the menu item's write oracle; $null
-# when the value is absent.
-function Get-ContinuousPref {
-    $v = Get-ItemProperty -Path $stripKey -Name ContinuousScroll -ErrorAction SilentlyContinue
-    if ($null -eq $v) { return $null }
-    return $v.ContinuousScroll
 }
 
 # Polls the registry value until it equals $Expected or $TimeoutSeconds expires;
@@ -797,6 +859,26 @@ if (Test-Path $stripErr) { Remove-Item $stripErr -Force }
 $procStrip = $null
 try {
     if (-not $stripHadKey) { New-Item -Path $stripKey -Force | Out-Null }
+
+    # Row 0: the default (spec 7.2: a missing value means on from PR 4). With no
+    # value a document opens as the strip and View > Continuous Scroll is checked;
+    # with 0 it opens paged and the item is unchecked.
+    Remove-ItemProperty -Path $stripKey -Name ContinuousScroll -ErrorAction SilentlyContinue
+    $procStrip = Start-StripLaunch -Fixture $largeFixture -Step "default layout"
+    $ms = Read-MenuState -Ids @("40066")
+    if ($null -eq $ms -or -not $ms.items.'40066'.found -or $ms.items.'40066'.grayed -or -not $ms.items.'40066'.checked) {
+        throw "default layout: expected Continuous Scroll enabled and checked with no registry value: $($ms | ConvertTo-Json -Compress -Depth 5)"
+    }
+    Stop-LitePDF -Process $procStrip -Step "default layout"
+    Set-ItemProperty -Path $stripKey -Name ContinuousScroll -Value 0 -Type DWord
+    $procStrip = Start-StripLaunch -Fixture $largeFixture -Step "default layout, preference off" -Paged
+    $ms = Read-MenuState -Ids @("40066")
+    if ($null -eq $ms -or -not $ms.items.'40066'.found -or $ms.items.'40066'.checked) {
+        throw "default layout, preference off: expected Continuous Scroll unchecked with the value 0: $($ms | ConvertTo-Json -Compress -Depth 5)"
+    }
+    Stop-LitePDF -Process $procStrip -Step "default layout, preference off"
+    Write-Host "[OK] continuous strip: no value opens the strip with the item checked; 0 opens paged with it unchecked"
+
     Set-ItemProperty -Path $stripKey -Name ContinuousScroll -Value 1 -Type DWord
 
     # Row 1: cold start in continuous mode. The scroll bar appears only while the
@@ -1621,19 +1703,9 @@ try {
         Stop-Process -Id $procStrip.Id -Force -ErrorAction SilentlyContinue
         [void]$procStrip.WaitForExit(5000)
     }
-    if ($stripHadValue) {
-        $stripRestoreKind = "DWord"
-        if ($null -ne $stripPriorKind) { $stripRestoreKind = $stripPriorKind.ToString() }
-        Set-ItemProperty -Path $stripKey -Name ContinuousScroll -Value $stripPriorValue -Type $stripRestoreKind
-    } elseif (Test-Path $stripKey) {
-        Remove-ItemProperty -Path $stripKey -Name ContinuousScroll -ErrorAction SilentlyContinue
-        if (-not $stripHadKey) {
-            $stripKeyItem = Get-Item $stripKey
-            if ($stripKeyItem.ValueCount -eq 0 -and $stripKeyItem.SubKeyCount -eq 0) {
-                Remove-Item -Path $stripKey -Force
-            }
-        }
-    }
+    # Back to the default for the rows after this section (Row 24 leaves 0 behind);
+    # the user's own value is put back at the end of the run.
+    Set-SmokeDefaultPref
     Remove-Item $stripErr -Force -ErrorAction SilentlyContinue
 }
 Start-Sleep -Milliseconds 500
@@ -1668,6 +1740,21 @@ function Start-LitePDFSmokeLaunch {
         throw "$fixture never showed a window in $timeoutSeconds s"
     }
     Write-Host "[OK] $fixture window shown"
+    # #55: these rows run in the default layout, the strip; Row 24 leaves 0 behind,
+    # so check that the strip section handed the default back (spec 9.3).
+    $launchPref = Get-ContinuousPref
+    if ($null -ne $launchPref) {
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        throw "precondition: $fixture must open in the default layout, but ContinuousScroll is '$launchPref'"
+    }
+    $launchScroll = Wait-UxProbeState -Probe canvas-scroll -Until { param($s) $s.present -and $s.vscroll }
+    $launchCs = $null
+    try { $launchCs = $launchScroll | ConvertFrom-Json -ErrorAction Stop } catch { }
+    if ($null -eq $launchCs -or -not $launchCs.vscroll) {
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        throw "precondition: $fixture must open in the strip (the default), but the canvas has no scroll bar: $launchScroll"
+    }
+    Write-Host "[OK] $fixture opened in the strip (the default layout)"
     Stop-LitePDF -Process $proc -Step (Split-Path -Leaf $fixture)
     Start-Sleep -Milliseconds 300
 }
@@ -1718,3 +1805,7 @@ if ($newDumps.Count -gt 0) {
 Write-Host "[OK] no new crash dumps in $crashDir"
 
 Write-Host "[OK] smoke test passed."
+
+} finally {
+    Restore-ContinuousPref
+}

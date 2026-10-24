@@ -9,6 +9,21 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+### Added
+
+- Pages now scroll as one continuous vertical strip with a vertical scroll
+  bar, and this is on by default. View → Continuous Scroll turns it off and
+  on again, and litepdf remembers the choice. In continuous scroll the mouse
+  wheel moves through the pages without turning them, PgDn and PgUp scroll by
+  most of a screen, Home and End go to the top and bottom of the document,
+  and the page box, Ctrl+G, the thumbnails and the outline jump to the top of
+  a page. Two-page spread (Ctrl+Shift+D) still shows two pages at a time in
+  that tab; turning it off returns to the layout Continuous Scroll selects.
+  Search highlights the hits on every page on screen, and Find starts from the
+  top page on screen. A drag selection stays within the page it started on,
+  and Select All selects the current page. XPS and FB2 documents stay one page
+  at a time (#55).
+
 ### Changed
 
 - Turning to a page of a PDF for the first time no longer makes the window
