@@ -16,7 +16,9 @@ Generate the continuous-scroll strip fixtures (#55, spec section 9.4):
 They feed the page-sizing gate (spec section 4.4): litepdf-cli
 --bench-page-sizes times DocumentView::page_sizes() on each of them. The
 existing sample.epub / sample.cbz are far too small to produce a failing reading
-for a 100 ms gate.
+for a 100 ms gate. strip-images.cbz is too small as well: its images are under
+1 KB each, while sizing a CBZ page reads its whole image, so it passed a gate
+that a real-size CBZ misses (CBZ stays paged; #176).
 
 Determinism (the --check contract, as in generate-large-fixture.py):
   * PDF: reportlab invariant mode (rl_config.invariant = 1) pins the timestamp

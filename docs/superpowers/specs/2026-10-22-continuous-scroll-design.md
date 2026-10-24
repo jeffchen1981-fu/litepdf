@@ -215,7 +215,8 @@ for D2D.
 - **Formats without a gate reading.** `Document` also opens XPS, FB2 and SVG
   (`Document.cpp`'s `kAllowedExts`). XPS and FB2 have no reading above, so they get
   `format_ok = false` and stay paged until a follow-up measures them. SVG always opens as a
-  single page and counts as passing. CBZ has a reading, a miss (above), and stays paged too.
+  single page and counts as passing. CBZ has a reading, a miss (above), and stays paged
+  too.
 - **Large documents.** PR 1 also records (not gates) the time for a 10,000-page PDF. Sizing is
   O(N) on the UI thread; above 100 ms at 10,000 pages a follow-up issue is filed (§10).
 - **A page whose size cannot be read.** If `page_size` throws for page `i`, or returns a width
@@ -729,7 +730,9 @@ that test paged behaviour set the preference off explicitly. Otherwise they woul
 continuous mode and test something else. The smoke run captures the value before its first launch,
 runs every row that does not set it in the default, and restores the value at the end and on
 failure. Only the strip section's rows test paged behaviour, and each sets the preference itself:
-0 for paged single, or 1 with Two-Page Spread on for the paged spread.
+0 for paged single, or 1 with Two-Page Spread on for the paged spread. The one exception is the
+`sample.cbz` launch, which runs in the default and asserts that a format outside the strip
+(§4.4) opens one page at a time.
 
 ### 9.4 Fixtures and measurement gates
 

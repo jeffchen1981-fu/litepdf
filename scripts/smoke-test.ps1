@@ -1481,14 +1481,14 @@ try {
         Start-Sleep -Milliseconds 500
 
         # Row 20: Select All on a page with no text (a guard, not a fail-first row).
-        # page-size.pdf's first page has no content stream (#165's fixture): Select
-        # All must build no selection, so Copy stays grayed and leaves the clipboard
-        # alone. Nothing is expected to change, so a FIFO barrier (Status Bar, 40064:
+        # page-size.pdf's first page has no text, only a filled rectangle (#165's
+        # fixture): Select All must build no selection, so Copy stays grayed and
+        # leaves the clipboard alone. Nothing is expected to change, so a FIFO barrier (Status Bar, 40064:
         # the canvas height changes) shows that both commands have run before the
         # oracle is read. (This row used strip-images.cbz until CBZ left the strip.)
-        $stripImages = Join-Path $repoRoot "tests/fixtures/page-size.pdf"
-        if (-not (Test-Path $stripImages)) { throw "fixture not found at $stripImages" }
-        $procStrip = Start-StripLaunch -Fixture $stripImages -Step "strip select all, no text"
+        $noTextFixture = Join-Path $repoRoot "tests/fixtures/page-size.pdf"
+        if (-not (Test-Path $noTextFixture)) { throw "fixture not found at $noTextFixture" }
+        $procStrip = Start-StripLaunch -Fixture $noTextFixture -Step "strip select all, no text"
         $clipMarker = "litepdf-smoke-marker-$([guid]::NewGuid().ToString('N'))"
         Set-Clipboard -Value $clipMarker
         $cs = Read-UxProbeJson -Probe canvas-scroll

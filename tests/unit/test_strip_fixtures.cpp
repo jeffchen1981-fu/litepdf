@@ -2,6 +2,8 @@
 // section 9.4), written by scripts/generate-strip-fixtures.py. Pins the shape
 // the gate's readings depend on, so a regenerated fixture that drifts in page
 // count or layout fails here rather than as a quietly cheaper benchmark.
+// strip-images.cbz cannot show a CBZ miss (its images are under 1 KB, and
+// sizing a CBZ page reads its whole image): CBZ stays paged, #176.
 
 #include <catch2/catch_test_macros.hpp>
 
