@@ -27,6 +27,7 @@ Build: `cmake --build build --target litepdf --config Release` → `build\Releas
 - [ ] Thumbnail and outline clicks jump to the top of the page
 - [ ] Two strip tabs keep their own positions across tab switches
 - [ ] An `.xps` file opens one page at a time, with View → Continuous Scroll greyed
+- [ ] A `.cbz` file opens one page at a time, with View → Continuous Scroll greyed (#176)
 
 ## Phase 12 hardening
 - [ ] session.json appears under %LOCALAPPDATA%\LitePDF after opening a doc + 2 s
