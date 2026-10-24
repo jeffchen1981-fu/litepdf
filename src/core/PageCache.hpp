@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <vector>
 
 // Forward decls (header stays MuPDF-free).
 struct fz_pixmap;
@@ -109,6 +110,15 @@ public:
     // else, so a render that was already running when the tab left cannot
     // refill L1 or evict the kept pages.
     void retain_l1_pages(float scale, bool invert, int page, int other_page = -1);
+
+    // (#159, #55) The same for a set of pages: a continuous-scroll tab keeps
+    // every page it shows. An empty set empties L1 and admits nothing until
+    // release_l1_pin().
+    //
+    // Overload trap: a braced list of zero or one int ({}, {page}) converts to
+    // int by identity and binds the overload above ({} means page 0). Always
+    // pass an explicitly constructed std::vector<int>.
+    void retain_l1_pages(float scale, bool invert, const std::vector<int>& pages);
     void release_l1_pin();
 
     void clear();                 // drops all cached entries (L1 + L2)

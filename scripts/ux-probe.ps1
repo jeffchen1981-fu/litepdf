@@ -19,6 +19,7 @@
 #   ux-probe.ps1 page-box-go <n>                          - Type <n> into the page box and post VK_RETURN to it
 #   ux-probe.ps1 canvas-wheel <delta> [count]             - Post <count> WM_MOUSEWHEEL (default 1) of <delta> to the canvas centre
 #   ux-probe.ps1 canvas-key <vk_hex>                      - Post WM_KEYDOWN/UP <vk_hex> to the canvas (Home/End/PgUp/PgDn are canvas keys)
+#   ux-probe.ps1 menu-state <id> [id...]                  - JSON: for each command id, found/grayed/checked in the main menu (after WM_INITMENUPOPUP to its submenu)
 #
 # The probe is per-monitor DPI aware (see below), so every size it reports is in physical
 # pixels; divide by dpi / 96 for DIPs.
@@ -248,6 +249,46 @@ function File-Menu([IntPtr]$hwnd) {
   }
 }
 
+# For each command id: the top-level submenu that owns it gets WM_INITMENUPOPUP first
+# (as File-Menu does), so the app's own enable/check pass runs, then GetMenuState reads
+# MF_GRAYED (0x1) and MF_CHECKED (0x8). GetMenuState returns 0xFFFFFFFF for an id the
+# menu lacks; in PS 5.1 that literal is the Int32 -1, so compare to [uint32]::MaxValue.
+# Prints one line of JSON; a missing window or menu reports present=false.
+function Menu-State([IntPtr]$hwnd, [string[]]$ids) {
+  $notFound = [uint32]::MaxValue
+  $menu = [IntPtr]::Zero
+  if ($hwnd -ne [IntPtr]::Zero) { $menu = [W.U32]::GetMenu($hwnd) }
+  $items = [ordered]@{}
+  if ($menu -eq [IntPtr]::Zero) {
+    foreach ($s in $ids) { $items[$s] = [ordered]@{ found = $false; grayed = $false; checked = $false } }
+    $obj = [ordered]@{ present = $false; items = $items }
+    Write-Output ($obj | ConvertTo-Json -Compress -Depth 4)
+    return
+  }
+  $WM_INITMENUPOPUP = 0x0117
+  $MF_BYCOMMAND = [uint32]0
+  $topCount = [W.U32]::GetMenuItemCount($menu)
+  foreach ($s in $ids) {
+    $id = [uint32]$s
+    $entry = [ordered]@{ found = $false; grayed = $false; checked = $false }
+    for ($pos = 0; $pos -lt $topCount; $pos++) {
+      $sub = [W.U32]::GetSubMenu($menu, $pos)
+      if ($sub -eq [IntPtr]::Zero) { continue }
+      if ([W.U32]::GetMenuState($sub, $id, $MF_BYCOMMAND) -eq $notFound) { continue }
+      [void][W.U32]::SendMessage($hwnd, $WM_INITMENUPOPUP, $sub, [IntPtr]$pos)
+      $state = [W.U32]::GetMenuState($sub, $id, $MF_BYCOMMAND)
+      if ($state -eq $notFound) { break }   # the init pass removed it
+      $entry.found   = $true
+      $entry.grayed  = (($state -band 0x1) -ne 0)
+      $entry.checked = (($state -band 0x8) -ne 0)
+      break
+    }
+    $items[$s] = $entry
+  }
+  $obj = [ordered]@{ present = $true; items = $items }
+  Write-Output ($obj | ConvertTo-Json -Compress -Depth 4)
+}
+
 function Tab-Enum([IntPtr]$parent) {
   # Find the SysTabControl32 child of the LitePDF main window, read tab count,
   # active index, and each tab's label via TCM_GETITEMW. Emits one line of JSON
@@ -470,6 +511,14 @@ switch ($Action) {
     $h = Get-LitePdfHwnd
     if ($h -eq [IntPtr]::Zero) { Write-Error "litepdf window not found"; exit 1 }
     File-Menu $h
+  }
+  'menu-state' {
+    # One line of JSON, exit 0 even when the window is missing (present=false).
+    $ids = @()
+    if ($Arg1) { $ids += $Arg1 }
+    if ($Rest) { $ids += $Rest }
+    if (-not $ids) { Write-Error "Usage: menu-state <id> [id...]"; exit 1 }
+    Menu-State (Get-LitePdfHwnd) $ids
   }
   'send-cmd' {
     # PostMessage WM_COMMAND with the given control ID (e.g. 40020 for IDM_MRU_1)

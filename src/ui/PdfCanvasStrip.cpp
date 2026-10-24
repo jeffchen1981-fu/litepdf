@@ -173,6 +173,11 @@ bool PdfCanvas::strip_active() const noexcept {
 
 void PdfCanvas::switch_layout(LayoutKind next, bool carry_position) {
     if (!impl_) return;
+    // spec 3.4: a layout switch ends any live gesture, without committing. The
+    // set_dual_page call below cancels only when the dual flag changes, which a
+    // single <-> strip switch does not, and a drag's placement belongs to the
+    // outgoing layout.
+    cancel_gesture();
     const bool was_strip = impl_->strip;
 
     // spec 7.3, deviation 1: the carry is captured FIRST, before anything below
@@ -389,12 +394,20 @@ void PdfCanvas::strip_kick(const StripKickActions& a, const StripTabState* resto
     // depend on one having arrived since the layout switch.
     const DipSize vp = strip_viewport_dip();
     sv.set_viewport(vp.w, vp.h);
-    if (!sv.has_layout()) {
+    const bool built_here = !sv.has_layout();
+    if (built_here) {
         strip_build_layout();
     } else if (a.relayout) {
         sv.relayout(impl_->view->zoom_pct());   // spec 4.5
     }
-    if (restore) sv.restore(*restore);          // spec 7.4
+    if (restore) {
+        sv.restore(*restore);                   // spec 7.4
+    } else if (built_here) {
+        // spec 7.4: a tab entering the strip with no saved strip position starts
+        // at its current page (scroll = anchor, pinned), not at the top. A first
+        // open is unaffected: anchor(0) is scroll 0.
+        sv.navigate(impl_->view->current_page());
+    }
     if (a.restyle) {
         // spec 5.2: cancel every Pending request, keep the bitmaps as stale.
         impl_->strip_set.state.change_render_params();
@@ -418,6 +431,11 @@ int PdfCanvas::strip_top_visible_page() const {
     if (!impl_ || !impl_->view) return 0;
     if (!strip_active()) return impl_->view->current_page();
     return impl_->strip_view.top_visible_page();
+}
+
+std::vector<int> PdfCanvas::strip_retained_pages(std::size_t cap) const {
+    if (!strip_active()) return {};
+    return impl_->strip_view.retained_for_background(cap);
 }
 
 // ---------------------------------------------------------------------------
@@ -450,6 +468,12 @@ void PdfCanvas::strip_after_change() {
                                             v->l1_contains(c), sub);
     }
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+    // spec 7.1: Windows sends no WM_SETCURSOR when content scrolls under a still
+    // pointer, so a wheel, key, scroll bar or kick that moves a gap or a page
+    // under it would keep the old shape until the next mouse move.
+    // refresh_cursor acts only when the pointer is over the canvas or the
+    // canvas holds the capture.
+    refresh_cursor();
 }
 
 void PdfCanvas::strip_update_scrollbar() {
@@ -790,9 +814,7 @@ void PdfCanvas::strip_paint() {
     }
     // #135: record the overlay this paint draws, as the paged on_paint does, so
     // on_search_hits_changed compares the next search update against the screen.
-    // The strip draws no hits in PR 2 (PR 3 will): without this, hits a paged
-    // paint left here would make every search update repaint the whole strip.
-    impl_->painted_hits.clear();
+    impl_->painted_hits = overlay_hits();
     bool drew_bitmap = false;
 
     impl_->rt->BeginDraw();
@@ -855,6 +877,25 @@ void PdfCanvas::strip_paint() {
                         border_brush.Get(), 1.0f);
                 }
             }
+        }
+
+        // Search hits over every visible page (spec 7.1), whatever its bitmap
+        // state: a hit is placed from its page's rect. One PDF point is
+        // zoom_pct DIPs, as in paged mode; the layout's zoom is the one
+        // page_rect uses. overlay_hits() already checked the source and both
+        // fill brushes.
+        const float pct = static_cast<float>(sv.layout().zoom_pct());
+        for (const auto& hit : impl_->painted_hits) {
+            const StripPageRect r = sv.page_rect(static_cast<int>(hit.page));
+            paint_hit(hit, static_cast<float>(r.x), static_cast<float>(r.y), pct);
+        }
+
+        // The selection, after the hits so it reads as the active thing, on its
+        // own page whenever that page is visible (spec 7.1), placed the same way.
+        const litepdf::core::TextSelection* sel = painted_selection();
+        if (sel && sel->page >= visible.first && sel->page <= visible.last) {
+            const StripPageRect r = sv.page_rect(sel->page);
+            paint_selection_quads(*sel, static_cast<float>(r.x), static_cast<float>(r.y), pct);
         }
     }
 

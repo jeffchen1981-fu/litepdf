@@ -205,10 +205,11 @@ public:
     LayoutKind layout() const noexcept;
 
     // The layout-switch reset of spec 3.4, for a switch into or out of the strip
-    // (a paged single <-> spread switch keeps set_dual_page). Cancels the old
-    // layout's work, drops every bitmap, bumps the render epoch, sets the
-    // dual-page flag for `next` and adds or removes WS_VSCROLL, so a fit read
-    // after it already sees the right client width. The caller kicks a render.
+    // (a paged single <-> spread switch keeps set_dual_page). Cancels any live
+    // gesture first (without committing it), then the old layout's work, drops
+    // every bitmap, bumps the render epoch, sets the dual-page flag for `next`
+    // and adds or removes WS_VSCROLL, so a fit read after it already sees the
+    // right client width. The caller kicks a render.
     //
     // `carry_position` (a switch within one tab: the two-page toggle) carries the
     // reader's position (spec 7.3, deviation 1): (page, in-page offset) and the
@@ -230,7 +231,9 @@ public:
     // MainWindow::kick_render's strip branch, after it has refit and refreshed
     // the zoom readout as `a` asks: build the strip layout if there is none,
     // else re-layout at the view's zoom when `a.relayout`; apply `restore` when
-    // non-null; restyle when `a.restyle`; then recompute the current page,
+    // non-null; when this call built the layout and `restore` is null, navigate
+    // to the view's current page (spec 7.4); restyle when `a.restyle`; then
+    // recompute the current page,
     // update the scrollbar and reschedule. No-op unless the strip is shown.
     void strip_kick(const StripKickActions& a, const StripTabState* restore);
 
@@ -247,10 +250,16 @@ public:
     // current page when the strip is not shown or not laid out.
     int strip_top_visible_page() const;
 
+    // (#159, #55) The pages a background strip tab keeps in L1: the strip's
+    // visible pages, at most `cap` (the view's L1 count), the current page
+    // first. Empty unless the strip is shown and laid out.
+    std::vector<int> strip_retained_pages(std::size_t cap) const;
+
     // --- Phase 6 Task 9: search hit overlay ---
 
     // Source for overlay hits. PdfCanvas calls this each paint to fetch
-    // the hits for the currently visible page. Non-owning; caller must
+    // the hits for the pages on screen: the shown page when paged, every
+    // visible page when the strip is shown. Non-owning; caller must
     // ensure the lambda stays valid while set (or call set_hits_source(nullptr)
     // before the lambda's captures become invalid).
     using HitsFn = std::function<std::vector<litepdf::core::SearchSession::Hit>(std::size_t page)>;
@@ -445,12 +454,35 @@ private:
 
     // The search hits on_paint draws over the page right now: empty in spread
     // mode, over another view's or page's bitmap, before the render target
-    // exists, or with no hits source. on_paint and on_search_hits_changed both
-    // ask this, so the two cannot disagree about what is on screen.
+    // exists, or with no hits source. In the strip it is the hits of every page
+    // in V, with no bitmap condition (spec 7.1); strip_paint draws them too.
+    // on_paint and on_search_hits_changed both ask this, so the two cannot
+    // disagree about what is on screen.
     std::vector<litepdf::core::SearchSession::Hit> overlay_hits() const;
+
+    // Draws one search hit: the current-hit fill and stroke when it is the
+    // current hit, else the other-hit fill. (ox, oy) is the page's top-left in
+    // canvas DIPs and `pct` the DIPs per PDF point; the caller has checked
+    // that the render target and both fill brushes exist (overlay_hits does).
+    void paint_hit(const litepdf::core::SearchSession::Hit& hit,
+                   float ox, float oy, float pct);
 
     // The selection on_paint draws, or null.
     const litepdf::core::TextSelection* painted_selection() const noexcept;
+
+    // Fills `sel`'s quads with the selection brush. (ox, oy) is the page's
+    // top-left in canvas DIPs and `pct` the DIPs per PDF point; draws nothing
+    // without the brush. Paged on_paint and the strip (#55) both call it.
+    void paint_selection_quads(const litepdf::core::TextSelection& sel,
+                               float ox, float oy, float pct);
+
+    // Starts a selection gesture on `page`, drawn at `pl`: clears the committed
+    // selection, takes `text` as the drag's text, captures the mouse, and in
+    // Word or Line mode selects at press time (spec §4.2). The caller has
+    // checked that `text` is valid and no gesture is live. The paged press and
+    // the strip's press on the page under the cursor (#55, spec 7.1) share it.
+    void begin_selection(int page, const Placement& pl, litepdf::core::SelectMode mode,
+                         int x_px, int y_px, litepdf::core::Document::TextPage text);
 
     // #52 selection gestures. The state machine is ui/detail/SelectionDrag.hpp;
     // spec §4.2 has the message ordering these depend on.
@@ -501,8 +533,9 @@ private:
 
     // update_cursor outside WM_SETCURSOR: when a gesture ends normally (a
     // selection drag or click, or a pan), and when space goes down or up with
-    // the pointer still. Does nothing unless the pointer is over this window
-    // or this window holds the capture.
+    // the pointer still, and at the end of every strip change (content moved
+    // under a still pointer). Does nothing unless the pointer is over this
+    // window or this window holds the capture.
     void refresh_cursor();
 
     // --- #55: the continuous strip (PdfCanvasStrip.cpp) ---
@@ -526,7 +559,7 @@ private:
     void strip_update_scrollbar();
 
     // The common tail of every strip change: recompute the current page, update
-    // the scrollbar, reschedule, and invalidate. strip_after_change,
+    // the scrollbar, reschedule, invalidate, and refresh the cursor. strip_after_change,
     // strip_update_scrollbar and strip_reschedule return at once unless the
     // strip is shown and has a layout.
     void strip_after_change();

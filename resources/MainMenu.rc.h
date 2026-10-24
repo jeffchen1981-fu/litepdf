@@ -72,9 +72,12 @@
 // #48: go-to-page accelerator. Takes the next id of the same reservation.
 #define IDM_VIEW_GOTO_PAGE   40065   // Ctrl+G
 
-// Next free ID: 40066. Reserve 40066-40070 for future Phase 8.x cleanups.
+// #55: continuous scroll. The next id of the same reservation.
+#define IDM_VIEW_CONTINUOUS  40066   // View > Continuous Scroll (no accelerator)
 
-// #52: text selection. A fresh block, leaving the 40066-40070 reservation alone.
+// Next free ID: 40067. Reserve 40067-40070 for future Phase 8.x cleanups.
+
+// #52: text selection. A fresh block, outside the Phase 8.x reservation (now 40067-40070).
 #define IDM_EDIT_COPY        40071   // Ctrl+C
 #define IDM_EDIT_SELECT_ALL  40072   // Ctrl+A
 

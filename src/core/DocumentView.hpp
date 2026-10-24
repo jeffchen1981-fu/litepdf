@@ -228,6 +228,11 @@ public:
     // cannot refill it (PageCache::retain_l1_pages). UI thread only.
     void trim_l1_for_background(int page, int other_page = -1);
 
+    // (#159, #55) The same for a set of pages -- a continuous-scroll tab
+    // keeps every page it shows. Overload trap as PageCache::retain_l1_pages:
+    // pass an explicitly constructed std::vector<int>, never {} or {page}.
+    void trim_l1_for_background(const std::vector<int>& pages);
+
     // Phase 3 Task 11: cancel queued P1/P3 work, submit P0 for `page`
     // with the caller's callback, and submit P1 prefetch for prev/next
     // pages with drop-only callbacks. The pixmaps land in PageCache

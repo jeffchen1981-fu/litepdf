@@ -11,6 +11,7 @@
 #include "ui/detail/HitOverlay.hpp"
 #include "ui/detail/ViewportMath.hpp"
 #include "ui/detail/SelectionDrag.hpp"
+#include "ui/detail/StripOverlay.hpp"
 
 #include <d2d1.h>
 #include <d2d1_1.h>
@@ -534,6 +535,16 @@ bool PdfCanvas::single_page_placement(Placement& out) const {
 }
 
 std::vector<litepdf::core::SearchSession::Hit> PdfCanvas::overlay_hits() const {
+    // The strip (#55, spec 7.1): the hits of every visible page. They are placed
+    // from the pages' rects, so they need no bitmap (only the brushes, which a
+    // render target brings, and the hits source).
+    if (layout() == LayoutKind::Strip) {
+        if (!strip_active() || !impl_->hits_fn
+            || !impl_->brush_hit_other_fill || !impl_->brush_hit_current_fill) {
+            return {};
+        }
+        return strip_overlay_hits(impl_->strip_view.visible(), impl_->hits_fn);
+    }
     // Only over THIS view's bitmap of THIS page, and only in single-page mode
     // (spec §4.4; R17 left spread mode without an overlay).
     Placement pl;
@@ -545,6 +556,39 @@ std::vector<litepdf::core::SearchSession::Hit> PdfCanvas::overlay_hits() const {
     return impl_->hits_fn(static_cast<std::size_t>(impl_->view->current_page()));
 }
 
+void PdfCanvas::paint_hit(const litepdf::core::SearchSession::Hit& hit,
+                          float ox, float oy, float pct) {
+    const auto& q = hit.geom;
+    const D2D1_RECT_F r = quad_bounds_dip(q, ox, oy, pct);
+
+    const bool is_current =
+        impl_->current_hit.has_value()
+        && impl_->current_hit->page == hit.page
+        && impl_->current_hit->geom.ul_x == q.ul_x
+        && impl_->current_hit->geom.ul_y == q.ul_y
+        && impl_->current_hit->geom.lr_x == q.lr_x
+        && impl_->current_hit->geom.lr_y == q.lr_y;
+
+    if (is_current) {
+        impl_->rt->FillRectangle(r, impl_->brush_hit_current_fill.Get());
+        if (impl_->brush_hit_current_stroke) {
+            impl_->rt->DrawRectangle(
+                r, impl_->brush_hit_current_stroke.Get(), 1.0f);
+        }
+    } else {
+        impl_->rt->FillRectangle(r, impl_->brush_hit_other_fill.Get());
+    }
+}
+
+void PdfCanvas::paint_selection_quads(const litepdf::core::TextSelection& sel,
+                                      float ox, float oy, float pct) {
+    if (!impl_->brush_selection_fill) return;
+    for (const auto& q : sel.quads) {
+        impl_->rt->FillRectangle(quad_bounds_dip(q, ox, oy, pct),
+                                 impl_->brush_selection_fill.Get());
+    }
+}
+
 const litepdf::core::TextSelection* PdfCanvas::painted_selection() const noexcept {
     if (!impl_) return nullptr;
     if (impl_->live_selection) return &*impl_->live_selection;
@@ -554,9 +598,13 @@ const litepdf::core::TextSelection* PdfCanvas::painted_selection() const noexcep
 }
 
 bool PdfCanvas::can_select_all() const {
-    // #55: Select All and selection stay off in the strip until PR 3 (spec 7.1).
-    if (layout() == LayoutKind::Strip) return false;
-    if (!impl_ || !impl_->view || impl_->dual_page) return false;
+    // #55, spec 7.1: in the strip, Select All selects the current page (the
+    // derived or pinned one), under the same gesture rule as below.
+    if (layout() == LayoutKind::Strip) {
+        if (!strip_active()) return false;
+    } else if (!impl_ || !impl_->view || impl_->dual_page) {
+        return false;
+    }
     // A drag owns the selection. A stale one does not -- select_all ends it
     // first, as the next press would. That matters because Edit's
     // WM_INITMENUPOPUP asks this too, and TranslateAcceleratorW sends that
@@ -691,14 +739,36 @@ void PdfCanvas::on_left_button_down(bool is_double_click_message, int x_px, int 
         begin_pan_gesture(MouseButton::Left, x_px, y_px);
         return;
     }
+    // #55, spec 7.1: in the strip the press selects on the page under the
+    // cursor, placed from that page's rect, so it does not wait for the page's
+    // bitmap. A press in a gap, or beside a narrow page, starts no gesture and
+    // takes no capture; in Chars mode it clears the selection, as a click
+    // without a drag does. (A double or triple click there does nothing.)
+    if (layout() == LayoutKind::Strip) {
+        if (!strip_active()) return;
+        const float dpi = static_cast<float>(GetDpiForWindow(hwnd_));
+        const std::optional<int> page = impl_->strip_view.page_at(
+            client_px_to_dip(static_cast<float>(x_px), dpi),
+            client_px_to_dip(static_cast<float>(y_px), dpi));
+        if (!page) {
+            if (mode == litepdf::core::SelectMode::Chars) {
+                impl_->view->clear_selection();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return;
+        }
+        // The #98 slot when the page is the current one and its text is
+        // ready, else a synchronous build (text_for's contract).
+        litepdf::core::Document::TextPage text = impl_->view->text_for(*page);
+        if (!text.valid()) return;
+        begin_selection(*page, strip_page_placement(impl_->strip_view.page_rect(*page)),
+                        mode, x_px, y_px, std::move(text));
+        return;
+    }
     // Refuse spread mode HERE, not only in paint: current_bitmap holds the LEFT
     // slot in that mode, so a drag would compute points with single-page
     // geometry and build an invisible selection Ctrl+C would still copy (spec §1).
     if (!impl_->view || impl_->dual_page || !own_bitmap()) return;
-    // #55: no selection in the strip until PR 3 (spec 7.1). Defensive: every
-    // paged render submitter is strip-guarded, so own_bitmap() should already
-    // be false here, but a selection must never start in the strip.
-    if (layout() == LayoutKind::Strip) return;
     Placement pl;
     if (!single_page_placement(pl)) return;
 
@@ -706,6 +776,12 @@ void PdfCanvas::on_left_button_down(bool is_double_click_message, int x_px, int 
     litepdf::core::Document::TextPage text = impl_->view->text_for(page);
     if (!text.valid()) return;
 
+    begin_selection(page, pl, mode, x_px, y_px, std::move(text));
+}
+
+void PdfCanvas::begin_selection(int page, const Placement& pl,
+                                litepdf::core::SelectMode mode, int x_px, int y_px,
+                                litepdf::core::Document::TextPage text) {
     const litepdf::core::SelPoint pt = page_point_at(x_px, y_px, pl);
     impl_->view->clear_selection();
     impl_->gesture.begin_select(mode, x_px, y_px);
@@ -754,7 +830,16 @@ void PdfCanvas::on_mouse_move(int x_px, int y_px) {
     if (impl_->gesture.gesture() != Gesture::Selecting || !impl_->live_selection) return;
     impl_->gesture.move(x_px, y_px, pointer_metrics(hwnd_));
     Placement pl;
-    if (!own_bitmap() || !single_page_placement(pl)) return;
+    if (layout() == LayoutKind::Strip) {
+        // #55, spec 7.1: the START page's placement, recomputed on every move,
+        // so after a scroll or zoom mid-drag the pointer maps into where that
+        // page is now, and canvas_dip_to_page_point clamps it to that page
+        // whatever page is under the pointer.
+        if (!strip_active()) return;
+        pl = strip_page_placement(impl_->strip_view.page_rect(impl_->live_selection->page));
+    } else if (!own_bitmap() || !single_page_placement(pl)) {
+        return;
+    }
     // RAW: the pointer position, never a snapped one (spec §2).
     impl_->live_selection->extent = page_point_at(x_px, y_px, pl);
     refresh_live_selection();
@@ -855,9 +940,17 @@ bool PdfCanvas::can_pan() const {
 void PdfCanvas::update_cursor() {
     bool over_page = false;
     Placement pl;
-    // #55: the strip has no I-beam until it has selection (PR 3, spec 7.1).
-    if (!impl_->dual_page && layout() != LayoutKind::Strip && own_bitmap() &&
-        single_page_placement(pl)) {
+    if (layout() == LayoutKind::Strip) {
+        // #55, spec 7.1: an I-beam over any page rect, an arrow over the gaps.
+        POINT pt;
+        if (strip_active() && GetCursorPos(&pt) && ScreenToClient(hwnd_, &pt)) {
+            const float dpi = static_cast<float>(GetDpiForWindow(hwnd_));
+            over_page = impl_->strip_view
+                            .page_at(client_px_to_dip(static_cast<float>(pt.x), dpi),
+                                     client_px_to_dip(static_cast<float>(pt.y), dpi))
+                            .has_value();
+        }
+    } else if (!impl_->dual_page && own_bitmap() && single_page_placement(pl)) {
         POINT pt;
         if (GetCursorPos(&pt) && ScreenToClient(hwnd_, &pt)) {
             const float dpi = static_cast<float>(GetDpiForWindow(hwnd_));
@@ -2007,38 +2100,14 @@ void PdfCanvas::on_paint() {
 
             // overlay_hits() already checked the source and both fill brushes.
             for (const auto& hit : impl_->painted_hits) {
-                const auto& q = hit.geom;
-                const D2D1_RECT_F r = quad_bounds_dip(q, ox, oy, pct);
-
-                const bool is_current =
-                    impl_->current_hit.has_value()
-                    && impl_->current_hit->page == hit.page
-                    && impl_->current_hit->geom.ul_x == q.ul_x
-                    && impl_->current_hit->geom.ul_y == q.ul_y
-                    && impl_->current_hit->geom.lr_x == q.lr_x
-                    && impl_->current_hit->geom.lr_y == q.lr_y;
-
-                if (is_current) {
-                    impl_->rt->FillRectangle(r, impl_->brush_hit_current_fill.Get());
-                    if (impl_->brush_hit_current_stroke) {
-                        impl_->rt->DrawRectangle(
-                            r, impl_->brush_hit_current_stroke.Get(), 1.0f);
-                    }
-                } else {
-                    impl_->rt->FillRectangle(r, impl_->brush_hit_other_fill.Get());
-                }
+                paint_hit(hit, ox, oy, pct);
             }
 
             // The selection, after the hits so it reads as the active thing.
             // Painted only on its own page and only in single-page mode (this
             // branch is unreachable in spread mode -- spec §1).
             const litepdf::core::TextSelection* sel = painted_selection();
-            if (sel && sel->page == pg && impl_->brush_selection_fill) {
-                for (const auto& q : sel->quads) {
-                    impl_->rt->FillRectangle(quad_bounds_dip(q, ox, oy, pct),
-                                             impl_->brush_selection_fill.Get());
-                }
-            }
+            if (sel && sel->page == pg) paint_selection_quads(*sel, ox, oy, pct);
         }
     }
 

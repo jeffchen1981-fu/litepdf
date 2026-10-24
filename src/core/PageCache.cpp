@@ -2,12 +2,14 @@
 
 #include <mupdf/fitz.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <functional>
 #include <list>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+#include <vector>
 
 namespace litepdf::core {
 
@@ -54,11 +56,10 @@ struct PageCache::Impl {
     struct Pin {
         float scale;
         bool  invert;
-        int   page;
-        int   other_page;
+        std::vector<int> pages;
         bool admits(const L1Key& k) const noexcept {
             return k.scale == scale && k.invert == invert &&
-                   (k.page == page || k.page == other_page);
+                   std::find(pages.begin(), pages.end(), k.page) != pages.end();
         }
     };
     std::optional<Pin> pin;
@@ -193,8 +194,17 @@ void PageCache::put_pixmap(int page_num, float scale, bool invert, fz_pixmap* pi
 }
 
 void PageCache::retain_l1_pages(float scale, bool invert, int page, int other_page) {
+    // Explicit vectors: a braced {page} would bind this int overload again.
+    // No -1 entry: "none" is an absent page, not a key.
+    retain_l1_pages(scale, invert,
+                    other_page < 0 ? std::vector<int>{page}
+                                   : std::vector<int>{page, other_page});
+}
+
+void PageCache::retain_l1_pages(float scale, bool invert,
+                                const std::vector<int>& pages) {
     std::lock_guard<std::mutex> lk(impl_->mtx);
-    impl_->pin = Impl::Pin{scale, invert, page, other_page};
+    impl_->pin = Impl::Pin{scale, invert, pages};
     for (auto it = impl_->l1_map.begin(); it != impl_->l1_map.end();) {
         if (impl_->pin->admits(it->first)) {
             ++it;
