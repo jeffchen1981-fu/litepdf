@@ -773,7 +773,7 @@ two runs per layout; the paged arm ends at page 11's top after 10 PgDn, the stri
 |---|---|---|---|
 | Lifetime peak private bytes | 2,658.6 / 2,626.0 MiB | 2,127.4 / 2,149.3 MiB | ≤ 0.82: pass |
 | Largest private-bytes sample after a scroll step | 1,710.0 / 1,677.5 MiB | 2,127.4 / 2,137.9 MiB | 1.24–1.27: **miss, accepted by the user's ruling** |
-| Time-averaged private bytes over the scroll | 1,688 / 1,630 MiB | 1,676 / 1,691 MiB | ≈ 1.0 |
+| Mean of the per-step private-bytes samples | 1,688.0 / 1,629.7 MiB | 1,675.9 / 1,691.3 MiB | ≈ 1.0 |
 | GPU dedicated memory, largest sample | 496.7 MiB | 969.9 MiB | recorded, not gated |
 | CPU per scroll step, median / max | 391–484 / 500–547 ms | 0 / 516–531 ms | no P0-miss signature |
 
@@ -790,8 +790,8 @@ two runs per layout; the paged arm ends at page 11's top after 10 PgDn, the stri
 - **Why it is accepted.** The straddle step needs both bitmaps to paint, so no prefetch or
   retain change lowers the maximum; only tiled rendering would, which §5.4 and §10 exclude. The
   strip's highest sample stays below paged mode's own lifetime peak (the paged page turn holds
-  two bitmaps for a moment, and its zoom-up holds two pages in L1), and the time-averaged use is
-  the same. The ratio crosses 1.25 only where one page reaches about a third of the L1 budget:
+  two bitmaps for a moment, and its zoom-up holds two pages in L1), and the mean of the per-step
+  samples is the same. The ratio crosses 1.25 only where one page reaches about a third of the L1 budget:
   800% on a display scaled 175% or more, Letter, A4 or larger.
 - **Bias of the two readings.** The lifetime peak includes the zoom-up to 800%, where paged mode
   also renders a neighbour at every step and the strip does not, so it leans toward passing.
