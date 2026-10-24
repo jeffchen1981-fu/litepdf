@@ -17,7 +17,7 @@ TEST_CASE("ViewPrefs: a missing value gives the default", "[view_prefs]") {
     ViewPrefs prefs(kTestKey);
     prefs.load();
     REQUIRE(prefs.continuous_scroll() == ViewPrefs::kContinuousScrollDefault);
-    REQUIRE_FALSE(prefs.continuous_scroll());
+    REQUIRE(prefs.continuous_scroll());
     delete_test_key();
 }
 

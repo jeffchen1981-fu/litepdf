@@ -11,7 +11,8 @@
 //   prefs.save();        // write back
 //
 // Values:
-//   ContinuousScroll (REG_DWORD)  0 = single/dual page view, non-zero = strip.
+//   ContinuousScroll (REG_DWORD)  0 = single/dual page view, non-zero = strip;
+//                                 missing = strip (#55).
 
 #include <string>
 
@@ -20,7 +21,7 @@ namespace litepdf::core {
 class ViewPrefs {
 public:
     static constexpr wchar_t kDefaultKey[] = L"SOFTWARE\\LitePDF\\Settings";
-    static constexpr bool kContinuousScrollDefault = false;
+    static constexpr bool kContinuousScrollDefault = true;
 
     explicit ViewPrefs(const wchar_t* registry_subkey = kDefaultKey);
 

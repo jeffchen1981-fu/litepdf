@@ -797,6 +797,26 @@ if (Test-Path $stripErr) { Remove-Item $stripErr -Force }
 $procStrip = $null
 try {
     if (-not $stripHadKey) { New-Item -Path $stripKey -Force | Out-Null }
+
+    # Row 0: the default (spec 7.2: a missing value means on from PR 4). With no
+    # value a document opens as the strip and View > Continuous Scroll is checked;
+    # with 0 it opens paged and the item is unchecked.
+    Remove-ItemProperty -Path $stripKey -Name ContinuousScroll -ErrorAction SilentlyContinue
+    $procStrip = Start-StripLaunch -Fixture $largeFixture -Step "default layout"
+    $ms = Read-MenuState -Ids @("40066")
+    if ($null -eq $ms -or -not $ms.items.'40066'.found -or $ms.items.'40066'.grayed -or -not $ms.items.'40066'.checked) {
+        throw "default layout: expected Continuous Scroll enabled and checked with no registry value: $($ms | ConvertTo-Json -Compress -Depth 5)"
+    }
+    Stop-LitePDF -Process $procStrip -Step "default layout"
+    Set-ItemProperty -Path $stripKey -Name ContinuousScroll -Value 0 -Type DWord
+    $procStrip = Start-StripLaunch -Fixture $largeFixture -Step "default layout, preference off" -Paged
+    $ms = Read-MenuState -Ids @("40066")
+    if ($null -eq $ms -or -not $ms.items.'40066'.found -or $ms.items.'40066'.checked) {
+        throw "default layout, preference off: expected Continuous Scroll unchecked with the value 0: $($ms | ConvertTo-Json -Compress -Depth 5)"
+    }
+    Stop-LitePDF -Process $procStrip -Step "default layout, preference off"
+    Write-Host "[OK] continuous strip: no value opens the strip with the item checked; 0 opens paged with it unchecked"
+
     Set-ItemProperty -Path $stripKey -Name ContinuousScroll -Value 1 -Type DWord
 
     # Row 1: cold start in continuous mode. The scroll bar appears only while the

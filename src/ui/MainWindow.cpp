@@ -175,7 +175,7 @@ MainWindow::MainWindow()
     : search_dispatcher_(
           std::make_unique<litepdf::app::ThreadPoolDispatcher>(2)) {
     mru_.load();
-    view_prefs_.load();   // #55: ContinuousScroll; missing or invalid -> off
+    view_prefs_.load();   // #55: ContinuousScroll; missing or invalid -> on
     // Phase 12: resolve %LOCALAPPDATA%\LitePDF (creates it + crashes\).
     // Empty on failure => session persistence silently disabled everywhere.
     app_data_dir_ = litepdf::app::app_data_dir();
