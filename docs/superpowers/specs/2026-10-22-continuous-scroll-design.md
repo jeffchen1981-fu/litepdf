@@ -793,6 +793,10 @@ two runs per layout; the paged arm ends at page 11's top after 10 PgDn, the stri
   two bitmaps for a moment, and its zoom-up holds two pages in L1), and the mean of the per-step
   samples is the same. The ratio crosses 1.25 only where one page reaches about a third of the L1 budget:
   800% on a display scaled 175% or more, Letter, A4 or larger.
+- **GUI drag, measured in PR 4** (`strip-1000.pdf`, the default layout, DPI 192, the same outer
+  window; a real `SendInput` press on the thumb, 50 moves 20 ms apart to the bottom of the
+  track, release): thumbnails pane closed — page box `1000` 25 ms after release, idle (≤ 20 ms
+  CPU in 1 s) from 155 ms; open — 13 ms and 125 ms. Both ended at the largest scroll position.
 - **Bias of the two readings.** The lifetime peak includes the zoom-up to 800%, where paged mode
   also renders a neighbour at every step and the strip does not, so it leans toward passing.
   The after-idle samples miss paged mode's momentary two-bitmap page turn but see the strip's
