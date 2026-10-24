@@ -205,14 +205,23 @@ for D2D.
 
   Measured in PR 1 (medians of 9): 1000-page PDF 0.410 ms, EPUB 2.329 ms, CBZ 1.770 ms; the
   10,000-page PDF took 3.619 ms.
+
+  **CBZ re-measured at the 1.6.0 ship gate: a miss.** The PR 1 CBZ fixture's images are about
+  700 bytes each, and sizing a CBZ page reads its whole image (`cbz_load_page` →
+  `fz_read_archive_entry`). On 300 stored JPEGs of 1200 × 1700 (415 MB) `page_sizes()` took
+  641 ms with nothing cached and 329 ms cached, on an NVMe SSD. CBZ therefore stays paged like
+  XPS and FB2, and #176 is the follow-up. A 1,027-page EPUB of 60 chapters (2.4 MB of text)
+  took 0.98 ms, so EPUB keeps its pass.
 - **Formats without a gate reading.** `Document` also opens XPS, FB2 and SVG
   (`Document.cpp`'s `kAllowedExts`). XPS and FB2 have no reading above, so they get
   `format_ok = false` and stay paged until a follow-up measures them. SVG always opens as a
-  single page and counts as passing.
+  single page and counts as passing. CBZ has a reading, a miss (above), and stays paged too.
 - **Large documents.** PR 1 also records (not gates) the time for a 10,000-page PDF. Sizing is
   O(N) on the UI thread; above 100 ms at 10,000 pages a follow-up issue is filed (§10).
-- **A page whose size cannot be read.** If `page_size` throws for page `i`, page `i` takes page
-  0's size; if page 0 itself throws, US Letter (612 × 792 pt). This is new behaviour of
+- **A page whose size cannot be read.** If `page_size` throws for page `i`, or returns a width
+  or height that is not positive and finite, page `i` takes page 0's size; if page 0 itself
+  fails, US Letter (612 × 792 pt). (MuPDF bounds a CBZ page whose image cannot be decoded by
+  its empty rect, about −4.3e9 pt, without throwing; found at the 1.6.0 ship gate.) This is new behaviour of
   `page_sizes()`, not of the existing cache. The render, if it succeeds, is drawn at its rect's
   top-left.
 
@@ -528,7 +537,7 @@ in reading order.
 | else preference on and the format passed §4.4 | continuous |
 | else | paged single |
 
-"The format passed §4.4" means both that the format passes (XPS and FB2 do not yet; SVG does)
+"The format passed §4.4" means both that the format passes (XPS, FB2 and CBZ do not yet; SVG does)
 and that the document has at least one page: a 0-page view stays paged (§4.6, "0 pages: no
 strip").
 

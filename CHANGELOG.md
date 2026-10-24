@@ -21,8 +21,8 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   that tab; turning it off returns to the layout Continuous Scroll selects.
   Search highlights the hits on every page on screen, and Find starts from the
   top page on screen. A drag selection stays within the page it started on,
-  and Select All selects the current page. XPS and FB2 documents stay one page
-  at a time (#55).
+  and Select All selects the current page. XPS, FB2 and CBZ documents stay one
+  page at a time (#55).
 
 ### Changed
 

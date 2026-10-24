@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <functional>
 #include <future>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -198,6 +199,39 @@ TEST_CASE("DocumentView: page size fallback when a size cannot be read",
         REQUIRE(out[2].width_pt == 612.0f);
         REQUIRE(out[2].height_pt == 792.0f);
         REQUIRE(out[1].width_pt == 101.0f);
+    }
+    SECTION("a size that is not a positive finite number counts as unreadable") {
+        // MuPDF bounds a CBZ page whose image cannot be decoded by fz_empty_rect
+        // (x0 = y0 = 0x7fffff80, x1 = y1 = (int)0x80000000), which gives this
+        // width and height without throwing.
+        const float empty_rect_extent = -2147483648.0f - 2147483520.0f;
+        const float inf = std::numeric_limits<float>::infinity();
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        const std::vector<PageSize> raw = {
+            {100.0f, 200.0f}, {empty_rect_extent, empty_rect_extent}, {0.0f, 200.0f},
+            {100.0f, -1.0f},  {inf, 200.0f},  {100.0f, nan},  {105.0f, 205.0f},
+        };
+        std::vector<PageSize> out;
+        REQUIRE_NOTHROW(out = fill_page_sizes(raw.size(), [&](std::size_t i) { return raw[i]; }));
+        REQUIRE(out.size() == raw.size());
+        for (std::size_t i = 1; i <= 5; ++i) {
+            INFO("page " << i);
+            REQUIRE(out[i].width_pt == 100.0f);
+            REQUIRE(out[i].height_pt == 200.0f);
+        }
+        REQUIRE(out[6].width_pt == 105.0f);
+    }
+    SECTION("page 0 with an unusable size gives US Letter") {
+        std::vector<PageSize> out;
+        REQUIRE_NOTHROW(out = fill_page_sizes(3, [&](std::size_t i) {
+            if (i == 0) return PageSize{-4294967168.0f, -4294967168.0f};
+            if (i == 1) return PageSize{0.0f, 0.0f};
+            return sized(i);
+        }));
+        REQUIRE(out[0].width_pt == 612.0f);
+        REQUIRE(out[0].height_pt == 792.0f);
+        REQUIRE(out[1].width_pt == 612.0f);
+        REQUIRE(out[2].width_pt == 102.0f);
     }
     SECTION("no pages") {
         REQUIRE(fill_page_sizes(0, sized).empty());
