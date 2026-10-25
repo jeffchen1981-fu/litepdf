@@ -163,6 +163,10 @@ with `constexpr float kCbzDpi = 72.0f`, if `orientation == 0 || (orientation & 1
 - Workers and search open their own documents and do not change. Printing and paged fit call
   `page_size` and get the same values as today except for the §3.4 inputs.
 - Thread safety: the sizer uses only the Document's own context, always under `doc_mutex`.
+  `open()`, `close()` and `~Impl` reset it without the mutex, as they already drop `doc` without
+  it: a Document is opened and closed by one thread that is not inside another of its methods
+  (Document.cpp:60-63, "In practice only the UI thread takes it"). This change does not alter that
+  contract.
 
 ### 3.7 MuPDF error state (#146)
 
