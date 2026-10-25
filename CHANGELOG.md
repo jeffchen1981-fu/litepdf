@@ -14,7 +14,7 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 - Opening a file whose name holds an unpaired UTF-16 surrogate, a character
   Windows allows in a file name but that has no UTF-8 form, no longer closes
   litepdf. It now says the file name contains an invalid Unicode character
-  and asks you to rename the file.
+  and asks you to rename the file (#180).
 
 ## [1.6.0] — 2026-10-24 — Continuous scroll
 
