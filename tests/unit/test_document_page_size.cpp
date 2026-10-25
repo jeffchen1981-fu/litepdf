@@ -44,6 +44,7 @@ struct OwnDocument {
 
     int page_count() {
         int n = -1;
+        fz_var(n);
         fz_try(ctx) { n = fz_count_pages(ctx, doc); }
         fz_catch(ctx) { fz_report_error(ctx); }
         return n;

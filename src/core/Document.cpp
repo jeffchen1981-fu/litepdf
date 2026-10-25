@@ -284,6 +284,9 @@ bool Document::with_rendered_page(
     bool         ok   = false;
 
     fz_device* dev = nullptr;
+    fz_var(page);
+    fz_var(pix);
+    fz_var(dev);
     fz_try(ctx) {
         page = fz_load_page(ctx, doc, static_cast<int>(page_idx));
         if (page) {
@@ -457,6 +460,10 @@ std::string Document::page_text(std::size_t index) const {
     fz_buffer*     buf   = nullptr;
     fz_output*     out   = nullptr;
     std::string    result;
+    fz_var(page);
+    fz_var(stext);
+    fz_var(buf);
+    fz_var(out);
 
     fz_try(impl_->ctx) {
         page  = fz_load_page(impl_->ctx, impl_->doc, static_cast<int>(index));
