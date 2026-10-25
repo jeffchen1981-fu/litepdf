@@ -77,6 +77,7 @@ struct OwnDocument {
 
     std::size_t page_count() {
         int n = -1;
+        fz_var(n);   // read after a catch that does not leave (#178)
         fz_try(ctx) { n = fz_count_pages(ctx, doc); }
         fz_catch(ctx) { fz_report_error(ctx); }
         REQUIRE(n >= 0);
