@@ -215,7 +215,7 @@ claims, e.g. SOS offsets and sizes):
 | `p01_jfif300.jpg` | 600×400, JFIF 300 dpi | size |
 | `p02_exif6.jpg` | 400×600, EXIF orientation 6 | size (w/h swapped) |
 | `p03_sos_past_64k.jpg` | 300×300, ~100 KB of COM segments before SOF | size (512 KB step) |
-| `p04_large.jpg` | 1400×1000 noise, quality 95, ≥ 512 KB, SOS < 8 KB | size (read-count oracle) |
+| `p04_large.jpg` | 900×700 noise, quality 95, ≥ 512 KB, SOS < 8 KB | size (read-count oracle) |
 | `p05_sos_past_512k.jpg` | 300×300, ~600 KB of COM segments before SOF | nullopt |
 | `p06_phys.png` | 500×300, pHYs 144 dpi | size |
 | `p07.gif` | 120×80 | size |
