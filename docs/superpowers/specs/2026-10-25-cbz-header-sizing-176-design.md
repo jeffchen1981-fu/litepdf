@@ -254,8 +254,10 @@ mapped page is an `EXCEPTION_IN_PAGE_ERROR`, not an error code). Steps:
 1. Read the last n = min(size, 22 + 65,535) bytes. Scan backwards for the end-of-central-directory
    signature `50 4B 05 06` at positions p with p + 22 <= n, and take the first found (the last in
    the file), as MuPDF does (unzip.c:478-486). None → nullopt. A comment, or bytes after the record,
-   are allowed, again as MuPDF allows them. A signature that is really comment bytes yields a
-   directory that fails step 3, so the read-ahead is skipped.
+   are allowed, again as MuPDF allows them. A signature that is really comment bytes usually yields a
+   directory that fails step 3, and the read-ahead is skipped; a comment crafted to hold a
+   self-consistent record can pass, and then the read-ahead caches other bytes of the same file,
+   within the span rule. Neither changes a size.
 2. From the record: total entry count (+10), directory size (+12), directory offset (+16). Any at its
    Zip64 escape value (`0xFFFF`, `0xFFFFFFFF`) → nullopt (MuPDF still reads Zip64 files; only the
    read-ahead is skipped). Also nullopt unless count >= 1, count × 46 <= size <= 64 MiB, and
@@ -268,16 +270,20 @@ mapped page is an `EXCEPTION_IN_PAGE_ERROR`, not an error code). Steps:
 **Read-ahead.** `CreateFileW(GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
 OPEN_EXISTING)`; `GetFileSizeEx` (0 → false); `CreateFileMappingW(PAGE_READONLY)`;
 `MapViewOfFile(FILE_MAP_READ)` of the whole file; one `PrefetchVirtualMemory(GetCurrentProcess(), n,
-entries, 0)`, each `WIN32_MEMORY_RANGE_ENTRY` being {view base + range offset, range length}; then `UnmapViewOfFile` and both `CloseHandle`s before returning. The call is
+entries, 0)`, each `WIN32_MEMORY_RANGE_ENTRY` being {view base + range offset, range length}; then `UnmapViewOfFile` and both `CloseHandle`s before returning; the handles and the view are held by
+small RAII owners, so every return path releases them. The API is a hint: it may prefetch only part
+of the ranges, or none, under memory pressure, which costs speed only. On this machine the call is
 synchronous: measured, it returns with the pages resident, and they stay in the standby list after
-the view and handles are gone; the process working set and commit charge do not change. While the
+the view and handles are gone (65,534 ranges in one call also returned success); the process working set and commit charge do not change. While the
 view exists (the call's duration), another process cannot truncate the file (`SetEndOfFile` fails
 with `ERROR_USER_MAPPED_FILE`). `PrefetchVirtualMemory` is Windows 8+; litepdf requires Windows 10
 1903 (README), so the import always resolves.
 
 **Span.** Each range starts at a local header and covers clamp(32 MiB / k, 12 KiB, 68 KiB) bytes,
 k = the kept entries (k >= 1). 68 KiB holds the 30-byte local header, the name and extra field, and
-the first 64 KB of data, so for up to 481 pages a JPEG whose SOS lies past 8 KB is also served from
+the first 64 KB of data (when the name and extra field are short, as page names are; a local header
+whose name and extra field take more leaves less data in the range, which costs speed only), so for
+up to 481 pages a JPEG whose SOS lies past 8 KB is also served from
 the cache; from 482 pages the span shrinks with the 32 MiB budget (about 33 KiB at 1,000 pages, so
 such a JPEG reads part of its 64 KB step cold); from 2,731 pages it stays at 12 KiB, which covers
 the §3.3 8 KB step and the local header, and the total grows as k × 12 KiB (at most about 768 MiB at
@@ -393,7 +399,8 @@ green (`open()` resets too) and turns test 9 red.
     count equals `fz_count_archive_entries` and the names, in order, equal `fz_list_archive_entry(i)`
     on a test-owned archive; at every `local_header_offset` the file holds `50 4B 03 04` followed,
     at +30, by that entry's name (so an offset pointing at another entry's header fails).
-11. Crafted buffers, each a heap allocation of exactly `n` bytes:
+11. Crafted buffers, each placed so that its last byte is the last byte of a committed page followed
+    by a `PAGE_NOACCESS` page (`VirtualAlloc` + `VirtualProtect`), so a read past `n` faults the test:
     - `find_zip_directory` returns nullopt for an empty tail, a tail with no signature, a tail
       whose last 4 bytes are the signature (p + 22 > n), each Zip64 escape (count `0xFFFF`, size or
       offset `0xFFFFFFFF`), count 0, size < count × 46, size > 64 MiB, and a directory that does not
@@ -410,13 +417,17 @@ green (`open()` resets too) and turns test 9 red.
     unchanged; `CreateFileW` of the copy with share mode 0 succeeds (no file handle left); on that
     handle `SetFilePointerEx` to the current size and `SetEndOfFile` succeed (no view left: a mapped
     view makes it fail with `ERROR_USER_MAPPED_FILE`). (Removing the file is no oracle here: the
-    read-ahead's own handle allows `FILE_SHARE_DELETE`.)
+    read-ahead's own handle allows `FILE_SHARE_DELETE`.) A 0-byte file returns false with the same
+    checks. The `CreateFileMappingW` and `MapViewOfFile` failure branches cannot be reached from a test
+    without a seam; their release is by the RAII owners.
 14. The read-ahead runs, and once: a `Document` on `cbz-sizing.cbz` sizes page 0 (the sizer exists,
     no read-ahead); `GetProcessIoCounters` read operations around `read_ahead_page_sizes()` grow by
     at least 2 (the EOCD tail and the directory `ReadFile`s); around a second call they do not grow.
     `DocumentView::page_sizes()` calls it: after `page_sizes()` on a view of a fresh `Document`
     (the `DocumentView` pattern of `tests/unit/test_document_view_strip.cpp`), the counter does not
-    grow around `view.document().read_ahead_page_sizes()`, because it already ran.
+    grow around `view.document().read_ahead_page_sizes()`, because it already ran. That it runs
+    before the sizing loop, not after it, is not observable without timing: the call site is the
+    first statement of `page_sizes()`'s sizing branch, and §6 catches it in the wrong place.
 15. Tests 2-9 still pass with the read-ahead wired in; test 3 additionally calls
     `read_ahead_page_sizes()` before its loop, so sizing after the read-ahead equals the full read.
     Whether the read-ahead makes sizing faster is not observable without timing; §6 settles it.
