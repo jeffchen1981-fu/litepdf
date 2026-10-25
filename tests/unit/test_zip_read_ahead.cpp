@@ -167,21 +167,35 @@ DWORD handle_count() {
 }
 
 // No handle and no mapped view of `path` is left: an exclusive open succeeds,
-// and so does setting the end of file, which fails with ERROR_USER_MAPPED_FILE
-// while a view exists even after every handle is closed.
+// and so does cutting the file short, which fails with ERROR_USER_MAPPED_FILE
+// while a view exists even after every handle is closed (setting the end of
+// file where it already is succeeds either way). The cut byte is written back.
 void require_released(const fs::path& path) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     INFO("exclusive open error " << GetLastError());
     REQUIRE(h != INVALID_HANDLE_VALUE);
     LARGE_INTEGER size{};
-    const BOOL sized = GetFileSizeEx(h, &size);
-    const BOOL moved = sized && SetFilePointerEx(h, size, nullptr, FILE_BEGIN);
-    const BOOL ended = moved && SetEndOfFile(h);
+    REQUIRE(GetFileSizeEx(h, &size));
+    if (size.QuadPart == 0) {
+        CloseHandle(h);
+        return;   // nothing to cut; an empty file is never mapped
+    }
+    LARGE_INTEGER last{};
+    last.QuadPart = size.QuadPart - 1;
+    unsigned char byte = 0;
+    DWORD got = 0;
+    const BOOL read = SetFilePointerEx(h, last, nullptr, FILE_BEGIN) &&
+                      ReadFile(h, &byte, 1, &got, nullptr) && got == 1;
+    const BOOL cut = read && SetFilePointerEx(h, last, nullptr, FILE_BEGIN) && SetEndOfFile(h);
     const DWORD err = GetLastError();
+    DWORD put = 0;
+    const BOOL restored = cut && WriteFile(h, &byte, 1, &put, nullptr) && put == 1;
     CloseHandle(h);
-    INFO("SetEndOfFile error " << err);
-    REQUIRE(ended);
+    INFO("cut error " << err);
+    REQUIRE(read);
+    REQUIRE(cut);
+    REQUIRE(restored);
 }
 
 ULONGLONG read_operations() {

@@ -415,17 +415,23 @@ green (`open()` resets too) and turns test 9 red.
 13. `prefetch_file_ranges` on a temp copy of `cbz-sizing.cbz` with its planned ranges returns true;
     with no ranges, or for a missing file, false. After each call: `GetProcessHandleCount` is
     unchanged; `CreateFileW` of the copy with share mode 0 succeeds (no file handle left); on that
-    handle `SetFilePointerEx` to the current size and `SetEndOfFile` succeed (no view left: a mapped
-    view makes it fail with `ERROR_USER_MAPPED_FILE`). (Removing the file is no oracle here: the
+    handle cutting the file one byte short with `SetEndOfFile` succeeds, and the byte is written
+    back (no view left: a mapped view makes the cut fail with `ERROR_USER_MAPPED_FILE`; setting
+    the end where it already is succeeds even with a view, so the first version of this test missed
+    a leaked view). (Removing the file is no oracle here: the
     read-ahead's own handle allows `FILE_SHARE_DELETE`.) A 0-byte file returns false with the same
     checks. The `CreateFileMappingW` and `MapViewOfFile` failure branches cannot be reached from a test
     without a seam; their release is by the RAII owners.
-14. The read-ahead runs, and once: a `Document` on `cbz-sizing.cbz` sizes page 0 (the sizer exists,
-    no read-ahead); `GetProcessIoCounters` read operations around `read_ahead_page_sizes()` grow by
-    at least 2 (the EOCD tail and the directory `ReadFile`s); around a second call they do not grow.
+14. The read-ahead runs, and once: `read_ahead_page_sizes()` returns true when the call did it. A
+    `Document` on `cbz-sizing.cbz` sizes page 0 (the sizer exists, no read-ahead); the first
+    `read_ahead_page_sizes()` returns true and `GetProcessIoCounters` read operations around it grow
+    by at least 2 (the EOCD tail and the directory `ReadFile`s); a second returns false and reads
+    nothing; on `simple.pdf` it returns false.
     `DocumentView::page_sizes()` calls it: after `page_sizes()` on a view of a fresh `Document`
-    (the `DocumentView` pattern of `tests/unit/test_document_view_strip.cpp`), the counter does not
-    grow around `view.document().read_ahead_page_sizes()`, because it already ran. That it runs
+    (the `DocumentView` pattern of `tests/unit/test_document_view_strip.cpp`),
+    `view.document().read_ahead_page_sizes()` returns false, because it already ran. (The return
+    value, not the I/O counter, is the oracle here: the view's render workers read the file on
+    their own threads.) That it runs
     before the sizing loop, not after it, is not observable without timing: the call site is the
     first statement of `page_sizes()`'s sizing branch, and §6 catches it in the wrong place.
 15. Tests 2-9 still pass with the read-ahead wired in; test 3 additionally calls
