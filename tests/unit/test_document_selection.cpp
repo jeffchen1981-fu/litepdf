@@ -467,13 +467,9 @@ TEST_CASE("DocumentSelection the annotation fixture draws its annotation text",
         list = fz_new_display_list_from_page(ctx, page);
         stext = fz_new_stext_page_from_display_list(ctx, list, nullptr);
         buf = fz_new_buffer_from_stext_page(ctx, stext);
-        unsigned char* data = nullptr;
-        const std::size_t len = fz_buffer_storage(ctx, buf, &data);
-        text.assign(reinterpret_cast<const char*>(data), len);
         ok = true;
     }
     fz_always(ctx) {
-        fz_drop_buffer(ctx, buf);
         fz_drop_stext_page(ctx, stext);
         fz_drop_display_list(ctx, list);
         fz_drop_page(ctx, page);
@@ -482,6 +478,18 @@ TEST_CASE("DocumentSelection the annotation fixture draws its annotation text",
     fz_catch(ctx) {
         ok = false;
     }
+    // Copied after the fz_try: a C++ exception thrown inside one (a bad_alloc
+    // from the assign) would leave without popping MuPDF's try stack.
+    if (ok) {
+        unsigned char* data = nullptr;
+        const std::size_t len = fz_buffer_storage(ctx, buf, &data);
+        try {
+            text.assign(reinterpret_cast<const char*>(data), len);
+        } catch (...) {
+            ok = false;
+        }
+    }
+    fz_drop_buffer(ctx, buf);
     fz_drop_context(ctx);
     REQUIRE(ok);
     REQUIRE(text.find("Annotation text") != std::string::npos);

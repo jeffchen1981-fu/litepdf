@@ -49,7 +49,7 @@ public:
         root_ = detail::MuPDFRoot::of(esc.get());
         REQUIRE(root_ != nullptr);
         prev_ = fz_warning_callback(root_->ctx, &prev_user_);
-        fz_set_warning_callback(root_->ctx, [](void* user, const char* message) {
+        fz_set_warning_callback(root_->ctx, [](void* user, const char* message) noexcept {
             *static_cast<std::string*>(user) += std::string(message) + "\n";
         }, &text_);
     }
