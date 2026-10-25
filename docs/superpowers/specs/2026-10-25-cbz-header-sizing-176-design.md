@@ -173,12 +173,17 @@ with `constexpr float kCbzDpi = 72.0f`, if `orientation == 0 || (orientation & 1
 Every new `fz_catch` clears the error code. The archive open in `create` and the decode attempts
 in `header_size` are expected-failure probes: `fz_convert_error(ctx, nullptr)`, result discarded,
 so a GIF-only or TIFF-only CBZ prints no line per page. The fallback keeps its
-`fz_report_error` catch. Buffers, streams and images are dropped in `fz_always`.
+`fz_report_error` catch. Buffers, streams and images are dropped in `fz_always`, and every
+MuPDF-owned local that is assigned inside a `fz_try` and read in its `fz_always` or `fz_catch` is
+declared before the `fz_try` and marked `fz_var` (`context.h:88-94`; as `page` at
+Document.cpp:414-416).
 
 ## 4. Re-enabling CBZ in the strip
 
 - `strip_format_ok` (`src/ui/detail/EffectiveLayout.hpp:57`): add `.cbz`; the comment says the
-  header path makes it pass and points at this spec.
+  header path makes it pass and points at this spec. Admission stays by extension: a file of
+  another format renamed `.cbz` (MuPDF opens it with that format's handler) enters the strip and is
+  sized by the full read, as a file renamed `.epub` or `.pdf` already is today. Not addressed here.
 - `tests/unit/test_strip_helpers.cpp:82-83`: `CHECK_FALSE` → `CHECK`.
 - `scripts/smoke-test.ps1`: the `sample.cbz` launch (line 1786) drops `-Paged` and asserts the
   strip like the EPUB launch. The `-Paged` switch of `Start-LitePDFSmokeLaunch` (line 1726) has no
@@ -230,7 +235,8 @@ With a test-owned context and document (the `OwnDocument` pattern of
 1. `create` is non-null for `cbz-sizing.cbz` and `sample.cbz`; null for `simple.pdf` (no archive
    handler); and null for `sample.epub` copied to a temp `renamed.cbz` called with
    `page_count = 0`. `sample.epub` has no image entries, so its rebuilt list is empty and 0 passes
-   guard 2: only the metadata guard can reject it.
+   guard 2: only the metadata guard can reject it. And null for `cbz-sizing.cbz` called with its
+   page count + 1: only guard 2 can reject that.
 2. For every page of `cbz-sizing.cbz`, `sample.cbz` and `strip-images.cbz`: `header_size` returns a
    value exactly for the pages the table marks "size", and that value is bitwise equal
    (`std::memcmp` of the floats) to `fz_load_page` + `fz_bound_page` on the test's document.
@@ -244,8 +250,8 @@ With a test-owned context and document (the `OwnDocument` pattern of
 6. #146, on the test's own context with a warning callback installed, no fallback in between:
    `header_size` on `p11_broken.jpg` and on `p05_sos_past_512k.jpg` (both enter the decode
    `fz_catch`), and `create` on `simple.pdf` (the archive-open catch); after each, an immediate
-   `fz_throw` caught by the test reports no stale "UNHANDLED EXCEPTION!" (the oracle in memory
-   `project_litepdf_mupdf_error_state_146`).
+   `fz_throw` caught by the test reports no stale "UNHANDLED EXCEPTION!" (the warning-callback
+   oracle of `RootWarnings` in `tests/unit/test_document_error_state.cpp:44`).
 7. Reset: one `Document` opens `cbz-sizing.cbz`, sizes page 0, `close()`s, opens `sample.cbz`; every
    `page_size` then equals `sample.cbz`'s full read (a stale sizer would size A's entries).
 8. Out of range: `header_size(page_count)` returns nullopt; `Document::page_size(page_count)`
@@ -267,7 +273,11 @@ JPEGs saved with an sRGB ICC profile.
 Protocol per file: evict the file from the OS file cache by opening it with
 `FILE_FLAG_NO_BUFFERING` and closing it. Checked on 2026-10-25 with the build at 7b33740: a 510 MB
 JPEG CBZ read 1,009-1,029 ms in three cold singles against a 516 ms warm median, and a 193 MB PNG
-CBZ 567-602 ms against 150 ms, so the eviction holds. Then
+CBZ 567-602 ms against 150 ms. Cold singles 2 and 3 each ran right after the previous single had
+read the whole file into the cache and stayed slow, so the eviction holds. (Those readings
+validate the method only; they are not gate readings.) The helper is a local script, not
+committed. The gate readings come from a Release build of the branch head that contains the
+implementation, and the gate record names that commit. Then
 `litepdf-cli <file> --bench-page-sizes --iterations 1`, three times (cold singles); then
 `--iterations 9` once (warm median). Pass: every cold single ≤ 100 ms for the JPEG and PNG files.
 The ICC file is recorded, not gated. Recorded in the upstream spec §4.4 with the drive (NVMe), and
