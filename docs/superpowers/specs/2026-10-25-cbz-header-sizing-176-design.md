@@ -69,9 +69,14 @@ list the way `cbz_create_page_list` (mucbz.c:118) does, on a second archive open
 Guards (both must hold, else `create` returns nullptr):
 
 1. `fz_lookup_metadata(ctx, doc, FZ_META_FORMAT)` equals `fz_archive_format(ctx, arch)`.
-   `cbz_lookup_metadata` returns the archive format (mucbz.c:273); EPUB returns "EPUB" and XPS
-   has no FZ_META_FORMAT case, so a `.cbz` that MuPDF opened with another handler fails it.
+   `cbz_lookup_metadata` returns the archive format (mucbz.c:273); EPUB returns "EPUB"
+   (epub-doc.c:1097) and XPS returns "XPS" (xps-zip.c:250), so a `.cbz` that MuPDF opened with
+   another handler fails it.
 2. The rebuilt list's size equals `page_count`.
+
+No C++ code that can throw runs between a `fz_try` and its `fz_catch`: the MuPDF calls fill
+plain locals, and the `std::vector`/`std::string` work happens outside the MuPDF try blocks, where
+a `std::bad_alloc` makes `create` return nullptr (and `header_size` return nullopt).
 
 ### 3.3 Per-page header read
 
@@ -90,8 +95,9 @@ steps of 8 KB, 64 KB, 512 KB (stop early at end of entry). After each step:
       it. `fz_load_jpeg_info` reads nothing after `jpeg_read_header`.
     - GIF: `gif_read_image(only_metadata)` returns after the header and logical screen descriptor
       (load-gif.c:495). BMP: `bmp_read_image` returns after the headers and colour profile
-      (load-bmp.c:1296); a profile past the prefix throws, and the next step or the fallback
-      handles it.
+      (load-bmp.c:1304). An embedded profile past the prefix is not an error there:
+      `bmp_read_color_profile` warns and returns NULL (load-bmp.c:849-858) and the image takes
+      device RGB, so the prefix succeeds with the right size (the colour space does not enter it).
   - **PNG**: MuPDF's metadata loop walks every chunk to IEND (load-png.c:497), so the prefix is not
     handed over as is. Walk the chunk headers from offset 8; at the first `IDAT`, take the bytes
     before it, append an IEND chunk (`00 00 00 00 'IEND' AE 42 60 82`) and call
@@ -108,15 +114,27 @@ file), JPX, JXR, PNM, PSD, JBIG2. A CBZ made of them stays as slow as today.
 The header path differs from the full read only for files MuPDF cannot read in full, plus one
 non-conforming PNG layout. Both are accepted and recorded in the upstream spec §4.4:
 
-1. **pHYs after IDAT.** The PNG spec requires pHYs before the first IDAT; MuPDF's loop also reads a
-   later one (load-png.c:508), the header path does not. The strip slot then differs in scale from
-   the rendered bitmap, which the strip draws at its natural size (`src/ui/PdfCanvasStrip.cpp:855`).
+1. **PNG chunks after the first IDAT.** The PNG spec requires pHYs (and iCCP) before the first
+   IDAT; MuPDF's metadata loop also reads them later (load-png.c:508-513), the header path does not.
+   A later pHYs changes the resolution, so the size differs by its ratio; a later pHYs of the wrong
+   length makes the full read throw (load-png.c:425), which gives the empty rect of item 2; a later
+   iCCP changes only the colour space.
 2. **A damaged entry or image past the header**: a deflated entry whose data is corrupt or cut
-   short (`read_zip_entry` throws at unzip.c:583, the flate stream only warns, filter-flate.c:75), a
-   tar entry shorter than its header says (untar.c:203), or a PNG whose later chunks are cut short.
-   The full read leaves the page's image NULL, `fz_bound_page` returns `fz_empty_rect`, and
-   `fill_page_sizes` gives the page page 0's size; the header path gives the image's real size.
-   MuPDF renders that page blank either way.
+   short (`read_zip_entry` throws at unzip.c:586, the flate stream only warns, filter-flate.c:75), a
+   PNG whose later chunks are cut short, or a BMP whose embedded profile MuPDF rejects (the full
+   read throws in `fz_new_icc_colorspace`; the prefix never reaches the profile). The full read
+   leaves the page's image NULL, `fz_bound_page` returns `fz_empty_rect`, and `fill_page_sizes`
+   gives the page page 0's size in the strip; the header path gives the image's real size. MuPDF
+   renders that page blank either way. (Only zip archives reach this path: `Document::open`
+   requires `PK\x03\x04` for `.cbz`, Document.cpp:136-141.)
+
+Where the size differs, every `page_size` caller sees the header size while rendering uses
+`fz_bound_page` of the loaded page (`with_rendered_page`, Document.cpp:298): the strip slot
+differs from the bitmap, which the strip draws at its natural size
+(`src/ui/PdfCanvasStrip.cpp:855`); paged fit-to-width/page (`DocumentView.cpp:330`) is off by the
+same ratio; and printing (`PrintJob.cpp:282`) scales the page by it, so the image under- or
+over-fills the paper. Accepted because both cases need a non-conforming or damaged file, and for
+item 2 the page has no image to show.
 
 ### 3.5 Size arithmetic
 
@@ -129,14 +147,21 @@ with `constexpr float kCbzDpi = 72.0f`, if `orientation == 0 || (orientation & 1
 
 ### 3.6 Integration in `Document`
 
-- `Document::Impl` gains `std::unique_ptr<detail::CbzPageSizer> cbz` and `bool cbz_probed`,
-  declared after `root`. `~Impl` resets `cbz` before `fz_drop_document`, and member order keeps the
-  root context alive until after it (#61). `close()` and the start of `open()` reset both.
-- In `page_size`'s non-PDF branch, under `doc_mutex`: if `!cbz_probed` and the source path's
-  extension is `.cbz` (case-insensitive), call `create` once and set `cbz_probed`. Then, if `cbz`
-  is set and `header_size(index)` returns a size, return it; otherwise run the existing branch
-  unchanged.
-- Workers, search and printing open their own documents or call `page_size`; none changes.
+- `Document::Impl` gains `std::unique_ptr<detail::CbzPageSizer> cbz`, `bool cbz_probed` and
+  `std::string cbz_path`, declared after `root`. `~Impl` resets `cbz` before `fz_drop_document`,
+  and member order keeps the root context alive until after it (#61). `close()` and the start of
+  `open()` reset all three.
+- `open()`, after `fz_open_document` succeeds on a path whose extension is `.cbz`
+  (case-insensitive), stores `cbz_path` = the UTF-8 bytes of `std::filesystem::absolute(path)`, so a
+  later working-directory change cannot point the lazy probe at another file. The probe itself stays
+  lazy: a paged CBZ that never sizes a page pays nothing.
+- In `page_size`, under `doc_mutex` and **before** the existing `fz_try` (no `return` from inside a
+  `fz_try`): if the document is not a PDF, `!cbz_probed` and `cbz_path` is set, call `create` once
+  and set `cbz_probed`. Then, if `cbz` is set and `header_size(index)` returns a size, return it;
+  otherwise run the existing `fz_try` unchanged. An index past the list makes `header_size` return
+  nullopt, and the existing branch throws as today.
+- Workers and search open their own documents and do not change. Printing and paged fit call
+  `page_size` and get the same values as today except for the §3.4 inputs.
 - Thread safety: the sizer uses only the Document's own context, always under `doc_mutex`.
 
 ### 3.7 MuPDF error state (#146)
@@ -154,10 +179,17 @@ so a GIF-only or TIFF-only CBZ prints no line per page. The fallback keeps its
 - `scripts/smoke-test.ps1`: the `sample.cbz` launch (line 1786) drops `-Paged` and asserts the
   strip like the EPUB launch. The `-Paged` switch of `Start-LitePDFSmokeLaunch` (line 1726) has no
   other caller and is removed. Row 20 keeps `page-size.pdf`.
+- `docs/SMOKE-CHECKLIST.md:30`: the `.cbz` line becomes "opens in continuous scroll" (the XPS line
+  stays).
 - Docs: README:41 (XPS and FB2 stay one page at a time); a CHANGELOG Unreleased entry (the
   released 1.6.0 section stays as the record); upstream spec §4.4 (re-measured reading, the §3.4
   deviations, the fallback formats, NVMe and one seek per page), §7.3 line 541, §9.3 line 734;
   `scripts/generate-strip-fixtures.py` docstring ("CBZ stays paged; #176").
+- Comments: `tests/unit/test_strip_fixtures.cpp:5-6` ("CBZ stays paged, #176");
+  `tests/unit/test_document_page_size.cpp:88-90` ("the ePub and CBZ, which still load the page").
+  `scripts/smoke-test.ps1:1488` "(until CBZ left the strip)" stays as history.
+- Build: `src/core/CbzPageSizer.cpp` in `litepdf_core` (`CMakeLists.txt`),
+  `tests/unit/test_cbz_page_sizer.cpp` in `tests/CMakeLists.txt`.
 
 ## 5. Tests
 
@@ -174,7 +206,7 @@ claims, e.g. SOS offsets and sizes):
 | `p01_jfif300.jpg` | 600×400, JFIF 300 dpi | size |
 | `p02_exif6.jpg` | 400×600, EXIF orientation 6 | size (w/h swapped) |
 | `p03_sos_past_64k.jpg` | 300×300, ~100 KB of COM segments before SOF | size (512 KB step) |
-| `p04_large.jpg` | 1400×1000 noise, quality 95, ≥ 256 KB, SOS < 8 KB | size (read-count oracle) |
+| `p04_large.jpg` | 1400×1000 noise, quality 95, ≥ 512 KB, SOS < 8 KB | size (read-count oracle) |
 | `p05_sos_past_512k.jpg` | 300×300, ~600 KB of COM segments before SOF | nullopt |
 | `p06_phys.png` | 500×300, pHYs 144 dpi | size |
 | `p07.gif` | 120×80 | size |
@@ -183,14 +215,18 @@ claims, e.g. SOS offsets and sizes):
 | `p10.tif` | 64×64 | nullopt |
 | `p11_broken.jpg` | `FF D8 FF` + 1 KB of junk | nullopt |
 | `p12_deflated.jpg` | 300×450, `ZIP_DEFLATED` | size |
+| `p13_png_text.png` | 200×150, a ~100 KB tEXt chunk before IDAT | size (PNG 512 KB step) |
+| `p14_bmp_profile.bmp` | 80×50 BMP v5, embedded sRGB profile placed past 8 KB | size |
 
 ### 5.2 Unit tests (`tests/unit/test_cbz_page_sizer.cpp`, `[core][cbz]`)
 
 With a test-owned context and document (the `OwnDocument` pattern of
 `tests/unit/test_document_page_size.cpp:26`):
 
-1. `create` is non-null for `cbz-sizing.cbz` and `sample.cbz`, and null for `sample.epub` copied to
-   a temp `renamed.cbz` (the metadata guard) and for `simple.pdf` (no archive handler).
+1. `create` is non-null for `cbz-sizing.cbz` and `sample.cbz`; null for `simple.pdf` (no archive
+   handler); and null for `sample.epub` copied to a temp `renamed.cbz` called with
+   `page_count = 0`. `sample.epub` has no image entries, so its rebuilt list is empty and 0 passes
+   guard 2: only the metadata guard can reject it.
 2. For every page of `cbz-sizing.cbz`, `sample.cbz` and `strip-images.cbz`: `header_size` returns a
    value exactly for the pages the table marks "size", and that value is bitwise equal
    (`std::memcmp` of the floats) to `fz_load_page` + `fz_bound_page` on the test's document.
@@ -201,8 +237,21 @@ With a test-owned context and document (the `OwnDocument` pattern of
    `fz_load_page` of the same page on the test's document costs ≥ 60.
 5. A UTF-8 (CJK) path: `cbz-sizing.cbz` copied into a temp directory with a CJK name; `create` is
    non-null and page 0 matches.
-6. #146: after a nullopt (`p10.tif`), an immediate throw on the Document's own context reports no
-   stale "UNHANDLED EXCEPTION!" (the oracle in memory `project_litepdf_mupdf_error_state_146`).
+6. #146, on the test's own context with a warning callback installed, no fallback in between:
+   `header_size` on `p11_broken.jpg` and on `p05_sos_past_512k.jpg` (both enter the decode
+   `fz_catch`), and `create` on `simple.pdf` (the archive-open catch); after each, an immediate
+   `fz_throw` caught by the test reports no stale "UNHANDLED EXCEPTION!" (the oracle in memory
+   `project_litepdf_mupdf_error_state_146`).
+7. Reset: one `Document` opens `cbz-sizing.cbz`, sizes page 0, `close()`s, opens `sample.cbz`; every
+   `page_size` then equals `sample.cbz`'s full read (a stale sizer would size A's entries).
+8. Out of range: `header_size(page_count)` returns nullopt; `Document::page_size(page_count)`
+   still throws `std::runtime_error`.
+
+Mutation checks, run once while implementing and recorded in the PR: replacing `qsort` with
+`std::stable_sort` turns test 2 red (Sonnet ran the UCRT `qsort` on the p09 trio written t01, t001,
+t1 and got t001, t1, t01, so the trio tells them apart); dropping guard 1 turns test 1 red; removing
+the `fz_convert_error` from the decode catch turns test 6 red; dropping the reset in `close()` turns
+test 7 red.
 
 `test_strip_helpers.cpp` changes as §4 says. Test names are ASCII and prefixed `CbzPageSizer:`.
 
@@ -211,9 +260,10 @@ With a test-owned context and document (the `OwnDocument` pattern of
 Scratch files, never committed: 300 stored 1200×1700 JPEGs (~415 MB); the same as PNG; the same
 JPEGs saved with an sRGB ICC profile.
 
-Protocol per file: evict the file from the OS file cache (open it with
-`FILE_FLAG_NO_BUFFERING`; the method counts only if the first reading after it is clearly slower
-than a warm reading; otherwise ask the user before using RAMMap), then
+Protocol per file: evict the file from the OS file cache by opening it with
+`FILE_FLAG_NO_BUFFERING` and closing it. Checked on 2026-10-25 with the build at 7b33740: a 510 MB
+JPEG CBZ read 1,009-1,029 ms in three cold singles against a 516 ms warm median, and a 193 MB PNG
+CBZ 567-602 ms against 150 ms, so the eviction holds. Then
 `litepdf-cli <file> --bench-page-sizes --iterations 1`, three times (cold singles); then
 `--iterations 9` once (warm median). Pass: every cold single ≤ 100 ms for the JPEG and PNG files.
 The ICC file is recorded, not gated. Recorded in the upstream spec §4.4 with the drive (NVMe), and
