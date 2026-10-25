@@ -220,7 +220,7 @@ claims, e.g. SOS offsets and sizes):
 | `p06_phys.png` | 500×300, pHYs 144 dpi | size |
 | `p07.gif` | 120×80 | size |
 | `p08.bmp` | 90×60 | size |
-| `p09_t1.png`, `p09_t01.png`, `p09_t001.png` | 100×100, 100×200, 100×300; tie under natcmp, written in the order t01, t001, t1 | size |
+| `p09_t1.png`, `p09_t01.png`, `p09_t001.png` | 100×100, 100×200, 100×300; tie under natcmp; the last three entries written, in the order t01, t001, t1 | size |
 | `p10.tif` | 64×64 | nullopt |
 | `p11_broken.jpg` | `FF D8 FF` + 1 KB of junk | nullopt |
 | `p12_deflated.jpg` | 300×450, `ZIP_DEFLATED` | size |
@@ -258,8 +258,10 @@ With a test-owned context and document (the `OwnDocument` pattern of
    still throws `std::runtime_error`.
 
 Mutation checks, run once while implementing and recorded in the PR: replacing `qsort` with
-`std::stable_sort` turns test 2 red (Sonnet ran the UCRT `qsort` on the p09 trio written t01, t001,
-t1 and got t001, t1, t01, so the trio tells them apart); dropping guard 1 turns test 1 red; removing
+`std::stable_sort` turns test 2 red. (Written among the other entries, the trio came out of the
+UCRT `qsort` in its stable order and the first run of this mutant stayed green; `ucrtbase.dll`'s
+`qsort`, called from a script over the whole list, puts the trio t1, t001, t01 when it is written
+last, the reverse of a stable sort, so the generator writes it last.) Dropping guard 1 turns test 1 red; removing
 the `fz_convert_error` from the decode catch turns test 6 red; dropping the reset in `close()` turns
 test 7 red.
 

@@ -17,9 +17,13 @@ docs/superpowers/specs/2026-10-25-cbz-header-sizing-176-design.md, section 5.1):
   p07.gif                120 x 80 GIF
   p08.bmp                90 x 60 BMP
   p09_t01.png, p09_t001.png, p09_t1.png
-                         100 x 200, 100 x 300, 100 x 100 PNGs, written in this
-                         order; MuPDF's natural sort ties them, so their page
-                         order is whatever the CRT qsort makes of it
+                         100 x 200, 100 x 300, 100 x 100 PNGs. MuPDF's natural
+                         sort ties them, so their page order is whatever the
+                         CRT qsort makes of the zip order. They are the last
+                         three entries written, in this order, where the UCRT
+                         qsort puts them t1, t001, t01: the reverse of a stable
+                         sort, so a rebuilt list that sorts any other way sizes
+                         them wrong
   p10.tif                64 x 64 TIFF (no header path: falls back)
   p11_broken.jpg         a JPEG signature and 1 KB of junk (MuPDF cannot decode it)
   p12_deflated.jpg       300 x 450 JPEG, the only ZIP_DEFLATED entry
@@ -172,10 +176,6 @@ def build_entries():
     entries.append(("p07.gif", encode(solid((120, 80), "P", 3), "GIF")))
     entries.append(("p08.bmp", encode(solid((90, 60)), "BMP")))
 
-    # Written t01, t001, t1: the tie trio (see the module docstring).
-    for name, h in (("p09_t01.png", 200), ("p09_t001.png", 300), ("p09_t1.png", 100)):
-        entries.append((name, encode(solid((100, h)), "PNG")))
-
     entries.append(("p10.tif", encode(solid((64, 64)), "TIFF")))
 
     junk = bytes(range(256)) * 4
@@ -193,6 +193,10 @@ def build_entries():
     p14 = bmp_v5_with_profile(80, 50, srgb)
     assert 14 + 124 + 80 * 50 * 3 > 8 * KB
     entries.append(("p14_bmp_profile.bmp", p14))
+
+    # The tie trio, written last, t01, t001, t1 (see the module docstring).
+    for name, h in (("p09_t01.png", 200), ("p09_t001.png", 300), ("p09_t1.png", 100)):
+        entries.append((name, encode(solid((100, h)), "PNG")))
 
     return entries
 
