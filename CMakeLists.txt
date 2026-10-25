@@ -60,6 +60,7 @@ add_custom_target(litepdf_build_id
 add_library(litepdf_core STATIC
     src/core/Document.cpp
     src/core/CbzPageSizer.cpp      # #176
+    src/core/ZipReadAhead.cpp      # #176
     src/core/Version.cpp           # #60 build identity
     src/core/EscrowContext.cpp     # #61
     src/core/MuPDFRoot.cpp         # #61

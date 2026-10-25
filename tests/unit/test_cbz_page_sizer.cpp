@@ -213,6 +213,8 @@ TEST_CASE("CbzPageSizer: Document::page_size equals the loaded page's bounds",
         REQUIRE_FALSE(doc.open(fs::u8path(path)).has_value());
         OwnDocument own(path);
         REQUIRE(own.page_count() == doc.page_count());
+        // As the strip sizes them: after the read-ahead (#176, spec 3.8).
+        (void)doc.read_ahead_page_sizes();
         for (std::size_t i = 0; i < doc.page_count(); ++i) {
             INFO("page " << i);
             CHECK(same_bits(doc.page_size(i), own.loaded_size(i)));

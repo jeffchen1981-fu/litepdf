@@ -1,16 +1,24 @@
 #include "core/detail/CbzPageSizer.hpp"
+#include "core/detail/ZipReadAhead.hpp"
 
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <filesystem>
 #include <new>
+#include <system_error>
 #include <utility>
+
+#include <windows.h>
 
 // Spec: docs/superpowers/specs/2026-10-25-cbz-header-sizing-176-design.md.
 //
 // MuPDF error handling (#146): every fz_catch here is an expected-failure
-// probe, so it takes the error with fz_convert_error and discards it; nothing
-// is printed per page. No C++ code that can throw runs inside a fz_try.
+// probe, so it takes the error with fz_convert_error and discards it, and no
+// error is reported per page. MuPDF's own warnings still are (a BMP colour
+// profile past the prefix, libjpeg's notes on corrupt data). No C++ code that
+// can throw runs inside a fz_try.
 
 namespace litepdf::core::detail {
 
@@ -202,7 +210,7 @@ std::unique_ptr<CbzPageSizer> CbzPageSizer::create(fz_context* ctx, fz_document*
     if (same_format && static_cast<std::size_t>(count) == page_count) {
         try {
             std::vector<std::string> list(names, names + count);
-            sizer.reset(new CbzPageSizer(ctx, arch, std::move(list)));
+            sizer.reset(new CbzPageSizer(ctx, arch, std::move(list), utf8_path));
             arch = nullptr;   // the sizer owns it now
         } catch (const std::bad_alloc&) {
             sizer.reset();
@@ -213,12 +221,44 @@ std::unique_ptr<CbzPageSizer> CbzPageSizer::create(fz_context* ctx, fz_document*
     return sizer;
 }
 
-CbzPageSizer::CbzPageSizer(fz_context* ctx, fz_archive* arch,
-                           std::vector<std::string> names) noexcept
-    : ctx_(ctx), arch_(arch), names_(std::move(names)) {}
+CbzPageSizer::CbzPageSizer(fz_context* ctx, fz_archive* arch, std::vector<std::string> names,
+                           std::string utf8_path) noexcept
+    : ctx_(ctx), arch_(arch), names_(std::move(names)), utf8_path_(std::move(utf8_path)) {}
 
 CbzPageSizer::~CbzPageSizer() {
     fz_drop_archive(ctx_, arch_);
+}
+
+bool CbzPageSizer::read_ahead() noexcept {
+    if (read_ahead_done_) return false;
+    read_ahead_done_ = true;
+    try {
+        const int wide = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8_path_.data(),
+                                             static_cast<int>(utf8_path_.size()), nullptr, 0);
+        if (wide <= 0) return true;
+        std::wstring path(static_cast<std::size_t>(wide), L'\0');
+        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8_path_.data(),
+                                static_cast<int>(utf8_path_.size()), path.data(), wide) != wide)
+            return true;
+
+        // The directory's raw names: for an entry MuPDF renames (no UTF-8 flag,
+        // or an Info-ZIP Unicode Path field) the kept set can differ from the
+        // page list, which only changes what is cached.
+        const auto entries = read_zip_directory(path);
+        if (!entries) return true;
+        std::vector<std::uint64_t> offsets;
+        for (const ZipEntryRef& e : *entries) {
+            if (is_page_name(e.name.c_str())) offsets.push_back(e.local_header_offset);
+        }
+        if (offsets.empty()) return true;
+        std::error_code ec;
+        const std::uintmax_t size = std::filesystem::file_size(path, ec);
+        if (ec) return true;
+        (void)prefetch_file_ranges(path, plan_read_ahead(offsets, size));
+    } catch (const std::exception&) {
+        // Skipped: a cache hint only.
+    }
+    return true;
 }
 
 std::optional<PageSize> CbzPageSizer::header_size(std::size_t index) noexcept {

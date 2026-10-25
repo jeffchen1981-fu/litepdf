@@ -506,6 +506,17 @@ PageSize Document::page_size(std::size_t index) const {
     result.height_pt = bounds.y1 - bounds.y0;
     return result;
 }
+bool Document::read_ahead_page_sizes() const {
+    if (!impl_->doc || impl_->cbz_path.empty()) return false;
+    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
+    if (!impl_->cbz_probed) {
+        impl_->cbz_probed = true;
+        impl_->cbz = detail::CbzPageSizer::create(impl_->ctx, impl_->doc, impl_->cbz_path.c_str(),
+                                                  impl_->page_count);
+    }
+    return impl_->cbz && impl_->cbz->read_ahead();
+}
+
 std::string Document::page_text(std::size_t index) const {
     if (!impl_->doc) throw std::logic_error("page_text called on unopened document");
 

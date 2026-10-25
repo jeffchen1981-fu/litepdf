@@ -44,12 +44,21 @@ public:
     // throws; a MuPDF failure is marked handled.
     std::optional<PageSize> header_size(std::size_t index) noexcept;
 
+    // Reads every page entry's first bytes into the file cache ahead of
+    // header_size, once (spec section 3.8): for when every page is about to be
+    // sized. A cache hint only; any failure skips it. True when this call was
+    // the one that did it, whether or not the read-ahead itself succeeded.
+    bool read_ahead() noexcept;
+
 private:
-    CbzPageSizer(fz_context* ctx, fz_archive* arch, std::vector<std::string> names) noexcept;
+    CbzPageSizer(fz_context* ctx, fz_archive* arch, std::vector<std::string> names,
+                 std::string utf8_path) noexcept;
 
     fz_context* ctx_;           // borrowed: the Document's own context
     fz_archive* arch_;          // owned
     std::vector<std::string> names_;   // page entries, in MuPDF's page order
+    std::string utf8_path_;
+    bool read_ahead_done_ = false;
 };
 
 }  // namespace litepdf::core::detail
