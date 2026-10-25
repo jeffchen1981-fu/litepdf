@@ -256,14 +256,19 @@ With a test-owned context and document (the `OwnDocument` pattern of
    `page_size` then equals `sample.cbz`'s full read (a stale sizer would size A's entries).
 8. Out of range: `header_size(page_count)` returns nullopt; `Document::page_size(page_count)`
    still throws `std::runtime_error`.
+9. `close()` releases the archive: after `open`, `page_size(0)` and `close()` on a temp copy, the
+   copy can be removed (MuPDF opens files without `FILE_SHARE_DELETE`).
 
 Mutation checks, run once while implementing and recorded in the PR: replacing `qsort` with
 `std::stable_sort` turns test 2 red. (Written among the other entries, the trio came out of the
 UCRT `qsort` in its stable order and the first run of this mutant stayed green; `ucrtbase.dll`'s
 `qsort`, called from a script over the whole list, puts the trio t1, t001, t01 when it is written
-last, the reverse of a stable sort, so the generator writes it last.) Dropping guard 1 turns test 1 red; removing
-the `fz_convert_error` from the decode catch turns test 6 red; dropping the reset in `close()` turns
-test 7 red.
+last, the reverse of a stable sort, so the generator writes it last.) Dropping guard 1 turns test 1
+red. Removing the `fz_convert_error` from `create`'s catch turns test 6 red. Removing it from the
+decode catch in `try_image` leaves test 6 green, and no test can tell: that catch always runs
+inside `header_size`'s own `fz_try`, and MuPDF's `fz_do_catch` overwrites the error code when that
+outer try completes; it stays for the #146 rule. Dropping the reset in `close()` leaves test 7
+green (`open()` resets too) and turns test 9 red.
 
 `test_strip_helpers.cpp` changes as §4 says. Test names are ASCII and prefixed `CbzPageSizer:`.
 

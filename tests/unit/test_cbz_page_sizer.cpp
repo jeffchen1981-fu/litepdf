@@ -20,6 +20,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 
 #include <windows.h>
 
@@ -288,6 +289,24 @@ TEST_CASE("CbzPageSizer: close and open size the new document", "[core][cbz]") {
         INFO("page " << i);
         CHECK(same_bits(doc.page_size(i), own.loaded_size(i)));
     }
+}
+
+TEST_CASE("CbzPageSizer: close releases the archive's file", "[core][cbz]") {
+    // MuPDF opens files without FILE_SHARE_DELETE, so the copy cannot be
+    // removed while the sizer's archive still holds it.
+    const fs::path copy = temp_copy(kSizing, "litepdf-cbz-176-close", "close.cbz");
+    {
+        Document doc;
+        REQUIRE_FALSE(doc.open(copy).has_value());
+        (void)doc.page_size(0);
+        doc.close();
+        std::error_code ec;
+        CHECK(fs::remove(copy, ec));
+        INFO(ec.message());
+        CHECK_FALSE(ec);
+    }
+    std::error_code ignored;
+    fs::remove(copy, ignored);
 }
 
 TEST_CASE("CbzPageSizer: a page past the end", "[core][cbz]") {
