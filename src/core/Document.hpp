@@ -44,6 +44,9 @@ public:
         BadPassword,
         Corrupted,
         OutOfMemory,
+        // The file name has no UTF-8 form (an unpaired UTF-16 surrogate,
+        // which NTFS allows), and MuPDF opens files by UTF-8 name only.
+        UnconvertiblePath,
         Other
     };
 
@@ -194,6 +197,9 @@ public:
     // document is not open (or was never opened), returns a reference to an
     // empty path. RenderEngine workers use this to re-open the file on their
     // own fz_context (MuPDF forbids sharing fz_document across contexts).
+    // A non-empty path always has a UTF-8 form: open() refuses one that does
+    // not (UnconvertiblePath), so the workers' own u8string() cannot fail on
+    // the name.
     [[nodiscard]] const std::filesystem::path& source_path() const noexcept;
 
     // ------------------------------------------------------------------
