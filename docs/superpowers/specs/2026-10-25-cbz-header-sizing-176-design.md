@@ -1,6 +1,8 @@
 # CBZ page sizes from image headers (#176) — design
 
-Status: approved in chat 2026-10-25 (after a Fable design review); spec gate pending.
+Status: approved in chat 2026-10-25 (after a Fable design review); spec gate passed at a34de67.
+§3.8 (read-ahead) added 2026-10-26 after the first implementation missed the §6 cold gate
+(§6.1), chosen by the user from a Fable review; its spec gate is pending.
 Issue: #176. Upstream spec: `docs/superpowers/specs/2026-10-22-continuous-scroll-design.md`
 (§4.4 page-sizing gate, §7.3 formats, §9.3/§9.4 smoke and fixtures).
 
@@ -178,6 +180,97 @@ MuPDF-owned local that is assigned inside a `fz_try` and read in its `fz_always`
 declared before the `fz_try` and marked `fz_var` (`context.h:88-94`; as `page` at
 Document.cpp:414-416).
 
+### 3.8 Read-ahead of every page's first bytes
+
+**Why.** §3.3 alone misses the cold gate (§6.1). Per page it costs three 4 KB `fread`s at queue
+depth 1: `read_zip_entry_header` reads 4 KB at the local header and its relative `fz_seek` over
+the name and extra field discards that buffer (unzip.c:439-459, stream-open.c:156-157); the null
+filter seeks again and reads the first 4 KB of data, then the next 4 KB for the 8 KB step
+(filter-basic.c:46-47). That spans 4 pages of the file, faulted one at a time: about 160 µs for the
+first and 65 µs for each further page on this NVMe, so 300 pages cost about 100 ms before any
+decoding, and a JPEG whose SOS lies past 8 KB costs a 64 KB step as well. A smaller first step only
+moves the floor (one 512-byte read per entry is still 48 ms cold). What changes the regime is
+reading at a queue depth above 1.
+
+**What.** Once, in `CbzPageSizer::create`, after the guards pass and before `create` returns, hand
+the memory manager every page entry's first bytes as one `PrefetchVirtualMemory` call over a
+read-only mapping of the file. The pages land in the system file cache; the §3.3 reads that follow
+hit it. The read-ahead changes which bytes are cached, never which bytes MuPDF reads, so the sizes
+and every §3.4 statement stay as they are. Any failure skips the read-ahead and §3.3 runs as it does
+without it.
+
+**New unit.** `src/core/detail/ZipReadAhead.hpp` and `src/core/ZipReadAhead.cpp` (in
+`litepdf_core`), Win32 and the C++ standard library only, no MuPDF:
+
+```cpp
+namespace litepdf::core::detail {
+struct ZipDirectory { std::uint64_t offset; std::uint64_t size; std::size_t count; };
+struct ZipEntryRef { std::string name; std::uint64_t local_header_offset; };
+
+// Pure, over bytes the caller read (unit-testable on crafted buffers). nullopt for anything
+// the parser does not handle (§3.8 "Parser").
+// `tail` is the file's last bytes; `tail_offset` is where they start, `tail_offset + n` is
+// the file size.
+std::optional<ZipDirectory> find_zip_directory(const unsigned char* tail, std::size_t n,
+                                               std::uint64_t tail_offset);
+// `dir` is the directory's `dir.size` bytes, read from `dir.offset`.
+std::optional<std::vector<ZipEntryRef>> parse_zip_directory(const unsigned char* bytes,
+                                                            std::size_t n, const ZipDirectory& dir);
+
+// File level. Never throw.
+// The directory of the zip at `path`, read with ReadFile on its own handle.
+std::optional<std::vector<ZipEntryRef>> read_zip_directory(const std::wstring& path) noexcept;
+// One PrefetchVirtualMemory call over [offset, offset + span) for each offset, clipped to the
+// file, through a read-only mapping that is unmapped and closed before returning. True when the
+// call succeeded.
+bool prefetch_file_ranges(const std::wstring& path, const std::vector<std::uint64_t>& offsets,
+                          std::size_t span) noexcept;
+}
+```
+
+`create` calls them on the Document's path (UTF-8 → UTF-16 with `MultiByteToWideChar(CP_UTF8)`,
+`MB_ERR_INVALID_CHARS`), keeps the entries whose names pass the same `is_page_name` test as the
+page list (§3.2), and passes their offsets. The order of the offsets does not matter.
+
+**Parser.** Reads the directory with `ReadFile` on its own handle (never through the mapping: a
+read error on a mapped page is an `EXCEPTION_IN_PAGE_ERROR`, not an error code). Steps:
+
+1. Read the last min(size, 22 + 65,535) bytes; find the end-of-central-directory signature
+   `50 4B 05 06` scanning backwards, at a position whose comment length reaches exactly the end of
+   the file. None → nullopt.
+2. Take the entry count (total), the directory size and the directory offset. Any of them at its
+   Zip64 escape value (`0xFFFF`, `0xFFFFFFFF`), a directory that does not fit before the EOCD record,
+   or more than 1,000,000 entries → nullopt (MuPDF still reads such files; only the read-ahead is
+   skipped).
+3. Read the directory and walk `count` records: signature `50 4B 01 02`, name length (+28), extra
+   length (+30), comment length (+32), local header offset (+42), name (+46). A record that runs past
+   the directory, a wrong signature, or an offset at or past the directory start → nullopt.
+
+**Read-ahead.** `CreateFileW(GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+OPEN_EXISTING)`, `CreateFileMappingW(PAGE_READONLY)`, `MapViewOfFile(FILE_MAP_READ)` of the whole
+file, one `PrefetchVirtualMemory(GetCurrentProcess(), n, ranges, 0)`, then `UnmapViewOfFile` and both
+`CloseHandle`s before returning, so `close()` still releases every handle (test 9). The mapped view
+is never dereferenced. Measured on the gate files (§6): the call took 17-41 ms with 64 KB ranges and
+returned with the pages resident; sizing then took 4-19 ms.
+
+**Span.** Each range starts at the local header and covers `span` = clamp(32 MiB / pages, 12 KiB,
+68 KiB) bytes: 68 KiB holds the 30-byte local header, the name and extra field, and the first 64 KB
+of data, so a JPEG whose SOS lies past 8 KB is also served from the cache. The total stays at
+32 MiB until the 12 KiB floor (2,730 pages and up). The pages go to the standby list, not to the
+process working set.
+
+**Cost when it does not help.** A warm archive pays the parse (one read of the EOCD tail and one of
+the directory, both cached after MuPDF's own open) and a prefetch that finds the pages resident:
+about 1 ms on the gate files. A CBZ that falls back for every page (§3.4 formats) pays the
+read-ahead for nothing; accepted.
+
+**Errors.** No MuPDF call is involved, so #146 does not apply. `read_zip_directory` and
+`prefetch_file_ranges` are `noexcept`: a `std::bad_alloc` inside them gives nullopt / false, and
+every handle is closed on every path. `create` calls them outside its `fz_try`. Nothing is logged.
+On a system without `PrefetchVirtualMemory` (before Windows 8; litepdf requires Windows 10 1903)
+the call fails and is skipped like any other failure; the import is resolved at load time, which
+Windows 10 always satisfies.
+
 ## 4. Re-enabling CBZ in the strip
 
 - `strip_format_ok` (`src/ui/detail/EffectiveLayout.hpp:57`): add `.cbz`; the comment says the
@@ -192,13 +285,17 @@ Document.cpp:414-416).
   stays).
 - Docs: README:41 (XPS and FB2 stay one page at a time); a CHANGELOG Unreleased entry (the
   released 1.6.0 section stays as the record); upstream spec §4.4 (re-measured reading, the §3.4
-  deviations, the fallback formats, NVMe and one seek per page), §7.3 line 541, §9.3 line 734;
+  deviations, the fallback formats, the drive and the §3.8 read-ahead), §7.3 line 541, §9.3 line 734;
   `scripts/generate-strip-fixtures.py` docstring ("CBZ stays paged; #176").
 - Comments: `tests/unit/test_strip_fixtures.cpp:5-6` ("CBZ stays paged, #176");
   `tests/unit/test_document_page_size.cpp:88-90` ("the ePub and CBZ, which still load the page").
   `scripts/smoke-test.ps1:1488` "(until CBZ left the strip)" stays as history.
-- Build: `src/core/CbzPageSizer.cpp` in `litepdf_core` (`CMakeLists.txt`),
-  `tests/unit/test_cbz_page_sizer.cpp` in `tests/CMakeLists.txt`.
+- Build: `src/core/CbzPageSizer.cpp` and `src/core/ZipReadAhead.cpp` in `litepdf_core`
+  (`CMakeLists.txt`), `tests/unit/test_cbz_page_sizer.cpp` and `tests/unit/test_zip_read_ahead.cpp`
+  in `tests/CMakeLists.txt`.
+- `src/core/CbzPageSizer.cpp`'s header comment says nothing is printed per page; MuPDF's own
+  warnings (a BMP profile past the prefix, libjpeg's corrupt-data notes) are, so it says that
+  only the discarded errors are silent.
 
 ## 5. Tests
 
@@ -270,12 +367,37 @@ inside `header_size`'s own `fz_try`, and MuPDF's `fz_do_catch` overwrites the er
 outer try completes; it stays for the #146 rule. Dropping the reset in `close()` leaves test 7
 green (`open()` resets too) and turns test 9 red.
 
-`test_strip_helpers.cpp` changes as §4 says. Test names are ASCII and prefixed `CbzPageSizer:`.
+### 5.3 Read-ahead tests (`tests/unit/test_zip_read_ahead.cpp`, `[core][zip]`)
+
+10. `read_zip_directory` on `cbz-sizing.cbz`, `sample.cbz`, `strip-images.cbz` and `sample.epub`:
+    the entry count equals `fz_count_archive_entries` and the names, in order, equal
+    `fz_list_archive_entry(i)` on a test-owned archive; at every `local_header_offset` the file
+    holds `50 4B 03 04`.
+11. Crafted buffers: `find_zip_directory` returns nullopt for an empty tail, a tail with no
+    signature, a signature whose comment length does not reach the end, and each Zip64 escape value
+    (count `0xFFFF`, size or offset `0xFFFFFFFF`). A zip comment that contains the bytes
+    `50 4B 05 06` does not fool it: the backward scan skips a candidate whose comment length does
+    not reach the end of the file. `parse_zip_directory` returns nullopt for a wrong record
+    signature, a name running past the directory, and a local offset at the directory start.
+12. `prefetch_file_ranges` returns true on `cbz-sizing.cbz` with its page offsets, false for a
+    missing file, and after it returns the file can be removed (handles closed).
+13. The existing tests 2-9 run with the read-ahead in `create` (it is unconditional), so they show
+    that sizing with it still equals the full read and that `close()` still releases the file.
+    Whether the read-ahead makes sizing faster is not observable from a unit test (the file cache
+    has no residency query a test can use without timing); §6 settles it.
+
+Mutation checks for §3.8 (recorded in the PR): making `create` skip the read-ahead leaves every
+unit test green (it is a cache hint) and is caught by §6 only; corrupting the parsed offsets by
++1 turns test 10 red.
+
+`test_strip_helpers.cpp` changes as §4 says. Test names are ASCII and prefixed `CbzPageSizer:` or
+`ZipReadAhead:`.
 
 ## 6. Gate (local, not in CI)
 
-Scratch files, never committed: 300 stored 1200×1700 JPEGs (~415 MB); the same as PNG; the same
-JPEGs saved with an sRGB ICC profile.
+Scratch files, never committed: 300 stored 1200×1700 JPEGs (510 MB as generated); the same as PNG
+(193 MB); the same JPEGs saved with an sRGB ICC profile; the same JPEGs with a 16 KB COM segment
+after SOI (`hdr16k`, standing in for the EXIF thumbnails and Photoshop/XMP blocks real scans carry).
 
 Protocol per file: evict the file from the OS file cache by opening it with
 `FILE_FLAG_NO_BUFFERING` and closing it. Checked on 2026-10-25 with the build at 7b33740: a 510 MB
@@ -287,12 +409,31 @@ committed. The gate readings come from a Release build of the branch head that c
 implementation, and the gate record names that commit. Then
 `litepdf-cli <file> --bench-page-sizes --iterations 1`, three times (cold singles); then
 `--iterations 9` once (warm median). Pass: every cold single ≤ 100 ms for the JPEG and PNG files.
-The ICC file is recorded, not gated. Recorded in the upstream spec §4.4 with the drive (NVMe), and
-the note that a CBZ costs one seek per page, so on a hard drive 300 pages take on the order of
-seconds, and that `lookup_zip_entry` is a linear name search, so CBZ sizing is O(N²) in name
-compares.
+The ICC and `hdr16k` files are recorded, not gated. Recorded in the upstream spec §4.4 with the
+drive (NVMe); the read pattern (§3.8 "Why": three 4 KB reads over four pages per page, served from
+the cache after the read-ahead); that the read-ahead was measured on NVMe only (on a hard drive
+its value depends on the drive's command queue, not measured); and that `lookup_zip_entry` is a
+linear name search, so CBZ sizing is O(N²) in name compares.
 
 A cold miss stops the PR (CBZ stays paged; the header path may still land for paged sizing).
+
+### 6.1 Record: the first implementation (247646e) missed
+
+Build at 247646e (§3.3 without §3.8), same protocol, 2026-10-25/26:
+
+| file | before #176 (7b33740) cold / warm | 247646e cold / warm |
+|---|---|---|
+| JPEG 510 MB | 1,009-1,029 / 516 ms | 122-149 / 5.2 ms |
+| PNG 193 MB | 567-602 / 150 ms | 122-130 / 4.6 ms |
+| JPEG + ICC | - | 124-132 / 6.7 ms |
+| JPEG `hdr16k` | - | 360-362 / 18.7 ms |
+
+A 2 KB first step (experiment, not kept) gave 80-98 ms on the first three and 149 ms on `hdr16k`
+(the latter read is from a binary later found to predate a source revert; the 360 ms row is the
+clean one). The cold-read floor for one unbuffered read per entry, from a script: 512 B 48-50 ms,
+4 KB 67-76, 8 KB 86-96, 12 KB 102-104, 16 KB 151-153. With the pages prefetched by a script
+(`PrefetchVirtualMemory`, 64 KB per entry, the file evicted first): call 17-41 ms, then sizing in a
+separate process 4.2-5.5 ms (JPEG), 4.2-4.5 (PNG), 18.5-19.3 (`hdr16k`). Hence §3.8.
 
 ## 7. Review
 
