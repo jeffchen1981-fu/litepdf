@@ -219,6 +219,10 @@ struct RenderEngine::Impl {
                 // fz_new_display_list_from_page. fz_try/fz_catch wraps each
                 // call so a failure cleans up intermediate resources.
                 fz_page* page = nullptr;
+                // Modified inside fz_try and read in fz_catch or after it once
+                // an error has longjmp'd out, so fz_var them (context.h).
+                fz_var(page);
+                fz_var(dlist);
                 fz_try(ctx) {
                     page = fz_load_page(ctx, wdoc, req.page_num);
                     dlist = fz_new_display_list_from_page(ctx, page);
@@ -257,8 +261,11 @@ struct RenderEngine::Impl {
             // DXGI_FORMAT_B8G8R8A8_UNORM. Task 6 (D2D upload) becomes zero
             // channel-swap.
             fz_pixmap* pix = nullptr;
+            // As above, for the rasterise block's fz_try.
+            fz_var(pix);
             if (dlist) {
                 fz_device* draw_dev = nullptr;
+                fz_var(draw_dev);
                 fz_try(ctx) {
                     fz_matrix m = fz_scale(req.scale, req.scale);
                     // Render onto an OPAQUE WHITE background. The convenience
@@ -418,6 +425,7 @@ RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache,
             // fz_convert_error into a fixed buffer, as in SearchSession's
             // constructor.
             char reason[detail::kOpenFailureReasonSize] = "";
+            fz_var(wdoc);
             fz_try(ctx) {
                 wdoc = fz_open_document(ctx, path_str.c_str());
             }
@@ -434,6 +442,7 @@ RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache,
             impl_->worker_docs.push_back(wdoc);
             if (!pw.empty()) {
                 int ok = 0;
+                fz_var(ok);
                 fz_try(ctx) {
                     ok = fz_authenticate_password(ctx, wdoc, pw.c_str());
                 }
