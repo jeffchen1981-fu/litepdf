@@ -268,7 +268,7 @@ mapped page is an `EXCEPTION_IN_PAGE_ERROR`, not an error code). Steps:
 **Read-ahead.** `CreateFileW(GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
 OPEN_EXISTING)`; `GetFileSizeEx` (0 → false); `CreateFileMappingW(PAGE_READONLY)`;
 `MapViewOfFile(FILE_MAP_READ)` of the whole file; one `PrefetchVirtualMemory(GetCurrentProcess(), n,
-ranges, 0)`; then `UnmapViewOfFile` and both `CloseHandle`s before returning. The call is
+entries, 0)`, each `WIN32_MEMORY_RANGE_ENTRY` being {view base + range offset, range length}; then `UnmapViewOfFile` and both `CloseHandle`s before returning. The call is
 synchronous: measured, it returns with the pages resident, and they stay in the standby list after
 the view and handles are gone; the process working set and commit charge do not change. While the
 view exists (the call's duration), another process cannot truncate the file (`SetEndOfFile` fails
@@ -443,7 +443,8 @@ read the whole file into the cache and stayed slow, so the eviction holds. (Thos
 validate the method only; they are not gate readings.) The helper is a local script, not
 committed. The gate readings come from a Release build of the branch head that contains the
 implementation, and the gate record names that commit. Then
-`litepdf-cli <file> --bench-page-sizes --iterations 1`, three times (cold singles); then
+`litepdf-cli <file> --bench-page-sizes --iterations 1`, three times, each run right after its own
+eviction (cold singles); then
 `--iterations 9` once (warm median). `--bench-page-sizes` times `DocumentView::page_sizes()`
 (src/cli/main.cpp:252-254), so the read-ahead is inside the timed region. Pass: every cold single
 ≤ 100 ms for the JPEG and PNG files. The ICC and `hdr16k` files are recorded, not gated.
