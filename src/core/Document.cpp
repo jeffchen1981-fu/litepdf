@@ -290,6 +290,9 @@ bool Document::with_rendered_page(
     bool         ok   = false;
 
     fz_device* dev = nullptr;
+    fz_var(page);
+    fz_var(pix);
+    fz_var(dev);
     fz_try(ctx) {
         page = fz_load_page(ctx, doc, static_cast<int>(page_idx));
         if (page) {
