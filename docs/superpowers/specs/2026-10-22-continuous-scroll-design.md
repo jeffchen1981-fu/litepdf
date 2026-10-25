@@ -219,7 +219,8 @@ for D2D.
   chunks after the first IDAT, and an entry or image damaged past its header) and the formats
   that still load the page (TIFF, JPX, JXR, PNM, PSD, JBIG2). That alone left three 4 KB reads per
   page at queue depth 1 (122-149 ms cold on 300 pages), so before the strip sizes every page,
-  litepdf reads every page entry's first 68 KiB ahead in one `PrefetchVirtualMemory` call. Gate
+  litepdf reads every page entry's first bytes ahead in one `PrefetchVirtualMemory` call (68 KiB
+  each up to 481 pages, then a 32 MiB budget shared out, down to 12 KiB each). Gate
   readings on an NVMe SSD, one eviction per cold run (§6 of that spec): 300 stored 1200 × 1700
   JPEGs (510 MB) 28-58 ms cold, 7.6 ms warm; the same as PNG (193 MB) 25-50 ms, 6.1 ms; with an
   sRGB ICC profile 27-59 ms; with a 16 KB header block per JPEG 38-70 ms. A hard drive was not
