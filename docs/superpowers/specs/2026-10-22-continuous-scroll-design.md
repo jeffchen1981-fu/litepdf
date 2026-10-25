@@ -209,14 +209,26 @@ for D2D.
   **CBZ re-measured at the 1.6.0 ship gate: a miss.** The PR 1 CBZ fixture's images are about
   700 bytes each, and sizing a CBZ page reads its whole image (`cbz_load_page` →
   `fz_read_archive_entry`). On 300 stored JPEGs of 1200 × 1700 (415 MB) `page_sizes()` took
-  641 ms with nothing cached and 329 ms cached, on an NVMe SSD. CBZ therefore stays paged like
-  XPS and FB2, and #176 is the follow-up. A 1,027-page EPUB of 60 chapters (2.4 MB of text)
+  641 ms with nothing cached and 329 ms cached, on an NVMe SSD. CBZ therefore stayed paged like
+  XPS and FB2, and #176 was the follow-up. A 1,027-page EPUB of 60 chapters (2.4 MB of text)
   took 0.98 ms, so EPUB keeps its pass.
+
+  **CBZ passes since #176** (spec `2026-10-25-cbz-header-sizing-176-design.md`). A CBZ page is
+  sized from its image header through MuPDF's own image-info code, bit for bit the loaded page's
+  bounds for every entry MuPDF can read in full; its §3.4 lists two accepted deviations (PNG
+  chunks after the first IDAT, and an entry or image damaged past its header) and the formats
+  that still load the page (TIFF, JPX, JXR, PNM, PSD, JBIG2). That alone left three 4 KB reads per
+  page at queue depth 1 (122-149 ms cold on 300 pages), so before the strip sizes every page,
+  litepdf reads every page entry's first 68 KiB ahead in one `PrefetchVirtualMemory` call. Gate
+  readings on an NVMe SSD, one eviction per cold run (§6 of that spec): 300 stored 1200 × 1700
+  JPEGs (510 MB) 28-58 ms cold, 7.6 ms warm; the same as PNG (193 MB) 25-50 ms, 6.1 ms; with an
+  sRGB ICC profile 27-59 ms; with a 16 KB header block per JPEG 38-70 ms. A hard drive was not
+  measured. `lookup_zip_entry` is a linear name search, so CBZ sizing is O(N²) in name compares.
 - **Formats without a gate reading.** `Document` also opens XPS, FB2 and SVG
   (`Document.cpp`'s `kAllowedExts`). XPS and FB2 have no reading above, so they get
   `format_ok = false` and stay paged until a follow-up measures them. SVG always opens as a
-  single page and counts as passing. CBZ has a reading, a miss (above), and stays paged
-  too.
+  single page and counts as passing. CBZ missed at the 1.6.0 ship gate and passes since #176
+  (above).
 - **Large documents.** PR 1 also records (not gates) the time for a 10,000-page PDF. Sizing is
   O(N) on the UI thread; above 100 ms at 10,000 pages a follow-up issue is filed (§10).
 - **A page whose size cannot be read.** If `page_size` throws for page `i`, or returns a width
@@ -538,7 +550,7 @@ in reading order.
 | else preference on and the format passed §4.4 | continuous |
 | else | paged single |
 
-"The format passed §4.4" means both that the format passes (XPS, FB2 and CBZ do not yet; SVG does)
+"The format passed §4.4" means both that the format passes (XPS and FB2 do not yet; SVG and, since #176, CBZ do)
 and that the document has at least one page: a 0-page view stays paged (§4.6, "0 pages: no
 strip").
 
@@ -730,9 +742,9 @@ that test paged behaviour set the preference off explicitly. Otherwise they woul
 continuous mode and test something else. The smoke run captures the value before its first launch,
 runs every row that does not set it in the default, and restores the value at the end and on
 failure. Only the strip section's rows test paged behaviour, and each sets the preference itself:
-0 for paged single, or 1 with Two-Page Spread on for the paged spread. The one exception is the
-`sample.cbz` launch, which runs in the default and asserts that a format outside the strip
-(§4.4) opens one page at a time.
+0 for paged single, or 1 with Two-Page Spread on for the paged spread. (From the 1.6.0 ship gate
+until #176 the `sample.cbz` launch asserted one page at a time; it asserts the strip again, like
+the `sample.epub` launch.)
 
 ### 9.4 Fixtures and measurement gates
 
