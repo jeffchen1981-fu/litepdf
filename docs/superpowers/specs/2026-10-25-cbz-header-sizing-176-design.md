@@ -2,7 +2,8 @@
 
 Status: approved in chat 2026-10-25 (after a Fable design review); spec gate passed at a34de67.
 §3.8 (read-ahead) added 2026-10-26 after the first implementation missed the §6 cold gate
-(§6.1), chosen by the user from a Fable review; its spec gate round 1 (Opus, Sonnet) is folded in.
+(§6.1), chosen by the user from a Fable review; its spec gate passed at f5ec71b, and the gate
+passed with it (§6.2).
 Issue: #176. Upstream spec: `docs/superpowers/specs/2026-10-22-continuous-scroll-design.md`
 (§4.4 page-sizing gate, §7.3 formats, §9.3/§9.4 smoke and fixtures).
 
@@ -498,6 +499,21 @@ from three sessions on the head build, is the clean one). The cold-read floor fo
 then sizing in a separate process 4.2-6.5 ms (JPEG), 4.2-4.7 (PNG), 18.5-20.3 (`hdr16k`). With
 8 KB ranges the call took 5.7-5.9 ms, but a JPEG whose SOS lies past 8 KB then reads its 64 KB step
 cold (275-356 ms on `hdr16k`), which is why §3.8 takes 68 KiB. Hence §3.8.
+
+### 6.2 Record: the gate passed (56ce9ce)
+
+Release build of 56ce9ce (§3.3 + §3.8), 2026-10-26, NVMe SSD, each cold single after its own
+eviction:
+
+| file | cold singles | warm median |
+|---|---|---|
+| JPEG 510 MB | 57.7 / 28.0 / 28.0 ms | 7.6 ms |
+| PNG 193 MB | 49.6 / 25.5 / 24.6 ms | 6.1 ms |
+| JPEG + ICC (recorded) | 58.8 / 26.8 / 29.3 ms | 8.6 ms |
+| JPEG `hdr16k` (recorded) | 70.1 / 38.4 / 39.4 ms | 19.9 ms |
+
+After 65 minutes without touching the files (00:44 to 01:50), one cold single each: JPEG 59.9 ms,
+PNG 48.9 ms. Every gated reading is at most 60 ms against the 100 ms gate.
 
 ## 7. Review
 
