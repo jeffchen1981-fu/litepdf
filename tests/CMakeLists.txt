@@ -139,7 +139,10 @@ target_link_libraries(litepdf_unit_tests PRIVATE litepdf::mupdf)
 # #103: a build from a git checkout must carry a build id. Decided here, at
 # configure time and apart from cmake/CollectBuildFacts.cmake, so a collector
 # that blanks every fact cannot also switch the check off. A source archive has
-# no .git and is exempt: its build id is legitimately empty.
+# no .git and is exempt: its build id is legitimately empty. A checkout git
+# cannot answer for (no commit yet, or refused by the safe.directory ownership
+# check) goes red by design: that binary ships with no id, which CI's
+# check-version-sync.ps1 -ExpectDev also rejects.
 if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
     target_compile_definitions(litepdf_unit_tests PRIVATE LITEPDF_TEST_EXPECT_BUILD_ID=1)
 endif()
