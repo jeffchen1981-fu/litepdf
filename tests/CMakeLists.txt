@@ -142,9 +142,14 @@ target_link_libraries(litepdf_unit_tests PRIVATE litepdf::mupdf)
 # no .git and is exempt: its build id is legitimately empty. A checkout git
 # cannot answer for (no commit yet, or refused by the safe.directory ownership
 # check) goes red by design: that binary ships with no id, which CI's
-# check-version-sync.ps1 -ExpectDev also rejects.
-if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
-    target_compile_definitions(litepdf_unit_tests PRIVATE LITEPDF_TEST_EXPECT_BUILD_ID=1)
+# check-version-sync.ps1 -ExpectDev also rejects. With no git at all no fact
+# can exist, so the check is off, as version_script_selftest is.
+if(EXISTS "${CMAKE_SOURCE_DIR}/.git")
+    if(GIT_FOUND)
+        target_compile_definitions(litepdf_unit_tests PRIVATE LITEPDF_TEST_EXPECT_BUILD_ID=1)
+    else()
+        message(WARNING "git not found; the build id check in test_version.cpp is off.")
+    endif()
 endif()
 
 litepdf_apply_flags(litepdf_unit_tests)
