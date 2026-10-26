@@ -21,11 +21,13 @@ namespace {
 // A lock implementation that is not litepdf's: it ignores `user` entirely.
 std::array<std::mutex, FZ_LOCK_MAX> g_foreign_mutexes;
 
-void foreign_lock(void*, int lock) {
+// noexcept for the reason litepdf's own are (MuPDFRoot.cpp): MuPDF calls them
+// inside its fz_try blocks.
+void foreign_lock(void*, int lock) noexcept {
     g_foreign_mutexes[static_cast<std::size_t>(lock)].lock();
 }
 
-void foreign_unlock(void*, int lock) {
+void foreign_unlock(void*, int lock) noexcept {
     g_foreign_mutexes[static_cast<std::size_t>(lock)].unlock();
 }
 

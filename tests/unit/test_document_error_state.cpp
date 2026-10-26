@@ -49,7 +49,7 @@ public:
         root_ = detail::MuPDFRoot::of(esc.get());
         REQUIRE(root_ != nullptr);
         prev_ = fz_warning_callback(root_->ctx, &prev_user_);
-        fz_set_warning_callback(root_->ctx, [](void* user, const char* message) {
+        fz_set_warning_callback(root_->ctx, [](void* user, const char* message) noexcept {
             *static_cast<std::string*>(user) += std::string(message) + "\n";
         }, &text_);
     }
@@ -175,6 +175,32 @@ private:
     std::filesystem::path path_;
 };
 
+// A copy of simple.pdf whose file name holds an unpaired UTF-16 surrogate.
+// NTFS accepts the name, but it has no UTF-8 form: path::u8string() throws
+// std::system_error (MSVC's STL converts with WC_ERR_INVALID_CHARS).
+class UnconvertibleNamePdf {
+public:
+    UnconvertibleNamePdf() {
+        std::wstring name = L"litepdf-179-";
+        name += static_cast<wchar_t>(0xD800);
+        name += L".pdf";
+        path_ = std::filesystem::temp_directory_path() / name;
+        std::filesystem::copy_file("tests/fixtures/simple.pdf", path_,
+                                   std::filesystem::copy_options::overwrite_existing);
+    }
+    ~UnconvertibleNamePdf() {
+        std::error_code ec;
+        std::filesystem::remove(path_, ec);
+    }
+    UnconvertibleNamePdf(const UnconvertibleNamePdf&) = delete;
+    UnconvertibleNamePdf& operator=(const UnconvertibleNamePdf&) = delete;
+
+    const std::filesystem::path& path() const { return path_; }
+
+private:
+    std::filesystem::path path_;
+};
+
 Document open_fixture(const std::filesystem::path& path) {
     Document doc;
     REQUIRE_FALSE(doc.open(path).has_value());
@@ -237,4 +263,26 @@ TEST_CASE("Document error state: failed open is marked handled before the contex
 
     INFO("stderr:\n" << err);
     REQUIRE(err.find(kUnhandled) == std::string::npos);
+}
+
+// #179: open() converts the path to UTF-8 before its fz_try, never inside it.
+// Thrown inside, the conversion's exception left the try's frame on MuPDF's
+// error stack (256 slots, error.c fz_push_try). After about 254 such opens
+// every fz_try on the Document's context overflowed, and even a valid file
+// failed to open. What open() does with the bad name is not asserted here,
+// only that the Document still works afterwards.
+TEST_CASE("Document error state: an unconvertible path leaves the try stack balanced",
+          "[document][open]") {
+    const UnconvertibleNamePdf fixture;
+    REQUIRE(std::filesystem::exists(fixture.path()));
+    REQUIRE_THROWS_AS(fixture.path().u8string(), std::system_error);
+
+    Document doc;
+    for (int i = 0; i < 300; ++i) {
+        try {
+            (void)doc.open(fixture.path());
+        } catch (const std::system_error&) {
+        }
+    }
+    REQUIRE_FALSE(doc.open("tests/fixtures/simple.pdf").has_value());
 }

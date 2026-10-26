@@ -33,7 +33,7 @@ std::string warnings_from_probe_throw(fz_context* ctx) {
     std::string text;
     void* prev_user = nullptr;
     fz_warning_cb* prev = fz_warning_callback(ctx, &prev_user);
-    fz_set_warning_callback(ctx, [](void* user, const char* message) {
+    fz_set_warning_callback(ctx, [](void* user, const char* message) noexcept {
         *static_cast<std::string*>(user) += std::string(message) + "\n";
     }, &text);
     fz_try(ctx) {

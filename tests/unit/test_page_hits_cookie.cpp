@@ -96,7 +96,7 @@ TEST_CASE("Document: page_hits_on leaves no unhandled error on its context",
     REQUIRE(d.doc != nullptr);
 
     // The escrow's own copy of the callback: the tab's context is unaffected.
-    fz_set_warning_callback(ctx, [](void* user, const char* message) {
+    fz_set_warning_callback(ctx, [](void* user, const char* message) noexcept {
         *static_cast<std::string*>(user) += std::string(message) + "\n";
     }, &warnings);
 
