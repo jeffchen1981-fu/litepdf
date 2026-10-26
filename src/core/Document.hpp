@@ -45,7 +45,9 @@ public:
         Corrupted,
         OutOfMemory,
         // The file name has no UTF-8 form (an unpaired UTF-16 surrogate,
-        // which NTFS allows), and MuPDF opens files by UTF-8 name only.
+        // which NTFS allows). litepdf hands MuPDF a UTF-8 file name
+        // (fz_open_document here, and again in the render and search
+        // workers), so such a file is refused rather than opened.
         UnconvertiblePath,
         Other
     };
