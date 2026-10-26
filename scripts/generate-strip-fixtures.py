@@ -17,8 +17,9 @@ They feed the page-sizing gate (spec section 4.4): litepdf-cli
 --bench-page-sizes times DocumentView::page_sizes() on each of them. The
 existing sample.epub / sample.cbz are far too small to produce a failing reading
 for a 100 ms gate. strip-images.cbz is too small as well: its images are under
-1 KB each, while sizing a CBZ page reads its whole image, so it passed a gate
-that a real-size CBZ misses (CBZ stays paged; #176).
+1 KB each, so it could not show what sizing a real-size CBZ costs. The CBZ gate
+is measured on local real-size archives instead (#176; spec
+docs/superpowers/specs/2026-10-25-cbz-header-sizing-176-design.md, section 6).
 
 Determinism (the --check contract, as in generate-large-fixture.py):
   * PDF: reportlab invariant mode (rl_config.invariant = 1) pins the timestamp

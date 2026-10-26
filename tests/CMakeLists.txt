@@ -25,6 +25,8 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_document_open.cpp
     unit/test_document_pages.cpp
     unit/test_document_page_size.cpp    # #165
+    unit/test_cbz_page_sizer.cpp        # #176
+    unit/test_zip_read_ahead.cpp        # #176
     unit/test_document_page_count.cpp   # #119
     unit/test_document_text.cpp
     unit/test_document_password.cpp

@@ -87,9 +87,10 @@ TEST_CASE("Document::page_size applies inherited MediaBox, CropBox, UserUnit and
 TEST_CASE("Document::page_size equals the loaded page's bounds on every fixture",
           "[document][pages]") {
     // Every PDF fixture that opens without a password (the one with a
-    // non-ASCII name is a copy of simple.pdf), and the ePub and CBZ, which
-    // still load the page. The same arithmetic runs on the same floats, so
-    // the sizes must be equal, not just close.
+    // non-ASCII name is a copy of simple.pdf), the ePub, which still loads the
+    // page, and the CBZ, sized from its image headers (#176). The same
+    // arithmetic runs on the same floats, so the sizes must be equal, not just
+    // close.
     const char* const fixtures[] = {
         "tests/fixtures/page-size.pdf",  "tests/fixtures/annot.pdf",
         "tests/fixtures/bookmarks.pdf",  "tests/fixtures/cjk-ja.pdf",

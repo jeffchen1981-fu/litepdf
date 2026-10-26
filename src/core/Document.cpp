@@ -2,6 +2,7 @@
 
 #include "core/MuPDFRoot.hpp"
 #include "core/EscrowContext.hpp"
+#include "core/detail/CbzPageSizer.hpp"
 #include "core/detail/PageHitsAccess.hpp"
 #include "core/detail/TextPageAccess.hpp"
 #include "core/SearchQuery.hpp"
@@ -21,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 // SecureZeroMemory is a volatile-write loop the optimizer cannot elide,
 // unlike std::memset which can be DCE'd when the buffer's lifetime ends
@@ -49,6 +51,22 @@ struct Document::Impl {
     // in LitePDF re-lays-out a document after it opens.
     std::size_t page_count = 0;
 
+    // #176: a CBZ page's size from its image header. `cbz_path` is the
+    // absolute UTF-8 path of an open .cbz (absolute, so a later change of the
+    // working directory cannot point the probe at another file); the sizer is
+    // created on the first page_size, so a CBZ that sizes no page pays nothing.
+    // Declared after `root`, so the sizer drops its archive while the root
+    // context is alive.
+    std::string cbz_path;
+    bool cbz_probed = false;
+    std::unique_ptr<detail::CbzPageSizer> cbz;
+
+    void reset_cbz() noexcept {
+        cbz.reset();
+        cbz_probed = false;
+        cbz_path.clear();
+    }
+
     // Serializes every method that touches impl_->ctx via fz_try/fz_catch.
     // MuPDF's exception handling uses a per-fz_context setjmp/longjmp error
     // stack that is NOT thread-safe — two threads in fz_try on the same ctx
@@ -74,6 +92,7 @@ struct Document::Impl {
     // profiles through the context that created them, so the root must be the
     // last context of the family to die (#61).
     ~Impl() {
+        cbz.reset();
         if (doc) fz_drop_document(ctx, doc);
     }
 };
@@ -164,6 +183,27 @@ void flatten_outline(fz_context* ctx,
     }
 }
 
+// True for a path whose extension is .cbz, in any case.
+bool is_cbz_path(const std::filesystem::path& path) {
+    std::wstring ext = path.extension().wstring();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](wchar_t c) { return (c >= L'A' && c <= L'Z') ? static_cast<wchar_t>(c - L'A' + L'a') : c; });
+    return ext == L".cbz";
+}
+
+// The UTF-8 bytes of `path` made absolute, or "" when it cannot be.
+std::string absolute_utf8(const std::filesystem::path& path) {
+    std::error_code ec;
+    const std::filesystem::path abs = std::filesystem::absolute(path, ec);
+    if (ec) return {};
+#if defined(__cpp_lib_char8_t) && __cpp_lib_char8_t >= 201907L
+    const std::u8string u8 = abs.u8string();
+    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+#else
+    return abs.u8string();
+#endif
+}
+
 // Counts the pages of a document that has just become open. False when MuPDF
 // throws or answers a negative count; the caller then refuses the document.
 //
@@ -199,6 +239,8 @@ std::optional<Document::OpenError> Document::open(const std::filesystem::path& p
 
     if (!looks_like_supported_document(path)) return OpenError::UnsupportedFormat;
 
+    impl_->reset_cbz();
+
     // UTF-8 conversion — fz_open_document takes UTF-8 char*. On Windows,
     // path.string() returns ACP (CP950/936/etc); path.u8string() returns
     // UTF-8. In C++17 path::u8string() returns std::string; in C++20+ it
@@ -231,6 +273,7 @@ std::optional<Document::OpenError> Document::open(const std::filesystem::path& p
     if (!impl_->doc) return OpenError::Other;
 
     impl_->path = path;
+    if (is_cbz_path(path)) impl_->cbz_path = absolute_utf8(path);
     impl_->needs_password = fz_needs_password(impl_->ctx, impl_->doc) != 0;
     impl_->authenticated = !impl_->needs_password;
     if (impl_->needs_password) {
@@ -252,6 +295,7 @@ bool Document::is_open() const noexcept {
 }
 
 void Document::close() noexcept {
+    impl_->reset_cbz();
     if (impl_->doc) {
         fz_drop_document(impl_->ctx, impl_->doc);
         impl_->doc = nullptr;
@@ -420,6 +464,23 @@ PageSize Document::page_size(std::size_t index) const {
     // Defense in depth: protect impl_->ctx error stack from any concurrent
     // call into this Document's context. See Impl::doc_mutex.
     std::lock_guard<std::mutex> lk(impl_->doc_mutex);
+
+    // A CBZ page's size from its image header (#176): loading the page reads
+    // the whole image out of the archive first. Outside the fz_try below,
+    // which must not be returned from. A page the header path declines is
+    // loaded as before.
+    if (!impl_->cbz_path.empty()) {
+        if (!impl_->cbz_probed) {
+            impl_->cbz_probed = true;
+            impl_->cbz = detail::CbzPageSizer::create(impl_->ctx, impl_->doc,
+                                                      impl_->cbz_path.c_str(),
+                                                      impl_->page_count);
+        }
+        if (impl_->cbz) {
+            if (const auto size = impl_->cbz->header_size(index)) return *size;
+        }
+    }
+
     fz_page* page = nullptr;
     fz_rect bounds = {};
     fz_var(page);
@@ -455,6 +516,17 @@ PageSize Document::page_size(std::size_t index) const {
     result.height_pt = bounds.y1 - bounds.y0;
     return result;
 }
+bool Document::read_ahead_page_sizes() const {
+    if (!impl_->doc || impl_->cbz_path.empty()) return false;
+    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
+    if (!impl_->cbz_probed) {
+        impl_->cbz_probed = true;
+        impl_->cbz = detail::CbzPageSizer::create(impl_->ctx, impl_->doc, impl_->cbz_path.c_str(),
+                                                  impl_->page_count);
+    }
+    return impl_->cbz && impl_->cbz->read_ahead();
+}
+
 std::string Document::page_text(std::size_t index) const {
     if (!impl_->doc) throw std::logic_error("page_text called on unopened document");
 
