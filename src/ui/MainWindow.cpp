@@ -243,7 +243,16 @@ void MainWindow::open_tab_async(std::filesystem::path path) {
         litepdf::ui::ColdStartTimer::mark_sub(
             litepdf::ui::ColdStartTimer::Sub::OpenStart);
         litepdf::core::Document doc;
-        auto err = doc.open(path);
+        std::optional<litepdf::core::Document::OpenError> err;
+        try {
+            err = doc.open(path);
+        } catch (...) {
+            // open() reports its own failures as an OpenError. Anything that
+            // still escapes it (a std::bad_alloc, or a filesystem_error from
+            // its existence check) would otherwise reach this thread's
+            // boundary and terminate the app; show it as a failed open.
+            err = litepdf::core::Document::OpenError::Other;
+        }
         litepdf::ui::ColdStartTimer::mark_sub(
             litepdf::ui::ColdStartTimer::Sub::OpenDone);
         if (err.has_value()) {
@@ -2143,6 +2152,9 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     emsg = L"Document is corrupted."; break;
                 case OE::OutOfMemory:
                     emsg = L"Out of memory while opening the document."; break;
+                case OE::UnconvertiblePath:
+                    emsg = L"The file name contains an invalid Unicode character. "
+                           L"Rename the file and try again."; break;
                 case OE::Other:
                 default:
                     break;

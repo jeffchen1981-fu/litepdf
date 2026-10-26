@@ -14,7 +14,6 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
-#include <cctype>
 #include <climits>
 #include <cstdio>
 #include <fstream>
@@ -123,21 +122,17 @@ namespace {
 // plus a magic-number sanity check for the PDF/ZIP families, so MuPDF won't
 // be handed unrelated files (e.g. PNG) that it would otherwise open.
 bool looks_like_supported_document(const std::filesystem::path& path) {
-    // Use u8string() for hygiene even though extensions are ASCII-only in
-    // the allowlist; keeps string-handling uniform with the fz_open_document
-    // call site below. C++17 returns std::string; C++20 returns std::u8string
-    // (we reinterpret-cast the bytes to std::string for the compare).
-#if defined(__cpp_lib_char8_t) && __cpp_lib_char8_t >= 201907L
-    auto ext_u8 = path.extension().u8string();
-    std::string ext(reinterpret_cast<const char*>(ext_u8.data()), ext_u8.size());
-#else
-    std::string ext = path.extension().u8string();
-#endif
-    std::transform(ext.begin(), ext.end(), ext.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    // Compared in the native wide form, never converted: u8string() throws
+    // for a name holding an unpaired UTF-16 surrogate (MSVC's STL converts
+    // with WC_ERR_INVALID_CHARS), and NTFS allows one. The allowlist is ASCII,
+    // so lowering only ASCII letters is enough.
+    std::wstring ext = path.extension().wstring();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](wchar_t c) {
+        return (c >= L'A' && c <= L'Z') ? static_cast<wchar_t>(c - L'A' + L'a') : c;
+    });
 
-    static constexpr std::string_view kAllowedExts[] = {
-        ".pdf", ".epub", ".cbz", ".xps", ".fb2", ".svg"
+    static constexpr std::wstring_view kAllowedExts[] = {
+        L".pdf", L".epub", L".cbz", L".xps", L".fb2", L".svg"
     };
     bool ext_allowed = false;
     for (auto e : kAllowedExts) {
@@ -145,14 +140,14 @@ bool looks_like_supported_document(const std::filesystem::path& path) {
     }
     if (!ext_allowed) return false;
 
-    if (ext == ".pdf") {
+    if (ext == L".pdf") {
         std::ifstream f(path, std::ios::binary);
         if (!f) return false;
         char header[5] = {0};
         f.read(header, 4);
         return std::string_view(header, 4) == "%PDF";
     }
-    if (ext == ".epub" || ext == ".cbz" || ext == ".xps") {
+    if (ext == L".epub" || ext == L".cbz" || ext == L".xps") {
         std::ifstream f(path, std::ios::binary);
         if (!f) return false;
         char header[4] = {0};
@@ -250,13 +245,24 @@ std::optional<Document::OpenError> Document::open(const std::filesystem::path& p
     // a longjmp out of a scope that holds an object with a destructor is
     // undefined ([csetjmp.syn]), while a C++ exception thrown inside it (a
     // bad_alloc from the conversion) leaves without popping MuPDF's try stack.
+    //
+    // u8string() also throws std::system_error for a name holding an unpaired
+    // UTF-16 surrogate, which NTFS allows but UTF-8 cannot carry (MSVC's STL
+    // converts with WC_ERR_INVALID_CHARS). Such a file cannot be handed to
+    // MuPDF by name, so it is refused here, with an error the open dialog can
+    // name; escaping, the exception used to reach the open thread's boundary
+    // and terminate the app.
 #if defined(__cpp_lib_char8_t) && __cpp_lib_char8_t >= 201907L
-    const std::u8string u8 = path.u8string();
-    const char* utf8_bytes = reinterpret_cast<const char*>(u8.c_str());
+    std::u8string u8;
 #else
-    const std::string u8 = path.u8string();
-    const char* utf8_bytes = u8.c_str();
+    std::string u8;
 #endif
+    try {
+        u8 = path.u8string();
+    } catch (const std::system_error&) {
+        return OpenError::UnconvertiblePath;
+    }
+    const char* utf8_bytes = reinterpret_cast<const char*>(u8.c_str());
 
     fz_try(impl_->ctx) {
         impl_->doc = fz_open_document(impl_->ctx, utf8_bytes);

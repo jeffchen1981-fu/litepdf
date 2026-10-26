@@ -20,6 +20,14 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   out in 28-58 ms with nothing cached, where sizing it took about 1 s (#176).
   XPS and FB2 documents still open one page at a time.
 
+### Fixed
+
+- Opening a file whose name holds an unpaired UTF-16 surrogate, a character
+  Windows allows in a file name but that has no UTF-8 form, no longer closes
+  litepdf. It now says the file name contains an invalid Unicode character
+  and asks you to rename the file; when the character is in the file's
+  extension, litepdf says the file format is unsupported instead (#180).
+
 ## [1.6.0] — 2026-10-24 — Continuous scroll
 
 ### Added

@@ -2,7 +2,41 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <filesystem>
+#include <string>
+#include <system_error>
+
 using namespace litepdf::core;
+
+namespace {
+
+// A copy of simple.pdf under the temp directory, at a caller-chosen name.
+class TempPdfCopy {
+public:
+    explicit TempPdfCopy(const std::wstring& name)
+        : path_(std::filesystem::temp_directory_path() / name) {
+        std::filesystem::copy_file("tests/fixtures/simple.pdf", path_,
+                                   std::filesystem::copy_options::overwrite_existing);
+    }
+    ~TempPdfCopy() {
+        std::error_code ec;
+        std::filesystem::remove(path_, ec);
+    }
+    TempPdfCopy(const TempPdfCopy&) = delete;
+    TempPdfCopy& operator=(const TempPdfCopy&) = delete;
+
+    const std::filesystem::path& path() const { return path_; }
+
+private:
+    std::filesystem::path path_;
+};
+
+// An unpaired UTF-16 surrogate: NTFS accepts it in a file name, but it has no
+// UTF-8 form, so path::u8string() throws std::system_error (MSVC's STL
+// converts with WC_ERR_INVALID_CHARS).
+constexpr wchar_t kLoneSurrogate = static_cast<wchar_t>(0xD800);
+
+} // namespace
 
 TEST_CASE("Document::open succeeds on a simple PDF", "[document][open]") {
     Document doc;
@@ -35,6 +69,44 @@ TEST_CASE("Document::open returns Corrupted for truncated PDF", "[document][open
     auto err = doc.open("tests/fixtures/corrupt.pdf");
     REQUIRE(err.has_value());
     REQUIRE(*err == Document::OpenError::Corrupted);
+    REQUIRE_FALSE(doc.is_open());
+}
+
+// The open runs on a std::thread with no catch (MainWindow::open_tab_async), so
+// a throw here terminated the app. It must come back as an error the open
+// dialog can name instead.
+TEST_CASE("Document::open returns UnconvertiblePath for a file name with a lone surrogate",
+          "[document][open]") {
+    const TempPdfCopy fixture(std::wstring(L"litepdf-name-") + kLoneSurrogate + L".pdf");
+    REQUIRE(std::filesystem::exists(fixture.path()));
+    REQUIRE_THROWS_AS(fixture.path().u8string(), std::system_error);
+
+    Document doc;
+    std::optional<Document::OpenError> err;
+    REQUIRE_NOTHROW(err = doc.open(fixture.path()));
+    REQUIRE(err.has_value());
+    REQUIRE(*err == Document::OpenError::UnconvertiblePath);
+    REQUIRE_FALSE(doc.is_open());
+    REQUIRE(doc.source_path().empty());
+
+    // The failure leaves the Document reusable.
+    REQUIRE_FALSE(doc.open("tests/fixtures/simple.pdf").has_value());
+    REQUIRE(doc.is_open());
+}
+
+// The extension check runs before the path is converted for MuPDF, on the
+// extension alone; it must not throw on the same character either.
+TEST_CASE("Document::open returns UnsupportedFormat for an extension with a lone surrogate",
+          "[document][open]") {
+    const TempPdfCopy fixture(std::wstring(L"litepdf-ext.pd") + kLoneSurrogate);
+    REQUIRE(std::filesystem::exists(fixture.path()));
+    REQUIRE_THROWS_AS(fixture.path().extension().u8string(), std::system_error);
+
+    Document doc;
+    std::optional<Document::OpenError> err;
+    REQUIRE_NOTHROW(err = doc.open(fixture.path()));
+    REQUIRE(err.has_value());
+    REQUIRE(*err == Document::OpenError::UnsupportedFormat);
     REQUIRE_FALSE(doc.is_open());
 }
 
