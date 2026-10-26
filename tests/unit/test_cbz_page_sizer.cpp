@@ -323,3 +323,46 @@ TEST_CASE("CbzPageSizer: a page past the end", "[core][cbz]") {
     REQUIRE_FALSE(doc.open(kSizing).has_value());
     CHECK_THROWS_AS(doc.page_size(kSizingPages), std::runtime_error);
 }
+
+TEST_CASE("CbzPageSizer: a relative path in a directory with no UTF-8 form",
+          "[core][cbz]") {
+    // The name is convertible, so the open succeeds, but its absolute form
+    // holds an unpaired UTF-16 surrogate: path::u8string() throws there
+    // (MSVC's STL converts with WC_ERR_INVALID_CHARS). The open must not
+    // throw; the CBZ is sized by loading each page instead.
+    const std::string fixture = utf8(fs::absolute(kSizing));
+    std::wstring dir_name = L"litepdf-cbz-";
+    dir_name += static_cast<wchar_t>(0xD800);
+    const fs::path dir = fs::temp_directory_path() / dir_name;
+    fs::create_directories(dir);
+    fs::copy_file(kSizing, dir / "relative.cbz", fs::copy_options::overwrite_existing);
+    struct RemoveDir {
+        fs::path dir;
+        ~RemoveDir() {
+            std::error_code ec;
+            fs::remove_all(dir, ec);
+        }
+    } remove_dir{dir};
+    // Declared after `remove_dir`, so the working directory is restored first.
+    struct RestoreCwd {
+        fs::path cwd = fs::current_path();
+        ~RestoreCwd() {
+            std::error_code ec;
+            fs::current_path(cwd, ec);
+        }
+    } restore_cwd;
+    fs::current_path(dir);
+
+    Document doc;
+    std::optional<Document::OpenError> err;
+    REQUIRE_NOTHROW(err = doc.open("relative.cbz"));
+    REQUIRE_FALSE(err.has_value());
+    CHECK_FALSE(doc.read_ahead_page_sizes());
+
+    OwnDocument own(fixture);
+    REQUIRE(own.page_count() == doc.page_count());
+    for (std::size_t i = 0; i < doc.page_count(); ++i) {
+        INFO("page " << i);
+        CHECK(same_bits(doc.page_size(i), own.loaded_size(i)));
+    }
+}

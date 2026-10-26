@@ -187,16 +187,24 @@ bool is_cbz_path(const std::filesystem::path& path) {
 }
 
 // The UTF-8 bytes of `path` made absolute, or "" when it cannot be.
+//
+// A relative path can convert while its absolute form does not: the working
+// directory may hold an unpaired UTF-16 surrogate, and u8string() then throws
+// std::system_error (MSVC's STL converts with WC_ERR_INVALID_CHARS).
 std::string absolute_utf8(const std::filesystem::path& path) {
     std::error_code ec;
     const std::filesystem::path abs = std::filesystem::absolute(path, ec);
     if (ec) return {};
+    try {
 #if defined(__cpp_lib_char8_t) && __cpp_lib_char8_t >= 201907L
-    const std::u8string u8 = abs.u8string();
-    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+        const std::u8string u8 = abs.u8string();
+        return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
 #else
-    return abs.u8string();
+        return abs.u8string();
 #endif
+    } catch (const std::system_error&) {
+        return {};
+    }
 }
 
 // Counts the pages of a document that has just become open. False when MuPDF
