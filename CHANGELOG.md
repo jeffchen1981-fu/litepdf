@@ -15,11 +15,14 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 - CBZ comics now open in continuous scroll, like PDF and ePub documents.
   For JPEG, PNG, GIF and BMP pages, litepdf reads each page's size from the
-  header of its image instead of loading the whole image, and reads those
-  headers for all pages at once; pages in other image formats (TIFF, JPEG 2000
-  and others) are still loaded whole to size them.
+  header of its image instead of loading the whole image, and before
+  continuous scroll sizes the pages it asks Windows to read the start of
+  every page's image into the file cache in one request. Pages in other
+  image formats (TIFF, JPEG 2000 and others) are still loaded whole to size
+  them, so a CBZ of such pages loads every image before continuous scroll
+  shows it; View → Continuous Scroll turns it off.
   On an NVMe SSD, a CBZ of 300 JPEG pages of about 1.7 MB each is laid out
-  in 28-58 ms with nothing cached; loading every image to size its page took
+  in 28-60 ms with nothing cached; loading every image to size its page took
   about 1 s, which is why 1.6.0 kept CBZ one page at a time (#176).
   XPS and FB2 documents still open one page at a time.
 
@@ -28,8 +31,9 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 - Opening a file whose name holds an unpaired UTF-16 surrogate, a character
   Windows allows in a file name but that has no UTF-8 form, no longer closes
   litepdf. It now says the file name contains an invalid Unicode character
-  and asks you to rename the file; when the character is in the file's
-  extension, litepdf says the file format is unsupported instead (#180).
+  and asks you to rename the file. A file whose format litepdf does not
+  open, such as one with the character in its extension, gets the
+  unsupported-format message instead (#180).
 
 ## [1.6.0] — 2026-10-24 — Continuous scroll
 
