@@ -60,7 +60,8 @@ struct OwnDocument {
     explicit OwnDocument(std::string utf8_path) : path(std::move(utf8_path)) {
         ctx = fz_new_context(nullptr, nullptr, FZ_STORE_DEFAULT);
         REQUIRE(ctx != nullptr);
-        fz_set_warning_callback(ctx, [](void* user, const char* message) {
+        // noexcept: MuPDF calls it from its C frames (#179).
+        fz_set_warning_callback(ctx, [](void* user, const char* message) noexcept {
             *static_cast<std::string*>(user) += std::string(message) + "\n";
         }, &warnings);
         fz_register_document_handlers(ctx);
