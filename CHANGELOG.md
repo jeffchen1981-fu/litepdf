@@ -9,6 +9,8 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-10-26 — CBZ continuous scroll
+
 ### Changed
 
 - CBZ comics now open in continuous scroll, like PDF and ePub documents.
@@ -16,8 +18,9 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   header of its image instead of loading the whole image, and reads those
   headers for all pages at once; pages in other image formats (TIFF, JPEG 2000
   and others) are still loaded whole to size them.
-  On an NVMe SSD, a CBZ of 300 JPEG pages of about 1.7 MB each is now laid
-  out in 28-58 ms with nothing cached, where sizing it took about 1 s (#176).
+  On an NVMe SSD, a CBZ of 300 JPEG pages of about 1.7 MB each is laid out
+  in 28-58 ms with nothing cached; loading every image to size its page took
+  about 1 s, which is why 1.6.0 kept CBZ one page at a time (#176).
   XPS and FB2 documents still open one page at a time.
 
 ### Fixed
@@ -736,7 +739,7 @@ and Phase 12 (release hardening: crash-safe session restore).
 
 [Compare initial commit…0.0.1-phase0](https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.1-phase0)
 
-[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.7.0...HEAD
 [0.0.12-phase10]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.12-phase10
 [0.0.11-phase9]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.11-phase9
 [0.0.10-phase8.5]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.10-phase8.5
