@@ -82,6 +82,13 @@ public:
     [[nodiscard]] std::size_t page_count() const;
     [[nodiscard]] PageSize page_size(std::size_t index) const;
 
+    // A hint that every page's size is about to be read. For a CBZ it reads
+    // every page entry's first bytes into the file cache at once, so the
+    // per-page header reads that follow do not wait one at a time (#176); it
+    // does that once per opened document, and nothing for other formats. True
+    // when this call did it.
+    bool read_ahead_page_sizes() const;
+
     // Returns the plain text of page `index`, with newlines preserved.
     [[nodiscard]] std::string page_text(std::size_t index) const;
 

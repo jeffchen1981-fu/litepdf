@@ -52,8 +52,8 @@ inline ContinuousToggle continuous_toggle(bool pref_on, bool spread_on) noexcept
 
 // The formats whose page sizes were measured cheap enough for the strip (spec 4.4,
 // 7.3), by case-insensitive extension, and a document with at least one page.
-// CBZ is not one: sizing a CBZ page reads its whole image, so a real-size
-// archive misses the gate (spec 4.4; #176).
+// CBZ passes since #176: a page is sized from its image header, read ahead for
+// all pages at once (docs/superpowers/specs/2026-10-25-cbz-header-sizing-176-design.md).
 inline bool strip_format_ok(const std::filesystem::path& source, int page_count) {
     if (page_count < 1) return false;
     const std::filesystem::path::string_type ext = source.extension().native();
@@ -67,7 +67,7 @@ inline bool strip_format_ok(const std::filesystem::path& source, int page_count)
         }
         return i == ext.size();
     };
-    return equals(".pdf") || equals(".epub") || equals(".svg");
+    return equals(".pdf") || equals(".epub") || equals(".cbz") || equals(".svg");
 }
 
 enum class KickReason {

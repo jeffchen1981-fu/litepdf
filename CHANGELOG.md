@@ -9,6 +9,17 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+### Changed
+
+- CBZ comics now open in continuous scroll, like PDF and ePub documents.
+  For JPEG, PNG, GIF and BMP pages, litepdf reads each page's size from the
+  header of its image instead of loading the whole image, and reads those
+  headers for all pages at once; pages in other image formats (TIFF, JPEG 2000
+  and others) are still loaded whole to size them.
+  On an NVMe SSD, a CBZ of 300 JPEG pages of about 1.7 MB each is now laid
+  out in 28-58 ms with nothing cached, where sizing it took about 1 s (#176).
+  XPS and FB2 documents still open one page at a time.
+
 ### Fixed
 
 - Opening a file whose name holds an unpaired UTF-16 surrogate, a character

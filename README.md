@@ -38,7 +38,7 @@ Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab i
 - **Thumbnails** — lazy-rendered side pane (F4)
 - **Invert colors** — per-tab dark-mode toggle (Ctrl+Shift+I, Phase 8)
 - **Two-page spread** — book-style side-by-side layout with cover-page rule (Ctrl+Shift+D, Phase 8)
-- **Continuous scroll** — pages in one vertical strip with a scroll bar, on by default; View → Continuous Scroll switches back to one page at a time and is remembered. Two-page spread still shows two pages at a time. XPS, FB2 and CBZ documents stay one page at a time (v1.6.0)
+- **Continuous scroll** — pages in one vertical strip with a scroll bar, on by default; View → Continuous Scroll switches back to one page at a time and is remembered. Two-page spread still shows two pages at a time. XPS and FB2 documents stay one page at a time (v1.6.0; CBZ joined the strip after it, #176)
 - **Print** — standard `PrintDlgEx` with page range, copies, scale modes (fit / actual / custom %), auto-rotate, and mid-job cancel (Ctrl+P, Phase 8.5)
 - **CJK rendering** — Chinese / Japanese / Korean text renders from your installed Windows fonts (no bundled CJK font), keeping `litepdf.exe` ~7 MB (v1.2.0)
 - **Zoom** — Zoom In / Out / Reset actually change what you see, at the right resolution on high-DPI displays (Ctrl+= / Ctrl+- / Ctrl+0, v1.3.0)

@@ -1722,10 +1722,7 @@ function Start-LitePDFSmokeLaunch {
     param(
         [string]$exe,
         [string]$fixture,
-        [int]$timeoutSeconds = 5,
-        # The format misses the strip's sizing gate (spec 4.4, 9.4) and opens one
-        # page at a time even in the default layout.
-        [switch]$Paged
+        [int]$timeoutSeconds = 5
     )
     Write-Host "----"
     Write-Host "Launching: $exe $fixture"
@@ -1751,25 +1748,14 @@ function Start-LitePDFSmokeLaunch {
         Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
         throw "precondition: $fixture must open in the default layout, but ContinuousScroll is '$launchPref'"
     }
-    if ($Paged) {
-        # The canvas shows no scroll bar once the page is laid out, so wait on the
-        # page box reading 1 rather than on the absent scroll bar alone.
-        $st = Wait-StripState -Until { param($cs, $pb) $cs.present -and -not $cs.vscroll -and $pb.text -eq "1" }
-        if ($null -eq $st.cs -or $st.cs.vscroll -or $st.pb.text -ne "1") {
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-            throw "$fixture must open one page at a time in the default layout: $(Format-StripState $st)"
-        }
-        Write-Host "[OK] $fixture opened one page at a time (its format stays out of the strip)"
-    } else {
-        $launchScroll = Wait-UxProbeState -Probe canvas-scroll -Until { param($s) $s.present -and $s.vscroll }
-        $launchCs = $null
-        try { $launchCs = $launchScroll | ConvertFrom-Json -ErrorAction Stop } catch { }
-        if ($null -eq $launchCs -or -not $launchCs.vscroll) {
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-            throw "precondition: $fixture must open in the strip (the default), but the canvas has no scroll bar: $launchScroll"
-        }
-        Write-Host "[OK] $fixture opened in the strip (the default layout)"
+    $launchScroll = Wait-UxProbeState -Probe canvas-scroll -Until { param($s) $s.present -and $s.vscroll }
+    $launchCs = $null
+    try { $launchCs = $launchScroll | ConvertFrom-Json -ErrorAction Stop } catch { }
+    if ($null -eq $launchCs -or -not $launchCs.vscroll) {
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        throw "precondition: $fixture must open in the strip (the default), but the canvas has no scroll bar: $launchScroll"
     }
+    Write-Host "[OK] $fixture opened in the strip (the default layout)"
     Stop-LitePDF -Process $proc -Step (Split-Path -Leaf $fixture)
     Start-Sleep -Milliseconds 300
 }
@@ -1783,7 +1769,7 @@ if (Test-Path $epubFixture) {
 
 $cbzFixture = Join-Path $repoRoot "tests/fixtures/sample.cbz"
 if (Test-Path $cbzFixture) {
-    Start-LitePDFSmokeLaunch -exe $exe -fixture $cbzFixture -Paged
+    Start-LitePDFSmokeLaunch -exe $exe -fixture $cbzFixture
 } else {
     Write-Host "[SKIP] sample.cbz not found at $cbzFixture"
 }

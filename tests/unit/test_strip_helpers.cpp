@@ -78,9 +78,9 @@ TEST_CASE("EffectiveLayout: strip_format_ok accepts the measured formats") {
     CHECK(strip_format_ok(std::filesystem::path("a.PDF"), 1));
     CHECK(strip_format_ok(std::filesystem::path("b.epub"), 1));
     CHECK(strip_format_ok(std::filesystem::path("d.svg"), 1));
-    // A real-size CBZ misses the spec 4.4 gate: sizing a page reads its whole image.
-    CHECK_FALSE(strip_format_ok(std::filesystem::path("c.cbz"), 1));
-    CHECK_FALSE(strip_format_ok(std::filesystem::path("c.CBZ"), 1));
+    // CBZ passes since #176: a page is sized from its image header.
+    CHECK(strip_format_ok(std::filesystem::path("c.cbz"), 1));
+    CHECK(strip_format_ok(std::filesystem::path("c.CBZ"), 1));
     CHECK_FALSE(strip_format_ok(std::filesystem::path("e.xps"), 1));
     CHECK_FALSE(strip_format_ok(std::filesystem::path("f.fb2"), 1));
     CHECK_FALSE(strip_format_ok(std::filesystem::path("a.pdf"), 0));
