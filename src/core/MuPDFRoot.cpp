@@ -13,11 +13,15 @@ namespace {
 std::atomic<std::size_t> g_live_roots{0};
 std::atomic<std::size_t> g_roots_dropped{0};
 
-void litepdf_lock(void* user, int lock) {
+// noexcept: MuPDF calls these from its C frames, inside its callers' fz_try
+// blocks. A std::system_error out of std::mutex::lock would unwind through
+// those frames without popping MuPDF's try stack; terminating is the defined
+// outcome, and a lock that cannot be taken is not recoverable anyway.
+void litepdf_lock(void* user, int lock) noexcept {
     static_cast<MuPDFRoot*>(user)->mutexes[static_cast<std::size_t>(lock)].lock();
 }
 
-void litepdf_unlock(void* user, int lock) {
+void litepdf_unlock(void* user, int lock) noexcept {
     static_cast<MuPDFRoot*>(user)->mutexes[static_cast<std::size_t>(lock)].unlock();
 }
 

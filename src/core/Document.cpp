@@ -199,18 +199,24 @@ std::optional<Document::OpenError> Document::open(const std::filesystem::path& p
 
     if (!looks_like_supported_document(path)) return OpenError::UnsupportedFormat;
 
-    fz_try(impl_->ctx) {
-        // UTF-8 conversion — fz_open_document takes UTF-8 char*. On Windows,
-        // path.string() returns ACP (CP950/936/etc); path.u8string() returns
-        // UTF-8. In C++17 path::u8string() returns std::string; in C++20+ it
-        // returns std::u8string (we reinterpret-cast the bytes).
+    // UTF-8 conversion — fz_open_document takes UTF-8 char*. On Windows,
+    // path.string() returns ACP (CP950/936/etc); path.u8string() returns
+    // UTF-8. In C++17 path::u8string() returns std::string; in C++20+ it
+    // returns std::u8string (we reinterpret-cast the bytes).
+    //
+    // Done BEFORE the fz_try, never inside it: fz_try is setjmp/longjmp, and
+    // a longjmp out of a scope that holds an object with a destructor is
+    // undefined ([csetjmp.syn]), while a C++ exception thrown inside it (a
+    // bad_alloc from the conversion) leaves without popping MuPDF's try stack.
 #if defined(__cpp_lib_char8_t) && __cpp_lib_char8_t >= 201907L
-        const std::u8string u8 = path.u8string();
-        const char* utf8_bytes = reinterpret_cast<const char*>(u8.c_str());
+    const std::u8string u8 = path.u8string();
+    const char* utf8_bytes = reinterpret_cast<const char*>(u8.c_str());
 #else
-        const std::string u8 = path.u8string();
-        const char* utf8_bytes = u8.c_str();
+    const std::string u8 = path.u8string();
+    const char* utf8_bytes = u8.c_str();
 #endif
+
+    fz_try(impl_->ctx) {
         impl_->doc = fz_open_document(impl_->ctx, utf8_bytes);
     }
     fz_catch(impl_->ctx) {
@@ -459,7 +465,8 @@ std::string Document::page_text(std::size_t index) const {
     fz_stext_page* stext = nullptr;
     fz_buffer*     buf   = nullptr;
     fz_output*     out   = nullptr;
-    std::string    result;
+    unsigned char* data  = nullptr;
+    std::size_t    len   = 0;
     fz_var(page);
     fz_var(stext);
     fz_var(buf);
@@ -476,22 +483,30 @@ std::string Document::page_text(std::size_t index) const {
         // IMPORTANT: fz_close_output must run before fz_buffer_storage to flush
         // all pending bytes into the buffer.
         fz_close_output(impl_->ctx, out);
-
-        unsigned char* data = nullptr;
-        const std::size_t len = fz_buffer_storage(impl_->ctx, buf, &data);
-        result.assign(reinterpret_cast<const char*>(data), len);
+        len = fz_buffer_storage(impl_->ctx, buf, &data);
     }
     fz_always(impl_->ctx) {
         if (out)   fz_drop_output(impl_->ctx, out);
-        if (buf)   fz_drop_buffer(impl_->ctx, buf);
         if (stext) fz_drop_stext_page(impl_->ctx, stext);
         if (page)  fz_drop_page(impl_->ctx, page);
     }
     fz_catch(impl_->ctx) {
+        if (buf) fz_drop_buffer(impl_->ctx, buf);
         fz_report_error(impl_->ctx);   // also marks it handled (#146)
         throw std::runtime_error("page_text extraction failed");
     }
 
+    // Copied out of the buffer AFTER the fz_try, as in TextPage::copy: the copy
+    // can throw std::bad_alloc, and a C++ exception thrown inside a fz_try
+    // leaves without popping MuPDF's try stack. So `buf` outlives the block.
+    std::string result;
+    try {
+        result.assign(reinterpret_cast<const char*>(data), len);
+    } catch (...) {
+        fz_drop_buffer(impl_->ctx, buf);
+        throw;
+    }
+    fz_drop_buffer(impl_->ctx, buf);
     return result;
 }
 
