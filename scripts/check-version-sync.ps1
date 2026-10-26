@@ -53,7 +53,8 @@ function Test-CliIdentity {
     $failures = @()
     # Keys match case-insensitively (@{}): they are literals in litepdf-cli's
     # printf, not git data. Values that can hold letters (the build id, the
-    # -dev suffix) compare with -cne (#106); the rest have a digit-only side.
+    # -dev suffix) compare with -cne (#106); the other comparisons have a
+    # digit-only side or test for empty, so case cannot change their result.
     $kv = @{}
     foreach ($line in $CliOutput) {
         $t = "$line".Trim()
