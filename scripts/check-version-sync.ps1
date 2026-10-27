@@ -51,6 +51,10 @@ function Test-CliIdentity {
         [string]$Tag                # required tag for Release
     )
     $failures = @()
+    # Keys match case-insensitively (@{}): they are literals in litepdf-cli's
+    # printf, not git data. Values that can hold letters (the build id, the
+    # -dev suffix) compare with -cne (#106); the other comparisons have a
+    # digit-only side or test for empty, so case cannot change their result.
     $kv = @{}
     foreach ($line in $CliOutput) {
         $t = "$line".Trim()
@@ -72,10 +76,10 @@ function Test-CliIdentity {
     if ($Mode -eq "Release") {
         if ($kv["release"] -ne "1") { $failures += "build is not classified as a release (release=$($kv["release"]))" }
         if ($kv["version"] -ne $Expected) { $failures += "release version must be the bare triple '$Expected', got '$($kv["version"])'" }
-        if ($kv["build"] -ne $Tag) { $failures += "release build id '$($kv["build"])' does not equal the tag '$Tag'" }
+        if ($kv["build"] -cne $Tag) { $failures += "release build id '$($kv["build"])' does not equal the tag '$Tag'" }
     } elseif ($Mode -eq "Dev") {
         if ($kv["release"] -ne "0") { $failures += "build is not classified as dev (release=$($kv["release"]))" }
-        if ($kv["version"] -ne "$Expected-dev") { $failures += "dev version must be '$Expected-dev', got '$($kv["version"])'" }
+        if ($kv["version"] -cne "$Expected-dev") { $failures += "dev version must be '$Expected-dev', got '$($kv["version"])'" }
         if ($kv["build"] -eq "") { $failures += "dev build id is empty (no git provenance)" }
     }
     return ,$failures
@@ -128,6 +132,12 @@ function Invoke-SelfTest {
     CheckOnly $f "build is not classified as dev" "12: release=1 alone fails -ExpectDev on the flag"
     $f = Test-CliIdentity @("version=1.3.0", "build=gabc1234", "release=0") "1.3.0" "1.3.0.0" "Dev" ""
     CheckOnly $f "dev version must be" "13: bare version alone fails -ExpectDev on the -dev shape"
+
+    # #106: the id and the -dev suffix compare case-sensitively.
+    $f = Test-CliIdentity @("version=1.3.0", "build=V1.3.0", "release=1") "1.3.0" "1.3.0.0" "Release" "v1.3.0"
+    CheckOnly $f "release build id" "14: case-mismatched tag alone fails -ExpectRelease"
+    $f = Test-CliIdentity @("version=1.3.0-DEV", "build=v1.3.0-18-gf7b1ed6", "release=0") "1.3.0" "1.3.0.0" "Dev" ""
+    CheckOnly $f "dev version must be" "15: case-mismatched -dev suffix alone fails -ExpectDev"
 
     if ($script:selfTestOk) { Write-Host "[OK] version-sync self-test: $script:selfTestCount/$script:selfTestCount passed"; exit 0 }
     Write-Host "[FAIL] version-sync self-test had failures"
