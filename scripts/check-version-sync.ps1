@@ -87,9 +87,18 @@ function Test-CliIdentity {
 
 function Invoke-SelfTest {
     $script:selfTestOk = $true
+    $script:selfTestCount = 0
     function Check([bool]$cond, [string]$label) {
+        $script:selfTestCount++
         if ($cond) { Write-Host "[PASS] $label" }
         else { Write-Host "[FAIL] $label"; $script:selfTestOk = $false }
+    }
+    # Passes only when exactly one check failed and it is the named one, so a
+    # case proves that check on its own rather than any of several at once.
+    function CheckOnly([string[]]$failures, [string]$expectedPrefix, [string]$label) {
+        $only = ($failures.Count -eq 1) -and $failures[0].StartsWith($expectedPrefix)
+        Check $only $label
+        if (-not $only) { foreach ($x in $failures) { Write-Host "       got: $x" } }
     }
     $rel = @("version=1.3.0", "build=v1.3.0", "release=1")
     $dev = @("version=1.3.0-dev", "build=v1.3.0-18-gf7b1ed6", "release=0")
@@ -112,13 +121,25 @@ function Invoke-SelfTest {
     Check ($f.Count -gt 0) "8: ProductVersion mismatch fails"
     $f = Test-CliIdentity @("version=1.3.0-dev", "release=0") "1.3.0" "1.3.0.0" "Local" ""
     Check ($f.Count -gt 0) "9: missing build= line fails"
+
+    # Cases 2 and 6 trip several classification checks at once, so each of
+    # these isolates one: every other field matches the expected shape (#105).
+    $f = Test-CliIdentity @("version=1.3.0", "build=v1.3.0", "release=0") "1.3.0" "1.3.0.0" "Release" "v1.3.0"
+    CheckOnly $f "build is not classified as a release" "10: release=0 alone fails -ExpectRelease on the flag"
+    $f = Test-CliIdentity @("version=1.3.0-dev", "build=v1.3.0", "release=1") "1.3.0" "1.3.0.0" "Release" "v1.3.0"
+    CheckOnly $f "release version must be the bare triple" "11: -dev version alone fails -ExpectRelease on the bare triple"
+    $f = Test-CliIdentity @("version=1.3.0-dev", "build=gabc1234", "release=1") "1.3.0" "1.3.0.0" "Dev" ""
+    CheckOnly $f "build is not classified as dev" "12: release=1 alone fails -ExpectDev on the flag"
+    $f = Test-CliIdentity @("version=1.3.0", "build=gabc1234", "release=0") "1.3.0" "1.3.0.0" "Dev" ""
+    CheckOnly $f "dev version must be" "13: bare version alone fails -ExpectDev on the -dev shape"
+
     # #106: the id and the -dev suffix compare case-sensitively.
     $f = Test-CliIdentity @("version=1.3.0", "build=V1.3.0", "release=1") "1.3.0" "1.3.0.0" "Release" "v1.3.0"
-    Check ($f.Count -gt 0) "10: case-mismatched tag fails -ExpectRelease"
+    CheckOnly $f "release build id" "14: case-mismatched tag alone fails -ExpectRelease"
     $f = Test-CliIdentity @("version=1.3.0-DEV", "build=v1.3.0-18-gf7b1ed6", "release=0") "1.3.0" "1.3.0.0" "Dev" ""
-    Check ($f.Count -gt 0) "11: case-mismatched -dev suffix fails -ExpectDev"
+    CheckOnly $f "dev version must be" "15: case-mismatched -dev suffix alone fails -ExpectDev"
 
-    if ($script:selfTestOk) { Write-Host "[OK] version-sync self-test: 11/11 passed"; exit 0 }
+    if ($script:selfTestOk) { Write-Host "[OK] version-sync self-test: $script:selfTestCount/$script:selfTestCount passed"; exit 0 }
     Write-Host "[FAIL] version-sync self-test had failures"
     exit 1
 }

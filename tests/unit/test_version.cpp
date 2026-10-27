@@ -98,4 +98,12 @@ TEST_CASE("Version: this build's identity is well formed", "[version]") {
         REQUIRE(id.display_version.size() > 4);
         REQUIRE(id.display_version.substr(id.display_version.size() - 4) == "-dev");
     }
+#ifdef LITEPDF_TEST_EXPECT_BUILD_ID
+    // #103: the checks above also pass with every fact blank. Built from a
+    // git checkout (tests/CMakeLists.txt decides), the facts must have
+    // reached the binary.
+    INFO("git checkout but no build id: see build/generated/litepdf_build_facts.h; "
+         "git may have no commit or refuse the tree (safe.directory)");
+    REQUIRE_FALSE(id.build_id.empty());
+#endif
 }

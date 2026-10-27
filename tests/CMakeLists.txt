@@ -136,6 +136,22 @@ target_link_libraries(litepdf_unit_tests PRIVATE litepdf_core)
 # not propagate; the libraries are already on the link line through it.
 target_link_libraries(litepdf_unit_tests PRIVATE litepdf::mupdf)
 
+# #103: a build from a git checkout must carry a build id. Decided here, at
+# configure time and apart from cmake/CollectBuildFacts.cmake, so a collector
+# that blanks every fact cannot also switch the check off. A source archive has
+# no .git and is exempt: its build id is legitimately empty. A checkout git
+# cannot answer for (no commit yet, or refused by the safe.directory ownership
+# check) goes red by design: that binary ships with no id, which CI's
+# check-version-sync.ps1 -ExpectDev also rejects. With no git at all no fact
+# can exist, so the check is off, as version_script_selftest is.
+if(EXISTS "${CMAKE_SOURCE_DIR}/.git")
+    if(GIT_FOUND)
+        target_compile_definitions(litepdf_unit_tests PRIVATE LITEPDF_TEST_EXPECT_BUILD_ID=1)
+    else()
+        message(WARNING "git not found; the build id check in test_version.cpp is off.")
+    endif()
+endif()
+
 litepdf_apply_flags(litepdf_unit_tests)
 
 target_link_libraries(litepdf_unit_tests PRIVATE

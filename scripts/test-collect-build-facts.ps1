@@ -152,6 +152,18 @@ try {
     Check ($f["FACT_EXACT_TAG"] -eq "v9.9.9-dirty") "L: -dirty-named tag is the exact tag"
     Check ($f["FACT_DIRTY"] -eq "0") "L: a -dirty-named tag on a clean tree is not dirty"
 
+    # M: SRC is inside no git repository at all (an extracted source archive
+    # outside any checkout), with a working git. The precondition guards the
+    # premise: if the temp dir ever sat inside a checkout, M would silently
+    # become case E.
+    $norepo = Join-Path $work "norepo"
+    New-Item -ItemType Directory -Force $norepo | Out-Null
+    & $Git -C $norepo rev-parse --git-dir 2>$null | Out-Null
+    Check ($LASTEXITCODE -ne 0) "M: precondition: git finds no repository for the dir"
+    $f = Get-Facts $norepo $Git
+    Check ($f["FACT_TOPLEVEL_MATCH"] -eq "0") "M: no toplevel outside a repo"
+    Check ($f["FACT_SHORT_SHA"] -eq "" -and $f["FACT_EXACT_TAG"] -eq "" -and $f["FACT_DESCRIBE"] -eq "") "M: no facts outside a repo"
+
     # H: an unchanged state leaves the header untouched (no rebuild).
     $stable = Join-Path $work "stable.h"
     Invoke-Collector $repo $Git $stable
