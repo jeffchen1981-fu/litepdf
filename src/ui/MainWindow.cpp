@@ -16,6 +16,7 @@
 #include "ui/password_retry.hpp"  // Phase 8 Task 1
 #include "printing/PrintJob.hpp"  // Phase 8.5 Task 10
 #include "ui/ThumbnailPane.hpp"  // Phase 7 Task 8: F4 toggle uses ThumbnailPane methods.
+#include "ui/detail/OpenErrorMessage.hpp"  // #184: unconvertible-path text
 #include "ui/detail/SplitterMath.hpp"  // #93: results panel height clamp
 
 #include <commctrl.h>
@@ -2134,6 +2135,7 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 return 0;
             }
             const wchar_t* emsg = L"Failed to open the document.";
+            std::wstring built_msg;  // owns emsg's text when it is built, not literal
             switch (static_cast<OE>(w)) {
                 case OE::FileNotFound:
                     emsg = L"File not found or inaccessible."; break;
@@ -2153,8 +2155,13 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 case OE::OutOfMemory:
                     emsg = L"Out of memory while opening the document."; break;
                 case OE::UnconvertiblePath:
-                    emsg = L"The file name contains an invalid Unicode character. "
-                           L"Rename the file and try again."; break;
+                    // #184: the bad character may be in a folder, not the
+                    // file name; the helper names whichever it is.
+                    built_msg = litepdf::ui::detail::unconvertible_path_message(
+                        failed_path ? std::filesystem::path(*failed_path)
+                                    : std::filesystem::path{});
+                    emsg = built_msg.c_str();
+                    break;
                 case OE::Other:
                 default:
                     break;
