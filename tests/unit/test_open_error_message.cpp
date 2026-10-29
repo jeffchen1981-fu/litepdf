@@ -61,8 +61,9 @@ TEST_CASE("OpenErrorMessage names both when the file and a folder are bad",
 
 TEST_CASE("OpenErrorMessage is neutral when the path does not say which part is bad",
           "[ui][open_error]") {
-    // The worker posts no path on two failure routes (lParam 0). A path that
-    // converts cannot have produced this error, but must not claim a culprit.
+    // Defensive: the worker's lParam-0 posts all carry OpenError::Other, and a
+    // path that converts cannot have produced this error. Neither may still
+    // claim a culprit.
     for (const auto& p : {std::filesystem::path{},
                           std::filesystem::path(L"C:\\docs\\good.pdf")}) {
         const std::wstring msg = unconvertible_path_message(p);
