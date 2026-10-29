@@ -9,6 +9,13 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+### Fixed
+
+- Opening a file inside a folder whose name holds an unpaired UTF-16
+  surrogate no longer tells you to rename the file. The message now names
+  that folder and asks you to rename it or move the file; when the file name
+  and a folder both hold one, it says so and names the folder (#184).
+
 ## [1.7.0] — 2026-10-26 — CBZ continuous scroll
 
 ### Changed

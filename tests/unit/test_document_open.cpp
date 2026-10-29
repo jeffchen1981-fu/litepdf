@@ -94,6 +94,36 @@ TEST_CASE("Document::open returns UnconvertiblePath for a file name with a lone 
     REQUIRE(doc.is_open());
 }
 
+// The conversion covers the WHOLE path, so a good file name inside a folder
+// whose name has no UTF-8 form is refused the same way (#184). The open dialog
+// tells the two apart by the path; this pins the error it is given.
+TEST_CASE("Document::open returns UnconvertiblePath for a folder name with a lone surrogate",
+          "[document][open]") {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path()
+                       / (std::wstring(L"litepdf-folder-") + kLoneSurrogate);
+    fs::create_directories(dir);
+    struct RemoveDir {
+        fs::path dir;
+        ~RemoveDir() {
+            std::error_code ec;
+            fs::remove_all(dir, ec);
+        }
+    } remove_dir{dir};
+    const fs::path file = dir / L"simple.pdf";
+    fs::copy_file("tests/fixtures/simple.pdf", file, fs::copy_options::overwrite_existing);
+    REQUIRE(fs::exists(file));
+    REQUIRE_NOTHROW(file.filename().u8string());
+    REQUIRE_THROWS_AS(file.u8string(), std::system_error);
+
+    Document doc;
+    std::optional<Document::OpenError> err;
+    REQUIRE_NOTHROW(err = doc.open(file));
+    REQUIRE(err.has_value());
+    REQUIRE(*err == Document::OpenError::UnconvertiblePath);
+    REQUIRE_FALSE(doc.is_open());
+}
+
 // The extension check runs before the path is converted for MuPDF, on the
 // extension alone; it must not throw on the same character either.
 TEST_CASE("Document::open returns UnsupportedFormat for an extension with a lone surrogate",
