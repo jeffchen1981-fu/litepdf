@@ -8,7 +8,9 @@
 using litepdf::ui::bitmap_px_to_dip;
 using litepdf::ui::clamp_pan;
 using litepdf::ui::content_overflows;
+using litepdf::ui::pan_y_centring_quad;
 using litepdf::ui::place_bitmap;
+using litepdf::ui::quad_fully_visible;
 
 TEST_CASE("ViewportMath bitmap px to dip divides by the render target dpi ratio",
           "[ui][viewport]") {
@@ -139,4 +141,29 @@ TEST_CASE("ViewportMath content overflows exactly when clamp pan leaves a range"
                             || clamp_pan(-1e9f, c[1], c[3]) < 0.0f;
         REQUIRE(content_overflows(c[0], c[1], c[2], c[3]) == has_range);
     }
+}
+
+// #191: the worked example from the issue. Viewport 800, left page 1000, right
+// page 600 centred at y = 100, hit centre 500 down the right page. Measuring from
+// the left page's origin (0) gives -100; the right page's own origin gives -200.
+TEST_CASE("ViewportMath: centring a hit measures from its own page's top",
+          "[ui][viewport]") {
+    REQUIRE(pan_y_centring_quad(500.0f, 100.0f, 1000.0f, 800.0f) == -200.0f);
+    REQUIRE(pan_y_centring_quad(500.0f, 0.0f, 1000.0f, 800.0f) == -100.0f);
+}
+
+TEST_CASE("ViewportMath: centring a hit stays inside the pan range",
+          "[ui][viewport]") {
+    // Near the top the pan would go positive, near the bottom past the far end.
+    REQUIRE(pan_y_centring_quad(10.0f, 0.0f, 1000.0f, 800.0f) == 0.0f);
+    REQUIRE(pan_y_centring_quad(990.0f, 0.0f, 1000.0f, 800.0f) == -200.0f);
+    // Content that fits has no pan.
+    REQUIRE(pan_y_centring_quad(300.0f, 100.0f, 600.0f, 800.0f) == 0.0f);
+}
+
+TEST_CASE("ViewportMath: a quad is visible only clear of both margins",
+          "[ui][viewport]") {
+    REQUIRE(quad_fully_visible(24.0f, 776.0f, 800.0f));
+    REQUIRE_FALSE(quad_fully_visible(23.9f, 400.0f, 800.0f));
+    REQUIRE_FALSE(quad_fully_visible(400.0f, 776.1f, 800.0f));
 }

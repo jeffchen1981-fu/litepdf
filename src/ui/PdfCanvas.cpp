@@ -324,11 +324,13 @@ void PdfCanvas::apply_viewport() {
         // Route through change_current_page so the observer fires for any
         // caller that reaches here without a canonical current_page. No
         // anchor -- this is a snap, and change_current_page leaves the
-        // pending one untouched, so a Hit installed by a search landing on
-        // the spread's RIGHT page survives.
+        // pending one untouched.
         change_current_page(left);
     }
     const int right = dual_page_compute_right(left, total);
+    // A pair with no right page gets no right completion to replace this bitmap
+    // (#191): it would stay on screen and in the extent the pan is clamped to.
+    if (right < 0) impl_->right_bitmap.Reset();
     const float gutter_px = 8.0f * dpi_f / 96.0f;   // matches the 8 DIP gutter
     const float slot_px   = std::max(0.0f, (cw_px - gutter_px) * 0.5f);
     impl_->view->set_viewport(slot_px, ch_px, dpi_f, right);
@@ -460,8 +462,16 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
         return;
     }
 
+    // In a spread both pages are one position (#191): the current page stays the
+    // pair's left page, so a hit on the right page moves nothing. Taking the right
+    // page here would be snapped back by the kick that follows, which fired the
+    // observer twice and made every find on that page look like a page move.
     const int  target_pg  = static_cast<int>(h.page);
-    const bool page_moved = change_current_page(target_pg);
+    const int  total      = impl_->view->page_count();
+    const int  view_pg    = canonical_page(target_pg, total, impl_->dual_page);
+    const bool page_moved =
+        view_pg != canonical_page(impl_->view->current_page(), total, impl_->dual_page);
+    change_current_page(view_pg);
 
     // A bitmap from a previous view, or from a previous PAGE, is not evidence
     // about this one. Neither set_view (on a non-null swap) nor
@@ -471,7 +481,8 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     // Measuring the wanted quad against either can report "already visible" for a
     // hit that is off screen -- and with the conditional install below, that
     // verdict is final: no anchor is left for the completion to correct.
-    if (page_moved || !own_bitmap() || !impl_->rt) {
+    float page_h = 0.0f;
+    if (page_moved || !impl_->rt || !shown_page_height(target_pg, page_h)) {
         // The hit is on a different page, we have nothing rendered, or what we
         // have belongs to another document. In every case the incoming pixmap is
         // the only thing that can place this hit -- a scroll computed from the
@@ -482,11 +493,8 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
         return;
     }
 
-    const D2D1_SIZE_F src_px = impl_->current_bitmap->GetSize();
-    const D2D1_SIZE_F vp     = impl_->rt->GetSize();
-    const float rt_dpi = static_cast<float>(GetDpiForWindow(hwnd_));
-    const float src_h  = bitmap_px_to_dip(src_px.height, rt_dpi);
-    const float pct    = impl_->view->zoom_pct();
+    const D2D1_SIZE_F vp  = impl_->rt->GetSize();
+    const float       pct = impl_->view->zoom_pct();
 
     const float q_min_y_pt = std::min({ h.geom.ul_y, h.geom.ur_y,
                                         h.geom.ll_y, h.geom.lr_y });
@@ -494,16 +502,17 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
                                         h.geom.ll_y, h.geom.lr_y });
 
     // Already visible? Measure against the SAME origin the paint path uses.
-    const float origin_y  = page_origin_y(src_h, vp.height) + impl_->pan_y;
+    const float origin_y  = page_origin_y(page_h, vp.height) + impl_->pan_y;
     const float q_top_dip = origin_y + pdf_point_to_dip(q_min_y_pt, pct);
     const float q_bot_dip = origin_y + pdf_point_to_dip(q_max_y_pt, pct);
-    const float margin    = 24.0f;
-    if (q_top_dip >= margin && q_bot_dip <= vp.height - margin) {
+    if (quad_fully_visible(q_top_dip, q_bot_dip, vp.height)) {
         // Visible on the page already showing: DO NOT anchor. The header
         // contract is "If already visible, no scroll -- only the invalidate",
         // and MainWindow kicks a render after every find, so an anchor here
         // would re-centre the view on each F3 through hits that are all on
-        // screen together.
+        // screen together. An older find's Hit that has not landed yet goes too:
+        // the kick would carry it forward and scroll this hit away.
+        set_pending_anchor(PageAnchor::none());
         InvalidateRect(hwnd_, nullptr, FALSE);
         return;
     }
@@ -517,10 +526,44 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
-bool PdfCanvas::own_bitmap() const noexcept {
-    return impl_ && impl_->view && impl_->current_bitmap
-        && impl_->bitmap_epoch == impl_->view_epoch
-        && impl_->bitmap_page  == impl_->view->current_page();
+bool PdfCanvas::own_bitmap() const {
+    return impl_ && impl_->view && impl_->current_bitmap && !bitmap_is_stale();
+}
+
+bool PdfCanvas::own_right_bitmap() const {
+    if (!impl_ || !impl_->view || !impl_->right_bitmap) return false;
+    const int total = impl_->view->page_count();
+    const int left  = dual_page_compute_left(impl_->view->current_page(), total);
+    const int right = dual_page_compute_right(left, total);
+    return right >= 0 && impl_->right_bitmap_epoch == impl_->view_epoch
+        && impl_->right_bitmap_page == right;
+}
+
+bool PdfCanvas::spread_landed() const {
+    if (!impl_ || !impl_->view) return false;
+    const int total = impl_->view->page_count();
+    const int left  = dual_page_compute_left(impl_->view->current_page(), total);
+    return spread_pair_landed(own_bitmap(), dual_page_compute_right(left, total),
+                              own_right_bitmap());
+}
+
+bool PdfCanvas::shown_page_height(int page, float& out) const {
+    if (!impl_ || !impl_->view || !hwnd_) return false;
+    ID2D1Bitmap* bm = nullptr;
+    if (!impl_->dual_page) {
+        if (page == impl_->view->current_page() && own_bitmap()) {
+            bm = impl_->current_bitmap.Get();
+        }
+    } else {
+        const std::optional<Slot> slot = spread_slot_of(
+            page, impl_->view->current_page(), impl_->view->page_count());
+        if (slot == Slot::Left && own_bitmap()) bm = impl_->current_bitmap.Get();
+        if (slot == Slot::Right && own_right_bitmap()) bm = impl_->right_bitmap.Get();
+    }
+    if (!bm) return false;
+    out = bitmap_px_to_dip(bm->GetSize().height,
+                           static_cast<float>(GetDpiForWindow(hwnd_)));
+    return true;
 }
 
 bool PdfCanvas::single_page_placement(Placement& out) const {
@@ -545,14 +588,22 @@ std::vector<litepdf::core::SearchSession::Hit> PdfCanvas::overlay_hits() const {
         }
         return strip_overlay_hits(impl_->strip_view.visible(), impl_->hits_fn);
     }
-    // Only over THIS view's bitmap of THIS page, and only in single-page mode
-    // (spec §4.4; R17 left spread mode without an overlay).
-    Placement pl;
-    if (!impl_ || impl_->dual_page || !own_bitmap() || !single_page_placement(pl)
-        || !impl_->hits_fn
+    if (!impl_ || !impl_->view || !impl_->rt || !impl_->hits_fn
         || !impl_->brush_hit_other_fill || !impl_->brush_hit_current_fill) {
         return {};
     }
+    // Only over THIS view's bitmap of THIS page (spec §4.4). In a spread that
+    // holds per slot (#191): each half lands on its own, and until then a slot can
+    // be blank or still show the outgoing page.
+    if (impl_->dual_page) {
+        const int total = impl_->view->page_count();
+        const int left  = dual_page_compute_left(impl_->view->current_page(), total);
+        const int right = dual_page_compute_right(left, total);
+        return strip_overlay_hits(
+            spread_overlay_range(left, right, own_bitmap(), own_right_bitmap()),
+            impl_->hits_fn);
+    }
+    if (!own_bitmap()) return {};
     return impl_->hits_fn(static_cast<std::size_t>(impl_->view->current_page()));
 }
 
@@ -1319,7 +1370,9 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             }
 
             if (is_right) {
-                impl_->right_bitmap = std::move(bmp);
+                impl_->right_bitmap       = std::move(bmp);
+                impl_->right_bitmap_epoch = epoch;
+                impl_->right_bitmap_page  = page;
             } else {
                 impl_->current_bitmap = std::move(bmp);
                 impl_->bitmap_epoch   = epoch;
@@ -1334,7 +1387,8 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // ui/detail/PageAnchor.hpp -- and mark_applied() is called ONLY when
             // the placement actually happened. A right half arriving while
             // navigate_to_page has both bitmaps reset cannot measure anything,
-            // and must not retire an intent the left half has yet to use.
+            // and must not retire an intent the left half has yet to use; nor
+            // can a left half place a hit on the right page.
             const PageAnchor anchor = impl_->anchor.take(seq);
             if (apply_anchor(anchor) && anchor.kind != PageAnchor::Kind::None) {
                 impl_->anchor.mark_applied();
@@ -1723,12 +1777,13 @@ float PdfCanvas::pan_y_for_hit(const litepdf::core::SearchSession::Hit& h) const
     }
     ContentBox box{};
     if (!content_extent(box)) return impl_->pan_y;
+    // The page's own height, so a hit on a spread's right page is measured from
+    // where that page sits: an unequal pair centres the shorter one (#191).
+    float src_h = 0.0f;
+    if (!shown_page_height(static_cast<int>(h.page), src_h)) return impl_->pan_y;
 
-    const D2D1_SIZE_F src_px = impl_->current_bitmap->GetSize();
-    const D2D1_SIZE_F vp     = impl_->rt->GetSize();
-    const float rt_dpi = static_cast<float>(GetDpiForWindow(hwnd_));
-    const float src_h  = bitmap_px_to_dip(src_px.height, rt_dpi);
-    const float pct    = impl_->view->zoom_pct();
+    const D2D1_SIZE_F vp  = impl_->rt->GetSize();
+    const float       pct = impl_->view->zoom_pct();
 
     // Quad centre in PDF points -> DIPs, measured from the page's own top.
     const float q_min_y_pt = std::min({ h.geom.ul_y, h.geom.ur_y,
@@ -1745,8 +1800,7 @@ float PdfCanvas::pan_y_for_hit(const litepdf::core::SearchSession::Hit& h) const
     // disagreed with the paint path in a spread whose right page is taller
     // (PR-A1 escalated item E2), landing the hit off-centre. In single-page
     // mode box.h IS src_h, so this is the same number the old code produced.
-    return clamp_pan(vp.height * 0.5f - q_center - page_origin_y(src_h, vp.height),
-                     box.h, vp.height);
+    return pan_y_centring_quad(q_center, page_origin_y(src_h, vp.height), box.h, vp.height);
 }
 
 bool PdfCanvas::apply_anchor(const PageAnchor& anchor) {
@@ -1754,6 +1808,11 @@ bool PdfCanvas::apply_anchor(const PageAnchor& anchor) {
     if (!content_extent(box)) return false;
     const D2D1_SIZE_F vp = impl_->rt->GetSize();
 
+    // Bottom and Hit are clamped to the pair: not final until both halves are in,
+    // so a batch opened before then carries the intent forward rather than
+    // retiring it on a partial extent. Top depends on no extent.
+    const bool extent_final = !impl_->dual_page || spread_landed();
+    bool placed = true;
     switch (anchor.kind) {
         case PageAnchor::Kind::Top:
             impl_->pan_y = 0.0f;
@@ -1763,19 +1822,35 @@ bool PdfCanvas::apply_anchor(const PageAnchor& anchor) {
             // when the content fits, which is the right answer -- a page that
             // fits has no distinct bottom to land on.
             impl_->pan_y = vp.height - box.h;
+            placed = extent_final;
             break;
-        case PageAnchor::Kind::Hit:
+        case PageAnchor::Kind::Hit: {
+            // Not placed yet: the hit's slot has not landed, so its page's
+            // position is unknown. The other half's completion places it.
+            float page_h = 0.0f;
+            if (!shown_page_height(static_cast<int>(anchor.target.page), page_h)) {
+                return false;
+            }
             impl_->pan_y = pan_y_for_hit(anchor.target);
+            placed = extent_final;
             break;
+        }
         case PageAnchor::Kind::None:
             // Same-page re-render: keep the pan exactly where the user left
             // it. Only the clamp below applies, because the content may have
             // changed size (zoom, DPI, pane toggle, window resize).
+            //
+            // #171: not while half a spread is missing. The box above then
+            // measures one page, and a clamp against it would cut a pan set for
+            // the whole pair: a layout carry, or a tab switch restoring the
+            // reader's place. The missing half's completion comes back here,
+            // and on_paint clamps what it draws until then.
+            if (!extent_final) return false;
             break;
     }
     impl_->pan_x = clamp_pan(impl_->pan_x, box.w, vp.width);
     impl_->pan_y = clamp_pan(impl_->pan_y, box.h, vp.height);
-    return true;
+    return placed;
 }
 
 LRESULT PdfCanvas::scroll_to_top() {
@@ -1817,8 +1892,7 @@ void PdfCanvas::navigate_to_page(int target, PageAnchor anchor) {
                                                  total);
         if (left != impl_->view->current_page()) {
             // A snap, not a navigation: change_current_page never touches the
-            // anchor, so a Hit installed moments earlier -- a search landing on
-            // the RIGHT page of a spread -- survives it untouched.
+            // anchor, so the one installed above survives it untouched.
             change_current_page(left);
         }
         apply_viewport();
@@ -1963,8 +2037,7 @@ void PdfCanvas::on_paint() {
     // (Phase 8 D10) Two-page-spread layout. Each page gets a half-
     // canvas-width slot minus an 8 DIP gutter. Cover-page (page 0) and
     // odd-tail cases render the LEFT slot only and leave the RIGHT slot
-    // as an empty placeholder rectangle. Search-hit overlay is disabled
-    // in dual mode for v1 (R17 — deferred per plan §"Out of scope").
+    // as an empty placeholder rectangle.
     if (impl_->dual_page) {
         D2D1_SIZE_F vp = impl_->rt->GetSize();
         const float gutter   = 8.0f;
@@ -2002,7 +2075,13 @@ void PdfCanvas::on_paint() {
         const float base_x = (box.w > vp.width) ? -box.l : 0.0f;
         const float base_y = (box.h > slot_h)   ? -box.t : 0.0f;
 
-        auto draw_slot = [&](ID2D1Bitmap* bm, float x0, const Placement& pl) {
+        const int   total_pages = impl_->view ? impl_->view->page_count() : 0;
+        const int   left_page   = impl_->view
+            ? dual_page_compute_left(impl_->view->current_page(), total_pages) : 0;
+        const int   right_page  = dual_page_compute_right(left_page, total_pages);
+        const float pct         = impl_->view ? impl_->view->zoom_pct() : 1.0f;
+
+        auto draw_slot = [&](ID2D1Bitmap* bm, float x0, const Placement& pl, int page) {
             if (!bm) return;
             const D2D1_RECT_F dst = D2D1::RectF(x0 + pl.x + base_x + pan_x,
                                                 pl.y + base_y + pan_y,
@@ -2033,10 +2112,18 @@ void PdfCanvas::on_paint() {
                 D2D1_ANTIALIAS_MODE_ALIASED);
             impl_->rt->DrawBitmap(bm, dst, 1.0f,
                                   D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            // #191: the hits of this slot's page, inside its clip so a hit on a
+            // part of the page the band hides is hidden with it. overlay_hits()
+            // already left out a slot still showing another page.
+            for (const auto& hit : impl_->painted_hits) {
+                if (static_cast<int>(hit.page) == page) {
+                    paint_hit(hit, dst.left, dst.top, pct);
+                }
+            }
             impl_->rt->PopAxisAlignedClip();
         };
-        draw_slot(impl_->current_bitmap.Get(), left_x0,  le);
-        draw_slot(impl_->right_bitmap.Get(),   right_x0, re);
+        draw_slot(impl_->current_bitmap.Get(), left_x0,  le, left_page);
+        draw_slot(impl_->right_bitmap.Get(),   right_x0, re, right_page);
 
         // Empty-right placeholder when there is no right page (cover or
         // odd-tail). Without it the user's first Ctrl+Shift+D press on

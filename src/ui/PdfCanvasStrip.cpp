@@ -361,7 +361,8 @@ void PdfCanvas::apply_layout_carry(LayoutKind next, CarriedPosition c, double pa
             const int left = dual_page_compute_left(c.page, total);
             const SpreadVertical sv = spread_vertical_for(sizes, left, total, zoom, vp.h);
             impl_->pan_x = 0.0f;
-            impl_->pan_y = spread_pan_y_for(c, sv.left_top_in_union, sv.union_h, vp.h);
+            impl_->pan_y = spread_pan_y_for(c, spread_page_top(sv, c.page, left),
+                                            sv.union_h, vp.h);
             break;
         }
         case LayoutKind::PagedSingle:

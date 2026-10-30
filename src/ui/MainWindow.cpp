@@ -847,8 +847,6 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
     auto* incoming = tabs_->active_tab();
     if (canvas_) {
         canvas_->set_view(incoming ? incoming->view.get() : nullptr);
-        if (incoming) canvas_->set_pan(incoming->pan_x, incoming->pan_y);
-        else          canvas_->set_pan(0.0f, 0.0f);
         // PR-B: set_view's null branch returns before firing the page-change
         // observer, so the indicator would otherwise keep showing the closed
         // document's page. This is the only path to the empty state.
@@ -861,9 +859,14 @@ void MainWindow::on_tab_switch(int new_index, int old_index) {
                                        : false);
         // (Phase 8 D10) Same per-tab carry for two-page-spread layout, and
         // (#55) the continuous strip: the incoming tab's effective layout, or
-        // PagedSingle when no tab is left. After set_pan and set_invert_chrome,
-        // which do not depend on the layout (spec 3.4, deviation 3).
+        // PagedSingle when no tab is left. After set_invert_chrome, which does
+        // not depend on the layout (spec 3.4, deviation 3).
         apply_effective_layout(incoming, false);
+        // #171: after the layout, whose switch zeroes the pan when the two tabs
+        // differ (set_dual_page). A spread tab sits beside a non-spread one more
+        // often than beside another spread.
+        if (incoming) canvas_->set_pan(incoming->pan_x, incoming->pan_y);
+        else          canvas_->set_pan(0.0f, 0.0f);
     }
 
     if (outline_) {

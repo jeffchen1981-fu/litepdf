@@ -4,6 +4,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+using litepdf::ui::canonical_page;
 using litepdf::ui::dual_page_compute_left;
 using litepdf::ui::dual_page_compute_right;
 using litepdf::ui::dual_page_step_next_left;
@@ -94,4 +95,15 @@ TEST_CASE("dual_page: shown pages are what a background tab keeps (#159)",
     REQUIRE(shown_pages(0, 10, true).second == -1);
     REQUIRE(shown_pages(9, 10, true).first == 9);
     REQUIRE(shown_pages(9, 10, true).second == -1);
+}
+
+TEST_CASE("Spread: canonical_page is the pair's left page, or the page itself",
+          "[ui][dual_page]") {
+    // Spread: a right page maps to its left, so two hits on one pair compare equal.
+    REQUIRE(canonical_page(4, 10, true) == 3);
+    REQUIRE(canonical_page(3, 10, true) == 3);
+    REQUIRE(canonical_page(0, 10, true) == 0);
+    // One page at a time: the page itself, whatever its parity.
+    REQUIRE(canonical_page(4, 10, false) == 4);
+    REQUIRE(canonical_page(3, 10, false) == 3);
 }

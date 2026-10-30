@@ -45,4 +45,15 @@ inline std::vector<core::SearchSession::Hit> strip_overlay_hits(
     return out;
 }
 
+// (#191) The pages of a spread whose overlay may be drawn: those whose own bitmap
+// is up, since a slot can still show the outgoing page until its render lands.
+// `right` is -1 when the spread has no right page. strip_overlay_hits takes the
+// result: a spread's two pages are adjacent, and an empty range draws nothing.
+inline StripRange spread_overlay_range(int left, int right, bool left_own,
+                                       bool right_own) noexcept {
+    const bool has_right = right >= 0 && right_own;
+    if (!left_own && !has_right) return StripRange{};
+    return StripRange{left_own ? left : right, has_right ? right : left};
+}
+
 }  // namespace litepdf::ui

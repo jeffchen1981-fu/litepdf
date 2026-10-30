@@ -334,10 +334,11 @@ public:
     // Scroll / page-change such that `h`'s quad is visible with a 24 DIP
     // margin. If already visible, no scroll — only the invalidate. If
     // target page differs from current, page is switched via
-    // change_current_page. Installs a pending Hit anchor on every path
-    // EXCEPT the already-visible one, so the caller (MainWindow) must
-    // follow this with kick_render -- both to render and to bind that
-    // anchor to the submission it opens.
+    // change_current_page; in a spread, only when the hit is on another pair,
+    // and to that pair's left page. Installs a pending Hit anchor on every path
+    // EXCEPT the already-visible one, which drops any pending anchor instead,
+    // so the caller (MainWindow) must follow this with kick_render -- both to
+    // render and to bind that anchor to the submission it opens.
     //
     // In the strip (spec 6.3) it scrolls the strip itself and installs no
     // anchor: no scroll when the quad is inside the viewport by the same 24 DIP
@@ -391,7 +392,7 @@ private:
     // and navigate_to_page declines a move to where you already are.
     LRESULT scroll_to_top();
 
-    // Unpanned vertical origin of the LEFT/single page in canvas DIPs, i.e.
+    // Unpanned vertical origin of a page `src_h` high in canvas DIPs, i.e.
     // what on_paint would use with pan_y == 0. Single mode: place_bitmap
     // centres a fitting page and pins an overflowing one to 0. Dual mode: the
     // same, because the slot band is the full canvas height and on_paint's
@@ -402,17 +403,22 @@ private:
     // Pan that centres `h`'s quad vertically, using the same geometry as
     // on_paint. Extracted in Task 6; scroll_into_view and the Hit anchor share
     // it so the pre-render estimate and the post-render placement cannot drift.
+    // Measured against the bitmap of the slot showing the hit's page (#191);
+    // the current pan when that slot has not landed.
     float pan_y_for_hit(const litepdf::core::SearchSession::Hit& h) const;
 
     // Turn an anchor into a pan. Called from the completion handler once the
     // arriving bitmap is installed, so the page's real height is known.
-    // Kind::None keeps the current pan and only re-clamps it.
+    // Kind::None keeps the current pan and only re-clamps it, and in a spread
+    // only once both halves have landed (#171).
     //
     // Returns false when there is nothing to measure against yet (no bitmap,
-    // no render target). The caller must NOT mark the anchor applied in that
-    // case, or an intent would be retired without ever taking effect -- the
-    // reachable path being a spread whose RIGHT half lands first, while
-    // navigate_to_page has just reset both bitmaps.
+    // no render target, or a Hit whose page's slot has not landed), and for a
+    // Bottom or Hit in a spread until both halves are in. The caller must NOT
+    // mark the anchor applied in that case, or an intent would be retired
+    // without ever taking effect -- the reachable paths being a spread whose
+    // RIGHT half lands first, while navigate_to_page has just reset both
+    // bitmaps, and a hit on the right page when the left half lands first.
     bool apply_anchor(const PageAnchor& anchor);
 
     // Painted extent plus its origin, in canvas DIPs. `l`/`t` are zero for a
@@ -435,27 +441,39 @@ private:
     // True while current_bitmap belongs to another view or page than the one
     // showing. set_view and navigate_to_page keep painting the outgoing bitmap
     // until the incoming render lands, and both wheels and pan_by (the arrow
-    // keys and the hand tool, #120) drop a step until then. NOT own_bitmap():
-    // this compares against the CANONICAL left page in spread mode, and it is
-    // false when there is no bitmap at all.
+    // keys and the hand tool, #120) drop a step until then. NOT !own_bitmap():
+    // it is false when there is no bitmap at all.
     bool bitmap_is_stale() const;
 
     bool    content_extent(ContentBox& out) const;
 
-    // True when current_bitmap is THIS view's rendering of THIS page. set_view
-    // and navigate_to_page's single-page branch both keep painting the outgoing
-    // bitmap until the incoming render lands, so anything that measures the
-    // bitmap or draws page-space geometry over it has to ask first.
-    bool own_bitmap() const noexcept;
+    // True when current_bitmap is THIS view's rendering of THIS page, or of the
+    // left page of THIS spread. set_view and navigate_to_page's single-page
+    // branch both keep painting the outgoing bitmap until the incoming render
+    // lands, so anything that measures the bitmap or draws page-space geometry
+    // over it has to ask first.
+    bool own_bitmap() const;
+
+    // The same question for right_bitmap: THIS view's rendering of the right
+    // page of THIS spread. False when the spread has no right page.
+    bool own_right_bitmap() const;
+
+    // True in a spread once both halves are this view's and this pair's.
+    bool spread_landed() const;
+
+    // The height in DIPs of the page `page`, read from the own bitmap of the
+    // slot showing it. False when no slot shows that page yet.
+    bool shown_page_height(int page, float& out) const;
 
     // Where on_paint draws the single-page bitmap, in canvas DIPs. False when
     // there is no bitmap or render target yet.
     bool single_page_placement(Placement& out) const;
 
-    // The search hits on_paint draws over the page right now: empty in spread
-    // mode, over another view's or page's bitmap, before the render target
-    // exists, or with no hits source. In the strip it is the hits of every page
-    // in V, with no bitmap condition (spec 7.1); strip_paint draws them too.
+    // The search hits on_paint draws over the page right now: empty over another
+    // view's or page's bitmap, before the render target exists, or with no hits
+    // source. In a spread it is the hits of each half whose own bitmap is up
+    // (#191). In the strip it is the hits of every page in V, with no bitmap
+    // condition (spec 7.1); strip_paint draws them too.
     // on_paint and on_search_hits_changed both ask this, so the two cannot
     // disagree about what is on screen.
     std::vector<litepdf::core::SearchSession::Hit> overlay_hits() const;

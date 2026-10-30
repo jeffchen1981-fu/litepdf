@@ -27,6 +27,7 @@
 // same path, so it would never recover.
 
 #include <cstdint>
+#include <optional>
 
 #include "ui/PdfCanvasLayout.hpp"
 
@@ -77,6 +78,26 @@ inline bool accept_completion(std::uint64_t meta_epoch, std::uint64_t cur_epoch,
     const int right = dual_page_compute_right(left, page_count);
     if (right < 0) return false;   // cover page, or odd tail: no right half
     return meta_page == right;
+}
+
+// Which half of the spread around `cur_page` shows `page`; none when `page` is
+// outside that spread.
+inline std::optional<Slot> spread_slot_of(int page, int cur_page,
+                                          int page_count) noexcept {
+    const int left = dual_page_compute_left(cur_page, page_count);
+    if (page == left) return Slot::Left;
+    if (page == dual_page_compute_right(left, page_count)) return Slot::Right;
+    return std::nullopt;
+}
+
+// (#171) True once a spread can be measured: its left bitmap and, when it has a
+// right page (`right_page >= 0`), its right bitmap both belong to this view and
+// pair. Before that the painted extent is not the pair's: either half can land
+// first, and a re-clamp against the partial extent would cut a pan that a tab
+// switch or a layout carry set for the whole pair.
+inline bool spread_pair_landed(bool left_own, int right_page,
+                               bool right_own) noexcept {
+    return left_own && (right_page < 0 || right_own);
 }
 
 }  // namespace litepdf::ui

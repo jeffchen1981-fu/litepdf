@@ -89,6 +89,24 @@ inline float pdf_point_to_dip(float pt, float zoom_pct) noexcept {
     return pt * zoom_pct;
 }
 
+// The margin a search hit keeps from the viewport's top and bottom edge to count
+// as fully visible.
+inline constexpr float kHitMarginDip = 24.0f;
+
+// True when a quad spanning [q_top, q_bot] in canvas DIPs needs no scroll.
+inline bool quad_fully_visible(float q_top, float q_bot, float vp_h) noexcept {
+    return q_top >= kHitMarginDip && q_bot <= vp_h - kHitMarginDip;
+}
+
+// The pan that puts a quad's centre at the viewport's centre. `quad_center` is
+// measured from the top of the quad's own page, and `page_top` is where that page
+// sits at pan 0; `content_h` is the height the pan is clamped against. In a spread
+// that is the painted union, while `page_top` differs between the two pages.
+inline float pan_y_centring_quad(float quad_center, float page_top,
+                                 float content_h, float vp_h) noexcept {
+    return clamp_pan(vp_h * 0.5f - quad_center - page_top, content_h, vp_h);
+}
+
 // Client-area pixels (mouse message coordinates) -> render-target DIPs. The same
 // factor as bitmap_px_to_dip; a separate name so each call site says which kind
 // of pixel it holds.
