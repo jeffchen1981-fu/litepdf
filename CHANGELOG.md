@@ -9,6 +9,8 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-10-31 — Search highlights in two-page spreads, and spreads keep their place across tabs
+
 ### Added
 
 - Search hits are now highlighted in two-page spreads, on both pages (#191).
@@ -20,15 +22,21 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   that folder and asks you to rename it or move the file; when the file name
   and a folder both hold one, it says so and names the folder (#184).
 - A two-page spread no longer loses your place when you come back to its tab.
-  A spread beside a tab of another layout used to return to its top, and so did
-  one whose right page is the taller, beside any tab. Turning two-page on from
-  continuous scroll while in the taller right page now keeps you on the same
-  part of that page (#171).
-- Find Next and Find Previous in a two-page spread now centre a hit on the right
-  page, and no longer scroll when the next hit is already on screen (#191).
+  A spread beside a tab of another layout used to return to its top, and one
+  whose right page is the taller was cut back to the end of its left page, even
+  beside another spread. A tab showing one page at a time keeps its place too
+  when you come back to it from a spread; it used to return to its top. Turning
+  two-page on from continuous scroll while in the taller right page now keeps
+  you on the same part of that page (#171). In both cases, an arrow key, the
+  hand tool or the wheel used before the right page appears can still cut the
+  position to the end of the left page, or turn the spread if the left page
+  fits the window (#194).
+- Find Next and Find Previous now centre a hit on the right page of a two-page
+  spread whose pages differ in height. A hit on the right page that is already
+  well inside the window no longer scrolls the view, in any spread (#191).
 - Moving from a two-page spread to the cover, or to a last page with no partner,
-  by a thumbnail, the page box or a search no longer leaves the previous right
-  page on screen (#191).
+  by the outline, a thumbnail, the page box or a search no longer leaves the
+  previous right page on screen (#191).
 
 ## [1.7.0] — 2026-10-26 — CBZ continuous scroll
 
@@ -764,7 +772,7 @@ and Phase 12 (release hardening: crash-safe session restore).
 
 [Compare initial commit…0.0.1-phase0](https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.1-phase0)
 
-[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.8.0...HEAD
 [0.0.12-phase10]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.12-phase10
 [0.0.11-phase9]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.11-phase9
 [0.0.10-phase8.5]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.10-phase8.5
