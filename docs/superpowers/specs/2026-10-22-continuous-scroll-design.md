@@ -112,7 +112,7 @@ These run in both layouts. Each gets a strip branch; its paged branch keeps toda
 |---|---|---|
 | `MainWindow::kick_render(page)`, 21 call sites | `apply_viewport` (refit), refresh the zoom readout, then `request_render_with_prefetch` (or two P0s in a spread) | Gains a `KickReason` argument. The paged branch ignores it. The strip branch dispatches by reason, per the table below. |
 | `MainWindow::navigate_click(page)` | `change_current_page`; **returns early if the page did not change**; Top anchor; kick | The strip branch runs **first, before the early return**: strip navigation (§6.3), then a `Navigate` kick. Going to the derived current page while mid-page therefore scrolls to its top. |
-| `MainWindow::on_tab_switch` | snapshot, `set_view`, pan, `set_dual_page`, `set_viewport`, kick | Calls `apply_effective_layout` (below). `apply_effective_layout` takes the place of today's `set_dual_page` call, after `set_pan` and `set_invert_chrome`. Same-index calls (`new_index == old_index`) kick with `Navigate`, not `TabSwitch`. |
+| `MainWindow::on_tab_switch` | snapshot, `set_view`, pan, `set_dual_page`, `set_viewport`, kick | Calls `apply_effective_layout` (below). `apply_effective_layout` takes the place of today's `set_dual_page` call, after `set_invert_chrome` and before `set_pan`, since a switch that changes the dual flag zeroes the pan (#171). Same-index calls (`new_index == old_index`) kick with `Navigate`, not `TabSwitch`. |
 | `MainWindow::apply_effective_layout(tab)` (new) | — | The **only** owner of layout switches. Computes `EffectiveLayout` for the tab (or `PagedSingle` for a null view) and, if it differs from the canvas's current layout, does the layout-switch reset below and sets or clears `WS_VSCROLL` (§6.2). Called from `on_tab_switch`, the two-page toggle (both directions), the Continuous Scroll menu item, and tab close. The reset and the carry run only for a switch into or out of the strip; a paged single ↔ spread switch keeps today's `set_dual_page` path (U6). |
 | `PdfCanvas::apply_viewport` | refit from the current page, then `set_viewport` | Called only for the reasons that refit (below). |
 | `PdfCanvas::resubmit_current_page` (Ctrl+wheel zoom; `on_size`, `on_paint` and the completion handler on `D2DERR_RECREATE_TARGET`) | resubmit the current page | Re-layout (§4.5), then reschedule. |
@@ -576,12 +576,13 @@ strip").
     outgoing horizontal pan (paged single's `pan_x`; 0 from a spread), scaled by the zoom
     ratio, becomes the strip's desired `pan_x`; only `pan_x_eff` clamps it.
   - **Into paged single.** Paged `pan_y` = −offset, clamped; `pan_x` = `pan_x_eff`.
-  - **Into paged spread.** The spread containing the page; `pan_y` = −(the left page's top in
+  - **Into paged spread.** The spread containing the page; `pan_y` = −(the carried page's top in
     the union + offset), clamped to the union; `pan_x` = 0, because the union's horizontal layout
-    differs from the strip's.
+    differs from the strip's. (#171: the page's own top, left or right; the left page's top was
+    wrong for a carry onto the right page of an unequal pair.)
   - Into either paged layout, the pan is set before the render is kicked. The switch cleared the
-    anchor, so the paged completion path only re-clamps the pan and the position survives
-    (except unequal-height spreads, §10).
+    anchor, so the paged completion path only re-clamps the pan, in a spread once both halves
+    have landed (#171), and the position survives.
   - Every carry is applied after the new layout's fit: the current page is set to the carried
     page, the viewport refits, and the offset is scaled by the zoom ratio (after / before), so a
     fit change does not shift the reader.
@@ -851,10 +852,12 @@ two runs per layout; the paged arm ends at page 11's top after 10 PgDn, the stri
   paged at its page's top (§7.4). Only a switch within the active tab carries the offset (§7.3).
 - A text build the worker skips because a P0 is queued (#98 skip rule 3) is not retried; a press
   on that page builds its text synchronously, as in paged mode (§5.2).
-- A carry into a spread whose right page is taller than its left can be cut short: the left
-  page's completion re-clamps the pan against the left bitmap alone (`content_extent`,
-  `apply_anchor` in `PdfCanvas.cpp`) before the right one lands, so §7.3's "the position
-  survives" does not hold for unequal-height spreads. A follow-up issue is filed with PR 2.
+- ~~A carry into a spread whose right page is taller than its left can be cut short~~ Fixed by
+  #171: `apply_anchor` no longer re-clamps a `None` anchor until both halves have landed.
+  An arrow key, hand-tool step or wheel notch in the one render between the two completions
+  still measures the left page alone (`pan_by`, `on_wheel_scroll`, `on_hwheel_scroll`). Dropping
+  that input is not an option: `bitmap_is_stale` lapses when a render succeeds, and a right render
+  that fails would leave the spread's input dead.
 
 ## 11. Risk and review
 

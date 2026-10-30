@@ -37,7 +37,7 @@ namespace litepdf::ui {
 
 // The margin a search hit keeps from the viewport's top and bottom edge to count
 // as fully visible: the one paged mode's scroll_into_view uses.
-inline constexpr double kStripHitMarginDip = 24.0;
+inline constexpr double kStripHitMarginDip = kHitMarginDip;
 
 // A page's rectangle relative to the viewport's top-left corner, in DIPs.
 struct StripPageRect {

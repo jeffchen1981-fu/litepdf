@@ -22,6 +22,7 @@
 #include "core/PageCache.hpp"
 #include "core/RenderEngine.hpp"
 #include "core/detail/PageSizeFill.hpp"
+#include "ui/PdfCanvasLayout.hpp"
 
 // Plain extern "C" declarations keep this TU MuPDF-header-free, as in
 // test_document_view.cpp and test_page_cache_l1.cpp.
@@ -147,6 +148,23 @@ TEST_CASE("DocumentView: continuous mode does not refit on a page change",
     const float b_before = b.zoom_pct();
     REQUIRE(b.set_current_page(1));
     REQUIRE(b.zoom_pct() != b_before);
+}
+
+// #171, #191: spread-unequal.pdf never shows two pages side by side (a cover and
+// an odd tail), so a defect of an unequal pair needs a document that really pairs.
+TEST_CASE("Spread fixture: spread-pairs.pdf pairs pages of unequal height",
+          "[core][view][strip]") {
+    Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/spread-pairs.pdf").has_value());
+    REQUIRE(doc.page_count() == 5);
+    InlineDispatcher disp;
+    DocumentView view(std::move(doc), disp);
+    const std::vector<PageSize>& sizes = view.page_sizes();
+
+    REQUIRE(litepdf::ui::dual_page_compute_right(1, 5) == 2);
+    CHECK(sizes[1].height_pt < sizes[2].height_pt);   // the right page is taller
+    REQUIRE(litepdf::ui::dual_page_compute_right(3, 5) == 4);
+    CHECK(sizes[3].height_pt > sizes[4].height_pt);   // the left page is taller
 }
 
 TEST_CASE("DocumentView: page_sizes returns one size per page", "[core][view][strip]") {

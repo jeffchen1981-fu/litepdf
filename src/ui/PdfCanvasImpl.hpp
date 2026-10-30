@@ -180,11 +180,16 @@ struct PdfCanvas::Impl {
 
     // (Phase 8 D10) two-page-spread layout state. The right slot
     // bitmap is populated by WM_USER_RENDER_DONE_RIGHT handler when
-    // dual_page is on. Reset to null both on dual→single transition
-    // and on every page-change in dual mode (the left slot's
-    // current_bitmap is also reset on page-change).
+    // dual_page is on. Reset to null on dual→single transition, by
+    // navigate_to_page (which resets current_bitmap too), and by
+    // apply_viewport for a pair with no right page.
     bool                          dual_page = false;
     ComPtr<ID2D1Bitmap>           right_bitmap;
+    // #191: what right_bitmap shows, the counterpart of bitmap_epoch/bitmap_page.
+    // A kick that moves the pair keeps painting the outgoing right bitmap until
+    // the incoming one lands.
+    std::uint64_t                 right_bitmap_epoch = 0;
+    int                           right_bitmap_page  = -1;
 
     // --- Phase 7 Task 7: page-change observer ---
     // Fired by change_current_page() after a real page transition, and

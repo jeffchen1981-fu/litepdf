@@ -102,3 +102,34 @@ TEST_CASE("CompletionMath rejects everything for a document with no pages",
     REQUIRE_FALSE(accept_completion(7, 7, 5, 5, 0, Slot::Left,  0, false, 0));
     REQUIRE_FALSE(accept_completion(7, 7, 5, 5, 0, Slot::Right, 0, true,  0));
 }
+
+TEST_CASE("CompletionMath: spread_slot_of names the half that shows a page",
+          "[ui][completion]") {
+    using litepdf::ui::spread_slot_of;
+    // Pair (3,4), from either of its pages as the current page.
+    REQUIRE(spread_slot_of(3, 3, 10) == Slot::Left);
+    REQUIRE(spread_slot_of(4, 3, 10) == Slot::Right);
+    REQUIRE(spread_slot_of(3, 4, 10) == Slot::Left);
+    REQUIRE(spread_slot_of(4, 4, 10) == Slot::Right);
+    // Off the pair.
+    REQUIRE_FALSE(spread_slot_of(2, 3, 10).has_value());
+    REQUIRE_FALSE(spread_slot_of(5, 3, 10).has_value());
+    // The cover and an odd tail have no right half.
+    REQUIRE(spread_slot_of(0, 0, 10) == Slot::Left);
+    REQUIRE_FALSE(spread_slot_of(1, 0, 10).has_value());
+    REQUIRE(spread_slot_of(9, 9, 10) == Slot::Left);
+}
+
+TEST_CASE("CompletionMath: a spread has landed once both of its halves have",
+          "[ui][completion]") {
+    using litepdf::ui::spread_pair_landed;
+    REQUIRE(spread_pair_landed(true, 4, true));
+    // #171: the left half alone measures neither the pair's height nor its width.
+    REQUIRE_FALSE(spread_pair_landed(true, 4, false));
+    // A right half beside another view's or page's left bitmap, likewise.
+    REQUIRE_FALSE(spread_pair_landed(false, 4, true));
+    REQUIRE_FALSE(spread_pair_landed(false, 4, false));
+    // The cover and an odd tail have no right half to wait for.
+    REQUIRE(spread_pair_landed(true, -1, false));
+    REQUIRE_FALSE(spread_pair_landed(false, -1, false));
+}

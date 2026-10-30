@@ -99,6 +99,30 @@ TEST_CASE("StripOverlay: overlay hits are the visible pages' hits in page order"
     CHECK_FALSE(same_overlay(strip_overlay_hits({2, 4}, f), strip_overlay_hits({2, 5}, f)));
 }
 
+TEST_CASE("Spread: the overlay covers each half whose own bitmap is up") {
+    // #191: left page 3, right page 4.
+    StripRange r = spread_overlay_range(3, 4, true, true);
+    CHECK(r.first == 3);
+    CHECK(r.last == 4);
+    r = spread_overlay_range(3, 4, true, false);
+    CHECK(r.first == 3);
+    CHECK(r.last == 3);
+    r = spread_overlay_range(3, 4, false, true);
+    CHECK(r.first == 4);
+    CHECK(r.last == 4);
+    CHECK(spread_overlay_range(3, 4, false, false).empty());
+    // The cover, or an odd tail: no right half.
+    r = spread_overlay_range(0, -1, true, false);
+    CHECK(r.first == 0);
+    CHECK(r.last == 0);
+    CHECK(spread_overlay_range(0, -1, false, false).empty());
+    // A slot with no page has nothing to add, whatever its bitmap says.
+    r = spread_overlay_range(0, -1, true, true);
+    CHECK(r.first == 0);
+    CHECK(r.last == 0);
+    CHECK(spread_overlay_range(0, -1, false, true).empty());
+}
+
 TEST_CASE("StripOverlay: a drag past the start page clamps to that page") {
     StripViewport v = make(sizes_a(), 300, 150);
     v.scroll_to(108);

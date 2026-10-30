@@ -32,13 +32,18 @@ inline int dual_page_compute_right(int left_page, int page_count) noexcept {
     return left_page + 1;
 }
 
+// The page that names what is on screen: the left page of the pair in two-page
+// mode, else the page itself. Two pages of one spread are one position.
+inline int canonical_page(int page, int page_count, bool dual_page) noexcept {
+    return dual_page ? dual_page_compute_left(page, page_count) : page;
+}
+
 // The page a search scans first and Find Next / Find Previous start from:
 // the page on screen, or the left page of its spread in two-page mode so
 // the visible pages come first in the forward scan order.
 inline int search_start_page(int current_page, int page_count,
                              bool dual_page) noexcept {
-    return dual_page ? dual_page_compute_left(current_page, page_count)
-                     : current_page;
+    return canonical_page(current_page, page_count, dual_page);
 }
 
 // (#159) The pages a tab shows, which it keeps in L1 when it goes to the

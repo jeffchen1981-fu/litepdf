@@ -9,12 +9,26 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+### Added
+
+- Search hits are now highlighted in two-page spreads, on both pages (#191).
+
 ### Fixed
 
 - Opening a file inside a folder whose name holds an unpaired UTF-16
   surrogate no longer tells you to rename the file. The message now names
   that folder and asks you to rename it or move the file; when the file name
   and a folder both hold one, it says so and names the folder (#184).
+- A two-page spread no longer loses your place when you come back to its tab.
+  A spread beside a tab of another layout used to return to its top, and so did
+  one whose right page is the taller, beside any tab. Turning two-page on from
+  continuous scroll while in the taller right page now keeps you on the same
+  part of that page (#171).
+- Find Next and Find Previous in a two-page spread now centre a hit on the right
+  page, and no longer scroll when the next hit is already on screen (#191).
+- Moving from a two-page spread to the cover, or to a last page with no partner,
+  by a thumbnail, the page box or a search no longer leaves the previous right
+  page on screen (#191).
 
 ## [1.7.0] — 2026-10-26 — CBZ continuous scroll
 

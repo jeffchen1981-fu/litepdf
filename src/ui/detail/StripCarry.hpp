@@ -74,11 +74,11 @@ inline float paged_pan_y_for(const CarriedPosition& c, double page_h,
                      static_cast<float>(vp_h));
 }
 
-// Into paged spread: pan_y = -(the left page's top in the union + offset),
+// Into paged spread: pan_y = -(the carried page's top in the union + offset),
 // clamped to the union.
-inline float spread_pan_y_for(const CarriedPosition& c, double left_top_in_union,
+inline float spread_pan_y_for(const CarriedPosition& c, double page_top_in_union,
                               double union_h, double vp_h) noexcept {
-    return clamp_pan(static_cast<float>(-(left_top_in_union + c.offset_dip)),
+    return clamp_pan(static_cast<float>(-(page_top_in_union + c.offset_dip)),
                      static_cast<float>(union_h), static_cast<float>(vp_h));
 }
 
@@ -92,6 +92,8 @@ struct SpreadVertical {
     // edge when the union overflows the slot (on_paint's base_y shift), else the
     // page's slot-centred y.
     double left_top_in_union = 0;
+    // The same for the right page; 0 when there is none.
+    double right_top_in_union = 0;
     double union_h = 0;
 };
 
@@ -101,8 +103,9 @@ inline SpreadVertical spread_vertical(double left_h, double right_h,
     const double left_y = page_y(left_h);
     double top = left_y;
     double bottom = left_y + left_h;
+    double right_y = 0.0;
     if (right_h >= 0.0) {
-        const double right_y = page_y(right_h);
+        right_y = page_y(right_h);
         top = std::min(top, right_y);
         bottom = std::max(bottom, right_y + right_h);
     }
@@ -110,7 +113,14 @@ inline SpreadVertical spread_vertical(double left_h, double right_h,
     out.union_h = std::max(0.0, bottom - top);
     const double base_y = out.union_h > slot_h ? -top : 0.0;
     out.left_top_in_union = left_y + base_y;
+    if (right_h >= 0.0) out.right_top_in_union = right_y + base_y;
     return out;
+}
+
+// The top of `page` in the painted frame, for a spread whose left page is
+// `left_page`. A carry from the strip can name either page of the pair.
+inline double spread_page_top(const SpreadVertical& sv, int page, int left_page) noexcept {
+    return page == left_page ? sv.left_top_in_union : sv.right_top_in_union;
 }
 
 }  // namespace litepdf::ui
