@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <exception>
 #include <functional>
+#include <optional>
 #include <vector>
 
 // PageSize only; Document.hpp is MuPDF-free.
@@ -25,6 +26,17 @@ inline constexpr PageSize kFallbackPageSize{612.0f, 792.0f};
 inline bool page_size_usable(const PageSize& s) {
     return s.width_pt > 0.0f && s.height_pt > 0.0f &&
            std::isfinite(s.width_pt) && std::isfinite(s.height_pt);
+}
+
+// `page`'s size, or nothing when reading it throws or gives a size that is not
+// usable. A size failure never escapes.
+inline std::optional<PageSize> usable_page_size(const Document& doc, std::size_t page) {
+    try {
+        const PageSize s = doc.page_size(page);
+        if (page_size_usable(s)) return s;
+    } catch (const std::exception&) {
+    }
+    return std::nullopt;
 }
 
 // One size per page 0..n-1. A page whose `size_of` throws, or returns a size

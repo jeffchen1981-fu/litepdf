@@ -90,9 +90,9 @@ struct DocumentView::Impl {
     std::size_t            l1_capacity   = 5;
     int                    last_prefetch_page = -1;
     TravelDirection        travel        = TravelDirection::Forward;
-    // (#49) Page sizes request_render_with_prefetch has looked up, so a page
-    // turn loads only the page it has not sized yet; a page's size does not
-    // change for the life of the Document. UI thread only.
+    // (#49) Page sizes request_render_with_prefetch and set_viewport have looked
+    // up, so a page turn loads only the page it has not sized yet; a page's size
+    // does not change for the life of the Document. UI thread only.
     std::vector<std::optional<PageSize>> page_sizes;
     // (#55) DocumentView::page_sizes(): every page's size, fallbacks
     // included, built once. Separate from `page_sizes` above so a fallback
@@ -102,22 +102,29 @@ struct DocumentView::Impl {
     bool                   strip_sized   = false;
     bool                   continuous    = false;  // #55, spec §4.3
 
-    // Estimated L1 bytes of `page` at `scale`; 0 when its size is unknown.
-    // Document::page_size throws on a page it cannot size: a PDF page object
-    // it cannot find, or another format's page that does not load. That is
-    // not cached, so a later call tries again.
-    std::size_t estimated_bytes(int page, float scale) noexcept {
+    // `page`'s size, or nothing when it has none to use: out of range, not
+    // usable, or Document::page_size threw, which it does on a page it cannot
+    // size: a PDF page object it cannot find, or another format's page that
+    // does not load. A throw is not cached, so a later call tries again.
+    std::optional<PageSize> known_size(int page) noexcept {
         try {
-            if (page < 0) return 0;
+            if (page < 0) return std::nullopt;
             const auto i = static_cast<std::size_t>(page);
             if (page_sizes.size() <= i) page_sizes.resize(doc.page_count());
-            if (i >= page_sizes.size()) return 0;
+            if (i >= page_sizes.size()) return std::nullopt;
             if (!page_sizes[i]) page_sizes[i] = doc.page_size(i);
-            return estimated_pixmap_bytes(page_sizes[i]->width_pt,
-                                          page_sizes[i]->height_pt, scale);
+            if (!detail::page_size_usable(*page_sizes[i])) return std::nullopt;
+            return page_sizes[i];
         } catch (const std::exception&) {
-            return 0;
+            return std::nullopt;
         }
+    }
+
+    // Estimated L1 bytes of `page` at `scale`; 0 when its size is unknown.
+    std::size_t estimated_bytes(int page, float scale) noexcept {
+        const auto size = known_size(page);
+        return size ? estimated_pixmap_bytes(size->width_pt, size->height_pt, scale)
+                    : 0;
     }
     std::optional<TextSelection> selection;       // #52; pure data, order-free
 
@@ -268,9 +275,7 @@ bool DocumentView::set_current_page(int idx) {
     const int clamped = std::clamp(idx, 0, max_idx);
     if (clamped == impl_->current_page) return false;
     impl_->current_page = clamped;
-    // (#98) The slot holds only the current page's text. Dropped before
-    // set_viewport, which can throw (Document::page_size), so a throw never
-    // leaves the old page's text in the slot or its build still wanted.
+    // (#98) The slot holds only the current page's text.
     impl_->text_slot = Document::TextPage{};
     impl_->text_wanted->store(-1, std::memory_order_relaxed);
     // Recompute the percentage if not Custom (page size may differ per page).
@@ -330,20 +335,25 @@ void DocumentView::set_viewport(float viewport_w_px, float viewport_h_px,
     if (page_count() <= 0) { impl_->pct = 1.0f; return; }
     if (impl_->zm == ZoomMode::Custom) return;   // frozen; viewport only stored
 
-    const auto a = impl_->doc.page_size(static_cast<std::size_t>(impl_->current_page));
-    float pw = a.width_pt;
-    float ph = a.height_pt;
-    if (pair_page >= 0 && pair_page < page_count()) {
-        // Two-page spread: one render scale is shared by both slots, so fit the
-        // pair's bounding size. Deriving from the current page alone overflows
-        // the slot holding the larger page once the paint path stops
-        // shrink-to-fitting.
-        const auto b = impl_->doc.page_size(static_cast<std::size_t>(pair_page));
-        pw = std::max(pw, b.width_pt);
-        ph = std::max(ph, b.height_pt);
-    }
+    // Two-page spread: one render scale is shared by both slots, so fit the
+    // pair's bounding size. Deriving from the current page alone overflows
+    // the slot holding the larger page once the paint path stops
+    // shrink-to-fitting.
+    //
+    // This runs inside the window procedure, where nothing would catch
+    // Document::page_size, so only a page with a size enters the fit. With
+    // neither, it is the stand-in page_sizes() lays such a page out with, so that
+    // a fit does not depend on the zoom the view arrived with.
+    const auto current = impl_->known_size(impl_->current_page);
+    const auto pair    = impl_->known_size(pair_page);
+    const PageSize one = current ? *current
+                       : pair    ? *pair
+                                 : impl_->known_size(0).value_or(detail::kFallbackPageSize);
+    const PageSize two = pair.value_or(one);
 
-    impl_->pct = fit_percentage(viewport_w_px, viewport_h_px, dpi, pw, ph,
+    impl_->pct = fit_percentage(viewport_w_px, viewport_h_px, dpi,
+                                std::max(one.width_pt, two.width_pt),
+                                std::max(one.height_pt, two.height_pt),
                                 impl_->zm == ZoomMode::FitPage);
 }
 

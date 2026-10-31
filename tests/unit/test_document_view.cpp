@@ -276,6 +276,134 @@ TEST_CASE("DocumentView set_viewport fits the larger page of a spread pair",
     REQUIRE(view.zoom_pct() == Catch::Approx(solo));
 }
 
+// damaged-pages.pdf: pages 2, 3, 5 and 6 cannot be sized. Page 1 is 420 x 400,
+// page 4 is 300 x 800, page 0 is 420 x 595. A page that cannot be sized must not
+// reach the window procedure as a C++ exception: set_viewport runs there.
+TEST_CASE("DocumentView set_viewport fits the page of a pair that can be sized",
+          "[core][view][zoom]") {
+    Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/damaged-pages.pdf").has_value());
+    REQUIRE_THROWS(doc.page_size(2));   // Control: the fixture still fails.
+    InlineDispatcher disp;
+    DocumentView view(std::move(doc), disp);
+    view.set_zoom_mode_fit_page();
+
+    // The right page is damaged: the left page's own fit.
+    REQUIRE(view.set_current_page(1));
+    view.set_viewport(600.0f, 900.0f, 96.0f, /*pair_page=*/2);
+    CHECK(view.zoom_pct() == Catch::Approx(600.0f / 420.0f));
+
+    // Its height decides here. Page 0 is taller, so a stand-in for the damaged
+    // page shows: the width above is page 0's too.
+    view.set_viewport(1000.0f, 500.0f, 96.0f, /*pair_page=*/2);
+    CHECK(view.zoom_pct() == Catch::Approx(500.0f / 400.0f));
+
+    // The left page is damaged: the right page's.
+    view.set_current_page(3);
+    view.set_viewport(600.0f, 900.0f, 96.0f, /*pair_page=*/4);
+    CHECK(view.zoom_pct() == Catch::Approx(900.0f / 800.0f));
+
+    // Its width decides here. Page 0 is wider, so a stand-in in the fit shows.
+    view.set_zoom_mode_fit_width();
+    view.set_viewport(600.0f, 900.0f, 96.0f, /*pair_page=*/4);
+    CHECK(view.zoom_pct() == Catch::Approx(600.0f / 300.0f));
+}
+
+TEST_CASE("DocumentView set_viewport fits page 0's size when nothing shown can be sized",
+          "[core][view][zoom]") {
+    Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/damaged-pages.pdf").has_value());
+    InlineDispatcher disp;
+    DocumentView view(std::move(doc), disp);
+    view.set_zoom_mode_fit_page();
+    view.set_viewport(1000.0f, 1000.0f, 96.0f);
+    const float page_0 = 1000.0f / 595.0f;
+    REQUIRE(view.zoom_pct() == Catch::Approx(page_0));
+
+    // One page away, so that the view has another zoom to keep by mistake.
+    view.set_current_page(4);
+    REQUIRE(view.zoom_pct() == Catch::Approx(1000.0f / 800.0f));
+
+    // A single damaged page, reached through set_current_page's own refit.
+    view.set_current_page(2);
+    CHECK(view.zoom_pct() == Catch::Approx(page_0));
+
+    // A pair with both pages damaged.
+    view.set_current_page(4);
+    view.set_current_page(5);
+    view.set_viewport(1000.0f, 1000.0f, 96.0f, /*pair_page=*/6);
+    CHECK(view.zoom_pct() == Catch::Approx(page_0));
+
+    // The two calls that set a fit mode on the page already current.
+    view.set_zoom_mode_fit_width();
+    CHECK(view.zoom_pct() == Catch::Approx(1000.0f / 420.0f));
+    view.set_zoom_mode_fit_page();
+    CHECK(view.zoom_pct() == Catch::Approx(page_0));
+}
+
+TEST_CASE("DocumentView set_viewport leaves out a size that is not usable",
+          "[core][view][zoom]") {
+    // cbz-sizing.cbz page 12 is an image MuPDF cannot decode: it has no throw, but
+    // a width and height of about -4.3e9 pt.
+    Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/cbz-sizing.cbz").has_value());
+    REQUIRE(doc.page_size(12).width_pt < 0.0f);   // Control.
+    const float page_0 = 800.0f / doc.page_size(0).width_pt;
+    const float page_1 = 800.0f / doc.page_size(1).width_pt;
+    REQUIRE(page_0 != Catch::Approx(page_1));
+    InlineDispatcher disp;
+    DocumentView view(std::move(doc), disp);
+    view.set_viewport(800.0f, 600.0f, 96.0f);
+    REQUIRE(view.zoom_pct() == Catch::Approx(page_0));
+
+    view.set_current_page(1);
+    REQUIRE(view.zoom_pct() == Catch::Approx(page_1));
+    view.set_current_page(12);
+    CHECK(view.zoom_pct() == Catch::Approx(page_0));
+}
+
+TEST_CASE("DocumentView set_viewport fits US Letter when page 0 has no size either",
+          "[core][view][zoom]") {
+    // cbz-broken-first.cbz: page 1 is 300 x 450; pages 0, 2 and 3 are images MuPDF
+    // cannot decode. Letter's 612 x 792 is written out: an expected value read from
+    // kFallbackPageSize would follow any change to it.
+    Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/cbz-broken-first.cbz").has_value());
+    REQUIRE(doc.page_count() == 4);
+    REQUIRE(doc.page_size(0).width_pt < 0.0f);   // Control: it opened without a size.
+    REQUIRE(doc.page_size(1).width_pt == Catch::Approx(300.0f));
+    REQUIRE(doc.page_size(1).height_pt == Catch::Approx(450.0f));
+    InlineDispatcher disp;
+    DocumentView view(std::move(doc), disp);
+
+    const auto fits_letter = [&view](float letter, float page_1) {
+        view.set_viewport(1000.0f, 1000.0f, 96.0f);
+        CHECK(view.zoom_pct() == Catch::Approx(letter));
+
+        // One page away, so that the view has another zoom to keep by mistake.
+        view.set_current_page(1);
+        REQUIRE(view.zoom_pct() == Catch::Approx(page_1));
+        view.set_current_page(2);
+        CHECK(view.zoom_pct() == Catch::Approx(letter));
+
+        // A pair with both pages damaged.
+        view.set_current_page(1);
+        REQUIRE(view.zoom_pct() == Catch::Approx(page_1));
+        view.set_current_page(2);
+        view.set_viewport(1000.0f, 1000.0f, 96.0f, /*pair_page=*/3);
+        CHECK(view.zoom_pct() == Catch::Approx(letter));
+    };
+
+    SECTION("FitWidth") {
+        view.set_zoom_mode_fit_width();
+        fits_letter(1000.0f / 612.0f, 1000.0f / 300.0f);
+    }
+    SECTION("FitPage") {
+        view.set_zoom_mode_fit_page();
+        fits_letter(1000.0f / 792.0f, 1000.0f / 450.0f);
+    }
+}
+
 TEST_CASE("DocumentView selection persists across a page change until cleared",
           "[core][view][selection]") {
     InlineDispatcher disp;

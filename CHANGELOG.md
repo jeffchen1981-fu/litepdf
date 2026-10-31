@@ -16,6 +16,13 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   search hit on it when you scroll and then zoom, resize the window, toggle a
   pane or invert colors. This came in with 1.8.0. Going to such a spread also
   no longer leaves the previous right page on screen beside it (#198).
+- Fit Width, Fit Page and printing no longer crash on a damaged page. A page
+  whose size could not be read ended the app when you went to it or to a
+  two-page spread holding it, or reset the zoom while it was current. The zoom
+  now fits the other page of the spread. When no page on screen has a size it
+  fits the first page of the document, or a Letter page if that has none either.
+  Printing stops with the same "Failed to render page" message as any other page
+  that does not render (#203).
 
 ## [1.8.0] — 2026-10-31 — Search highlights in two-page spreads, and spreads keep their place across tabs
 

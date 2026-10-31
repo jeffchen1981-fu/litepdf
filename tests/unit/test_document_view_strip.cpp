@@ -359,3 +359,27 @@ TEST_CASE("DocumentView: cancel_thumbnail_renders flags a queued P3 but no strip
     REQUIRE_FALSE(flag0->load());
     REQUIRE_FALSE(flag1->load());
 }
+
+// PrintJob reads a page's size through this: both ways a page can have none.
+TEST_CASE("usable_page_size has nothing for a page with no usable size",
+          "[core][view]") {
+    using litepdf::core::detail::usable_page_size;
+    Document doc;
+
+    SECTION("a page that cannot be looked up throws") {
+        REQUIRE_FALSE(doc.open("tests/fixtures/damaged-pages.pdf").has_value());
+        REQUIRE_THROWS(doc.page_size(2));   // Control.
+        CHECK_FALSE(usable_page_size(doc, 2).has_value());
+
+        const auto good = usable_page_size(doc, 4);
+        REQUIRE(good.has_value());
+        CHECK(good->width_pt == 300.0f);
+        CHECK(good->height_pt == 800.0f);
+    }
+    SECTION("a CBZ image that cannot be decoded gives a negative size") {
+        REQUIRE_FALSE(doc.open("tests/fixtures/cbz-sizing.cbz").has_value());
+        REQUIRE(doc.page_size(12).width_pt < 0.0f);   // Control.
+        CHECK_FALSE(usable_page_size(doc, 12).has_value());
+        CHECK(usable_page_size(doc, 0).has_value());
+    }
+}

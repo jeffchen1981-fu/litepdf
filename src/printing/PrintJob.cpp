@@ -26,6 +26,7 @@
 #include "printing/PrintProgressDlg.hpp"
 #include "printing/PrintRange.hpp"
 #include "core/Document.hpp"
+#include "core/detail/PageSizeFill.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -256,6 +257,13 @@ bool PrintJob::run(HWND parent,
     }
     std::size_t emitted = 0;
     bool error_aborted = false;
+    const auto abort_on_page = [&](std::size_t p) {
+        AbortDoc(pd.hDC);
+        wchar_t buf[96];
+        swprintf_s(buf, L"Failed to render page %zu.", p + 1);
+        show_error(parent, buf);
+        error_aborted = true;
+    };
     for (std::size_t p : pages) {
         if (abort_flag.is_aborted()) break;
         ++emitted;
@@ -278,9 +286,15 @@ bool PrintJob::run(HWND parent,
                      reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
         }
 
-        // Compute matrix from page size + paper geometry.
-        const auto ps = doc.page_size(p);
-        const Rect page_rect_pt{ 0.0f, 0.0f, ps.width_pt, ps.height_pt };
+        // Compute matrix from page size + paper geometry. A page with no
+        // usable size cannot be rendered either: page_size's throw would reach
+        // the window procedure, and a negative size would reach the matrix.
+        const auto ps = litepdf::core::detail::usable_page_size(doc, p);
+        if (!ps) {
+            abort_on_page(p);
+            break;
+        }
+        const Rect page_rect_pt{ 0.0f, 0.0f, ps->width_pt, ps->height_pt };
         const Rect paper_rect_px{ 0.0f, 0.0f,
                                   static_cast<float>(paper_w_px),
                                   static_cast<float>(paper_h_px) };
@@ -303,11 +317,7 @@ bool PrintJob::run(HWND parent,
                     pd.hDC, w, h, bgra, dst_x, dst_y);
             });
         if (!got_pix || !render_ok) {
-            AbortDoc(pd.hDC);
-            wchar_t buf[96];
-            swprintf_s(buf, L"Failed to render page %zu.", p + 1);
-            show_error(parent, buf);
-            error_aborted = true;
+            abort_on_page(p);
             break;
         }
 
