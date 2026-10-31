@@ -11,13 +11,12 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ### Fixed
 
-- A damaged page no longer crashes LitePDF. Fit Width and Fit Page ended the
-  app on a page whose size could not be read: going to it, or to a two-page
-  spread holding it, or resetting the zoom while it was current. The zoom now
-  fits the other page of the spread, or the first page of the document when no
-  page on screen has a size. Printing a document with such a page stops with
-  the same "Failed to render page" message as any other page that does not
-  render, where it used to crash.
+- Fit Width, Fit Page and printing no longer crash on a damaged page. A page
+  whose size could not be read ended the app when you went to it or to a
+  two-page spread holding it, or reset the zoom while it was current. The zoom
+  now fits the other page of the spread, or the first page of the document when
+  no page on screen has a size. Printing stops with the same "Failed to render
+  page" message as any other page that does not render.
 
 ## [1.8.0] — 2026-10-31 — Search highlights in two-page spreads, and spreads keep their place across tabs
 
