@@ -1361,6 +1361,48 @@ try {
         throw "strip tab B after tab A went to page 20: expected page box 3 (not 20) and pos $tab2Pos (+/- 1): $(Format-StripState $st)"
     }
     Write-Host "[OK] continuous strip: tab A at page 20, tab B keeps page 3 and pos $($st.cs.pos) (recorded $tab2Pos)"
+
+    # A spread tab keeps its place across a tab of another layout (#171). A spread's
+    # pan has no readout, but leaving the spread carries it into the strip (row 13):
+    # tab 1 returns to row 13's mid-page position and turns two-page on, and after
+    # tab 2 and back, two-page off must land on that position. Entering the spread
+    # zeroes the pan (set_dual_page), so a pan restored before that lands on page
+    # 29's top, three notches away.
+    & $uxProbe send-cmd 40033 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll -and $pb.text -eq "20" }
+    if ($null -eq $st.cs -or -not $st.cs.vscroll -or $st.pb.text -ne "20") {
+        throw "precondition: tab 1 is not shown in the strip at page 20: $(Format-StripState $st)"
+    }
+    & $uxProbe page-box-go 30 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $pb.text -eq "30" -and [Math]::Abs($cs.pos - $customAnchor) -le 1 }
+    if ($null -eq $st.cs -or $st.pb.text -ne "30" -or [Math]::Abs($st.cs.pos - $customAnchor) -gt 1) {
+        throw "Ctrl+G 30 in tab 1: expected page box 30 and pos $customAnchor (+/- 1): $(Format-StripState $st)"
+    }
+    & $uxProbe canvas-wheel -120 3 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) [Math]::Abs($cs.pos - $threeNotchPos) -le 1 }
+    if ($null -eq $st.cs -or [Math]::Abs($st.cs.pos - $threeNotchPos) -gt 1 -or $st.pb.text -ne "30") {
+        throw "three wheel notches in tab 1: expected pos $threeNotchPos (+/- 1) and page box 30: $(Format-StripState $st)"
+    }
+    $tabPanPos = $st.cs.pos
+    & $uxProbe send-cmd 40062 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) -not $cs.vscroll }
+    if ($null -eq $st.cs -or $st.cs.vscroll) { throw "precondition: tab 1 did not enter the spread: $(Format-StripState $st)" }
+    & $uxProbe send-cmd 40034 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll -and $pb.text -eq "3" }
+    if ($null -eq $st.cs -or -not $st.cs.vscroll -or $st.pb.text -ne "3") {
+        throw "precondition: tab 2 is not shown in the strip at page 3: $(Format-StripState $st)"
+    }
+    & $uxProbe send-cmd 40033 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) -not $cs.vscroll -and $pb.text -eq "30" }
+    if ($null -eq $st.cs -or $st.cs.vscroll -or $st.pb.text -ne "30") {
+        throw "switch back to the spread tab: expected no scroll bar and page box 30: $(Format-StripState $st)"
+    }
+    & $uxProbe send-cmd 40062 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll -and $pb.text -eq "30" -and [Math]::Abs($cs.pos - $tabPanPos) -le 1 }
+    if ($null -eq $st.cs -or -not $st.cs.vscroll -or $st.pb.text -ne "30" -or [Math]::Abs($st.cs.pos - $tabPanPos) -gt 1) {
+        throw "two-page off after a tab switch: expected the strip, page box 30 and pos $tabPanPos (+/- 1): $(Format-StripState $st)"
+    }
+    Write-Host "[OK] continuous strip: a spread tab keeps its place across a strip tab: pos $tabPanPos -> $($st.cs.pos)"
     Stop-LitePDF -Process $procStrip -Step "strip transitions"
     Start-Sleep -Milliseconds 500
 
