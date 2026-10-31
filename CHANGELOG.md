@@ -27,6 +27,9 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   page before it on screen under the new page number. Its place stays empty.
   When only the right page of a two-page spread can be rendered, it can now be
   scrolled, and the wheel can leave the spread.
+- The mouse wheel no longer stops at a page that cannot be rendered, or at a
+  two-page spread with neither page rendered. One notch goes to the next or the
+  previous page; before, only Page Down or the page box got you past it.
 
 ## [1.8.0] — 2026-10-31 — Search highlights in two-page spreads, and spreads keep their place across tabs
 

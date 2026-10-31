@@ -561,6 +561,17 @@ bool PdfCanvas::spread_landed() const {
                                   || impl_->right_failed_seq == impl_->next_seq);
 }
 
+bool PdfCanvas::newest_batch_failed() const {
+    if (!impl_ || !impl_->view) return false;
+    // 0 is "none" for both, before the first batch.
+    if (impl_->next_seq == 0 || impl_->left_failed_seq != impl_->next_seq) return false;
+    if (!impl_->dual_page) return true;
+    const int total = impl_->view->page_count();
+    const int left  = dual_page_compute_left(impl_->view->current_page(), total);
+    return dual_page_compute_right(left, total) < 0
+        || impl_->right_failed_seq == impl_->next_seq;
+}
+
 bool PdfCanvas::shown_page_height(int page, float& out) const {
     if (!impl_ || !impl_->view || !hwnd_) return false;
     ID2D1Bitmap* bm = nullptr;
@@ -1574,7 +1585,8 @@ void PdfCanvas::resubmit_current_page() {
 // half that merely landed first does not: the left one is still coming, and
 // until then there is nothing rendered yet.
 //
-// Returns false when there is nothing rendered yet.
+// Returns false when there is nothing to measure: nothing rendered yet, or a page
+// that failed (newest_batch_failed tells them apart).
 bool PdfCanvas::content_extent(ContentBox& out) const {
     if (!impl_ || !impl_->rt) return false;
     const bool right_alone = !impl_->current_bitmap && impl_->dual_page
@@ -1714,8 +1726,15 @@ LRESULT PdfCanvas::on_wheel_scroll(int delta) {
     const int notches = consume_notches(delta, impl_->wheel_residual);
     if (notches == 0) return 0;   // a fractional notch is never a page flip
 
+    // Nothing to measure means nothing rendered yet, and the notch is dropped: the
+    // page is on its way, and turning now would skip it. A page that failed is the
+    // other case. No pixmap is coming and the wheel must not stop here, so the box
+    // stays empty and apply_wheel treats it as a page that fits: one notch, one page.
     ContentBox box{};
-    if (!content_extent(box)) return 0;   // nothing rendered yet
+    if (!content_extent(box) && !newest_batch_failed()) return 0;
+    // A failure paints nothing and makes no target of its own.
+    create_render_target();
+    if (!impl_->rt) return 0;
     const D2D1_SIZE_F vp = impl_->rt->GetSize();
 
     UINT lines = 3;   // the Windows default, and the value if the query fails
