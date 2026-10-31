@@ -94,6 +94,10 @@ struct PdfCanvas::Impl {
     // same-page re-render, which must KEEP the current pan. See
     // ui/detail/PageAnchor.hpp for the lifetime rule.
     AnchorSlot                    anchor;
+    // (#198) The newest batch that will bring no right bitmap. Only a match with
+    // next_seq counts: the next batch renders the pair again and answers for
+    // itself. See spread_landed() and right_half_failed().
+    std::uint64_t                 right_failed_seq = 0;   // 0 = none
     // Leftover wheel delta below one full notch. High-resolution wheels and
     // precision touchpads deliver |delta| < WHEEL_DELTA; without this the
     // canvas would either round every fragment up to a full notch or drop it.
@@ -135,6 +139,9 @@ struct PdfCanvas::Impl {
     // canvas is holding the OUTGOING page of the SAME document -- an epoch check
     // alone would call that bitmap trustworthy. Both fields are set together.
     int                           bitmap_page  = -1;
+    // (#198) ...and which batch delivered it: a re-render of the same page keeps
+    // the older bitmap, at the older zoom or viewport, until its own lands.
+    std::uint64_t                 bitmap_seq   = 0;
     // Pan offset in canvas DIPs. An axis whose content fits the viewport is
     // centered and its pan is 0; an axis that overflows uses a TOP-LEFT
     // origin with the pan clamped to [viewport - content, 0]. Re-anchored and

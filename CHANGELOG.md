@@ -9,6 +9,14 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+### Fixed
+
+- In a two-page spread whose right page cannot be rendered, such as a damaged
+  page, you are no longer thrown back to the bottom of the left page or to a
+  search hit on it when you scroll and then zoom, resize the window, toggle a
+  pane or invert colors. This came in with 1.8.0. Going to such a spread also
+  no longer leaves the previous right page on screen beside it (#198).
+
 ## [1.8.0] — 2026-10-31 — Search highlights in two-page spreads, and spreads keep their place across tabs
 
 ### Added

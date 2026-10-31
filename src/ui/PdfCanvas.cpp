@@ -110,7 +110,7 @@ namespace litepdf::ui {
 // (clone of the worker ctx) plus the identity of the render that produced
 // it. Allocated on the worker thread, freed on the UI thread in the
 // WM_USER_RENDER_DONE[_RIGHT] handler. wParam still carries the fz_pixmap*
-// directly.
+// directly. A failed render has no pixmap, so its meta has an empty escrow.
 //
 // epoch  which VIEW (bumped by set_view)          -> is this the current tab?
 // page   which PAGE was rendered                  -> has the user paged away?
@@ -134,9 +134,22 @@ bool post_render_done_impl(HWND target, UINT msg, litepdf::ui::Slot slot,
                            fz_pixmap* pix, fz_context* worker_ctx,
                            std::uint64_t epoch, int page, std::uint64_t seq) {
     if (!pix) {
-        PostMessageW(target, msg,
-                     reinterpret_cast<WPARAM>(nullptr),
-                     static_cast<LPARAM>(0));
+        // Nothing to escrow, but the handler needs to know whose failure this is
+        // (#198). When the meta cannot be allocated the message still goes out
+        // without one: it answers a pending wheel flip.
+        auto* meta = new (std::nothrow) RenderMeta{};
+        if (meta) {
+            meta->epoch = epoch;
+            meta->page  = page;
+            meta->slot  = slot;
+            meta->seq   = seq;
+        }
+        if (!PostMessageW(target, msg,
+                          reinterpret_cast<WPARAM>(nullptr),
+                          reinterpret_cast<LPARAM>(meta))) {
+            delete meta;
+            return false;
+        }
         return true;
     }
     // The escrow keeps the Document's lock table AND the root context its family
@@ -544,7 +557,8 @@ bool PdfCanvas::spread_landed() const {
     const int total = impl_->view->page_count();
     const int left  = dual_page_compute_left(impl_->view->current_page(), total);
     return spread_pair_landed(own_bitmap(), dual_page_compute_right(left, total),
-                              own_right_bitmap());
+                              own_right_bitmap()
+                                  || impl_->right_failed_seq == impl_->next_seq);
 }
 
 bool PdfCanvas::shown_page_height(int page, float& out) const {
@@ -1278,12 +1292,28 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             const bool is_right = (msg == WM_USER_RENDER_DONE_RIGHT);
             auto* pix  = reinterpret_cast<fz_pixmap*>(w);
             auto* meta = reinterpret_cast<RenderMeta*>(l);
+            const int cur_page = impl_->view ? impl_->view->current_page() : 0;
+            const int total    = impl_->view ? impl_->view->page_count()   : 0;
 
             if (!pix) {
-                // Render failed or cancelled (helper posts WPARAM=0 here).
-                // meta is also null on this path — nothing to drop.
+                // The render failed: these are P0 requests, which nothing
+                // cancels. meta has no escrow here, so there is nothing to drop,
+                // and it is null if the worker could not allocate one.
                 // This answers a pending wheel flip: no pixmap is coming for it.
                 impl_->wheel_flip_seq = 0;
+                if (meta) {
+                    // A failed left half does not count: this batch has no left
+                    // page to measure, and the intent waits for the retry
+                    // (ui/detail/PageAnchor.hpp).
+                    if (is_right
+                        && accept_completion(meta->epoch, impl_->view_epoch,
+                                             meta->seq, impl_->next_seq,
+                                             meta->page, meta->slot,
+                                             cur_page, impl_->dual_page, total)) {
+                        right_half_failed(meta->seq);
+                    }
+                    delete meta;
+                }
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return 0;
             }
@@ -1321,8 +1351,7 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // leaves the pending page anchor alone: it belongs to the CURRENT
             // view, and a stale completion can never consume it anyway (the
             // seq would have to match).
-            const int cur_page = impl_->view ? impl_->view->current_page() : 0;
-            const int total    = impl_->view ? impl_->view->page_count()   : 0;
+            //
             // next_seq is the newest submission ISSUED, which is what the seq
             // test needs -- see ui/detail/CompletionMath.hpp. Comparing against
             // the newest ACCEPTED seq instead would let the older of two racing
@@ -1365,6 +1394,8 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 return 0;
             }
             if (FAILED(hr)) {
+                // A page taller than the target's limit, or a GPU out of memory.
+                if (is_right) right_half_failed(seq);
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return 0;
             }
@@ -1377,6 +1408,7 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 impl_->current_bitmap = std::move(bmp);
                 impl_->bitmap_epoch   = epoch;
                 impl_->bitmap_page    = page;
+                impl_->bitmap_seq     = seq;
                 ColdStartTimer::mark(3);  // first pixmap -> D2D bitmap
             }
             // Place the page. BOTH slots run this: the pan is clamped against
@@ -1389,10 +1421,7 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // navigate_to_page has both bitmaps reset cannot measure anything,
             // and must not retire an intent the left half has yet to use; nor
             // can a left half place a hit on the right page.
-            const PageAnchor anchor = impl_->anchor.take(seq);
-            if (apply_anchor(anchor) && anchor.kind != PageAnchor::Kind::None) {
-                impl_->anchor.mark_applied();
-            }
+            place_anchor(seq);
             // This batch delivered; release the wheel.
             impl_->wheel_flip_seq = 0;
             InvalidateRect(hwnd_, nullptr, FALSE);
@@ -1803,14 +1832,32 @@ float PdfCanvas::pan_y_for_hit(const litepdf::core::SearchSession::Hit& h) const
     return pan_y_centring_quad(q_center, page_origin_y(src_h, vp.height), box.h, vp.height);
 }
 
+void PdfCanvas::place_anchor(std::uint64_t seq) {
+    const PageAnchor anchor = impl_->anchor.take(seq);
+    if (apply_anchor(anchor) && anchor.kind != PageAnchor::Kind::None) {
+        impl_->anchor.mark_applied();
+    }
+}
+
+void PdfCanvas::right_half_failed(std::uint64_t seq) {
+    impl_->right_failed_seq = seq;
+    // The outgoing pair's page would otherwise stay on screen and in the extent:
+    // no render will replace it.
+    if (!own_right_bitmap()) impl_->right_bitmap.Reset();
+    // A left half still to come places the anchor itself. The slots until then
+    // can hold an earlier render of this pair, at the old zoom or viewport.
+    if (impl_->bitmap_seq == seq) place_anchor(seq);
+}
+
 bool PdfCanvas::apply_anchor(const PageAnchor& anchor) {
     ContentBox box{};
     if (!content_extent(box)) return false;
     const D2D1_SIZE_F vp = impl_->rt->GetSize();
 
-    // Bottom and Hit are clamped to the pair: not final until both halves are in,
-    // so a batch opened before then carries the intent forward rather than
-    // retiring it on a partial extent. Top depends on no extent.
+    // Bottom and Hit are clamped to the pair: not final until both halves are in
+    // or the right one has failed, so a batch opened before then carries the
+    // intent forward rather than retiring it on a partial extent. Top depends on
+    // no extent.
     const bool extent_final = !impl_->dual_page || spread_landed();
     bool placed = true;
     switch (anchor.kind) {
