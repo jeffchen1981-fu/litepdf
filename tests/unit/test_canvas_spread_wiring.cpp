@@ -71,6 +71,8 @@ struct PdfCanvasTestAccess {
     }
     static void pan_by(PdfCanvas& c, float dx, float dy) { c.pan_by(dx, dy); }
     static void wheel(PdfCanvas& c, int delta) { c.on_wheel_scroll(delta); }
+    // What a wheel flip leaves behind, for a batch the test submitted itself.
+    static void mark_wheel_flip(PdfCanvas& c) { c.impl_->wheel_flip_seq = c.impl_->next_seq; }
 
     // The tallest bitmap this canvas's target takes. A GPU's limit is 16384; the
     // software target of a runner with no GPU takes 512 times that.
@@ -1455,6 +1457,18 @@ TEST_CASE("PdfCanvas spread: the wheel leaves a failed page with no partner",
     Rig rig;
     rig.kick(0, Fail::Left);   // the cover has no right page to wait for
     rig.land_left_failure();
+    Access::wheel(rig.canvas(), -WHEEL_DELTA);
+    CHECK(rig.view().current_page() == 1);
+}
+
+TEST_CASE("PdfCanvas spread: a refused bitmap answers a pending wheel flip",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(0, Fail::LeftBitmap);
+    Access::mark_wheel_flip(rig.canvas());
+    rig.land_left_completion();
+    REQUIRE(Access::left_bitmap(rig.canvas()) == nullptr);
+
     Access::wheel(rig.canvas(), -WHEEL_DELTA);
     CHECK(rig.view().current_page() == 1);
 }

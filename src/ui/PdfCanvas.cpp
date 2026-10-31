@@ -1406,6 +1406,8 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             }
             if (FAILED(hr)) {
                 // A page taller than the target's limit, or a GPU out of memory.
+                // This answers a pending wheel flip, as a null completion does.
+                impl_->wheel_flip_seq = 0;
                 if (is_right) {
                     right_half_failed(seq);
                 } else {
