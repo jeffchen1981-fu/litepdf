@@ -69,6 +69,8 @@ struct PdfCanvasTestAccess {
     static void navigate(PdfCanvas& c, int page) {
         c.navigate_to_page(page, PageAnchor::top());
     }
+    static void pan_by(PdfCanvas& c, float dx, float dy) { c.pan_by(dx, dy); }
+    static void wheel(PdfCanvas& c, int delta) { c.on_wheel_scroll(delta); }
 
     // The tallest bitmap this canvas's target takes. A GPU's limit is 16384; the
     // software target of a runner with no GPU takes 512 times that.
@@ -125,7 +127,7 @@ Document open_fixture(const char* path) {
 enum class Layout { Spread, Single };
 
 // Which half of a batch fails, and how (#198).
-enum class Fail { None, Left, Right, RightBitmap };
+enum class Fail { None, Left, Right, LeftBitmap, RightBitmap };
 
 // A pixmap past the target's limit: the worker delivers it, CreateBitmap refuses.
 fz_pixmap* too_tall_for_a_bitmap(fz_pixmap* rendered, fz_context* ctx, int height) {
@@ -185,16 +187,19 @@ public:
         canvas_->change_current_page(left);
         canvas_->apply_viewport();
         const int past_end = total + 100;
+        const int too_tall = fail == Fail::LeftBitmap || fail == Fail::RightBitmap
+                                 ? Access::max_bitmap_px(*canvas_) + 1 : 0;
+        const int left_too_tall = fail == Fail::LeftBitmap ? too_tall : 0;
         view_.request_render(fail == Fail::Left ? past_end : left,
-            [target, epoch, left, seq](fz_pixmap* p, fz_context* ctx) {
+            [target, epoch, left, seq, left_too_tall](fz_pixmap* p, fz_context* ctx) {
+                if (left_too_tall > 0) p = too_tall_for_a_bitmap(p, ctx, left_too_tall);
                 PdfCanvas::post_render_done(target, p, ctx, epoch, left, seq);
             });
         if (right >= 0) {
-            const int too_tall =
-                fail == Fail::RightBitmap ? Access::max_bitmap_px(*canvas_) + 1 : 0;
+            const int right_too_tall = fail == Fail::RightBitmap ? too_tall : 0;
             view_.request_render(fail == Fail::Right ? past_end : right,
-                [target, epoch, right, seq, too_tall](fz_pixmap* p, fz_context* ctx) {
-                    if (too_tall > 0) p = too_tall_for_a_bitmap(p, ctx, too_tall);
+                [target, epoch, right, seq, right_too_tall](fz_pixmap* p, fz_context* ctx) {
+                    if (right_too_tall > 0) p = too_tall_for_a_bitmap(p, ctx, right_too_tall);
                     PdfCanvas::post_render_done_right(target, p, ctx, epoch, right, seq);
                 });
         }
@@ -217,18 +222,11 @@ public:
     void land_left_failure() { land_failure(WM_USER_RENDER_DONE); }
     void land_right_failure() { land_failure(WM_USER_RENDER_DONE_RIGHT); }
 
-    // Hand the canvas one right completion, whatever it brings.
-    void land_right_completion() {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
-        MSG m;
-        while (!PeekMessageW(&m, canvas_->hwnd(), WM_USER_RENDER_DONE_RIGHT,
-                             WM_USER_RENDER_DONE_RIGHT, PM_REMOVE)) {
-            REQUIRE(std::chrono::steady_clock::now() < deadline);
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        DispatchMessageW(&m);
-    }
+    // Hand the canvas one completion of a slot, whatever it brings.
+    void land_left_completion() { land_completion(WM_USER_RENDER_DONE); }
+    void land_right_completion() { land_completion(WM_USER_RENDER_DONE_RIGHT); }
 
+    float pan_x() { return canvas_->pan().x; }
     float pan_y() { return canvas_->pan().y; }
 
     // A tab switch back to this view: neither bitmap counts any more, and the
@@ -252,6 +250,16 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
         }
+    }
+
+    void land_completion(UINT msg) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        MSG m;
+        while (!PeekMessageW(&m, canvas_->hwnd(), msg, msg, PM_REMOVE)) {
+            REQUIRE(std::chrono::steady_clock::now() < deadline);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        DispatchMessageW(&m);
     }
 
     void land_failure(UINT msg) {
@@ -314,7 +322,8 @@ PdfCanvas::HitsFn hits_on_every_page() {
     };
 }
 
-constexpr std::uint32_t kWhite = 0x00FFFFFFu;
+constexpr std::uint32_t kWhite  = 0x00FFFFFFu;
+constexpr std::uint32_t kChrome = 0x00F0F0F0u;
 
 }  // namespace
 
@@ -683,6 +692,260 @@ TEST_CASE("PdfCanvas spread: a failed left half leaves the right slot alone",
     CHECK(Access::right_bitmap(rig.canvas()) != nullptr);
 }
 
+// --- A failed left half and what the pair measures (#201) ---
+
+TEST_CASE("PdfCanvas spread: a failed left half drops the outgoing pair's bitmap",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+
+    rig.kick(1, Fail::Left);
+    rig.land_left_failure();
+    CHECK(Access::left_bitmap(rig.canvas()) == nullptr);
+    rig.land_right();
+}
+
+TEST_CASE("PdfCanvas spread: a left page with no bitmap drops the outgoing pair's bitmap",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+
+    rig.kick(1, Fail::LeftBitmap);
+    rig.land_left_completion();
+    CHECK(Access::left_bitmap(rig.canvas()) == nullptr);
+    rig.land_right();
+}
+
+TEST_CASE("PdfCanvas spread: a failed left half drops the other tab's bitmap",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+
+    rig.reenter(0.0f);
+    rig.kick(1, Fail::Left);
+    rig.land_left_failure();
+    CHECK(Access::left_bitmap(rig.canvas()) == nullptr);
+    rig.land_right();
+}
+
+TEST_CASE("PdfCanvas spread: a failed left half keeps the pair's own left bitmap",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+
+    rig.kick(1, Fail::Left);
+    rig.land_left_failure();
+    CHECK(Access::left_bitmap(rig.canvas()) != nullptr);
+    rig.land_right();
+}
+
+TEST_CASE("PdfCanvas spread: the pair's own left bitmap stays in the extent",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+
+    // Page 3 is the tall one and is still on screen: the short right page alone
+    // would pin the pan to 0.
+    rig.kick(3, Fail::Left);
+    rig.land_left_failure();
+    rig.land_right();
+    Access::pan_by(rig.canvas(), 0.0f, -5000.0f);
+    CHECK(rig.pan_y() == Approx(bottom_pan(rig.view(), kHeight)).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: a failed left half leaves an anchor to the retry over an own pair",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+
+    // The left slot holds this pair's older render: a zoom now would retire the
+    // anchor at the old height, had this batch counted as landed.
+    rig.canvas().set_pending_anchor(PageAnchor::bottom());
+    rig.kick(1, Fail::Left);
+    SECTION("the failure alone") {
+        rig.land_left_failure();
+    }
+    SECTION("left first") {
+        rig.land_left_failure();
+        rig.land_right();
+    }
+    SECTION("right first") {
+        rig.land_right();
+        rig.land_left_failure();
+    }
+
+    rig.view().set_zoom_pct(rig.view().zoom_pct() * 2.0f);
+    rig.kick(1);
+    rig.land_both();
+    CHECK(rig.pan_y() == Approx(bottom_pan(rig.view(), kHeight)).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: a failure from a superseded batch leaves the left slot alone",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+
+    rig.kick(1, Fail::Left);
+    rig.kick(1);
+    rig.land_left_failure();
+    CHECK(Access::left_bitmap(rig.canvas()) != nullptr);
+}
+
+TEST_CASE("PdfCanvas spread: a pair with only its right page pans over that page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+
+    rig.kick(1, Fail::Left);
+    SECTION("left first") {
+        rig.land_left_failure();
+        rig.land_right();
+    }
+    SECTION("right first") {
+        rig.land_right();
+        rig.land_left_failure();
+    }
+    Access::pan_by(rig.canvas(), 0.0f, -5000.0f);
+    CHECK(rig.pan_y() == Approx(bottom_pan(rig.view(), kHeight)).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: a pair with only its right page keeps that page in its slot",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1, Fail::Left);
+    rig.land_left_failure();
+    rig.land_right();
+
+    // Wider than the canvas: the range must leave room for the empty left slot,
+    // or a pan of 0 would slide the page under the slot's clip.
+    rig.view().set_zoom_pct(rig.view().zoom_pct() * 3.0f);
+    rig.kick(1, Fail::Left);
+    rig.land_right();
+    rig.land_left_failure();
+    Access::pan_by(rig.canvas(), -5000.0f, 0.0f);
+    const float page_w = std::ceil(420.0f * rig.view().zoom_pct());
+    CHECK(rig.pan_x() == Approx(kWidth - (504.0f + page_w)).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: the wheel leaves a pair with only its right page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1, Fail::Left);
+    rig.land_left_failure();
+    rig.land_right();
+
+    Access::pan_by(rig.canvas(), 0.0f, -5000.0f);
+    Access::wheel(rig.canvas(), -WHEEL_DELTA);
+    CHECK(rig.view().current_page() == 3);
+}
+
+TEST_CASE("PdfCanvas spread: a right half landing first measures nothing while the left is due",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+
+    Access::navigate(rig.canvas(), 1);   // resets both slots
+    rig.land_right();
+    Access::pan_by(rig.canvas(), 0.0f, -100.0f);
+    CHECK(rig.pan_y() == 0.0f);
+    rig.land_left();
+}
+
+TEST_CASE("PdfCanvas spread: the outgoing right bitmap is not a pair's right page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+
+    // The left slot is empty and the right one still shows the tall outgoing page.
+    rig.kick(3, Fail::Left);
+    rig.land_left_failure();
+    Access::pan_by(rig.canvas(), 0.0f, -100.0f);
+    CHECK(rig.pan_y() == 0.0f);
+    rig.land_right();
+}
+
+TEST_CASE("PdfCanvas spread: a failed left half counts only for its own batch",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1, Fail::Left);
+    rig.land_left_failure();
+    rig.land_right();
+
+    // A resize renders the pair again. This time the left page is on its way.
+    rig.kick(1);
+    rig.land_right();
+    Access::pan_by(rig.canvas(), 0.0f, -100.0f);
+    CHECK(rig.pan_y() == 0.0f);
+    rig.land_left();
+}
+
+TEST_CASE("PdfCanvas spread: a right page keeps a Bottom anchor for a left page that failed",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+
+    // The short right page alone fits, so placing the anchor against it would
+    // retire it before the tall left page could arrive.
+    rig.canvas().set_pending_anchor(PageAnchor::bottom());
+    rig.kick(3, Fail::Left);
+    rig.land_left_failure();
+    rig.land_right();
+
+    rig.kick(3);
+    rig.land_both();
+    CHECK(rig.pan_y() == Approx(bottom_pan(rig.view(), kHeight)).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: a Hit on the right page is centred beside a failed left page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+
+    rig.canvas().set_pending_anchor(PageAnchor::hit(hit_at(2, 860.0f)));
+    rig.kick(1, Fail::Left);
+    SECTION("left first") {
+        rig.land_left_failure();
+        rig.land_right();
+    }
+    SECTION("right first") {
+        rig.land_right();
+        rig.land_left_failure();
+    }
+    CHECK(rig.pan_y() == Approx(centred_pan(rig.view(), 860.0f, kHeight)).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: a Hit beside a failed left page lands with no outgoing left page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3, Fail::Left);
+    rig.land_left_failure();
+    rig.land_right();
+
+    rig.canvas().set_pending_anchor(PageAnchor::hit(hit_at(2, 860.0f)));
+    rig.kick(1, Fail::Left);
+    SECTION("left first") {
+        rig.land_left_failure();
+        rig.land_right();
+    }
+    SECTION("right first") {
+        rig.land_right();
+        rig.land_left_failure();
+    }
+    CHECK(rig.pan_y() == Approx(centred_pan(rig.view(), 860.0f, kHeight)).margin(1.0f));
+}
+
 // --- scroll_into_view ---
 
 TEST_CASE("PdfCanvas spread: a visible hit on the right page moves neither pan nor page",
@@ -950,4 +1213,90 @@ TEST_CASE("PdfCanvas single page: navigating to a damaged page does not throw",
     Access::navigate(rig.canvas(), 4);
     rig.land_left();
     CHECK(rig.view().zoom_pct() == Approx(1000.0f / 300.0f));
+}
+
+// --- A page that cannot be rendered: the page before it does not stay ---
+
+TEST_CASE("PdfCanvas spread: a damaged left page takes the outgoing page off the screen",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Spread, kDamaged);
+    rig.kick(1);
+    rig.land_left();
+    rig.land_right_failure();
+    constexpr int left_slot_x = 248;
+    constexpr int mid_y       = kHeight / 2;
+    REQUIRE(Access::painted_pixel(rig.canvas(), left_slot_x, mid_y) != kChrome);
+
+    rig.kick(3);
+    SECTION("left first") {
+        rig.land_left_failure();
+        rig.land_right();
+    }
+    SECTION("right first") {
+        rig.land_right();
+        rig.land_left_failure();
+    }
+    CHECK(Access::painted_pixel(rig.canvas(), left_slot_x, mid_y) == kChrome);
+    CHECK(Access::painted_pixel(rig.canvas(), 750, mid_y) != kChrome);
+}
+
+TEST_CASE("PdfCanvas spread: a page turn to a damaged left page lands at the right page's top",
+          "[ui][canvas][spread]") {
+    constexpr int height = 200;
+    Rig rig(kWidth, height, Layout::Spread, kDamaged);
+    rig.kick(1);
+    rig.land_left();
+    rig.land_right_failure();
+    rig.canvas().set_pan(0.0f, -100.0f);
+
+    Access::navigate(rig.canvas(), 3);   // resets both slots
+    SECTION("left first") {
+        rig.land_left_failure();
+        rig.land_right();
+    }
+    SECTION("right first") {
+        rig.land_right();
+        rig.land_left_failure();
+    }
+    CHECK(rig.pan_y() == 0.0f);
+}
+
+TEST_CASE("PdfCanvas spread: a pair with no good page shows neither outgoing page",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Spread, kDamaged);
+    SECTION("from a pair showing its left page") {
+        rig.kick(1);
+        rig.land_left();
+        rig.land_right_failure();
+        REQUIRE(Access::left_bitmap(rig.canvas()) != nullptr);
+    }
+    SECTION("from a pair showing its right page") {
+        rig.kick(3);
+        rig.land_left_failure();
+        rig.land_right();
+        REQUIRE(Access::right_bitmap(rig.canvas()) != nullptr);
+    }
+
+    rig.kick(5);
+    rig.land_left_failure();
+    rig.land_right_failure();
+    CHECK(Access::left_bitmap(rig.canvas()) == nullptr);
+    CHECK(Access::right_bitmap(rig.canvas()) == nullptr);
+}
+
+TEST_CASE("PdfCanvas single page: a damaged page takes the outgoing page off the screen",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Single, kDamaged);
+    rig.canvas().change_current_page(1);
+    rig.kick(1);
+    rig.land_left();
+    constexpr int mid_x = kWidth / 2;
+    constexpr int mid_y = kHeight / 2;
+    REQUIRE(Access::painted_pixel(rig.canvas(), mid_x, mid_y) != kChrome);
+
+    rig.canvas().change_current_page(2);
+    rig.kick(2);
+    rig.land_left_failure();
+    CHECK(Access::left_bitmap(rig.canvas()) == nullptr);
+    CHECK(Access::painted_pixel(rig.canvas(), mid_x, mid_y) == kChrome);
 }

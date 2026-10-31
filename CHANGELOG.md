@@ -23,6 +23,10 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   fits the first page of the document, or a Letter page if that has none either.
   Printing stops with the same "Failed to render page" message as any other page
   that does not render (#203).
+- A page that cannot be rendered, such as a damaged page, no longer leaves the
+  page before it on screen under the new page number. Its place stays empty.
+  When only the right page of a two-page spread can be rendered, it can now be
+  scrolled, and the wheel can leave the spread.
 
 ## [1.8.0] — 2026-10-31 — Search highlights in two-page spreads, and spreads keep their place across tabs
 

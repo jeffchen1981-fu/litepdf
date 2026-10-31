@@ -38,7 +38,9 @@
 //     more is coming to measure, so a Bottom, or a Hit on the left page, is
 //     placed for good and a later same-page re-render keeps the user's pan. A
 //     Hit on a failed page with no bitmap has nothing to measure and stays
-//     pending;
+//     pending. A failed LEFT half ends nothing (#201): its page may yet change
+//     the extent, so a Bottom or a Hit placed on the right page stays pending
+//     for the retry, and only a Top, which needs no extent, is marked;
 //   - a same-page re-render after a completed navigation finds the anchor
 //     retired, so it keeps the user's pan instead of snapping to the top;
 //   - set_view clears outright (new view, new epoch, different document);
