@@ -26,11 +26,11 @@
 #include "printing/PrintProgressDlg.hpp"
 #include "printing/PrintRange.hpp"
 #include "core/Document.hpp"
+#include "core/detail/PageSizeFill.hpp"
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
-#include <exception>
 #include <vector>
 
 #pragma comment(lib, "comdlg32.lib")
@@ -286,17 +286,15 @@ bool PrintJob::run(HWND parent,
                      reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
         }
 
-        // Compute matrix from page size + paper geometry. A page that cannot
-        // be sized cannot be rendered either, and this runs inside the window
-        // procedure, so its throw stops here.
-        litepdf::core::PageSize ps{};
-        try {
-            ps = doc.page_size(p);
-        } catch (const std::exception&) {
+        // Compute matrix from page size + paper geometry. A page with no
+        // usable size cannot be rendered either: page_size's throw would reach
+        // the window procedure, and a negative size would reach the matrix.
+        const auto ps = litepdf::core::detail::usable_page_size(doc, p);
+        if (!ps) {
             abort_on_page(p);
             break;
         }
-        const Rect page_rect_pt{ 0.0f, 0.0f, ps.width_pt, ps.height_pt };
+        const Rect page_rect_pt{ 0.0f, 0.0f, ps->width_pt, ps->height_pt };
         const Rect paper_rect_px{ 0.0f, 0.0f,
                                   static_cast<float>(paper_w_px),
                                   static_cast<float>(paper_h_px) };
