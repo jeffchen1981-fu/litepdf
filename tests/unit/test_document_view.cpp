@@ -357,6 +357,48 @@ TEST_CASE("DocumentView set_viewport leaves out a size that is not usable",
     CHECK(view.zoom_pct() == Catch::Approx(page_0));
 }
 
+TEST_CASE("DocumentView set_viewport fits US Letter when page 0 has no size either",
+          "[core][view][zoom]") {
+    // cbz-broken-first.cbz: page 1 is 300 x 450; pages 0, 2 and 3 are images MuPDF
+    // cannot decode. Letter's 612 x 792 is written out: an expected value read from
+    // kFallbackPageSize would follow any change to it.
+    Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/cbz-broken-first.cbz").has_value());
+    REQUIRE(doc.page_count() == 4);
+    REQUIRE(doc.page_size(0).width_pt < 0.0f);   // Control: it opened without a size.
+    REQUIRE(doc.page_size(1).width_pt == Catch::Approx(300.0f));
+    REQUIRE(doc.page_size(1).height_pt == Catch::Approx(450.0f));
+    InlineDispatcher disp;
+    DocumentView view(std::move(doc), disp);
+
+    const auto fits_letter = [&view](float letter, float page_1) {
+        view.set_viewport(1000.0f, 1000.0f, 96.0f);
+        CHECK(view.zoom_pct() == Catch::Approx(letter));
+
+        // One page away, so that the view has another zoom to keep by mistake.
+        view.set_current_page(1);
+        REQUIRE(view.zoom_pct() == Catch::Approx(page_1));
+        view.set_current_page(2);
+        CHECK(view.zoom_pct() == Catch::Approx(letter));
+
+        // A pair with both pages damaged.
+        view.set_current_page(1);
+        REQUIRE(view.zoom_pct() == Catch::Approx(page_1));
+        view.set_current_page(2);
+        view.set_viewport(1000.0f, 1000.0f, 96.0f, /*pair_page=*/3);
+        CHECK(view.zoom_pct() == Catch::Approx(letter));
+    };
+
+    SECTION("FitWidth") {
+        view.set_zoom_mode_fit_width();
+        fits_letter(1000.0f / 612.0f, 1000.0f / 300.0f);
+    }
+    SECTION("FitPage") {
+        view.set_zoom_mode_fit_page();
+        fits_letter(1000.0f / 792.0f, 1000.0f / 450.0f);
+    }
+}
+
 TEST_CASE("DocumentView selection persists across a page change until cleared",
           "[core][view][selection]") {
     InlineDispatcher disp;
