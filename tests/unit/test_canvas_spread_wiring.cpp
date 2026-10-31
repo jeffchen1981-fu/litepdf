@@ -9,15 +9,16 @@
 //
 //   page | spread | height (pt) | height (DIP)
 //     0  | cover  |  595        |  703
-//     1  | left   |  400        |  472
+//     1  | left   |  400        |  473
 //     2  | right  | 1600        | 1890
 //     3  | left   | 1600        | 1890
-//     4  | right  |  400        |  472
+//     4  | right  |  400        |  473
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -65,7 +66,7 @@ struct PdfCanvasTestAccess {
         c.impl_->strip_view.apply_carry(at);
     }
 
-    // Paint, then read one pixel back from the render target as 0xAARRGGBB. Reads
+    // Paint, then read one pixel back from the render target as 0x00RRGGBB. Reads
     // the target and not the window, which is never shown.
     static std::uint32_t painted_pixel(PdfCanvas& c, int x, int y) {
         using Microsoft::WRL::ComPtr;
@@ -105,9 +106,11 @@ Document open_pairs() {
     return doc;
 }
 
+enum class Layout { Spread, Single };
+
 class Rig {
 public:
-    Rig(int width = kWidth, int height = kHeight)
+    explicit Rig(int width = kWidth, int height = kHeight, Layout layout = Layout::Spread)
         : view_(open_pairs(), dispatcher_) {
         const HINSTANCE inst = GetModuleHandleW(nullptr);
         parent_ = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, width, height,
@@ -115,8 +118,8 @@ public:
         REQUIRE(parent_ != nullptr);
         canvas_.emplace(inst, parent_);
         canvas_->set_view(&view_);
-        canvas_->set_dual_page(true);
-        view_.set_dual_page(true);
+        canvas_->set_dual_page(layout == Layout::Spread);
+        view_.set_dual_page(layout == Layout::Spread);
     }
 
     ~Rig() {
@@ -127,18 +130,26 @@ public:
                             PM_REMOVE)) {
             DispatchMessageW(&m);
         }
-        canvas_.reset();
         DestroyWindow(parent_);
+        canvas_.reset();
     }
 
     PdfCanvas&    canvas() { return *canvas_; }
     DocumentView& view() { return view_; }
 
-    // MainWindow::kick_render's spread branch: one batch for both halves.
+    // MainWindow::kick_render's paged branches: in a spread, one batch for both
+    // halves.
     void kick(int page) {
         const HWND target = canvas_->hwnd();
         const std::uint64_t epoch = canvas_->render_epoch();
         const std::uint64_t seq   = canvas_->next_render_seq();
+        if (!view_.dual_page()) {
+            canvas_->apply_viewport();
+            view_.request_render(page, [target, epoch, page, seq](fz_pixmap* p, fz_context* ctx) {
+                PdfCanvas::post_render_done(target, p, ctx, epoch, page, seq);
+            });
+            return;
+        }
         const int total = view_.page_count();
         const int left  = litepdf::ui::dual_page_compute_left(page, total);
         const int right = litepdf::ui::dual_page_compute_right(left, total);
@@ -215,8 +226,13 @@ float centred_pan(DocumentView& view, float top_pt, int vp_h) {
     return static_cast<float>(vp_h) * 0.5f - (top_pt + 9.0f) * view.zoom_pct();
 }
 
+// A page's height in DIPs: MuPDF rounds a pixmap up.
+float page_dip(DocumentView& view, float height_pt) {
+    return std::ceil(height_pt * view.zoom_pct());
+}
+
 float bottom_pan(DocumentView& view, int vp_h) {
-    return static_cast<float>(vp_h) - 1600.0f * view.zoom_pct();
+    return static_cast<float>(vp_h) - page_dip(view, 1600.0f);
 }
 
 bool overlay_has(PdfCanvas& canvas, int page) {
@@ -245,17 +261,19 @@ TEST_CASE("PdfCanvas spread: a restored pan survives whichever half lands first"
     rig.kick(1);
     rig.land_both();
 
-    // -1000 reaches into the taller right page; the left page alone fits.
+    // -1000 is inside either pair's range, and outside what one short page and
+    // whatever the slot beside it still holds would allow.
     rig.reenter(-1000.0f);
-    rig.kick(1);
 
     SECTION("left first") {
+        rig.kick(1);
         rig.land_left();
         CHECK_FALSE(Access::spread_landed(rig.canvas()));
         CHECK(rig.pan_y() == -1000.0f);
         rig.land_right();
     }
     SECTION("right first") {
+        rig.kick(3);   // the left slot still holds the outgoing short page
         rig.land_right();
         CHECK_FALSE(Access::spread_landed(rig.canvas()));
         CHECK(rig.pan_y() == -1000.0f);
@@ -326,7 +344,7 @@ TEST_CASE("PdfCanvas spread: a Hit anchor outlives a batch that lands only one h
     rig.canvas().set_pending_anchor(PageAnchor::hit(h));
     rig.kick(1);
     rig.land_left();
-    const float left_alone = static_cast<float>(height) - 400.0f * rig.view().zoom_pct();
+    const float left_alone = static_cast<float>(height) - page_dip(rig.view(), 400.0f);
     CHECK(rig.pan_y() == Approx(left_alone).margin(1.0f));
 
     rig.kick(1);
@@ -369,6 +387,34 @@ TEST_CASE("PdfCanvas spread: a visible hit on the right page moves neither pan n
     rig.land_both();
     CHECK(rig.pan_y() == 0.0f);
     CHECK(page_changes == 0);
+}
+
+TEST_CASE("PdfCanvas spread: a hit on the right page is measured from that page's top",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+
+    // On screen from the right page's top; off it from the short left page's,
+    // which starts 189 DIPs lower.
+    rig.canvas().scroll_into_view(hit_at(2, 640.0f));
+    CHECK(rig.pan_y() == 0.0f);
+}
+
+TEST_CASE("PdfCanvas spread: a hit on the right page waits for its slot to judge visibility",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+    rig.kick(1);
+    rig.land_left();
+
+    // Would read as on screen against the left page, and be dropped.
+    rig.canvas().scroll_into_view(hit_at(2, 500.0f));
+    CHECK(rig.pan_y() == 0.0f);
+
+    rig.land_right();
+    CHECK(rig.pan_y() == Approx(centred_pan(rig.view(), 500.0f, kHeight)).margin(1.0f));
 }
 
 TEST_CASE("PdfCanvas spread: an off-screen hit on the right page centres at once",
@@ -428,6 +474,20 @@ TEST_CASE("PdfCanvas spread: the overlay covers only the slots showing their own
     rig.canvas().set_hits_source(nullptr);
 }
 
+TEST_CASE("PdfCanvas spread: the overlay leaves out a right slot showing the outgoing pair",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.canvas().set_hits_source(hits_on_every_page());
+    rig.kick(3);
+    rig.land_both();
+
+    rig.kick(1);
+    rig.land_left();
+    CHECK(overlay_has(rig.canvas(), 1));
+    CHECK_FALSE(overlay_has(rig.canvas(), 2));
+    rig.canvas().set_hits_source(nullptr);
+}
+
 TEST_CASE("PdfCanvas spread: each slot paints only its own page's hits",
           "[ui][canvas][spread]") {
     Rig rig;
@@ -441,7 +501,7 @@ TEST_CASE("PdfCanvas spread: each slot paints only its own page's hits",
     const int   qx  = static_cast<int>(150.0f * pct);
     const int   qy  = static_cast<int>(109.0f * pct);
     const int   right_x   = 504 + qx;
-    const int   right_top = (kHeight - static_cast<int>(400.0f * pct)) / 2;
+    const int   right_top = (kHeight - static_cast<int>(page_dip(rig.view(), 400.0f))) / 2;
     auto& canvas = rig.canvas();
 
     SECTION("a hit on the left page") {
@@ -495,4 +555,36 @@ TEST_CASE("PdfCanvas spread: a carry from the strip uses the carried page's own 
 
     CHECK(rig.view().current_page() == 1);
     CHECK(rig.pan_y() == Approx(-300.0f * z_spread / z_strip).margin(1.0f));
+}
+
+// --- A single page: nothing waits for a right half ---
+
+TEST_CASE("PdfCanvas single page: a re-render clamps the pan at once",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Single);
+    rig.canvas().change_current_page(1);
+    rig.kick(1);
+    rig.land_left();
+
+    // Past the page's range. A spread would hold this pan for its right half.
+    rig.canvas().set_pan(0.0f, -1000.0f);
+    rig.kick(1);
+    rig.land_left();
+    CHECK(rig.pan_y() == Approx(kHeight - page_dip(rig.view(), 400.0f)).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas single page: a Hit is placed by its own completion",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Single);
+    rig.canvas().change_current_page(2);
+    rig.canvas().set_pending_anchor(PageAnchor::hit(hit_at(2, 1500.0f)));
+    rig.kick(2);
+    rig.land_left();
+    REQUIRE(rig.pan_y() < 0.0f);
+
+    // Placed, so the next batch retires it and the reader's pan stands.
+    rig.canvas().set_pan(0.0f, -10.0f);
+    rig.kick(2);
+    rig.land_left();
+    CHECK(rig.pan_y() == -10.0f);
 }
