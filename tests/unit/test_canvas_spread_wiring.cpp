@@ -67,6 +67,15 @@ struct PdfCanvasTestAccess {
         c.impl_->strip_view.apply_carry(at);
     }
 
+    // The tallest bitmap this canvas's target takes. A GPU's limit is 16384; the
+    // software target of a runner with no GPU takes 512 times that.
+    static int max_bitmap_px(PdfCanvas& c) {
+        c.create_render_target();
+        ID2D1HwndRenderTarget* const rt = c.impl_->rt.Get();
+        REQUIRE(rt != nullptr);
+        return static_cast<int>(rt->GetMaximumBitmapSize());
+    }
+
     // Paint, then read one pixel back from the render target as 0x00RRGGBB. Reads
     // the target and not the window, which is never shown.
     static std::uint32_t painted_pixel(PdfCanvas& c, int x, int y) {
@@ -112,10 +121,10 @@ enum class Layout { Spread, Single };
 // Which half of a batch fails, and how (#198).
 enum class Fail { None, Left, Right, RightBitmap };
 
-// A pixmap no render target can hold: the worker delivers it, CreateBitmap refuses.
-fz_pixmap* too_tall_for_a_bitmap(fz_pixmap* rendered, fz_context* ctx) {
+// A pixmap past the target's limit: the worker delivers it, CreateBitmap refuses.
+fz_pixmap* too_tall_for_a_bitmap(fz_pixmap* rendered, fz_context* ctx, int height) {
     fz_drop_pixmap(ctx, rendered);
-    return fz_new_pixmap(ctx, fz_device_bgr(ctx), 1, 1 << 18, nullptr, 1);
+    return fz_new_pixmap(ctx, fz_device_bgr(ctx), 1, height, nullptr, 1);
 }
 
 class Rig {
@@ -174,9 +183,11 @@ public:
                 PdfCanvas::post_render_done(target, p, ctx, epoch, left, seq);
             });
         if (right >= 0) {
+            const int too_tall =
+                fail == Fail::RightBitmap ? Access::max_bitmap_px(*canvas_) + 1 : 0;
             view_.request_render(fail == Fail::Right ? past_end : right,
-                [target, epoch, right, seq, fail](fz_pixmap* p, fz_context* ctx) {
-                    if (fail == Fail::RightBitmap) p = too_tall_for_a_bitmap(p, ctx);
+                [target, epoch, right, seq, too_tall](fz_pixmap* p, fz_context* ctx) {
+                    if (too_tall > 0) p = too_tall_for_a_bitmap(p, ctx, too_tall);
                     PdfCanvas::post_render_done_right(target, p, ctx, epoch, right, seq);
                 });
         }
