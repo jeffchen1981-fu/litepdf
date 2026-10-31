@@ -32,14 +32,19 @@
 // first (two workers, and an L1 cache hit returns before any MuPDF work). So
 // take() does not mutate; the canvas calls mark_applied() when it actually
 // applied one; and the anchor is retired by the NEXT stamp(). That yields:
-//   - a failed render (null completion) never marks applied, so the retry's
-//     stamp carries the intent forward -- the recovery path;
+//   - a failed render (null completion) marks nothing by itself, so the retry's
+//     stamp carries the intent forward -- the recovery path. The failed RIGHT
+//     half of the anchor's own batch does end the pair's landing (#198): nothing
+//     more is coming to measure, so a Bottom, or a Hit on the left page, is
+//     placed for good and a later same-page re-render keeps the user's pan. A
+//     Hit on a failed page with no bitmap has nothing to measure and stays
+//     pending;
 //   - a same-page re-render after a completed navigation finds the anchor
 //     retired, so it keeps the user's pan instead of snapping to the top;
 //   - set_view clears outright (new view, new epoch, different document);
-//   - epoch-mismatch drops and null completions leave it alone, which is safe
-//     precisely because of the seq match: a stale completion can never take an
-//     anchor that belongs to a different batch.
+//   - epoch-mismatch drops and stale null completions leave it alone, which is
+//     safe precisely because of the seq match: a stale completion can never take
+//     an anchor that belongs to a different batch.
 
 #include <cstdint>
 #include <utility>

@@ -120,9 +120,8 @@ public:
     // Flag every queued request except the P0 visible-page renders: P1
     // neighbour prefetch and P3 thumbnails. For a view the user has left (a
     // tab switch). P0 stays: a cancelled P0 still posts a null completion
-    // (D17), and a null completion carries no epoch, so PdfCanvas cannot tell
-    // the left tab's from its own -- it would clear the shared canvas's
-    // pending wheel flip.
+    // (D17), and PdfCanvas clears the shared canvas's pending wheel flip on any
+    // null completion, the left tab's included.
     void cancel_background();
 
     std::size_t num_workers() const noexcept;

@@ -97,8 +97,9 @@ TEST_CASE("PageAnchor slot retires an applied anchor at the next stamp",
 TEST_CASE("PageAnchor slot carries an UNAPPLIED intent to a new seq",
           "[ui][anchor]") {
     // The failed-render recovery path. The render that was going to consume the
-    // anchor never delivered (cancelled or failed -> null completion), so
-    // mark_applied was never called and the retry inherits the intent.
+    // anchor never delivered (cancelled or failed -> null completion), and the
+    // canvas did not call mark_applied, so the retry inherits the intent. It does
+    // call it for a spread's failed right half once the left has landed (#198).
     AnchorSlot slot;
     slot.install(PageAnchor::top());
     slot.stamp(2);

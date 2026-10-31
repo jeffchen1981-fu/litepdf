@@ -94,10 +94,11 @@ inline std::optional<Slot> spread_slot_of(int page, int cur_page,
 // right page (`right_page >= 0`), its right bitmap both belong to this view and
 // pair. Before that the painted extent is not the pair's: either half can land
 // first, and a re-clamp against the partial extent would cut a pan that a tab
-// switch or a layout carry set for the whole pair.
+// switch or a layout carry set for the whole pair. `right_settled` is also true
+// when the right page will not arrive (#198): nothing more is coming to measure.
 inline bool spread_pair_landed(bool left_own, int right_page,
-                               bool right_own) noexcept {
-    return left_own && (right_page < 0 || right_own);
+                               bool right_settled) noexcept {
+    return left_own && (right_page < 0 || right_settled);
 }
 
 }  // namespace litepdf::ui
