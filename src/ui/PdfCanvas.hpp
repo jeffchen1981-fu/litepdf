@@ -422,8 +422,9 @@ private:
     void right_half_failed(std::uint64_t seq);
 
     // The same for the left half, which is also a single page's only half. It
-    // takes the outgoing page off the screen and does nothing else: the anchor
-    // waits for the retry (ui/detail/PageAnchor.hpp).
+    // takes the outgoing page off the screen. Unlike a failed right half it ends
+    // no landing: a Bottom or a Hit waits for the retry, and only a Top, which
+    // needs no extent, is placed on the right page (ui/detail/PageAnchor.hpp).
     void left_half_failed(std::uint64_t seq);
 
     // Turn an anchor into a pan. Called from the completion handler once the

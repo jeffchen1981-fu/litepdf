@@ -743,6 +743,39 @@ TEST_CASE("PdfCanvas spread: a failed left half keeps the pair's own left bitmap
     rig.land_right();
 }
 
+TEST_CASE("PdfCanvas spread: the pair's own left bitmap stays in the extent",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+
+    // Page 3 is the tall one and is still on screen: the short right page alone
+    // would pin the pan to 0.
+    rig.kick(3, Fail::Left);
+    rig.land_left_failure();
+    rig.land_right();
+    Access::pan_by(rig.canvas(), 0.0f, -5000.0f);
+    CHECK(rig.pan_y() == Approx(bottom_pan(rig.view(), kHeight)).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: a failed left half leaves an anchor to the retry over an own pair",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+
+    // Both slots hold this pair's older render: a zoom now would retire the
+    // anchor at the old height, had the failure placed it.
+    rig.canvas().set_pending_anchor(PageAnchor::bottom());
+    rig.kick(1, Fail::Left);
+    rig.land_left_failure();
+
+    rig.view().set_zoom_pct(rig.view().zoom_pct() * 2.0f);
+    rig.kick(1);
+    rig.land_both();
+    CHECK(rig.pan_y() == Approx(bottom_pan(rig.view(), kHeight)).margin(1.0f));
+}
+
 TEST_CASE("PdfCanvas spread: a failure from a superseded batch leaves the left slot alone",
           "[ui][canvas][spread]") {
     Rig rig;
@@ -869,6 +902,26 @@ TEST_CASE("PdfCanvas spread: a Hit on the right page is centred beside a failed 
     Rig rig;
     rig.kick(3);
     rig.land_both();
+
+    rig.canvas().set_pending_anchor(PageAnchor::hit(hit_at(2, 860.0f)));
+    rig.kick(1, Fail::Left);
+    SECTION("left first") {
+        rig.land_left_failure();
+        rig.land_right();
+    }
+    SECTION("right first") {
+        rig.land_right();
+        rig.land_left_failure();
+    }
+    CHECK(rig.pan_y() == Approx(centred_pan(rig.view(), 860.0f, kHeight)).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: a Hit beside a failed left page lands with no outgoing left page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3, Fail::Left);
+    rig.land_left_failure();
+    rig.land_right();
 
     rig.canvas().set_pending_anchor(PageAnchor::hit(hit_at(2, 860.0f)));
     rig.kick(1, Fail::Left);
@@ -1175,6 +1228,27 @@ TEST_CASE("PdfCanvas spread: a damaged left page takes the outgoing page off the
     }
     CHECK(Access::painted_pixel(rig.canvas(), left_slot_x, mid_y) == kChrome);
     CHECK(Access::painted_pixel(rig.canvas(), 750, mid_y) != kChrome);
+}
+
+TEST_CASE("PdfCanvas spread: a page turn to a damaged left page lands at the right page's top",
+          "[ui][canvas][spread]") {
+    constexpr int height = 200;
+    Rig rig(kWidth, height, Layout::Spread, kDamaged);
+    rig.kick(1);
+    rig.land_left();
+    rig.land_right_failure();
+    rig.canvas().set_pan(0.0f, -100.0f);
+
+    Access::navigate(rig.canvas(), 3);   // resets both slots
+    SECTION("left first") {
+        rig.land_left_failure();
+        rig.land_right();
+    }
+    SECTION("right first") {
+        rig.land_right();
+        rig.land_left_failure();
+    }
+    CHECK(rig.pan_y() == 0.0f);
 }
 
 TEST_CASE("PdfCanvas spread: a pair with no good page shows neither outgoing page",

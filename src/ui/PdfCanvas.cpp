@@ -1877,6 +1877,11 @@ void PdfCanvas::left_half_failed(std::uint64_t seq) {
     // number, and in the extent: no render will replace it. This page's own older
     // render stays, as right_half_failed keeps the right one's.
     if (!own_bitmap()) impl_->current_bitmap.Reset();
+    // A right half that came first could not measure anything: left_failed_seq
+    // is what lets this pair be measured. Run its landing now, so the order the
+    // two halves arrive in changes nothing. Not with a left bitmap in the slot:
+    // the pair would count as landed, on an older render of the left page.
+    if (!impl_->current_bitmap && own_right_bitmap()) place_anchor(seq);
 }
 
 bool PdfCanvas::apply_anchor(const PageAnchor& anchor) {

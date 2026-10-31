@@ -25,8 +25,8 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   that does not render (#203).
 - A page that cannot be rendered, such as a damaged page, no longer leaves the
   page before it on screen under the new page number. Its place stays empty.
-  In a two-page spread whose left page cannot be rendered, the right page can
-  now be scrolled, and the wheel can leave the spread.
+  When only the right page of a two-page spread can be rendered, it can now be
+  scrolled, and the wheel can leave the spread.
 
 ## [1.8.0] — 2026-10-31 — Search highlights in two-page spreads, and spreads keep their place across tabs
 
