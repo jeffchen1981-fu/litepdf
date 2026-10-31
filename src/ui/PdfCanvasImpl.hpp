@@ -98,9 +98,9 @@ struct PdfCanvas::Impl {
     // next_seq counts: the next batch renders the pair again and answers for
     // itself. See spread_landed() and right_half_failed().
     std::uint64_t                 right_failed_seq = 0;   // 0 = none
-    // (#201) The same for the left half. It says only what the pair can measure,
-    // and spread_landed() does not read it. See content_extent() and
-    // left_half_failed().
+    // (#201) The same for the left half. It says only what the pair can measure and
+    // whether the wheel may leave it, and spread_landed() does not read it. See
+    // content_extent(), newest_batch_failed() and left_half_failed().
     std::uint64_t                 left_failed_seq = 0;    // 0 = none
     // Leftover wheel delta below one full notch. High-resolution wheels and
     // precision touchpads deliver |delta| < WHEEL_DELTA; without this the

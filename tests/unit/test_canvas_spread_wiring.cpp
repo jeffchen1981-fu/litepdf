@@ -71,6 +71,8 @@ struct PdfCanvasTestAccess {
     }
     static void pan_by(PdfCanvas& c, float dx, float dy) { c.pan_by(dx, dy); }
     static void wheel(PdfCanvas& c, int delta) { c.on_wheel_scroll(delta); }
+    // What a wheel flip leaves behind, for a batch the test submitted itself.
+    static void mark_wheel_flip(PdfCanvas& c) { c.impl_->wheel_flip_seq = c.impl_->next_seq; }
 
     // The tallest bitmap this canvas's target takes. A GPU's limit is 16384; the
     // software target of a runner with no GPU takes 512 times that.
@@ -1299,4 +1301,198 @@ TEST_CASE("PdfCanvas single page: a damaged page takes the outgoing page off the
     rig.land_left_failure();
     CHECK(Access::left_bitmap(rig.canvas()) == nullptr);
     CHECK(Access::painted_pixel(rig.canvas(), mid_x, mid_y) == kChrome);
+}
+
+// --- A page that failed: the wheel leaves it, and only then ---
+//
+// Nothing on screen means one of two things. A page still landing keeps the wheel
+// dead, or a notch would flip again and skip it. A page that failed has no pixmap
+// coming, and the wheel has to be able to leave it.
+
+TEST_CASE("PdfCanvas single page: the wheel leaves a damaged page",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Single, kDamaged);
+    // Nothing has landed yet, so this canvas has no render target either.
+    rig.canvas().change_current_page(5);
+    rig.kick(5);
+    rig.land_left_failure();
+    REQUIRE(Access::left_bitmap(rig.canvas()) == nullptr);
+
+    SECTION("forward") {
+        Access::wheel(rig.canvas(), -WHEEL_DELTA);
+        CHECK(rig.view().current_page() == 6);
+    }
+    SECTION("backward, to the bottom of the page before") {
+        Access::wheel(rig.canvas(), WHEEL_DELTA);
+        CHECK(rig.view().current_page() == 4);
+        rig.land_left();
+        CHECK(rig.pan_y() == Approx(kHeight - page_dip(rig.view(), 800.0f)).margin(1.0f));
+    }
+}
+
+TEST_CASE("PdfCanvas single page: the wheel crosses damaged pages one at a time",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Single, kDamaged);
+    rig.canvas().change_current_page(5);
+    rig.kick(5);
+    rig.land_left_failure();
+
+    Access::wheel(rig.canvas(), -WHEEL_DELTA);
+    REQUIRE(rig.view().current_page() == 6);
+    Access::wheel(rig.canvas(), -WHEEL_DELTA);   // that flip has not answered yet
+    CHECK(rig.view().current_page() == 6);
+
+    rig.land_left_failure();
+    Access::wheel(rig.canvas(), -WHEEL_DELTA);
+    CHECK(rig.view().current_page() == 7);
+    rig.land_left();
+}
+
+TEST_CASE("PdfCanvas single page: the wheel stays dead while a page is landing",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Single, kDamaged);
+    rig.canvas().change_current_page(2);
+    rig.kick(2);
+    rig.land_left_failure();
+    int expected = 0;
+
+    // The slot is empty and no wheel flip is pending: only the batch tells this
+    // from the failure before it.
+    SECTION("a page turn the wheel did not drive") {
+        Access::navigate(rig.canvas(), 3);
+        expected = 3;
+    }
+    SECTION("the same page rendered again") {
+        rig.kick(2);
+        expected = 2;
+    }
+    Access::wheel(rig.canvas(), -WHEEL_DELTA);
+    CHECK(rig.view().current_page() == expected);
+
+    rig.land_left_failure();
+    Access::wheel(rig.canvas(), -WHEEL_DELTA);
+    CHECK(rig.view().current_page() == expected + 1);
+}
+
+TEST_CASE("PdfCanvas single page: the wheel stays dead before the first render",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Single, kDamaged);
+    Access::wheel(rig.canvas(), -WHEEL_DELTA);
+    CHECK(rig.view().current_page() == 0);
+}
+
+TEST_CASE("PdfCanvas spread: the wheel leaves a pair with no good page",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Spread, kDamaged);
+    rig.kick(5);
+    SECTION("left half first") {
+        rig.land_left_failure();
+        rig.land_right_failure();
+    }
+    SECTION("right half first") {
+        rig.land_right_failure();
+        rig.land_left_failure();
+    }
+    REQUIRE(Access::left_bitmap(rig.canvas()) == nullptr);
+    REQUIRE(Access::right_bitmap(rig.canvas()) == nullptr);
+
+    Access::wheel(rig.canvas(), -WHEEL_DELTA);
+    CHECK(rig.view().current_page() == 7);
+    rig.land_left();
+}
+
+TEST_CASE("PdfCanvas spread: the wheel backs out of a pair with no good page to the bottom",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Spread, kDamaged);
+    rig.kick(5);
+    rig.land_left_failure();
+    rig.land_right_failure();
+
+    // (3, 4) shows only its right page, which overflows.
+    Access::wheel(rig.canvas(), WHEEL_DELTA);
+    CHECK(rig.view().current_page() == 3);
+    SECTION("left half first") {
+        rig.land_left_failure();
+        rig.land_right();
+    }
+    SECTION("right half first") {
+        rig.land_right();
+        rig.land_left_failure();
+    }
+    CHECK(rig.pan_y() == Approx(kHeight - page_dip(rig.view(), 800.0f)).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: the wheel stays dead while a half of the pair is due",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Spread, kDamaged);
+    rig.kick(5);
+    SECTION("the left half failed, the right one is due") {
+        rig.land_left_failure();
+        Access::wheel(rig.canvas(), -WHEEL_DELTA);
+        CHECK(rig.view().current_page() == 5);
+        rig.land_right_failure();
+    }
+    SECTION("the right half failed, the left one is due") {
+        rig.land_right_failure();
+        Access::wheel(rig.canvas(), -WHEEL_DELTA);
+        CHECK(rig.view().current_page() == 5);
+        rig.land_left_failure();
+    }
+    Access::wheel(rig.canvas(), -WHEEL_DELTA);
+    CHECK(rig.view().current_page() == 7);
+    rig.land_left();
+}
+
+TEST_CASE("PdfCanvas spread: a failed right half answers only for its own batch at the wheel",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Spread, kDamaged);
+    rig.kick(5);
+    rig.land_left_failure();
+    rig.land_right_failure();
+
+    // A resize renders the pair again, and its right half has not answered yet.
+    rig.kick(5);
+    rig.land_left_failure();
+    Access::wheel(rig.canvas(), -WHEEL_DELTA);
+    CHECK(rig.view().current_page() == 5);
+    rig.land_right_failure();
+}
+
+TEST_CASE("PdfCanvas spread: the wheel leaves a failed page with no partner",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(0, Fail::Left);   // the cover has no right page to wait for
+    rig.land_left_failure();
+    Access::wheel(rig.canvas(), -WHEEL_DELTA);
+    CHECK(rig.view().current_page() == 1);
+}
+
+TEST_CASE("PdfCanvas spread: a refused bitmap answers a pending wheel flip",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(0, Fail::LeftBitmap);
+    Access::mark_wheel_flip(rig.canvas());
+    rig.land_left_completion();
+    REQUIRE(Access::left_bitmap(rig.canvas()) == nullptr);
+
+    Access::wheel(rig.canvas(), -WHEEL_DELTA);
+    CHECK(rig.view().current_page() == 1);
+}
+
+TEST_CASE("PdfCanvas spread: the wheel scrolls a page that kept its render through a failure",
+          "[ui][canvas][spread]") {
+    constexpr int height = 300;
+    Rig rig(kWidth, height);
+    rig.kick(0);
+    rig.land_left();
+
+    // A re-render that fails leaves the older render up: there is still a page to
+    // scroll, however completely the newest batch failed.
+    rig.kick(0, Fail::Left);
+    rig.land_left_failure();
+    REQUIRE(Access::left_bitmap(rig.canvas()) != nullptr);
+
+    Access::wheel(rig.canvas(), -WHEEL_DELTA);
+    CHECK(rig.view().current_page() == 0);
+    CHECK(rig.pan_y() < 0.0f);
 }

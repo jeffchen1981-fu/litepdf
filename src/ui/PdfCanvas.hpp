@@ -484,6 +484,12 @@ private:
     // left one is and the newest batch's right half failed (#198).
     bool spread_landed() const;
 
+    // True when the newest batch failed outright, so no pixmap is due: its single
+    // page, or both halves of its pair, or the left half of a pair with no right
+    // page. False while a half is still landing. Ask only once content_extent()
+    // has found nothing: it does not look at what the slots hold.
+    bool newest_batch_failed() const;
+
     // The height in DIPs of the page `page`, read from the own bitmap of the
     // slot showing it. False when no slot shows that page yet.
     bool shown_page_height(int page, float& out) const;
