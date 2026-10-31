@@ -122,6 +122,13 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_strip_overlay.cpp        # #55 PR 3 Task 1
     unit/test_l1_retain_set.cpp        # #55 PR 3 Task 2
     unit/test_open_error_message.cpp   # #184
+    unit/test_canvas_spread_wiring.cpp # #196
+    # The real canvas, for the wiring tests above: they drive it on a hidden
+    # window. Compiled here because it is not part of litepdf_core.
+    "${CMAKE_SOURCE_DIR}/src/ui/Clipboard.cpp"
+    "${CMAKE_SOURCE_DIR}/src/ui/ColdStartTimer.cpp"
+    "${CMAKE_SOURCE_DIR}/src/ui/PdfCanvas.cpp"
+    "${CMAKE_SOURCE_DIR}/src/ui/PdfCanvasStrip.cpp"
     # The CLI helpers under test are compiled straight into the test binary
     # (they are not part of litepdf_core). All are MuPDF-header-free and
     # resolve their fz_* calls through the litepdf::mupdf dependency that
@@ -135,7 +142,9 @@ target_link_libraries(litepdf_unit_tests PRIVATE litepdf_core)
 # MuPDF's include path, for the tests that reach src/core's internal headers
 # (test_mupdf_root.cpp). litepdf_core links MuPDF privately, so its headers do
 # not propagate; the libraries are already on the link line through it.
-target_link_libraries(litepdf_unit_tests PRIVATE litepdf::mupdf)
+target_link_libraries(litepdf_unit_tests PRIVATE litepdf::mupdf comctl32)
+# MainMenu.rc.h, for PdfCanvas.cpp.
+target_include_directories(litepdf_unit_tests PRIVATE "${CMAKE_SOURCE_DIR}/resources")
 
 # #103: a build from a git checkout must carry a build id. Decided here, at
 # configure time and apart from cmake/CollectBuildFacts.cmake, so a collector
