@@ -421,6 +421,11 @@ private:
     // batch's left half lands (#198).
     void right_half_failed(std::uint64_t seq);
 
+    // The same for the left half, which is also a single page's only half. It
+    // takes the outgoing page off the screen and does nothing else: the anchor
+    // waits for the retry (ui/detail/PageAnchor.hpp).
+    void left_half_failed(std::uint64_t seq);
+
     // Turn an anchor into a pan. Called from the completion handler once the
     // arriving bitmap is installed, so the page's real height is known.
     // Kind::None keeps the current pan and only re-clamps it, and in a spread

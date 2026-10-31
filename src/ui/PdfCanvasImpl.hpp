@@ -98,6 +98,9 @@ struct PdfCanvas::Impl {
     // next_seq counts: the next batch renders the pair again and answers for
     // itself. See spread_landed() and right_half_failed().
     std::uint64_t                 right_failed_seq = 0;   // 0 = none
+    // (#201) The same for the left half. It says only what the pair can measure:
+    // see content_extent() and left_half_failed(). The anchor does not read it.
+    std::uint64_t                 left_failed_seq = 0;    // 0 = none
     // Leftover wheel delta below one full notch. High-resolution wheels and
     // precision touchpads deliver |delta| < WHEEL_DELTA; without this the
     // canvas would either round every fragment up to a full notch or drop it.

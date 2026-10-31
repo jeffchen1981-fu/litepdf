@@ -1302,15 +1302,15 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 // This answers a pending wheel flip: no pixmap is coming for it.
                 impl_->wheel_flip_seq = 0;
                 if (meta) {
-                    // A failed left half does not count: this batch has no left
-                    // page to measure, and the intent waits for the retry
-                    // (ui/detail/PageAnchor.hpp).
-                    if (is_right
-                        && accept_completion(meta->epoch, impl_->view_epoch,
-                                             meta->seq, impl_->next_seq,
-                                             meta->page, meta->slot,
-                                             cur_page, impl_->dual_page, total)) {
-                        right_half_failed(meta->seq);
+                    if (accept_completion(meta->epoch, impl_->view_epoch,
+                                          meta->seq, impl_->next_seq,
+                                          meta->page, meta->slot,
+                                          cur_page, impl_->dual_page, total)) {
+                        if (is_right) {
+                            right_half_failed(meta->seq);
+                        } else {
+                            left_half_failed(meta->seq);
+                        }
                     }
                     delete meta;
                 }
@@ -1395,7 +1395,11 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             }
             if (FAILED(hr)) {
                 // A page taller than the target's limit, or a GPU out of memory.
-                if (is_right) right_half_failed(seq);
+                if (is_right) {
+                    right_half_failed(seq);
+                } else {
+                    left_half_failed(seq);
+                }
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return 0;
             }
@@ -1566,9 +1570,16 @@ void PdfCanvas::resubmit_current_page() {
 // "content fits -> pin to 0" branch would fire on every arrow key and
 // horizontal panning would silently do nothing.
 //
+// A pair whose left page failed measures its right page alone (#201). A right
+// half that merely landed first does not: the left one is still coming, and
+// until then there is nothing rendered yet.
+//
 // Returns false when there is nothing rendered yet.
 bool PdfCanvas::content_extent(ContentBox& out) const {
-    if (!impl_ || !impl_->rt || !impl_->current_bitmap) return false;
+    if (!impl_ || !impl_->rt) return false;
+    const bool right_alone = !impl_->current_bitmap && impl_->dual_page
+        && impl_->left_failed_seq == impl_->next_seq && own_right_bitmap();
+    if (!impl_->current_bitmap && !right_alone) return false;
     const float rt_dpi = static_cast<float>(GetDpiForWindow(hwnd_));
     const D2D1_SIZE_F vp = impl_->rt->GetSize();
 
@@ -1579,7 +1590,7 @@ bool PdfCanvas::content_extent(ContentBox& out) const {
     };
 
     float lw = 0.0f, lh = 0.0f;
-    dip_size(impl_->current_bitmap.Get(), lw, lh);
+    if (!right_alone) dip_size(impl_->current_bitmap.Get(), lw, lh);
     if (!impl_->dual_page) {
         out = ContentBox{0.0f, 0.0f, lw, lh};
         return true;
@@ -1591,6 +1602,17 @@ bool PdfCanvas::content_extent(ContentBox& out) const {
     const float slot_h   = vp.height;
     const float left_x0  = 0.0f;
     const float right_x0 = slot_w + gutter;
+
+    if (right_alone) {
+        float rw = 0.0f, rh = 0.0f;
+        dip_size(impl_->right_bitmap.Get(), rw, rh);
+        const Placement re = place_bitmap(rw, rh, slot_w, slot_h, 0.0f, 0.0f);
+        // From the canvas edge, not the page's: the empty slot keeps its place.
+        // A box starting at the page would slide an overflowing page under the
+        // clip of its own band, out of reach of the pan.
+        out = ContentBox{left_x0, re.y, right_x0 + re.x + re.w, re.h};
+        return true;
+    }
 
     const Placement le = place_bitmap(lw, lh, slot_w, slot_h, 0.0f, 0.0f);
     float l = left_x0 + le.x;
@@ -1801,7 +1823,7 @@ float PdfCanvas::page_origin_y(float src_h, float vp_h) const {
 }
 
 float PdfCanvas::pan_y_for_hit(const litepdf::core::SearchSession::Hit& h) const {
-    if (!impl_ || !impl_->current_bitmap || !impl_->rt || !impl_->view) {
+    if (!impl_ || !impl_->rt || !impl_->view) {
         return impl_ ? impl_->pan_y : 0.0f;
     }
     ContentBox box{};
@@ -1847,6 +1869,14 @@ void PdfCanvas::right_half_failed(std::uint64_t seq) {
     // A left half still to come places the anchor itself. The slots until then
     // can hold an earlier render of this pair, at the old zoom or viewport.
     if (impl_->bitmap_seq == seq) place_anchor(seq);
+}
+
+void PdfCanvas::left_half_failed(std::uint64_t seq) {
+    impl_->left_failed_seq = seq;
+    // The page before this one would otherwise stay on screen under this page's
+    // number, and in the extent: no render will replace it. This page's own older
+    // render stays, as right_half_failed keeps the right one's.
+    if (!own_bitmap()) impl_->current_bitmap.Reset();
 }
 
 bool PdfCanvas::apply_anchor(const PageAnchor& anchor) {
