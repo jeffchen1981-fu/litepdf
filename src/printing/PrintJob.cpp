@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <exception>
 #include <vector>
 
 #pragma comment(lib, "comdlg32.lib")
@@ -256,6 +257,13 @@ bool PrintJob::run(HWND parent,
     }
     std::size_t emitted = 0;
     bool error_aborted = false;
+    const auto abort_on_page = [&](std::size_t p) {
+        AbortDoc(pd.hDC);
+        wchar_t buf[96];
+        swprintf_s(buf, L"Failed to render page %zu.", p + 1);
+        show_error(parent, buf);
+        error_aborted = true;
+    };
     for (std::size_t p : pages) {
         if (abort_flag.is_aborted()) break;
         ++emitted;
@@ -278,8 +286,16 @@ bool PrintJob::run(HWND parent,
                      reinterpret_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
         }
 
-        // Compute matrix from page size + paper geometry.
-        const auto ps = doc.page_size(p);
+        // Compute matrix from page size + paper geometry. A page that cannot
+        // be sized cannot be rendered either, and this runs inside the window
+        // procedure, so its throw stops here.
+        litepdf::core::PageSize ps{};
+        try {
+            ps = doc.page_size(p);
+        } catch (const std::exception&) {
+            abort_on_page(p);
+            break;
+        }
         const Rect page_rect_pt{ 0.0f, 0.0f, ps.width_pt, ps.height_pt };
         const Rect paper_rect_px{ 0.0f, 0.0f,
                                   static_cast<float>(paper_w_px),
@@ -303,11 +319,7 @@ bool PrintJob::run(HWND parent,
                     pd.hDC, w, h, bgra, dst_x, dst_y);
             });
         if (!got_pix || !render_ok) {
-            AbortDoc(pd.hDC);
-            wchar_t buf[96];
-            swprintf_s(buf, L"Failed to render page %zu.", p + 1);
-            show_error(parent, buf);
-            error_aborted = true;
+            abort_on_page(p);
             break;
         }
 

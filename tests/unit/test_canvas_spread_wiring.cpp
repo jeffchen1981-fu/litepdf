@@ -65,6 +65,9 @@ struct PdfCanvasTestAccess {
     static void strip_scroll_to(PdfCanvas& c, const CarriedPosition& at) {
         c.impl_->strip_view.apply_carry(at);
     }
+    static void navigate(PdfCanvas& c, int page) {
+        c.navigate_to_page(page, PageAnchor::top());
+    }
 
     // Paint, then read one pixel back from the render target as 0x00RRGGBB. Reads
     // the target and not the window, which is never shown.
@@ -100,9 +103,12 @@ using Access = litepdf::ui::PdfCanvasTestAccess;
 constexpr int kWidth  = 1000;
 constexpr int kHeight = 850;
 
-Document open_pairs() {
+constexpr const char* kPairs   = "tests/fixtures/spread-pairs.pdf";
+constexpr const char* kDamaged = "tests/fixtures/damaged-pages.pdf";
+
+Document open_fixture(const char* path) {
     Document doc;
-    REQUIRE_FALSE(doc.open("tests/fixtures/spread-pairs.pdf").has_value());
+    REQUIRE_FALSE(doc.open(path).has_value());
     return doc;
 }
 
@@ -110,8 +116,9 @@ enum class Layout { Spread, Single };
 
 class Rig {
 public:
-    explicit Rig(int width = kWidth, int height = kHeight, Layout layout = Layout::Spread)
-        : view_(open_pairs(), dispatcher_) {
+    explicit Rig(int width = kWidth, int height = kHeight, Layout layout = Layout::Spread,
+                 const char* path = kPairs)
+        : view_(open_fixture(path), dispatcher_) {
         const HINSTANCE inst = GetModuleHandleW(nullptr);
         parent_ = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, width, height,
                                   nullptr, nullptr, inst, nullptr);
@@ -587,4 +594,55 @@ TEST_CASE("PdfCanvas single page: a Hit is placed by its own completion",
     rig.kick(2);
     rig.land_left();
     CHECK(rig.pan_y() == -10.0f);
+}
+
+// --- A page that cannot be sized ---
+//
+// tests/fixtures/damaged-pages.pdf: pages 2, 3, 5 and 6 cannot be looked up. In a
+// spread (1, 2) and (3, 4) each have one good page, (5, 6) has none. Page 1 is
+// 420 pt wide and page 4 is 300 pt, so FitWidth in the 496 slot tells them apart.
+
+TEST_CASE("PdfCanvas spread: a damaged right page leaves the left page shown and fitted",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Spread, kDamaged);
+    rig.kick(2);
+    rig.land_left();
+    CHECK(Access::left_bitmap(rig.canvas()) != nullptr);
+    CHECK(rig.view().current_page() == 1);
+    CHECK(rig.view().zoom_pct() == Approx(496.0f / 420.0f));
+}
+
+TEST_CASE("PdfCanvas spread: a damaged left page leaves the right page shown and fitted",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Spread, kDamaged);
+    rig.kick(3);
+    rig.land_right();
+    CHECK(Access::right_bitmap(rig.canvas()) != nullptr);
+    CHECK(rig.view().current_page() == 3);
+    CHECK(rig.view().zoom_pct() == Approx(496.0f / 300.0f));
+}
+
+TEST_CASE("PdfCanvas spread: navigating into a pair with no good page does not throw",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Spread, kDamaged);
+    Access::navigate(rig.canvas(), 5);
+    CHECK(rig.view().current_page() == 5);
+    // Page 0 stands in, and the document is still usable after it.
+    CHECK(rig.view().zoom_pct() == Approx(496.0f / 420.0f));
+    rig.kick(7);
+    rig.land_left();
+    CHECK(rig.view().current_page() == 7);
+    CHECK(rig.view().zoom_pct() == Approx(496.0f / 500.0f));
+}
+
+TEST_CASE("PdfCanvas single page: navigating to a damaged page does not throw",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Single, kDamaged);
+    rig.kick(0);        // The first render gives the view its viewport.
+    rig.land_left();
+    Access::navigate(rig.canvas(), 2);
+    CHECK(rig.view().current_page() == 2);
+    Access::navigate(rig.canvas(), 4);
+    rig.land_left();
+    CHECK(rig.view().zoom_pct() == Approx(1000.0f / 300.0f));
 }
