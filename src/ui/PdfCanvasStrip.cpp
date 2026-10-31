@@ -56,8 +56,8 @@ struct StripMeta {
 // `pix` over to this function, which on success passes it to the UI thread with
 // an escrow cloned from `worker_ctx`, and on any failure drops it here (on
 // worker_ctx when the clone failed, else on the escrow). The caller never drops
-// it again. Unlike the paged message, a null result carries its identity too.
-// Returns true iff the message was posted.
+// it again. A null result carries its identity too. Returns true iff the message
+// was posted.
 //
 // When the escrow clone fails, the pixmap is dropped here on worker_ctx and the
 // render is posted as a null result, so the UI thread still settles the page

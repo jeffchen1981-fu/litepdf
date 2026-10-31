@@ -35,7 +35,8 @@ namespace litepdf::ui {
 // Posted by render-done callback. WPARAM = fz_pixmap* (kept by worker),
 // LPARAM = a heap RenderMeta* { core::EscrowContext escrow; the render's
 // {epoch, page, slot, seq} identity }.
-// On cancel/fail both are null. Canvas drops the pixmap through the escrow,
+// A failed render has a null WPARAM and a meta with an empty escrow (#198), or a
+// null LPARAM if that allocation failed. Canvas drops the pixmap through the escrow,
 // then lets the escrow go — staying on the pixmap's own MuPDF root even if the
 // producing DocumentView has been swapped or destroyed. The escrow also keeps
 // the Document's lock table and the root context it was cloned from alive;
@@ -130,7 +131,8 @@ public:
     // drops the pixmap itself — on worker_ctx if the clone failed, on the
     // escrow otherwise — and then releases the escrow. Either way the
     // caller must never drop the pixmap again. Returns true iff the
-    // message was successfully posted.
+    // message was successfully posted. A null `pix` is a failed render: it
+    // posts the identity below alone, and `worker_ctx` is not used.
     //
     // Callers: MainWindow::kick_render, resubmit_current_page,
     // navigate_to_page, the WM_MOUSEWHEEL zoom path.
@@ -409,18 +411,30 @@ private:
     // the current pan when that slot has not landed.
     float pan_y_for_hit(const litepdf::core::SearchSession::Hit& h) const;
 
+    // Apply the anchor batch `seq` may take, and mark it applied if that placed
+    // it. Called for each half that lands, and by right_half_failed.
+    void place_anchor(std::uint64_t seq);
+
+    // Batch `seq`, the newest, will bring no right bitmap: its render failed, or
+    // its pixmap would not fit a bitmap. That ends the pair's landing as a right
+    // bitmap would, so what was waiting for the extent runs now, or when this
+    // batch's left half lands (#198).
+    void right_half_failed(std::uint64_t seq);
+
     // Turn an anchor into a pan. Called from the completion handler once the
     // arriving bitmap is installed, so the page's real height is known.
     // Kind::None keeps the current pan and only re-clamps it, and in a spread
-    // only once both halves have landed (#171).
+    // only once both halves have landed or the right one has failed (#171,
+    // #198).
     //
     // Returns false when there is nothing to measure against yet (no bitmap,
     // no render target, or a Hit whose page's slot has not landed), and for a
-    // Bottom or Hit in a spread until both halves are in. The caller must NOT
-    // mark the anchor applied in that case, or an intent would be retired
-    // without ever taking effect -- the reachable paths being a spread whose
-    // RIGHT half lands first, while navigate_to_page has just reset both
-    // bitmaps, and a hit on the right page when the left half lands first.
+    // Bottom or Hit in a spread until both halves are in or the right one has
+    // failed. The caller must NOT mark the anchor applied in that case, or an
+    // intent would be retired without ever taking effect -- the reachable paths
+    // being a spread whose RIGHT half lands first, while navigate_to_page has
+    // just reset both bitmaps, and a hit on the right page when the left half
+    // lands first.
     bool apply_anchor(const PageAnchor& anchor);
 
     // Painted extent plus its origin, in canvas DIPs. `l`/`t` are zero for a
@@ -460,7 +474,8 @@ private:
     // page of THIS spread. False when the spread has no right page.
     bool own_right_bitmap() const;
 
-    // True in a spread once both halves are this view's and this pair's.
+    // True in a spread once both halves are this view's and this pair's, or the
+    // left one is and the newest batch's right half failed (#198).
     bool spread_landed() const;
 
     // The height in DIPs of the page `page`, read from the own bitmap of the
