@@ -764,11 +764,21 @@ TEST_CASE("PdfCanvas spread: a failed left half leaves an anchor to the retry ov
     rig.kick(1);
     rig.land_both();
 
-    // Both slots hold this pair's older render: a zoom now would retire the
-    // anchor at the old height, had the failure placed it.
+    // The left slot holds this pair's older render: a zoom now would retire the
+    // anchor at the old height, had this batch counted as landed.
     rig.canvas().set_pending_anchor(PageAnchor::bottom());
     rig.kick(1, Fail::Left);
-    rig.land_left_failure();
+    SECTION("the failure alone") {
+        rig.land_left_failure();
+    }
+    SECTION("left first") {
+        rig.land_left_failure();
+        rig.land_right();
+    }
+    SECTION("right first") {
+        rig.land_right();
+        rig.land_left_failure();
+    }
 
     rig.view().set_zoom_pct(rig.view().zoom_pct() * 2.0f);
     rig.kick(1);

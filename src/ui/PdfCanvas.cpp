@@ -1892,8 +1892,11 @@ bool PdfCanvas::apply_anchor(const PageAnchor& anchor) {
     // Bottom and Hit are clamped to the pair: not final until both halves are in
     // or the right one has failed, so a batch opened before then carries the
     // intent forward rather than retiring it on a partial extent. Top depends on
-    // no extent.
-    const bool extent_final = !impl_->dual_page || spread_landed();
+    // no extent. A left bitmap of this pair from an older batch does not count:
+    // this batch's left half is still due, or has failed, and the pair would be
+    // final at the old zoom or viewport.
+    const bool extent_final = !impl_->dual_page
+        || (spread_landed() && impl_->bitmap_seq == impl_->next_seq);
     bool placed = true;
     switch (anchor.kind) {
         case PageAnchor::Kind::Top:
