@@ -1411,8 +1411,14 @@ TEST_CASE("PdfCanvas spread: the wheel backs out of a pair with no good page to 
     // (3, 4) shows only its right page, which overflows.
     Access::wheel(rig.canvas(), WHEEL_DELTA);
     CHECK(rig.view().current_page() == 3);
-    rig.land_left_failure();
-    rig.land_right();
+    SECTION("left half first") {
+        rig.land_left_failure();
+        rig.land_right();
+    }
+    SECTION("right half first") {
+        rig.land_right();
+        rig.land_left_failure();
+    }
     CHECK(rig.pan_y() == Approx(kHeight - page_dip(rig.view(), 800.0f)).margin(1.0f));
 }
 
