@@ -145,7 +145,8 @@ public:
     // would otherwise overflow the slot whose page is larger.
     //
     // A page that cannot be sized stays out of the fit, and this never throws
-    // for one: the fit is the other page's, or page 0's when neither has a size.
+    // for one: the fit is the other page's, or when neither has a size page 0's,
+    // or US Letter if page 0 has none either.
     //
     // Thread-safety: UI thread only, unchanged from the shipped contract. The
     // derived percentage is read by request_render() to build the CTM; all

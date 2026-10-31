@@ -90,9 +90,9 @@ struct DocumentView::Impl {
     std::size_t            l1_capacity   = 5;
     int                    last_prefetch_page = -1;
     TravelDirection        travel        = TravelDirection::Forward;
-    // (#49) Page sizes request_render_with_prefetch has looked up, so a page
-    // turn loads only the page it has not sized yet; a page's size does not
-    // change for the life of the Document. UI thread only.
+    // (#49) Page sizes request_render_with_prefetch and set_viewport have looked
+    // up, so a page turn loads only the page it has not sized yet; a page's size
+    // does not change for the life of the Document. UI thread only.
     std::vector<std::optional<PageSize>> page_sizes;
     // (#55) DocumentView::page_sizes(): every page's size, fallbacks
     // included, built once. Separate from `page_sizes` above so a fallback
@@ -341,14 +341,14 @@ void DocumentView::set_viewport(float viewport_w_px, float viewport_h_px,
     // shrink-to-fitting.
     //
     // This runs inside the window procedure, where nothing would catch
-    // Document::page_size, so only a page with a size enters the fit. A damaged
-    // page leaves its slot empty, so the fit is its partner's. With neither, it
-    // is the stand-in page_sizes() lays such a page out with, so that a fit does
-    // not depend on the zoom the view arrived with.
+    // Document::page_size, so only a page with a size enters the fit. With
+    // neither, it is the stand-in page_sizes() lays such a page out with, so that
+    // a fit does not depend on the zoom the view arrived with.
     const auto current = impl_->known_size(impl_->current_page);
     const auto pair    = impl_->known_size(pair_page);
-    const PageSize stand_in = impl_->known_size(0).value_or(detail::kFallbackPageSize);
-    const PageSize one = current.value_or(pair.value_or(stand_in));
+    const PageSize one = current ? *current
+                       : pair    ? *pair
+                                 : impl_->known_size(0).value_or(detail::kFallbackPageSize);
     const PageSize two = pair.value_or(one);
 
     impl_->pct = fit_percentage(viewport_w_px, viewport_h_px, dpi,

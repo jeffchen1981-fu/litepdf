@@ -293,6 +293,11 @@ TEST_CASE("DocumentView set_viewport fits the page of a pair that can be sized",
     view.set_viewport(600.0f, 900.0f, 96.0f, /*pair_page=*/2);
     CHECK(view.zoom_pct() == Catch::Approx(600.0f / 420.0f));
 
+    // Its height decides here. Page 0 is taller, so a stand-in for the damaged
+    // page shows: the width above is page 0's too.
+    view.set_viewport(1000.0f, 500.0f, 96.0f, /*pair_page=*/2);
+    CHECK(view.zoom_pct() == Catch::Approx(500.0f / 400.0f));
+
     // The left page is damaged: the right page's.
     view.set_current_page(3);
     view.set_viewport(600.0f, 900.0f, 96.0f, /*pair_page=*/4);

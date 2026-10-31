@@ -18,8 +18,9 @@ looked up, for the code that sizes and pairs pages.
 A damaged page is a /Pages node that contains itself and counts one page, so
 every other page still resolves past it (its /Count is skipped) while looking up
 this one throws "cycle in page tree". A /Pages node with an empty /Kids does NOT
-do this: MuPDF renders it as a blank page. Page 0 cannot be damaged in this way,
-because opening a document looks page 0 up and fails there (#119).
+do this: on its own, MuPDF drops it and the later pages move up. Page 0 cannot be
+damaged in this way, because opening a document looks page 0 up and fails there
+(#119).
 
 Every good page is a solid colour, so a screen capture shows which one landed.
 
