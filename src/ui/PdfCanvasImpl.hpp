@@ -204,6 +204,14 @@ struct PdfCanvas::Impl {
     // the incoming one lands.
     std::uint64_t                 right_bitmap_epoch = 0;
     int                           right_bitmap_page  = -1;
+    // The page of this spread the strip carried the reader in on. A spread
+    // remembers no page and either page of a pair reaches the same pan, so the
+    // carry back to the strip asks this one until the reader moves (spec 7.3): a
+    // pan the reader's own step changes (reader_pan_y), an anchor that names a
+    // place (set_pending_anchor, which every move to another pair installs),
+    // another view, set_dual_page. A clamp, a zoom or a resize is not a move,
+    // whatever it does to the pan.
+    std::optional<int>            held_page;
 
     // --- Phase 7 Task 7: page-change observer ---
     // Fired by change_current_page() after a real page transition, and

@@ -263,6 +263,8 @@ void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
     // orphan_ctx clone is no longer needed. The canvas just repoints
     // its view reference; the old view's pending pixmaps carry their
     // own escrow ctx and drop correctly regardless of this swap.
+    // Choosing the tab already shown lands here too, and is no switch.
+    if (view != impl_->view) impl_->held_page.reset();
     impl_->view = view;
     // Bump the render epoch on every view swap so any render still in
     // flight for the previous view is recognised as stale at completion
@@ -380,6 +382,7 @@ bool PdfCanvas::change_current_page(int idx) {
 
 void PdfCanvas::set_pending_anchor(PageAnchor anchor) {
     if (!impl_) return;
+    if (anchor.kind != PageAnchor::Kind::None) impl_->held_page.reset();
     impl_->anchor.install(std::move(anchor));
 }
 
@@ -450,6 +453,7 @@ void PdfCanvas::set_dual_page(bool on) {
     impl_->right_bitmap.Reset();
     impl_->pan_x = 0.0f;
     impl_->pan_y = 0.0f;
+    impl_->held_page.reset();
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -1905,8 +1909,11 @@ void PdfCanvas::left_half_failed(std::uint64_t seq) {
 }
 
 void PdfCanvas::reader_pan_y(float y) {
-    if (y != impl_->pan_y && impl_->left_failed_seq == impl_->next_seq) {
-        set_pending_anchor(PageAnchor::none());
+    if (y != impl_->pan_y) {
+        impl_->held_page.reset();
+        if (impl_->left_failed_seq == impl_->next_seq) {
+            set_pending_anchor(PageAnchor::none());
+        }
     }
     impl_->pan_y = y;
 }

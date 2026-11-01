@@ -129,4 +129,14 @@ inline CarriedPosition carry_from_spread(int left_page, int right_page, double p
     return {left_page, detail::carry_offset(viewport_top - sv.left_top_in_union, left_h)};
 }
 
+// Paged spread, when the page is already known: the one a carry from the strip came
+// in on (spec 7.3). `page_h` is that page's height. The top goes through float, as
+// the pan did, so a page carried in at its top reads exactly 0: strip_scroll_for
+// lands that on the page's anchor, and anything else 8 DIP lower.
+inline CarriedPosition carry_from_spread_on(int page, int left_page, double pan_y,
+                                            const SpreadVertical& sv, double page_h) noexcept {
+    const double top = static_cast<float>(spread_page_top(sv, page, left_page));
+    return {page, detail::carry_offset(-pan_y - top, page_h)};
+}
+
 }  // namespace litepdf::ui

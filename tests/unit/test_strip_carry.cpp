@@ -86,6 +86,34 @@ TEST_CASE("StripCarry: a spread with no right page stays on its left page", "[ui
     CHECK(c.offset_dip == Approx(500.0));
 }
 
+TEST_CASE("StripCarry: a spread's held page is measured from its own top", "[ui][strip]") {
+    // The left page spans 40 to 540 of the union, the right one all of it.
+    const SpreadVertical sv{40, 0, 800};
+
+    // Above the left page's bottom, where carry_from_spread would answer the left page.
+    const CarriedPosition right = carry_from_spread_on(7, 6, -140, sv, 800);
+    CHECK(right.page == 7);
+    CHECK(right.offset_dip == Approx(140.0));
+
+    // Past the left page's bottom, where it would answer the right page.
+    const CarriedPosition left = carry_from_spread_on(6, 6, -700, sv, 500);
+    CHECK(left.page == 6);
+    CHECK(left.offset_dip == Approx(500.0));
+
+    CHECK(carry_from_spread_on(6, 6, -20, sv, 500).offset_dip == 0.0);
+}
+
+TEST_CASE("StripCarry: a spread's held page at its top measures exactly zero",
+          "[ui][strip]") {
+    // No float holds this top, and the pan is a float. Offset 0 is what lands the
+    // strip on the page's anchor, 8 DIP above where any other offset starts.
+    const double top = 188.3;
+    const SpreadVertical sv{0, top, 800};
+    const float pan = spread_pan_y_for(CarriedPosition{7, 0.0}, top, 800, 100);
+
+    CHECK(carry_from_spread_on(7, 6, pan, sv, 400).offset_dip == 0.0);
+}
+
 TEST_CASE("StripCarry: offsets clamp to the page", "[ui][strip]") {
     const StripLayout l = tall_strip();
 
