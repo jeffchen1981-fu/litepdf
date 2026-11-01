@@ -1332,6 +1332,36 @@ TEST_CASE("PdfCanvas spread: a position past the left page survives two-page on,
     CHECK(at.offset_dip == Approx(1800.0).margin(1.0));
 }
 
+TEST_CASE("PdfCanvas spread: a carry to the strip stays on the page a turn is landing on",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+
+    // Past the left page of the pair the turn goes to, but the pan is the outgoing
+    // pair's: the turn's anchor sets it only when the render lands.
+    rig.canvas().set_pan(0.0f, -1000.0f);
+    Access::navigate(rig.canvas(), 1);
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 1);
+}
+
+TEST_CASE("PdfCanvas spread: a carry to the strip reaches the right page once a turn has landed",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+
+    // The anchor stays in its slot until the next batch retires it, but it is done.
+    Access::navigate(rig.canvas(), 1);
+    rig.land_both();
+    rig.canvas().set_pan(0.0f, -1000.0f);
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 2);
+}
+
 TEST_CASE("PdfCanvas spread: a carry to the strip stays on a left page still at the viewport top",
           "[ui][canvas][spread]") {
     Rig rig;

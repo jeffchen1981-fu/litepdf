@@ -310,9 +310,12 @@ CarriedPosition PdfCanvas::capture_layout_carry(double& pan_before) {
     const double pan_y = impl_->pan_y;
     if (impl_->dual_page) {
         // From a spread, in the painted frame: the left page, or the right one
-        // once the viewport top has left it.
+        // once the viewport top has left it. A page turn still landing has not
+        // set the pan yet: it is the outgoing pair's, and says nothing about the
+        // right page of this one.
+        const bool turn_landing = impl_->anchor.pending() && !impl_->anchor.applied();
         const int left  = dual_page_compute_left(v->current_page(), total);
-        const int right = dual_page_compute_right(left, total);
+        const int right = turn_landing ? -1 : dual_page_compute_right(left, total);
         const SpreadVertical sv = spread_vertical_for(sizes, left, total, zoom, vp_h);
         return carry_from_spread(left, right, pan_y, sv, page_h_dip(sizes, left, zoom),
                                  page_h_dip(sizes, right, zoom));

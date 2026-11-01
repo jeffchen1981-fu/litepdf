@@ -574,7 +574,9 @@ strip").
     hold such a position, and measuring it on the left page returned the reader to where the
     left page ends. Above the left page's bottom the left page stays the answer, even where the
     viewport top is inside both pages: a spread's current page is its left page, and the taller
-    page of the pair would move a reader who had not scrolled at all onto the next page.)
+    page of the pair would move a reader who had not scrolled at all onto the next page. A page
+    turn still landing also stays on the left page: its anchor has not set the pan yet, so the
+    pan is the outgoing pair's and says nothing about this pair's right page.)
   - **From the strip.** page = the derived current page; offset = viewport top − `top(page)`,
     clamped to [0, the page's height].
   - **Into the strip.** `scroll_y = anchor(page)` when the offset is 0, else `top(page) + offset` (the offset is measured from the page's top). A page that fits lands exactly where
@@ -868,10 +870,9 @@ two runs per layout; the paged arm ends at page 11's top after 10 PgDn, the stri
   passed the left page's bottom (§7.3, #197). The carry into the spread keeps the place, but a
   spread remembers no page, and the same pan is reached from either page of the pair. Keeping the
   reader on the right page there would need the carried page held across the spread.
-- A switch out of a spread in the one render between a page turn and its landing measures the old
-  pair's pan against the new pair, because the turn's anchor has not set the pan yet. The carry
-  lands on neither the top nor the bottom the turn asked for, and it can name the new pair's right
-  page (§7.3, #197). Before #197 it named the left page, at the wrong offset.
+- A switch out of a spread in the one render between a page turn and its landing keeps the page
+  the turn asked for, but not its top or bottom: the offset comes from the outgoing pair's pan,
+  clamped to the left page (§7.3).
 
 ## 11. Risk and review
 
