@@ -578,22 +578,22 @@ strip").
     turn still landing also stays on the left page: its anchor has not set the pan yet, so the
     pan is the outgoing pair's and says nothing about this pair's right page.)
   - **From paged spread, when the strip carried the reader in.** The carry into a spread holds
-    the carried page, left or right, and the pan it set. While the pan is still that one, the
-    carry out takes the held page instead of the two rules above; offset = how far the viewport
-    top is below that page's top in the union, clamped to [0, its height]. Only the page is held:
-    the offset still comes from the pan, so a position the union clamped comes back clamped, and
+    the carried page, left or right, until the reader moves. While it stands, the carry out takes
+    the held page instead of the two rules above; offset = how far the viewport top is below that
+    page's top in the union, clamped to [0, its height]. Only the page is held: the offset still
+    comes from the pan, so a position the union clamped comes back clamped, and
     the FitWidth round trip (row 18 of `scripts/smoke-test.ps1`) stays a measure of the scaling. (A
     spread remembers no page and either page of a pair reaches the same pan, so without this every
     reader on a right page above the left page's bottom came back to the left page, a whole page
     away on any document of equal pages.)
-    The hold ends at a reader's vertical move that moves the pan (a scroll, a wheel notch, the
-    Home or End that scrolls to the top), even one that comes back to the same pan, and whenever
-    anything else leaves another pan: a search hit, or a clamp to a smaller extent. It ends at a
-    page change, because a turn and back can land on the same pan, at a switch to another tab, and
-    at a layout switch; the canvas is shared between tabs and the hold is not part of a tab's
-    state. A zoom or a resize that leaves the pan alone keeps it: the reader has not left the pair,
-    and the offset is measured at the zoom on screen. A sideways step keeps it as well: the hold
-    answers for the vertical position, and pan_x plays no part in the carry out of a spread.
+    The hold ends at a vertical step that moves the pan (a scroll, a wheel notch, the Home or End
+    that scrolls to the top), at a search hit that is not already on screen, at a page change, at
+    a switch to another tab, and at a layout switch. The canvas is shared between tabs and the hold
+    is not part of a tab's state. A step that moves nothing keeps it, and so does a hit already on
+    screen. A zoom or a resize keeps it too, even where a clamp moves the pan: the reader has not
+    left the pair, and the offset is measured at the zoom on screen. A sideways step keeps it as
+    well: the hold answers for the vertical position, and pan_x plays no part in the carry out of
+    a spread.
   - **From the strip.** page = the derived current page; offset = viewport top − `top(page)`,
     clamped to [0, the page's height].
   - **Into the strip.** `scroll_y = anchor(page)` when the offset is 0, else `top(page) + offset` (the offset is measured from the page's top). A page that fits lands exactly where
@@ -885,8 +885,8 @@ two runs per layout; the paged arm ends at page 11's top after 10 PgDn, the stri
   that fails would leave the spread's input dead.
 - A reader who has moved in a spread, or left it and come back, is on its left page again: two-page
   off from there lands on the right page only once the viewport top has passed the left page's
-  bottom (§7.3, #197). Only a carry from the strip names a page, and only while its pan stands.
-  One notch away from it is enough to end that. A click or Ctrl+G on the right page of the pair on
+  bottom (§7.3, #197). Only a carry from the strip names a page, and only until the reader moves.
+  One notch is enough to end that, even a notch back again. A click or Ctrl+G on the right page of the pair on
   screen ends it too, as a page change the kick snaps back; one on the left page changes nothing
   and leaves it standing.
 - A round trip keeps the page, not always the place in it: the offset comes back from the pan, and

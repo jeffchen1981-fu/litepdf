@@ -1486,19 +1486,6 @@ TEST_CASE("PdfCanvas spread: repeated toggles keep a right page",
     CHECK(at.offset_dip == Approx(300.0).margin(1.0));
 }
 
-TEST_CASE("PdfCanvas spread: a carry clamped to the union keeps its pan when the pair lands",
-          "[ui][canvas][spread]") {
-    Rig rig;
-    // Past the pan's stop: the pair's real height is what the landing measures, and
-    // MuPDF rounds a pixmap up, so the page sizes' stop stays inside the real range.
-    enter_spread_from(rig, 2, 4000.0);
-    const float carried = rig.pan_y();
-    rig.kick(1);
-    rig.land_both();
-
-    CHECK(rig.pan_y() == carried);
-}
-
 TEST_CASE("PdfCanvas spread: a zoom keeps the right page the strip carried in",
           "[ui][canvas][spread]") {
     Rig rig;
@@ -1527,6 +1514,23 @@ TEST_CASE("PdfCanvas spread: a resize keeps the right page the strip carried in"
     leave_spread(rig);
 
     CHECK(Access::strip_position(rig.canvas()).page == 2);
+}
+
+TEST_CASE("PdfCanvas spread: a resize that clamps the pan keeps the carried page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 4, 50.0);
+    rig.kick(3);
+    rig.land_both();
+    const float carried = rig.pan_y();
+    // A window nearly as tall as the pair: the pan's stop is above the carried pan.
+    REQUIRE(MoveWindow(rig.canvas().hwnd(), 0, 0, kWidth, 1800, FALSE));
+    rig.kick(3);
+    rig.land_both();
+    REQUIRE(rig.pan_y() != carried);
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 4);
 }
 
 // A reader in the spread is back on its current page, the left one (spec 7.3).
@@ -1608,6 +1612,36 @@ TEST_CASE("PdfCanvas spread: a hit off screen ends the carried page",
     rig.kick(1);
     rig.land_both();
     rig.canvas().scroll_into_view(hit_at(1, 100.0f));
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 1);
+}
+
+TEST_CASE("PdfCanvas spread: a hit that goes back to the carried pan ends the carried page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 2, 0.0);
+    rig.kick(1);
+    rig.land_both();
+    rig.canvas().scroll_into_view(hit_at(2, 1500.0f));
+    REQUIRE(rig.pan_y() < 0.0f);
+    // Near the top of the short left page: the pan's stop is where the carry left it.
+    rig.canvas().scroll_into_view(hit_at(1, 0.0f));
+    REQUIRE(rig.pan_y() == 0.0f);
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 1);
+}
+
+TEST_CASE("PdfCanvas spread: a hit waiting for its slot ends the carried page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 2, 0.0);
+    rig.kick(1);
+    rig.land_left();
+    // The right slot has not landed, so the anchor will place the hit, not this call.
+    rig.canvas().scroll_into_view(hit_at(2, 1500.0f));
+    REQUIRE(rig.pan_y() == 0.0f);
     leave_spread(rig);
 
     CHECK(Access::strip_position(rig.canvas()).page == 1);

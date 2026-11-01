@@ -383,6 +383,7 @@ bool PdfCanvas::change_current_page(int idx) {
 
 void PdfCanvas::set_pending_anchor(PageAnchor anchor) {
     if (!impl_) return;
+    if (anchor.kind != PageAnchor::Kind::None) impl_->held_page.reset();
     impl_->anchor.install(std::move(anchor));
 }
 
