@@ -1318,9 +1318,7 @@ TEST_CASE("PdfCanvas spread: a carry to the strip past the left page lands on th
 TEST_CASE("PdfCanvas spread: a position past the left page survives two-page on, then off",
           "[ui][canvas][spread]") {
     Rig rig;
-    rig.view().set_dual_page(false);
-    rig.view().set_continuous(true);
-    rig.canvas().switch_layout(LayoutKind::Strip, true);
+    leave_spread(rig);
 
     // Deep in page 2, past where the short left page would end beside it and short
     // of where the pair's pan stops.

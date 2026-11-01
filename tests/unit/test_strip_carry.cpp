@@ -86,17 +86,6 @@ TEST_CASE("StripCarry: a spread with no right page stays on its left page", "[ui
     CHECK(c.offset_dip == Approx(500.0));
 }
 
-TEST_CASE("StripCarry: a right page's own offset does not start at the left page's top",
-          "[ui][strip]") {
-    // Left page first and short, the right page centred below where it ends: a
-    // pan cannot reach past the left page before the right page starts, so the
-    // offset stops at 0.
-    const SpreadVertical sv{0, 400, 1000};
-    const CarriedPosition c = carry_from_spread(2, 3, -300, sv, 300, 200);
-    CHECK(c.page == 3);
-    CHECK(c.offset_dip == 0.0);
-}
-
 TEST_CASE("StripCarry: offsets clamp to the page", "[ui][strip]") {
     const StripLayout l = tall_strip();
 

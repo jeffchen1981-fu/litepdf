@@ -864,10 +864,14 @@ two runs per layout; the paged arm ends at page 11's top after 10 PgDn, the stri
   still measures the left page alone (`pan_by`, `on_wheel_scroll`, `on_hwheel_scroll`). Dropping
   that input is not an option: `bitmap_is_stale` lapses when a render succeeds, and a right render
   that fails would leave the spread's input dead.
-- Two-page on, then off, from a right page returns to its left page while the left page is still
-  at the viewport top (§7.3, #197). The carry into the spread keeps the place, but a spread
-  remembers no page, and the same pan is reached from either page of the pair. Keeping the
+- Two-page on, then off, from a right page returns to its left page until the viewport top has
+  passed the left page's bottom (§7.3, #197). The carry into the spread keeps the place, but a
+  spread remembers no page, and the same pan is reached from either page of the pair. Keeping the
   reader on the right page there would need the carried page held across the spread.
+- A switch out of a spread in the one render between a page turn and its landing measures the old
+  pair's pan against the new pair, because the turn's anchor has not set the pan yet. The carry
+  lands on neither the top nor the bottom the turn asked for, and it can name the new pair's right
+  page (§7.3, #197). Before #197 it named the left page, at the wrong offset.
 
 ## 11. Risk and review
 
