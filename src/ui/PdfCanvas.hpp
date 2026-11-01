@@ -427,6 +427,12 @@ private:
     // needs no extent, is placed on the right page (ui/detail/PageAnchor.hpp).
     void left_half_failed(std::uint64_t seq);
 
+    // The reader moved the page to `y`. That ends an anchor a failed left half
+    // left pending: while that page keeps failing no render marks it, and each
+    // one that places it again would undo the move (#201). Until the reader moves
+    // it waits for the retry.
+    void reader_pan_y(float y);
+
     // Turn an anchor into a pan. Called from the completion handler once the
     // arriving bitmap is installed, so the page's real height is known.
     // Kind::None keeps the current pan and only re-clamps it, and in a spread

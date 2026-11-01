@@ -71,6 +71,7 @@ struct PdfCanvasTestAccess {
     }
     static void pan_by(PdfCanvas& c, float dx, float dy) { c.pan_by(dx, dy); }
     static void wheel(PdfCanvas& c, int delta) { c.on_wheel_scroll(delta); }
+    static void key(PdfCanvas& c, WPARAM vk) { c.on_key_down(vk); }
     // What a wheel flip leaves behind, for a batch the test submitted itself.
     static void mark_wheel_flip(PdfCanvas& c) { c.impl_->wheel_flip_seq = c.impl_->next_seq; }
 
@@ -177,7 +178,8 @@ public:
         const std::uint64_t seq   = canvas_->next_render_seq();
         if (!view_.dual_page()) {
             canvas_->apply_viewport();
-            view_.request_render(page, [target, epoch, page, seq](fz_pixmap* p, fz_context* ctx) {
+            const int asked = fail == Fail::Left ? view_.page_count() + 100 : page;
+            view_.request_render(asked, [target, epoch, page, seq](fz_pixmap* p, fz_context* ctx) {
                 PdfCanvas::post_render_done(target, p, ctx, epoch, page, seq);
             });
             return;
@@ -946,6 +948,151 @@ TEST_CASE("PdfCanvas spread: a Hit beside a failed left page lands with no outgo
         rig.land_left_failure();
     }
     CHECK(rig.pan_y() == Approx(centred_pan(rig.view(), 860.0f, kHeight)).margin(1.0f));
+}
+
+// --- The reader moves a page whose landing a failed left half left open (#201) ---
+//
+// Such an anchor stays pending for the retry. It is carried into every later batch,
+// so without the reader's own move ending it, each re-render throws them back.
+
+TEST_CASE("PdfCanvas spread: a scroll beside a failed left page ends a Bottom anchor",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.canvas().set_pending_anchor(PageAnchor::bottom());
+    rig.kick(1, Fail::Left);
+    rig.land_left_failure();
+    rig.land_right();
+    REQUIRE(rig.pan_y() == Approx(bottom_pan(rig.view(), kHeight)).margin(1.0f));
+
+    SECTION("an arrow key or a hand drag") {
+        Access::pan_by(rig.canvas(), 0.0f, 100.0f);
+    }
+    SECTION("the wheel") {
+        Access::wheel(rig.canvas(), WHEEL_DELTA);
+    }
+    const float place = rig.pan_y();
+    REQUIRE(place > bottom_pan(rig.view(), kHeight) + 1.0f);
+
+    rig.kick(1, Fail::Left);
+    rig.land_left_failure();
+    rig.land_right();
+    CHECK(rig.pan_y() == place);
+}
+
+TEST_CASE("PdfCanvas spread: a scroll beside a failed left page ends a Hit anchor",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.canvas().set_pending_anchor(PageAnchor::hit(hit_at(2, 860.0f)));
+    rig.kick(1, Fail::Left);
+    rig.land_left_failure();
+    rig.land_right();
+    REQUIRE(rig.pan_y() == Approx(centred_pan(rig.view(), 860.0f, kHeight)).margin(1.0f));
+
+    Access::pan_by(rig.canvas(), 0.0f, 100.0f);
+    const float place = rig.pan_y();
+
+    rig.kick(1, Fail::Left);
+    rig.land_right();
+    rig.land_left_failure();
+    CHECK(rig.pan_y() == place);
+}
+
+TEST_CASE("PdfCanvas spread: Home at the cover ends an anchor a failed re-render left open",
+          "[ui][canvas][spread]") {
+    constexpr int height = 300;
+    Rig rig(kWidth, height);
+    rig.kick(0);
+    rig.land_left();
+
+    rig.canvas().set_pending_anchor(PageAnchor::bottom());
+    rig.kick(0, Fail::Left);
+    rig.land_left_failure();
+    REQUIRE(Access::left_bitmap(rig.canvas()) != nullptr);
+    rig.canvas().set_pan(0.0f, -50.0f);
+
+    Access::key(rig.canvas(), VK_HOME);
+    REQUIRE(rig.pan_y() == 0.0f);
+
+    rig.kick(0);
+    rig.land_left();
+    CHECK(rig.pan_y() == 0.0f);
+}
+
+TEST_CASE("PdfCanvas spread: a scroll ends the anchor before this batch's right half lands",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+
+    // The left slot keeps this pair's older render, so the page can be moved while
+    // the right half is still due, and that half must not move it back.
+    rig.canvas().set_pending_anchor(PageAnchor::bottom());
+    rig.kick(1, Fail::Left);
+    rig.land_left_failure();
+    Access::pan_by(rig.canvas(), 0.0f, 100.0f);
+    const float place = rig.pan_y();
+    REQUIRE(place > bottom_pan(rig.view(), kHeight) + 1.0f);
+
+    rig.land_right();
+    CHECK(rig.pan_y() == place);
+}
+
+TEST_CASE("PdfCanvas spread: a step that moves nothing leaves the anchor to the retry",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+
+    // The short right page alone fits, so the step stops where it started. The
+    // reader has not moved anything, and the tall left page can still arrive.
+    rig.canvas().set_pending_anchor(PageAnchor::bottom());
+    rig.kick(3, Fail::Left);
+    rig.land_left_failure();
+    rig.land_right();
+    Access::pan_by(rig.canvas(), 0.0f, -100.0f);
+    REQUIRE(rig.pan_y() == 0.0f);
+
+    rig.kick(3);
+    rig.land_both();
+    CHECK(rig.pan_y() == Approx(bottom_pan(rig.view(), kHeight)).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: a scroll while a later batch lands leaves its anchor alone",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3, Fail::Left);
+    rig.land_left_failure();
+    rig.land_right();
+
+    // The failure belongs to the batch before this one: this pair is landing as
+    // usual, and its right half still applies the anchor.
+    rig.canvas().set_pending_anchor(PageAnchor::bottom());
+    rig.kick(3);
+    rig.land_left();
+    Access::pan_by(rig.canvas(), 0.0f, 100.0f);
+    REQUIRE(rig.pan_y() > bottom_pan(rig.view(), kHeight) + 1.0f);
+
+    rig.land_right();
+    CHECK(rig.pan_y() == Approx(bottom_pan(rig.view(), kHeight)).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas single page: a scroll ends an anchor a failed re-render left open",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Single);
+    rig.canvas().change_current_page(1);
+    rig.kick(1);
+    rig.land_left();
+
+    rig.canvas().set_pending_anchor(PageAnchor::bottom());
+    rig.kick(1, Fail::Left);
+    rig.land_left_failure();
+    REQUIRE(Access::left_bitmap(rig.canvas()) != nullptr);
+    Access::pan_by(rig.canvas(), 0.0f, -50.0f);
+    REQUIRE(rig.pan_y() == -50.0f);
+
+    rig.kick(1);
+    rig.land_left();
+    CHECK(rig.pan_y() == -50.0f);
 }
 
 // --- scroll_into_view ---

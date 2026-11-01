@@ -1662,7 +1662,7 @@ LRESULT PdfCanvas::pan_by(float dx, float dy) {
     if (!content_extent(box)) return 0;
     const D2D1_SIZE_F vp = impl_->rt->GetSize();
     impl_->pan_x = clamp_pan(impl_->pan_x + dx, box.w, vp.width);
-    impl_->pan_y = clamp_pan(impl_->pan_y + dy, box.h, vp.height);
+    reader_pan_y(clamp_pan(impl_->pan_y + dy, box.h, vp.height));
     InvalidateRect(hwnd_, nullptr, FALSE);
     return 0;
 }
@@ -1745,7 +1745,7 @@ LRESULT PdfCanvas::on_wheel_scroll(int delta) {
 
     const WheelResult r = apply_wheel(impl_->pan_y, box.h, vp.height, step);
     if (r.flip == Flip::None) {
-        impl_->pan_y = r.pan_y;
+        reader_pan_y(r.pan_y);
         InvalidateRect(hwnd_, nullptr, FALSE);
         return 0;
     }
@@ -1904,6 +1904,13 @@ void PdfCanvas::left_half_failed(std::uint64_t seq) {
     if (own_right_bitmap()) place_anchor(seq);
 }
 
+void PdfCanvas::reader_pan_y(float y) {
+    if (y != impl_->pan_y && impl_->left_failed_seq == impl_->next_seq) {
+        set_pending_anchor(PageAnchor::none());
+    }
+    impl_->pan_y = y;
+}
+
 bool PdfCanvas::apply_anchor(const PageAnchor& anchor) {
     ContentBox box{};
     if (!content_extent(box)) return false;
@@ -1949,7 +1956,8 @@ bool PdfCanvas::apply_anchor(const PageAnchor& anchor) {
             // measures one page, and a clamp against it would cut a pan set for
             // the whole pair: a layout carry, or a tab switch restoring the
             // reader's place. The missing half's completion comes back here,
-            // and on_paint clamps what it draws until then.
+            // and on_paint clamps what it draws until then. A left half that
+            // failed does not come back: its pair stays on on_paint's clamp.
             if (!extent_final) return false;
             break;
     }
@@ -1962,7 +1970,7 @@ LRESULT PdfCanvas::scroll_to_top() {
     ContentBox box{};
     if (!content_extent(box)) return 0;
     const D2D1_SIZE_F vp = impl_->rt->GetSize();
-    impl_->pan_y = clamp_pan(0.0f, box.h, vp.height);
+    reader_pan_y(clamp_pan(0.0f, box.h, vp.height));
     InvalidateRect(hwnd_, nullptr, FALSE);
     return 0;
 }
