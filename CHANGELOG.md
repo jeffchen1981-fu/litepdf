@@ -9,6 +9,8 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+## [1.8.1] — 2026-11-01 — Damaged pages no longer crash the app
+
 ### Fixed
 
 - In a two-page spread whose right page cannot be rendered, such as a damaged
@@ -16,20 +18,23 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   search hit on it when you scroll and then zoom, resize the window, toggle a
   pane or invert colors. This came in with 1.8.0. Going to such a spread also
   no longer leaves the previous right page on screen beside it (#198).
-- Fit Width, Fit Page and printing no longer crash on a damaged page. A page
-  whose size could not be read ended the app when you went to it or to a
-  two-page spread holding it, or reset the zoom while it was current. The zoom
-  now fits the other page of the spread. When no page on screen has a size it
-  fits the first page of the document, or a Letter page if that has none either.
-  Printing stops with the same "Failed to render page" message as any other page
-  that does not render (#203).
-- A page that cannot be rendered, such as a damaged page, no longer leaves the
-  page before it on screen under the new page number. Its place stays empty.
-  When only the right page of a two-page spread can be rendered, it can now be
-  scrolled, and the wheel can leave the spread.
-- The mouse wheel no longer stops at a page that cannot be rendered, or at a
-  two-page spread with neither page rendered. One notch goes to the next or the
-  previous page.
+- Fit Width, Fit Page and printing no longer crash on a damaged PDF page. A page
+  whose size could not be read ended the app at either fit. Outside continuous
+  scroll that happened when you went to it or to a two-page spread holding it.
+  In continuous scroll it happened when you resized the window, toggled a pane or
+  returned to its tab while it was the current page, but not when you went to it.
+  Reset Zoom did it in every layout. A fit on such a page now uses the other page
+  of a two-page spread, or else the first page of the document, or a Letter page
+  if that has no size either. Printing stops with the same "Failed to render
+  page" message as any other page that does not render (#203).
+- Outside continuous scroll, a page that cannot be rendered, such as a damaged
+  page, no longer leaves the page you came from on screen under the new page
+  number. Its place stays empty. When only the right page of a two-page spread
+  can be rendered, it can now be scrolled, and the wheel can leave the spread
+  (#201).
+- Outside continuous scroll, the mouse wheel no longer stops at a page that
+  cannot be rendered, or at a two-page spread with neither page rendered. With
+  nothing to scroll, one notch turns the page (#201).
 
 ## [1.8.0] — 2026-10-31 — Search highlights in two-page spreads, and spreads keep their place across tabs
 
@@ -794,7 +799,7 @@ and Phase 12 (release hardening: crash-safe session restore).
 
 [Compare initial commit…0.0.1-phase0](https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.1-phase0)
 
-[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.8.1...HEAD
 [0.0.12-phase10]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.12-phase10
 [0.0.11-phase9]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.11-phase9
 [0.0.10-phase8.5]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.10-phase8.5
