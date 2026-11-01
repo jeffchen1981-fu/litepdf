@@ -129,4 +129,11 @@ inline CarriedPosition carry_from_spread(int left_page, int right_page, double p
     return {left_page, detail::carry_offset(viewport_top - sv.left_top_in_union, left_h)};
 }
 
+// Paged spread, when the page is already known: the one a carry from the strip came
+// in on (spec 7.3). `page_h` is that page's height.
+inline CarriedPosition carry_from_spread_on(int page, int left_page, double pan_y,
+                                            const SpreadVertical& sv, double page_h) noexcept {
+    return {page, detail::carry_offset(-pan_y - spread_page_top(sv, page, left_page), page_h)};
+}
+
 }  // namespace litepdf::ui

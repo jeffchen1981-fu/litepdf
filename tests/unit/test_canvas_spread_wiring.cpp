@@ -335,6 +335,13 @@ void leave_spread(Rig& rig) {
     rig.canvas().switch_layout(LayoutKind::Strip, true);
 }
 
+// A reader in the strip, `offset` DIPs into `page`, turns two-page on.
+void enter_spread_from(Rig& rig, int page, double offset) {
+    leave_spread(rig);
+    Access::strip_scroll_to(rig.canvas(), CarriedPosition{page, offset});
+    enter_spread(rig);
+}
+
 // One hit per page, on the page it names.
 PdfCanvas::HitsFn hits_on_every_page() {
     return [](std::size_t page) {
@@ -1395,6 +1402,226 @@ TEST_CASE("PdfCanvas spread: a carry to the strip stays on a taller left page",
     const CarriedPosition at = Access::strip_position(rig.canvas());
     CHECK(at.page == 3);
     CHECK(at.offset_dip == Approx(1000.0f * z_strip / z_spread).margin(1.0f));
+}
+
+// --- The page a carry from the strip came in on ---
+
+TEST_CASE("PdfCanvas spread: a right page above the left page's bottom survives two-page on, then off",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 2, 300.0);
+    leave_spread(rig);
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 2);
+    CHECK(at.offset_dip == Approx(300.0).margin(1.0));
+    CHECK(rig.view().current_page() == 2);
+}
+
+TEST_CASE("PdfCanvas spread: the top of a right page survives two-page on, then off",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 2, 0.0);
+    leave_spread(rig);
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 2);
+    CHECK(at.offset_dip == 0.0);
+}
+
+TEST_CASE("PdfCanvas spread: a right page shorter than its left survives two-page on, then off",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 4, 50.0);
+    leave_spread(rig);
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 4);
+    CHECK(at.offset_dip == Approx(50.0).margin(1.0));
+}
+
+TEST_CASE("PdfCanvas spread: a right page survives the pair landing",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 2, 300.0);
+    rig.kick(1);
+    rig.land_both();
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 2);
+}
+
+TEST_CASE("PdfCanvas spread: a right page survives a toggle between the two halves",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 2, 300.0);
+    rig.kick(1);
+    rig.land_left();
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 2);
+}
+
+TEST_CASE("PdfCanvas spread: a left page's reader stays on it across two-page on, then off",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 1, 100.0);
+    leave_spread(rig);
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 1);
+    CHECK(at.offset_dip == Approx(100.0).margin(1.0));
+}
+
+TEST_CASE("PdfCanvas spread: repeated toggles keep a right page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 2, 300.0);
+    leave_spread(rig);
+    enter_spread(rig);
+    leave_spread(rig);
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 2);
+    CHECK(at.offset_dip == Approx(300.0).margin(1.0));
+}
+
+TEST_CASE("PdfCanvas spread: a carry clamped to the union keeps its pan when the pair lands",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    // Past the pan's stop: the pair's real height is what the landing measures, and
+    // MuPDF rounds a pixmap up, so the page sizes' stop stays inside the real range.
+    enter_spread_from(rig, 2, 4000.0);
+    const float carried = rig.pan_y();
+    rig.kick(1);
+    rig.land_both();
+
+    CHECK(rig.pan_y() == carried);
+}
+
+TEST_CASE("PdfCanvas spread: a zoom keeps the right page the strip carried in",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 2, 300.0);
+    rig.kick(1);
+    rig.land_both();
+    REQUIRE(rig.view().zoom_in());
+    rig.kick(1);
+    rig.land_both();
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 2);
+}
+
+TEST_CASE("PdfCanvas spread: a resize keeps the right page the strip carried in",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 2, 300.0);
+    rig.kick(1);
+    rig.land_both();
+    const float zoom = rig.view().zoom_pct();
+    REQUIRE(MoveWindow(rig.canvas().hwnd(), 0, 0, kWidth - 100, kHeight, FALSE));
+    rig.kick(1);
+    rig.land_both();
+    REQUIRE(rig.view().zoom_pct() != zoom);
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 2);
+}
+
+// A reader in the spread is back on its current page, the left one (spec 7.3).
+
+TEST_CASE("PdfCanvas spread: a scroll ends the carried page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 2, 300.0);
+    rig.kick(1);
+    rig.land_both();
+    Access::pan_by(rig.canvas(), 0.0f, -40.0f);
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 1);
+}
+
+TEST_CASE("PdfCanvas spread: a wheel notch ends the carried page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 2, 300.0);
+    rig.kick(1);
+    rig.land_both();
+    Access::wheel(rig.canvas(), -WHEEL_DELTA);
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 1);
+}
+
+TEST_CASE("PdfCanvas spread: a hit off screen ends the carried page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    // Past the short left page, whose hit takes the pan back up the pair.
+    enter_spread_from(rig, 2, 1700.0);
+    rig.kick(1);
+    rig.land_both();
+    rig.canvas().scroll_into_view(hit_at(1, 100.0f));
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 1);
+}
+
+TEST_CASE("PdfCanvas spread: a hit already on screen keeps the carried page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 2, 300.0);
+    rig.kick(1);
+    rig.land_both();
+    const float pan = rig.pan_y();
+    rig.canvas().scroll_into_view(hit_at(1, 300.0f));
+    REQUIRE(rig.pan_y() == pan);
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 2);
+}
+
+TEST_CASE("PdfCanvas spread: a page turn and back ends the carried page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    // At the top of the pair, so the turn back lands on the pan the carry set.
+    enter_spread_from(rig, 2, 0.0);
+    rig.kick(1);
+    rig.land_both();
+    Access::navigate(rig.canvas(), 3);
+    rig.land_both();
+    Access::navigate(rig.canvas(), 1);
+    rig.land_both();
+    REQUIRE(rig.pan_y() == 0.0f);
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 1);
+}
+
+TEST_CASE("PdfCanvas spread: a tab switch ends the carried page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 2, 0.0);
+    rig.reenter(0.0f);
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 1);
+}
+
+TEST_CASE("PdfCanvas spread: a spell in single page ends the carried page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 2, 0.0);
+    // The preference turned off while the spread showed: two-page off then goes to
+    // the single page, and back on, by set_dual_page alone.
+    rig.view().set_dual_page(false);
+    rig.canvas().set_dual_page(false);
+    rig.view().set_dual_page(true);
+    rig.canvas().set_dual_page(true);
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 1);
 }
 
 // --- A single page: nothing waits for a right half ---

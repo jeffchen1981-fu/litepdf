@@ -317,6 +317,12 @@ CarriedPosition PdfCanvas::capture_layout_carry(double& pan_before) {
         const int left  = dual_page_compute_left(v->current_page(), total);
         const int right = turn_landing ? -1 : dual_page_compute_right(left, total);
         const SpreadVertical sv = spread_vertical_for(sizes, left, total, zoom, vp_h);
+        // The reader has not moved since the strip carried them in: the pan alone
+        // cannot say which page of the pair that was.
+        if (impl_->held_page && impl_->held_page->pan_y == impl_->pan_y) {
+            const int page = impl_->held_page->page;
+            return carry_from_spread_on(page, left, pan_y, sv, page_h_dip(sizes, page, zoom));
+        }
         return carry_from_spread(left, right, pan_y, sv, page_h_dip(sizes, left, zoom),
                                  page_h_dip(sizes, right, zoom));
     }
@@ -368,6 +374,7 @@ void PdfCanvas::apply_layout_carry(LayoutKind next, CarriedPosition c, double pa
             impl_->pan_x = 0.0f;
             impl_->pan_y = spread_pan_y_for(c, spread_page_top(sv, c.page, left),
                                             sv.union_h, vp.h);
+            impl_->held_page = Impl::HeldPage{c.page, impl_->pan_y};
             break;
         }
         case LayoutKind::PagedSingle:

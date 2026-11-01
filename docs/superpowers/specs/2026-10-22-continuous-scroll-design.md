@@ -577,6 +577,21 @@ strip").
     page of the pair would move a reader who had not scrolled at all onto the next page. A page
     turn still landing also stays on the left page: its anchor has not set the pan yet, so the
     pan is the outgoing pair's and says nothing about this pair's right page.)
+  - **From paged spread, when the strip carried the reader in.** The carry into a spread holds
+    the carried page, left or right, and the pan it set. While the pan is still that one, the
+    carry out takes the held page instead of the two rules above; offset = how far the viewport
+    top is below that page's top in the union, clamped to [0, its height]. Only the page is held:
+    the offset still comes from the pan, so a position the union clamped comes back clamped, and
+    the round trip stays a measure of the scaling (row 18). (A spread remembers no page and either
+    page of a pair reaches the same pan, so without this every reader on a right page came back
+    to the left page, a whole page away on any document of equal pages.)
+    The hold ends when the pan changes, whoever writes it: a scroll, a wheel notch, a search hit,
+    or a clamp to a smaller extent. It ends at a page change, because a turn and back can land on
+    the same pan, at a tab switch, and at a layout switch; the canvas is shared between tabs and
+    the hold is not part of a tab's state. A zoom or a resize that leaves the pan alone keeps it:
+    the reader has not left the pair, and the offset is measured at the zoom on screen. A reader
+    who scrolls away and back to the very same pan keeps it too: the spread then shows what the
+    carry left, and the pan is all the canvas compares.
   - **From the strip.** page = the derived current page; offset = viewport top − `top(page)`,
     clamped to [0, the page's height].
   - **Into the strip.** `scroll_y = anchor(page)` when the offset is 0, else `top(page) + offset` (the offset is measured from the page's top). A page that fits lands exactly where
@@ -866,10 +881,12 @@ two runs per layout; the paged arm ends at page 11's top after 10 PgDn, the stri
   still measures the left page alone (`pan_by`, `on_wheel_scroll`, `on_hwheel_scroll`). Dropping
   that input is not an option: `bitmap_is_stale` lapses when a render succeeds, and a right render
   that fails would leave the spread's input dead.
-- Two-page on, then off, from a right page returns to its left page until the viewport top has
-  passed the left page's bottom (§7.3, #197). The carry into the spread keeps the place, but a
-  spread remembers no page, and the same pan is reached from either page of the pair. Keeping the
-  reader on the right page there would need the carried page held across the spread.
+- A reader who has moved in a spread, or left it and come back, is on its left page again: two-page
+  off from there lands on the right page only once the viewport top has passed the left page's
+  bottom (§7.3, #197). Only a carry from the strip names a page, and only while its pan stands.
+  One notch away from it is enough to end that. A click or Ctrl+G on the right page of the pair on
+  screen ends it too, as a page change the kick snaps back; one on the left page changes nothing
+  and leaves it standing.
 - A switch out of a spread in the one render between a page turn and its landing keeps the page
   the turn asked for, but not its top or bottom: the offset comes from the outgoing pair's pan,
   clamped to the left page (§7.3).

@@ -278,6 +278,7 @@ void PdfCanvas::set_view(litepdf::core::DocumentView* view) {
     // describes a page that is no longer on screen.
     impl_->anchor.clear();
     impl_->wheel_flip_seq = 0;
+    impl_->held_page.reset();
     if (!view) {
         // No active view — whatever bitmap is on screen is tied to a
         // ctx that will soon be gone. Discard so the next paint shows
@@ -368,6 +369,7 @@ bool PdfCanvas::change_current_page(int idx) {
     if (!impl_ || !impl_->view) return false;
     const bool changed = impl_->view->set_current_page(idx);
     if (changed) {
+        impl_->held_page.reset();
         // A selection is bound to one page (spec §1). A drag that outlived its
         // page would extend the old page's text with the new page's geometry.
         cancel_gesture();
@@ -450,6 +452,7 @@ void PdfCanvas::set_dual_page(bool on) {
     impl_->right_bitmap.Reset();
     impl_->pan_x = 0.0f;
     impl_->pan_y = 0.0f;
+    impl_->held_page.reset();
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
