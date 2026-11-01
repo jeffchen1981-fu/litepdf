@@ -309,11 +309,13 @@ CarriedPosition PdfCanvas::capture_layout_carry(double& pan_before) {
     const int    total = v->page_count();
     const double pan_y = impl_->pan_y;
     if (impl_->dual_page) {
-        // From a spread: measured on the left page alone, in the painted frame.
-        const int left = dual_page_compute_left(v->current_page(), total);
+        // From a spread, in the painted frame: the left page, or the right one
+        // once the viewport top has left it.
+        const int left  = dual_page_compute_left(v->current_page(), total);
+        const int right = dual_page_compute_right(left, total);
         const SpreadVertical sv = spread_vertical_for(sizes, left, total, zoom, vp_h);
-        return carry_from_spread(left, pan_y, sv.left_top_in_union,
-                                 page_h_dip(sizes, left, zoom));
+        return carry_from_spread(left, right, pan_y, sv, page_h_dip(sizes, left, zoom),
+                                 page_h_dip(sizes, right, zoom));
     }
     // From paged single: a page that fits is centred, one that overflows starts
     // at the viewport top.

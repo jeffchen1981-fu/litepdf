@@ -568,7 +568,13 @@ strip").
     into, `−pan_y − page_origin_y`, clamped to [0, the page's height] (0 when the page fits).
   - **From paged spread.** page = the spread's left page; offset = how far the viewport top is
     below that page's top inside the union placement (`content_extent`'s box), clamped to
-    [0, the left page's height]. So unequal page heights are measured on the left page alone.
+    [0, the left page's height]. Once the viewport top is at or past the left page's bottom and
+    the pair has a right page, page = the right page; offset = how far the viewport top is below
+    that page's top in the union, clamped to [0, its height]. (#197: only a taller right page can
+    hold such a position, and measuring it on the left page returned the reader to where the
+    left page ends. Above the left page's bottom the left page stays the answer, even where the
+    viewport top is inside both pages: a spread's current page is its left page, and the taller
+    page of the pair would move a reader who had not scrolled at all onto the next page.)
   - **From the strip.** page = the derived current page; offset = viewport top − `top(page)`,
     clamped to [0, the page's height].
   - **Into the strip.** `scroll_y = anchor(page)` when the offset is 0, else `top(page) + offset` (the offset is measured from the page's top). A page that fits lands exactly where
@@ -858,6 +864,10 @@ two runs per layout; the paged arm ends at page 11's top after 10 PgDn, the stri
   still measures the left page alone (`pan_by`, `on_wheel_scroll`, `on_hwheel_scroll`). Dropping
   that input is not an option: `bitmap_is_stale` lapses when a render succeeds, and a right render
   that fails would leave the spread's input dead.
+- Two-page on, then off, from a right page returns to its left page while the left page is still
+  at the viewport top (§7.3, #197). The carry into the spread keeps the place, but a spread
+  remembers no page, and the same pan is reached from either page of the pair. Keeping the
+  reader on the right page there would need the carried page held across the spread.
 
 ## 11. Risk and review
 

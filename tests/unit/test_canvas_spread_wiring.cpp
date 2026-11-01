@@ -66,6 +66,9 @@ struct PdfCanvasTestAccess {
     static void strip_scroll_to(PdfCanvas& c, const CarriedPosition& at) {
         c.impl_->strip_view.apply_carry(at);
     }
+    static CarriedPosition strip_position(const PdfCanvas& c) {
+        return c.impl_->strip_view.carry();
+    }
     static void navigate(PdfCanvas& c, int page) {
         c.navigate_to_page(page, PageAnchor::top());
     }
@@ -317,6 +320,19 @@ bool overlay_has(PdfCanvas& canvas, int page) {
         if (static_cast<int>(h.page) == page) return true;
     }
     return false;
+}
+
+// MainWindow's two-page toggle, in each direction.
+void enter_spread(Rig& rig) {
+    rig.view().set_continuous(false);
+    rig.view().set_dual_page(true);
+    rig.canvas().switch_layout(LayoutKind::PagedSpread, true);
+}
+
+void leave_spread(Rig& rig) {
+    rig.view().set_dual_page(false);
+    rig.view().set_continuous(true);
+    rig.canvas().switch_layout(LayoutKind::Strip, true);
 }
 
 // One hit per page, on the page it names.
@@ -1279,6 +1295,78 @@ TEST_CASE("PdfCanvas spread: a carry from the strip uses the carried page's own 
 
     CHECK(rig.view().current_page() == 1);
     CHECK(rig.pan_y() == Approx(-300.0f * z_spread / z_strip).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: a carry to the strip past the left page lands on the right page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+    const float z_spread = rig.view().zoom_pct();
+
+    // The short left page is centred and ends about 661 DIPs down the union.
+    rig.canvas().set_pan(0.0f, -1000.0f);
+    leave_spread(rig);
+    const float z_strip = rig.view().zoom_pct();
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 2);
+    CHECK(at.offset_dip == Approx(1000.0f * z_strip / z_spread).margin(1.0f));
+    CHECK(rig.view().current_page() == 2);
+}
+
+TEST_CASE("PdfCanvas spread: a position past the left page survives two-page on, then off",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.view().set_dual_page(false);
+    rig.view().set_continuous(true);
+    rig.canvas().switch_layout(LayoutKind::Strip, true);
+
+    // Deep in page 2, past where the short left page would end beside it and short
+    // of where the pair's pan stops.
+    Access::strip_scroll_to(rig.canvas(), CarriedPosition{2, 1800.0});
+
+    enter_spread(rig);
+    leave_spread(rig);
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 2);
+    CHECK(at.offset_dip == Approx(1800.0).margin(1.0));
+}
+
+TEST_CASE("PdfCanvas spread: a carry to the strip stays on a left page still at the viewport top",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+    const float z_spread = rig.view().zoom_pct();
+    const float left_top = (kHeight - 400.0f * z_spread) * 0.5f;
+
+    // Inside both pages: the spread's current page, its left one, is the answer.
+    rig.canvas().set_pan(0.0f, -300.0f);
+    leave_spread(rig);
+    const float z_strip = rig.view().zoom_pct();
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 1);
+    CHECK(at.offset_dip == Approx((300.0f - left_top) * z_strip / z_spread).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: a carry to the strip stays on a taller left page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+    const float z_spread = rig.view().zoom_pct();
+
+    // Past the bottom of the short right page beside it.
+    rig.canvas().set_pan(0.0f, -1000.0f);
+    leave_spread(rig);
+    const float z_strip = rig.view().zoom_pct();
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 3);
+    CHECK(at.offset_dip == Approx(1000.0f * z_strip / z_spread).margin(1.0f));
 }
 
 // --- A single page: nothing waits for a right half ---
