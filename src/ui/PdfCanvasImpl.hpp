@@ -207,11 +207,11 @@ struct PdfCanvas::Impl {
     // The page of this spread the strip carried the reader in on, and the pan
     // that carry set. A spread remembers no page and either page of a pair
     // reaches the same pan, so the carry back to the strip asks this one, for as
-    // long as the pan is still that one (spec 7.3). A reader's move ends it by
-    // changing the pan, and any other writer of the pan fails the same way; a
-    // zoom or a resize that leaves the pan alone keeps it. A page turn does not
-    // always change the pan, so change_current_page empties it, as do set_view
-    // and set_dual_page.
+    // long as the pan is still that one (spec 7.3): whatever else writes the pan
+    // need not know about it, and a zoom or a resize that leaves the pan alone
+    // keeps it. A reader can come back to the same pan and so can a page turn, so
+    // reader_pan_y and change_current_page empty it, as do set_view for another
+    // view and set_dual_page.
     struct HeldPage {
         int   page  = 0;
         float pan_y = 0.0f;

@@ -582,16 +582,18 @@ strip").
     carry out takes the held page instead of the two rules above; offset = how far the viewport
     top is below that page's top in the union, clamped to [0, its height]. Only the page is held:
     the offset still comes from the pan, so a position the union clamped comes back clamped, and
-    the round trip stays a measure of the scaling (row 18). (A spread remembers no page and either
-    page of a pair reaches the same pan, so without this every reader on a right page came back
-    to the left page, a whole page away on any document of equal pages.)
-    The hold ends when the pan changes, whoever writes it: a scroll, a wheel notch, a search hit,
-    or a clamp to a smaller extent. It ends at a page change, because a turn and back can land on
-    the same pan, at a tab switch, and at a layout switch; the canvas is shared between tabs and
-    the hold is not part of a tab's state. A zoom or a resize that leaves the pan alone keeps it:
-    the reader has not left the pair, and the offset is measured at the zoom on screen. A reader
-    who scrolls away and back to the very same pan keeps it too: the spread then shows what the
-    carry left, and the pan is all the canvas compares.
+    the FitWidth round trip (row 18 of `scripts/smoke-test.ps1`) stays a measure of the scaling. (A
+    spread remembers no page and either page of a pair reaches the same pan, so without this every
+    reader on a right page above the left page's bottom came back to the left page, a whole page
+    away on any document of equal pages.)
+    The hold ends at a reader's vertical move that moves the pan (a scroll, a wheel notch, the
+    Home or End that scrolls to the top), even one that comes back to the same pan, and whenever
+    anything else leaves another pan: a search hit, or a clamp to a smaller extent. It ends at a
+    page change, because a turn and back can land on the same pan, at a switch to another tab, and
+    at a layout switch; the canvas is shared between tabs and the hold is not part of a tab's
+    state. A zoom or a resize that leaves the pan alone keeps it: the reader has not left the pair,
+    and the offset is measured at the zoom on screen. A sideways step keeps it as well: the hold
+    answers for the vertical position, and pan_x plays no part in the carry out of a spread.
   - **From the strip.** page = the derived current page; offset = viewport top − `top(page)`,
     clamped to [0, the page's height].
   - **Into the strip.** `scroll_y = anchor(page)` when the offset is 0, else `top(page) + offset` (the offset is measured from the page's top). A page that fits lands exactly where
@@ -889,7 +891,8 @@ two runs per layout; the paged arm ends at page 11's top after 10 PgDn, the stri
   and leaves it standing.
 - A round trip keeps the page, not always the place in it: the offset comes back from the pan, and
   a spread that fits the viewport has no pan, so the reader returns to the top of the page they
-  were on (§7.3). Holding the offset as well would hide the clamp row 18 measures the scaling with.
+  were on (§7.3). Holding the offset as well would hide the clamp the FitWidth round trip (row 18 of
+  `scripts/smoke-test.ps1`) measures the scaling with.
 - A switch out of a spread in the one render between a page turn and its landing keeps the page
   the turn asked for, but not its top or bottom: the offset comes from the outgoing pair's pan,
   clamped to the left page (§7.3).

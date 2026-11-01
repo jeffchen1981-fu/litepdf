@@ -1555,6 +1555,51 @@ TEST_CASE("PdfCanvas spread: a wheel notch ends the carried page",
     CHECK(Access::strip_position(rig.canvas()).page == 1);
 }
 
+TEST_CASE("PdfCanvas spread: a notch away and back ends the carried page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    // At the top of the pair, where the pan's stop brings the reader back exactly.
+    enter_spread_from(rig, 2, 0.0);
+    rig.kick(1);
+    rig.land_both();
+    Access::wheel(rig.canvas(), -WHEEL_DELTA);
+    Access::wheel(rig.canvas(), WHEEL_DELTA);
+    REQUIRE(rig.pan_y() == 0.0f);
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 1);
+}
+
+TEST_CASE("PdfCanvas spread: a step that moves nothing keeps the carried page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 2, 0.0);
+    rig.kick(1);
+    rig.land_both();
+    // Up from the top of the pair: the clamp leaves the pan where it was.
+    Access::pan_by(rig.canvas(), 0.0f, 40.0f);
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 2);
+}
+
+TEST_CASE("PdfCanvas spread: a sideways step keeps the carried page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 2, 300.0);
+    rig.kick(1);
+    rig.land_both();
+    REQUIRE(rig.view().zoom_in());
+    REQUIRE(rig.view().zoom_in());
+    rig.kick(1);
+    rig.land_both();
+    Access::pan_by(rig.canvas(), -40.0f, 0.0f);
+    REQUIRE(rig.pan_x() != 0.0f);
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 2);
+}
+
 TEST_CASE("PdfCanvas spread: a hit off screen ends the carried page",
           "[ui][canvas][spread]") {
     Rig rig;
@@ -1603,18 +1648,32 @@ TEST_CASE("PdfCanvas spread: a tab switch ends the carried page",
           "[ui][canvas][spread]") {
     Rig rig;
     enter_spread_from(rig, 2, 0.0);
+    // Through another view: the tab already shown is no switch.
+    rig.canvas().set_view(nullptr);
     rig.reenter(0.0f);
     leave_spread(rig);
 
     CHECK(Access::strip_position(rig.canvas()).page == 1);
 }
 
+TEST_CASE("PdfCanvas spread: choosing the tab already shown keeps the carried page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 2, 300.0);
+    rig.kick(1);
+    rig.land_both();
+    rig.reenter(rig.pan_y());
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 2);
+}
+
 TEST_CASE("PdfCanvas spread: a spell in single page ends the carried page",
           "[ui][canvas][spread]") {
     Rig rig;
     enter_spread_from(rig, 2, 0.0);
-    // The preference turned off while the spread showed: two-page off then goes to
-    // the single page, and back on, by set_dual_page alone.
+    // Two-page off and back on by set_dual_page alone, the path with Continuous
+    // Scroll off, which leaves no carry to replace the hold.
     rig.view().set_dual_page(false);
     rig.canvas().set_dual_page(false);
     rig.view().set_dual_page(true);

@@ -15,8 +15,7 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   the page before when you have scrolled past the end of a shorter left page into
   a taller right page. You stay at that place on the right page (#197).
 - In continuous scroll, turning a two-page spread on and straight back off no longer
-  moves you from a right page to the page before it. You come back to the page you
-  were reading, unless you scrolled or turned the page in between.
+  moves you from a right page to the page before it (#197).
 
 ## [1.8.1] — 2026-11-01 — Damaged pages no longer crash the app
 
