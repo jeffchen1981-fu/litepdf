@@ -208,8 +208,9 @@ struct PdfCanvas::Impl {
     // remembers no page and either page of a pair reaches the same pan, so the
     // carry back to the strip asks this one until the reader moves (spec 7.3): a
     // pan the reader's own step changes (reader_pan_y), an anchor that names a
-    // place (set_pending_anchor), a page change, another view, set_dual_page. A
-    // clamp, a zoom or a resize is not a move, whatever it does to the pan.
+    // place (set_pending_anchor, which every move to another pair installs),
+    // another view, set_dual_page. A clamp, a zoom or a resize is not a move,
+    // whatever it does to the pan.
     std::optional<int>            held_page;
 
     // --- Phase 7 Task 7: page-change observer ---

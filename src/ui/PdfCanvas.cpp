@@ -370,7 +370,6 @@ bool PdfCanvas::change_current_page(int idx) {
     if (!impl_ || !impl_->view) return false;
     const bool changed = impl_->view->set_current_page(idx);
     if (changed) {
-        impl_->held_page.reset();
         // A selection is bound to one page (spec §1). A drag that outlived its
         // page would extend the old page's text with the new page's geometry.
         cancel_gesture();

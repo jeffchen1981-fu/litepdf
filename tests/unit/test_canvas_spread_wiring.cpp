@@ -1647,6 +1647,22 @@ TEST_CASE("PdfCanvas spread: a hit waiting for its slot ends the carried page",
     CHECK(Access::strip_position(rig.canvas()).page == 1);
 }
 
+TEST_CASE("PdfCanvas spread: a click on the pair on screen keeps the carried page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 2, 300.0);
+    rig.kick(1);
+    rig.land_both();
+    // MainWindow::navigate_click on the right page: no anchor, and the kick snaps
+    // the current page back to the left one.
+    REQUIRE(rig.canvas().change_current_page(2));
+    rig.kick(2);
+    rig.land_both();
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 2);
+}
+
 TEST_CASE("PdfCanvas spread: a hit already on screen keeps the carried page",
           "[ui][canvas][spread]") {
     Rig rig;
