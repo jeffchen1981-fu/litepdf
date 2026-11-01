@@ -45,14 +45,6 @@ inline CarriedPosition carry_from_paged_single(int page, double pan_y,
     return {page, detail::carry_offset(-pan_y - page_origin_y, page_h)};
 }
 
-// Paged spread: measured on the LEFT page alone, whose top sits
-// `left_top_in_union` below the top of the union placement.
-inline CarriedPosition carry_from_spread(int left_page, double pan_y,
-                                         double left_top_in_union,
-                                         double left_h) noexcept {
-    return {left_page, detail::carry_offset(-pan_y - left_top_in_union, left_h)};
-}
-
 // Strip: page is the derived current page (or the pinned one).
 inline CarriedPosition carry_from_strip(const StripLayout& l, int page,
                                         double scroll_y) {
@@ -121,6 +113,20 @@ inline SpreadVertical spread_vertical(double left_h, double right_h,
 // `left_page`. A carry from the strip can name either page of the pair.
 inline double spread_page_top(const SpreadVertical& sv, int page, int left_page) noexcept {
     return page == left_page ? sv.left_top_in_union : sv.right_top_in_union;
+}
+
+// Paged spread: the LEFT page, the spread's current page, until the viewport top
+// has left it. Past its bottom only the right page can hold the position, and it
+// is measured from that page's own top. `right_page < 0` means there is no right
+// page.
+inline CarriedPosition carry_from_spread(int left_page, int right_page, double pan_y,
+                                         const SpreadVertical& sv, double left_h,
+                                         double right_h) noexcept {
+    const double viewport_top = -pan_y;
+    if (right_page >= 0 && viewport_top >= sv.left_top_in_union + left_h) {
+        return {right_page, detail::carry_offset(viewport_top - sv.right_top_in_union, right_h)};
+    }
+    return {left_page, detail::carry_offset(viewport_top - sv.left_top_in_union, left_h)};
 }
 
 }  // namespace litepdf::ui

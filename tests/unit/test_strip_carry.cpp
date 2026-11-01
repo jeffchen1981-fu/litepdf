@@ -50,10 +50,40 @@ TEST_CASE("StripCarry: an overflowing paged page carries how far it is scrolled"
 TEST_CASE("StripCarry: a spread with unequal heights is measured on the left page",
           "[ui][strip]") {
     // The left page's top sits 40 DIP inside the union; scrolled up 140 DIP.
-    const CarriedPosition c = carry_from_spread(6, -140, 40, 500);
+    const SpreadVertical sv{40, 0, 800};
+    const CarriedPosition c = carry_from_spread(6, 7, -140, sv, 500, 800);
     CHECK(c.page == 6);
     CHECK(c.offset_dip == Approx(100.0));
     CHECK(spread_pan_y_for(c, 40, 800, 600) == Approx(-140.0f));
+}
+
+TEST_CASE("StripCarry: a spread past its left page is measured on the right page",
+          "[ui][strip]") {
+    // The left page spans 40 to 540 of the union, the right one all of it.
+    const SpreadVertical sv{40, 0, 800};
+
+    CHECK(carry_from_spread(6, 7, -539, sv, 500, 800).page == 6);
+
+    // At the left page's bottom nothing of it is left on screen.
+    const CarriedPosition at_bottom = carry_from_spread(6, 7, -540, sv, 500, 800);
+    CHECK(at_bottom.page == 7);
+    CHECK(at_bottom.offset_dip == Approx(540.0));
+
+    // Back in: the same pan, from the right page's own top.
+    const CarriedPosition past = carry_from_spread(6, 7, -700, sv, 500, 800);
+    CHECK(past.page == 7);
+    CHECK(past.offset_dip == Approx(700.0));
+    CHECK(spread_pan_y_for(past, sv.right_top_in_union, 800, 100) == Approx(-700.0f));
+
+    // A pan past the union stops at the right page's bottom.
+    CHECK(carry_from_spread(6, 7, -5000, sv, 500, 800).offset_dip == Approx(800.0));
+}
+
+TEST_CASE("StripCarry: a spread with no right page stays on its left page", "[ui][strip]") {
+    const SpreadVertical sv{0, 0, 500};
+    const CarriedPosition c = carry_from_spread(0, -1, -5000, sv, 500, 0);
+    CHECK(c.page == 0);
+    CHECK(c.offset_dip == Approx(500.0));
 }
 
 TEST_CASE("StripCarry: offsets clamp to the page", "[ui][strip]") {
@@ -68,7 +98,7 @@ TEST_CASE("StripCarry: offsets clamp to the page", "[ui][strip]") {
 
     // The paged forms clamp the same way.
     CHECK(carry_from_paged_single(0, -5000, 0, 1000).offset_dip == Approx(1000.0));
-    CHECK(carry_from_spread(0, 30, 40, 500).offset_dip == 0.0);
+    CHECK(carry_from_spread(0, -1, 30, SpreadVertical{40, 0, 500}, 500, 0).offset_dip == 0.0);
 }
 
 TEST_CASE("StripCarry: the carried scroll and pan clamp to what they land in",

@@ -9,6 +9,12 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+### Fixed
+
+- In continuous scroll, turning a two-page spread off no longer sends you back to
+  the page before when you have scrolled past the end of a shorter left page into
+  a taller right page. You stay at that place on the right page (#197).
+
 ## [1.8.1] — 2026-11-01 — Damaged pages no longer crash the app
 
 ### Fixed
