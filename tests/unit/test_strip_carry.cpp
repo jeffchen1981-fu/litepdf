@@ -103,6 +103,17 @@ TEST_CASE("StripCarry: a spread's held page is measured from its own top", "[ui]
     CHECK(carry_from_spread_on(6, 6, -20, sv, 500).offset_dip == 0.0);
 }
 
+TEST_CASE("StripCarry: a spread's held page at its top measures exactly zero",
+          "[ui][strip]") {
+    // No float holds this top, and the pan is a float. Offset 0 is what lands the
+    // strip on the page's anchor, 8 DIP above where any other offset starts.
+    const double top = 188.3;
+    const SpreadVertical sv{0, top, 800};
+    const float pan = spread_pan_y_for(CarriedPosition{7, 0.0}, top, 800, 100);
+
+    CHECK(carry_from_spread_on(7, 6, pan, sv, 400).offset_dip == 0.0);
+}
+
 TEST_CASE("StripCarry: offsets clamp to the page", "[ui][strip]") {
     const StripLayout l = tall_strip();
 

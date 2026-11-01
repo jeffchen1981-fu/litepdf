@@ -887,6 +887,9 @@ two runs per layout; the paged arm ends at page 11's top after 10 PgDn, the stri
   One notch away from it is enough to end that. A click or Ctrl+G on the right page of the pair on
   screen ends it too, as a page change the kick snaps back; one on the left page changes nothing
   and leaves it standing.
+- A round trip keeps the page, not always the place in it: the offset comes back from the pan, and
+  a spread that fits the viewport has no pan, so the reader returns to the top of the page they
+  were on (§7.3). Holding the offset as well would hide the clamp row 18 measures the scaling with.
 - A switch out of a spread in the one render between a page turn and its landing keeps the page
   the turn asked for, but not its top or bottom: the offset comes from the outgoing pair's pan,
   clamped to the left page (§7.3).
