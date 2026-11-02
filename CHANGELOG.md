@@ -9,13 +9,19 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+## [1.8.2] — 2026-11-02 — In continuous scroll, two-page on and straight back off keeps you on a right page
+
 ### Fixed
 
-- In continuous scroll, turning a two-page spread off no longer sends you back to
-  the page before when you have scrolled past the end of a shorter left page into
-  a taller right page. You stay at that place on the right page (#197).
 - In continuous scroll, turning a two-page spread on and straight back off no longer
-  moves you from a right page to the page before it (#197).
+  moves you off a right page. You used to land on the page before it, or, far enough
+  down a right page taller than its left page, at the top of the right page with the
+  page number one page back (#197).
+- In continuous scroll, when you have scrolled in a two-page spread until the end of
+  a shorter left page has gone off the top of the window, turning the spread off now
+  keeps your place on the taller right page. It used to take you to the top of that
+  page, with the page number one page back. If you scrolled less far, you still
+  return to the left page (#197).
 
 ## [1.8.1] — 2026-11-01 — Damaged pages no longer crash the app
 
@@ -807,7 +813,7 @@ and Phase 12 (release hardening: crash-safe session restore).
 
 [Compare initial commit…0.0.1-phase0](https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.1-phase0)
 
-[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.8.1...HEAD
+[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.8.2...HEAD
 [0.0.12-phase10]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.12-phase10
 [0.0.11-phase9]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.11-phase9
 [0.0.10-phase8.5]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.10-phase8.5
