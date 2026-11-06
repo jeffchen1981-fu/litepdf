@@ -320,7 +320,8 @@ CarriedPosition PdfCanvas::capture_layout_carry(double& pan_before) {
         const double left_h  = page_h_dip(sizes, left, zoom);
         const double right_h = page_h_dip(sizes, right, zoom);
         // Where the strip carried the reader in: the pan alone cannot say which
-        // page of the pair that was. It answers while the viewport top is on it.
+        // page of the pair that was. It answers until the viewport top passes its
+        // bottom.
         if (impl_->held_page) {
             return carry_from_spread_held(*impl_->held_page, left, right, pan_y, sv, left_h,
                                           right_h);

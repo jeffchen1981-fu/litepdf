@@ -1638,6 +1638,36 @@ TEST_CASE("PdfCanvas spread: a scroll back onto the carried page returns to it",
     CHECK(at.offset_dip == Approx(50.0).margin(1.0));
 }
 
+// End and PgDn in the last pair of an odd document name its right page, the pair
+// already on screen: they go to its top and leave the pair as they found it.
+TEST_CASE("PdfCanvas spread: End in the last pair keeps the carried page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 4, 50.0);
+    rig.kick(3);
+    rig.land_both();
+    Access::key(rig.canvas(), VK_END);
+    CHECK(rig.pan_y() == 0.0f);
+    leave_spread(rig);
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 4);
+    CHECK(at.offset_dip == 0.0);
+}
+
+TEST_CASE("PdfCanvas spread: PgDn in the last pair keeps the carried page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 4, 50.0);
+    rig.kick(3);
+    rig.land_both();
+    Access::key(rig.canvas(), VK_NEXT);
+    CHECK(rig.pan_y() == 0.0f);
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 4);
+}
+
 TEST_CASE("PdfCanvas spread: a step that moves nothing keeps the carried page",
           "[ui][canvas][spread]") {
     Rig rig;

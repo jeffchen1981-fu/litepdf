@@ -2064,6 +2064,12 @@ LRESULT PdfCanvas::on_key_down(WPARAM key) {
                 const int total    = impl_->view->page_count();
                 const int cur_left = dual_page_compute_left(cur, total);
                 next = dual_page_step_next_left(cur_left, total);
+                // The last pair of an odd document clamps to its own right
+                // page: no pair follows, so go to the top of this one without
+                // an anchor, which would end the page the strip carried in (#211).
+                if (next != cur && dual_page_compute_left(next, total) == cur_left) {
+                    return scroll_to_top();
+                }
             } else {
                 next = std::min(cur + 1, max_idx);
             }
@@ -2098,7 +2104,14 @@ LRESULT PdfCanvas::on_key_down(WPARAM key) {
             navigate_to_page(0, PageAnchor::top());
             return 0;
         case VK_END:
+            // In a spread, the last page can be the right page of the pair on
+            // screen: that is the top of this pair, as PgDn there (#211).
             if (cur == max_idx) return scroll_to_top();
+            if (impl_->dual_page &&
+                dual_page_compute_left(max_idx, max_idx + 1) ==
+                    dual_page_compute_left(cur, max_idx + 1)) {
+                return scroll_to_top();
+            }
             navigate_to_page(max_idx, PageAnchor::top());
             return 0;
         // Arrow keys pan by 100 DIP, clamped to the content.

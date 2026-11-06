@@ -117,7 +117,8 @@ TEST_CASE("StripCarry: a spread's held page answers while the viewport top is on
     CHECK(carry_from_spread_held(7, 6, 7, -650, sv, 1600, 500).page == 7);
     CHECK(carry_from_spread_held(7, 6, 7, -650.0001, sv, 1600, 500).page == 7);
 
-    // Past it only the left page holds the position.
+    // Past it only the left page holds the position, from the first whole DIP on.
+    CHECK(carry_from_spread_held(7, 6, 7, -651, sv, 1600, 500).page == 6);
     const CarriedPosition past = carry_from_spread_held(7, 6, 7, -700, sv, 1600, 500);
     CHECK(past.page == 6);
     CHECK(past.offset_dip == Approx(700.0));
