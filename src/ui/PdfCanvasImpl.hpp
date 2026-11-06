@@ -204,12 +204,13 @@ struct PdfCanvas::Impl {
     // the incoming one lands.
     std::uint64_t                 right_bitmap_epoch = 0;
     int                           right_bitmap_page  = -1;
-    // The page of this spread the strip carried the reader in on. A spread
+    // The page of this spread the strip carried the reader in on, or the page of
+    // the last search hit that was not already on screen (#214). A spread
     // remembers no page and either page of a pair reaches the same pan, so the
     // carry back to the strip asks this one, while the viewport top is on it, until
     // the reader leaves the pair (spec 7.3, #211): an anchor that names a place
-    // (set_pending_anchor, which every move to another pair installs), another
-    // view, set_dual_page. A scroll inside the pair, a clamp, a zoom or a resize
+    // other than a hit (set_pending_anchor, which every move to another pair
+    // installs), another view, set_dual_page. A scroll inside the pair, a clamp, a zoom or a resize
     // is no such move, whatever it does to the pan.
     std::optional<int>            held_page;
 

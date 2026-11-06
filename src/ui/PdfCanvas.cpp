@@ -382,7 +382,14 @@ bool PdfCanvas::change_current_page(int idx) {
 
 void PdfCanvas::set_pending_anchor(PageAnchor anchor) {
     if (!impl_) return;
-    if (anchor.kind != PageAnchor::Kind::None) impl_->held_page.reset();
+    if (anchor.kind == PageAnchor::Kind::Hit && impl_->dual_page && !impl_->strip) {
+        // A hit in a spread names its page, which the pan cannot: either page of
+        // the pair reaches the same pan. The carry out then agrees with where the
+        // reader was sent (#214). scroll_into_view has made the hit's pair current.
+        impl_->held_page = static_cast<int>(anchor.target.page);
+    } else if (anchor.kind != PageAnchor::Kind::None) {
+        impl_->held_page.reset();
+    }
     impl_->anchor.install(std::move(anchor));
 }
 

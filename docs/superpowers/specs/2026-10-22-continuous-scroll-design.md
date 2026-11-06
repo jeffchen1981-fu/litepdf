@@ -577,8 +577,10 @@ strip").
     page of the pair would move a reader who had not scrolled at all onto the next page. A page
     turn still landing also stays on the left page: its anchor has not set the pan yet, so the
     pan is the outgoing pair's and says nothing about this pair's right page.)
-  - **From paged spread, when the strip carried the reader in.** The carry into a spread holds
-    the carried page, left or right, until the reader leaves the pair. While it stands and the
+  - **From paged spread, when the strip carried the reader in or a search hit sent them.** The
+    carry into a spread holds the carried page, left or right, until the reader leaves the pair. A
+    search hit that is not already on screen holds the hit's page in its place, in its own pair,
+    whether or not a page was held before (#214). While it stands and the
     viewport top is no further down than the held page's bottom (half a DIP of slack: the pan is a
     float), the carry out takes the held page instead of the two rules above; offset = how far the
     viewport top is below that page's top in the union, clamped to [0, its height]. Past the held
@@ -588,9 +590,11 @@ strip").
     the FitWidth round trip (row 18 of `scripts/smoke-test.ps1`) stays a measure of the scaling. (A
     spread remembers no page and either page of a pair reaches the same pan, so without this every
     reader on a right page above the left page's bottom came back to the left page, a whole page
-    away on any document of equal pages.)
-    The hold ends at a search hit that is not already on screen, at a move to another pair, at a
-    switch to another tab, and at a layout switch. The canvas is shared between tabs and the hold
+    away on any document of equal pages.) A held right page is measured by its own height even
+    while a page turn or a hit is still landing: the rule above that keeps a landing on the left
+    page is about the pan, and the held page does not come from the pan.
+    The hold ends at a move to another pair by any route but a search hit (a page turn, Home, End,
+    Ctrl+G), at a switch to another tab, and at a layout switch. The canvas is shared between tabs and the hold
     is not part of a tab's state. A vertical step inside the pair keeps it (a scroll, a wheel notch,
     the Home or End that scrolls to the top, and the End or PgDn that names the right page of an odd
     document's last pair on screen, whose Top anchor takes the reader to that pair's top and replaces
@@ -894,12 +898,11 @@ two runs per layout; the paged arm ends at page 11's top after 10 PgDn, the stri
   that fails would leave the spread's input dead.
 - A reader who reached a spread by turning pages, or left it and came back, is on its left page:
   two-page off from there lands on the right page only once the viewport top has passed the left
-  page's bottom (§7.3, #197). Only a carry from the strip names a page, and only until the reader
-  leaves the pair (#211). A spread has one position for both pages, so a reader who came from the
-  right page returns to it after reading the left page beside it, and a click or Ctrl+G on the
-  left page of the pair on screen does not change that either. A search hit off screen ends the
-  hold even when it is on the held page: the reader then returns to the left page above its
-  bottom.
+  page's bottom (§7.3, #197). Only a carry from the strip or a search hit off screen names a page,
+  and only until the reader leaves the pair (#211, #214). A spread has one position for both
+  pages, so a reader who came from the right page returns to it after reading the left page beside
+  it, and a click or Ctrl+G on the left page of the pair on screen does not change that either. A
+  hit already on screen names nothing: it moves nothing, and the hold stays as it was.
 - A round trip keeps the page, not always the place in it: the offset comes back from the pan, and
   a spread that fits the viewport has no pan, so the reader returns to the top of the page they
   were on (§7.3). Holding the offset as well would hide the clamp the FitWidth round trip (row 18 of
