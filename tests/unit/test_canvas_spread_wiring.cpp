@@ -123,6 +123,7 @@ constexpr int kHeight = 850;
 
 constexpr const char* kPairs   = "tests/fixtures/spread-pairs.pdf";
 constexpr const char* kDamaged = "tests/fixtures/damaged-pages.pdf";
+constexpr const char* kLarge   = "tests/fixtures/large.pdf";
 
 Document open_fixture(const char* path) {
     Document doc;
@@ -1671,18 +1672,20 @@ TEST_CASE("PdfCanvas spread: PgDn in the last pair keeps the carried page",
 }
 
 // An even document ends on a lone page with no partner: large.pdf's 500th page,
-// index 499, is its own pair. PgDn there has nowhere to go.
-constexpr const char* kLarge = "tests/fixtures/large.pdf";
+// index 499, is its own pair. PgDn there has nowhere to go. The canvas is 400
+// high so the page (792 pt, about 642 DIP at the slot's FitWidth) overflows it
+// and a reader can really be scrolled down it.
+constexpr int kShortHeight = 400;
 
 TEST_CASE("PdfCanvas spread: PgDn on an even document's lone last page moves nothing",
           "[ui][canvas][spread]") {
-    Rig rig(kWidth, kHeight, Layout::Spread, kLarge);
+    Rig rig(kWidth, kShortHeight, Layout::Spread, kLarge);
     Access::navigate(rig.canvas(), 499);
     rig.land_left();
     REQUIRE(rig.view().current_page() == 499);
-    rig.canvas().set_pan(0.0f, -100.0f);
+    Access::pan_by(rig.canvas(), 0.0f, -100.0f);
     const float pan = rig.pan_y();
-    REQUIRE(pan < 0.0f);
+    REQUIRE(pan == -100.0f);
     ID2D1Bitmap* const shown = Access::left_bitmap(rig.canvas());
 
     Access::key(rig.canvas(), VK_NEXT);
@@ -1695,11 +1698,11 @@ TEST_CASE("PdfCanvas spread: PgDn on an even document's lone last page moves not
 
 TEST_CASE("PdfCanvas spread: End on an even document's lone last page goes to its top",
           "[ui][canvas][spread]") {
-    Rig rig(kWidth, kHeight, Layout::Spread, kLarge);
+    Rig rig(kWidth, kShortHeight, Layout::Spread, kLarge);
     Access::navigate(rig.canvas(), 499);
     rig.land_left();
-    rig.canvas().set_pan(0.0f, -100.0f);
-    REQUIRE(rig.pan_y() < 0.0f);
+    Access::pan_by(rig.canvas(), 0.0f, -100.0f);
+    REQUIRE(rig.pan_y() == -100.0f);
     ID2D1Bitmap* const shown = Access::left_bitmap(rig.canvas());
 
     Access::key(rig.canvas(), VK_END);
