@@ -1670,6 +1670,45 @@ TEST_CASE("PdfCanvas spread: PgDn in the last pair keeps the carried page",
     CHECK(Access::strip_position(rig.canvas()).page == 4);
 }
 
+// An even document ends on a lone page with no partner: large.pdf's 500th page,
+// index 499, is its own pair. PgDn there has nowhere to go.
+constexpr const char* kLarge = "tests/fixtures/large.pdf";
+
+TEST_CASE("PdfCanvas spread: PgDn on an even document's lone last page moves nothing",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Spread, kLarge);
+    Access::navigate(rig.canvas(), 499);
+    rig.land_left();
+    REQUIRE(rig.view().current_page() == 499);
+    rig.canvas().set_pan(0.0f, -100.0f);
+    const float pan = rig.pan_y();
+    REQUIRE(pan < 0.0f);
+    ID2D1Bitmap* const shown = Access::left_bitmap(rig.canvas());
+
+    Access::key(rig.canvas(), VK_NEXT);
+
+    // A navigation would have dropped the bitmap to render the pair again.
+    CHECK(Access::left_bitmap(rig.canvas()) == shown);
+    CHECK(rig.view().current_page() == 499);
+    CHECK(rig.pan_y() == pan);
+}
+
+TEST_CASE("PdfCanvas spread: End on an even document's lone last page goes to its top",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Spread, kLarge);
+    Access::navigate(rig.canvas(), 499);
+    rig.land_left();
+    rig.canvas().set_pan(0.0f, -100.0f);
+    REQUIRE(rig.pan_y() < 0.0f);
+    ID2D1Bitmap* const shown = Access::left_bitmap(rig.canvas());
+
+    Access::key(rig.canvas(), VK_END);
+
+    CHECK(Access::left_bitmap(rig.canvas()) == shown);
+    CHECK(rig.view().current_page() == 499);
+    CHECK(rig.pan_y() == 0.0f);
+}
+
 TEST_CASE("PdfCanvas spread: End in the last pair replaces an anchor still landing",
           "[ui][canvas][spread]") {
     Rig rig;
