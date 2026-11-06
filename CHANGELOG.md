@@ -9,6 +9,14 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+### Fixed
+
+- In continuous scroll, scrolling inside a two-page spread you turned on from a right
+  page no longer loses that page when you turn the spread off. One notch of the wheel
+  used to take you back to the left page, one page before. If you scroll past the end
+  of the right page, onto the part only the left page covers, you land on the left
+  page (#211).
+
 ## [1.8.2] — 2026-11-02 — In continuous scroll, two-page on and straight back off keeps you on a right page
 
 ### Fixed

@@ -139,4 +139,21 @@ inline CarriedPosition carry_from_spread_on(int page, int left_page, double pan_
     return {page, detail::carry_offset(-pan_y - top, page_h)};
 }
 
+// Paged spread, with the page the strip carried the reader in on (spec 7.3, #211):
+// that page while the viewport top is still on it, wherever the reader has scrolled
+// inside the pair. Past its bottom only the other page of the pair can hold the
+// position, so carry_from_spread answers. `held` is the held page, `held_h` its
+// height. Half a DIP of slack: a carry in at the held page's bottom comes back
+// through a float pan.
+inline CarriedPosition carry_from_spread_held(int held, int left_page, int right_page,
+                                              double pan_y, const SpreadVertical& sv,
+                                              double left_h, double right_h) noexcept {
+    const double held_h = held == left_page ? left_h : right_h;
+    const double top = static_cast<float>(spread_page_top(sv, held, left_page));
+    if (-pan_y <= top + held_h + 0.5) {
+        return carry_from_spread_on(held, left_page, pan_y, sv, held_h);
+    }
+    return carry_from_spread(left_page, right_page, pan_y, sv, left_h, right_h);
+}
+
 }  // namespace litepdf::ui

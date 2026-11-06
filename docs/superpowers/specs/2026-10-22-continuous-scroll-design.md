@@ -578,18 +578,24 @@ strip").
     turn still landing also stays on the left page: its anchor has not set the pan yet, so the
     pan is the outgoing pair's and says nothing about this pair's right page.)
   - **From paged spread, when the strip carried the reader in.** The carry into a spread holds
-    the carried page, left or right, until the reader moves. While it stands, the carry out takes
-    the held page instead of the two rules above; offset = how far the viewport top is below that
-    page's top in the union, clamped to [0, its height]. Only the page is held: the offset still
+    the carried page, left or right, until the reader leaves the pair. While it stands and the
+    viewport top is no further down than the held page's bottom (half a DIP of slack: the pan is a
+    float), the carry out takes the held page instead of the two rules above; offset = how far the
+    viewport top is below that page's top in the union, clamped to [0, its height]. Past the held
+    page's bottom only the other page of the pair holds the position, so the two rules above
+    answer; a scroll back onto the held page makes it the answer again (#211). Only the page is held: the offset still
     comes from the pan, so a position the union clamped comes back clamped, and
     the FitWidth round trip (row 18 of `scripts/smoke-test.ps1`) stays a measure of the scaling. (A
     spread remembers no page and either page of a pair reaches the same pan, so without this every
     reader on a right page above the left page's bottom came back to the left page, a whole page
     away on any document of equal pages.)
-    The hold ends at a vertical step that moves the pan (a scroll, a wheel notch, the Home or End
-    that scrolls to the top), at a search hit that is not already on screen, at a move to another
-    pair, at a switch to another tab, and at a layout switch. The canvas is shared between tabs and
-    the hold is not part of a tab's state. A step that moves nothing keeps it, and so does a hit
+    The hold ends at a search hit that is not already on screen, at a move to another pair, at a
+    switch to another tab, and at a layout switch. The canvas is shared between tabs and the hold
+    is not part of a tab's state. A vertical step inside the pair keeps it (a scroll, a wheel notch,
+    the Home or End that scrolls to the top): a reader who came from the right page and scrolls is
+    still reading the right page, and one notch used to cost a whole page on any document of equal
+    pages (#211). The cost: a reader who came from the right page and goes on to read the left
+    page beside it returns to the right page. A step that moves nothing keeps it too, and so does a hit
     already on screen, or a click or Ctrl+G on a page of the pair on screen, which moves nothing
     either. A zoom or a resize keeps it too, even where a clamp moves the pan: the reader has not
     left the pair, and the offset is measured at the zoom on screen. A sideways step keeps it as
@@ -884,12 +890,14 @@ two runs per layout; the paged arm ends at page 11's top after 10 PgDn, the stri
   still measures the left page alone (`pan_by`, `on_wheel_scroll`, `on_hwheel_scroll`). Dropping
   that input is not an option: `bitmap_is_stale` lapses when a render succeeds, and a right render
   that fails would leave the spread's input dead.
-- A reader who has moved in a spread, or left it and come back, is on its left page again: two-page
-  off from there lands on the right page only once the viewport top has passed the left page's
-  bottom (§7.3, #197). Only a carry from the strip names a page, and only until the reader moves.
-  One notch is enough to end that, even a notch back again. A click or Ctrl+G on the other page of
-  the pair on screen does not end it: a spread has one position for both pages, so asking for the
-  left page there still returns a reader who came from the right one to the right one.
+- A reader who reached a spread by turning pages, or left it and came back, is on its left page:
+  two-page off from there lands on the right page only once the viewport top has passed the left
+  page's bottom (§7.3, #197). Only a carry from the strip names a page, and only until the reader
+  leaves the pair (#211). A spread has one position for both pages, so a reader who came from the
+  right page returns to it after reading the left page beside it, and a click or Ctrl+G on the
+  left page of the pair on screen does not change that either. A search hit off screen ends the
+  hold even when it is on the held page: the reader then returns to the left page above its
+  bottom.
 - A round trip keeps the page, not always the place in it: the offset comes back from the pan, and
   a spread that fits the viewport has no pan, so the reader returns to the top of the page they
   were on (§7.3). Holding the offset as well would hide the clamp the FitWidth round trip (row 18 of

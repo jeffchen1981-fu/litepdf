@@ -1909,8 +1909,9 @@ void PdfCanvas::left_half_failed(std::uint64_t seq) {
 }
 
 void PdfCanvas::reader_pan_y(float y) {
+    // A step inside the pair keeps held_page (#211): the page the strip carried
+    // in on is still the reader's, and the carry out measures the pan against it.
     if (y != impl_->pan_y) {
-        impl_->held_page.reset();
         if (impl_->left_failed_seq == impl_->next_seq) {
             set_pending_anchor(PageAnchor::none());
         }
