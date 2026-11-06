@@ -1639,7 +1639,7 @@ TEST_CASE("PdfCanvas spread: a scroll back onto the carried page returns to it",
 }
 
 // End and PgDn in the last pair of an odd document name its right page, the pair
-// already on screen: they go to its top and leave the pair as they found it.
+// already on screen: they go to its top, and the reader has not left the pair.
 TEST_CASE("PdfCanvas spread: End in the last pair keeps the carried page",
           "[ui][canvas][spread]") {
     Rig rig;
@@ -1647,6 +1647,7 @@ TEST_CASE("PdfCanvas spread: End in the last pair keeps the carried page",
     rig.kick(3);
     rig.land_both();
     Access::key(rig.canvas(), VK_END);
+    rig.land_both();
     CHECK(rig.pan_y() == 0.0f);
     leave_spread(rig);
 
@@ -1662,10 +1663,38 @@ TEST_CASE("PdfCanvas spread: PgDn in the last pair keeps the carried page",
     rig.kick(3);
     rig.land_both();
     Access::key(rig.canvas(), VK_NEXT);
+    rig.land_both();
     CHECK(rig.pan_y() == 0.0f);
     leave_spread(rig);
 
     CHECK(Access::strip_position(rig.canvas()).page == 4);
+}
+
+TEST_CASE("PdfCanvas spread: End in the last pair replaces an anchor still landing",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 4, 50.0);
+    rig.kick(3);
+    rig.land_both();
+    // A place asked for earlier, whose render has not landed: End asks for the
+    // top since, and the landing must not take the reader away from it.
+    rig.canvas().set_pending_anchor(PageAnchor::bottom());
+    rig.kick(3);
+    Access::key(rig.canvas(), VK_END);
+    rig.land_both();
+    CHECK(rig.pan_y() == 0.0f);
+}
+
+TEST_CASE("PdfCanvas spread: PgDn in the last pair replaces an anchor still landing",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+    rig.canvas().set_pending_anchor(PageAnchor::bottom());
+    rig.kick(3);
+    Access::key(rig.canvas(), VK_NEXT);
+    rig.land_both();
+    CHECK(rig.pan_y() == 0.0f);
 }
 
 TEST_CASE("PdfCanvas spread: a step that moves nothing keeps the carried page",

@@ -593,7 +593,8 @@ strip").
     switch to another tab, and at a layout switch. The canvas is shared between tabs and the hold
     is not part of a tab's state. A vertical step inside the pair keeps it (a scroll, a wheel notch,
     the Home or End that scrolls to the top, and the End or PgDn that names the right page of an odd
-    document's last pair on screen, which scrolls to that pair's top without an anchor): a reader who came from the right page and scrolls is
+    document's last pair on screen, whose Top anchor takes the reader to that pair's top and replaces
+    one still landing, but names no other pair): a reader who came from the right page and scrolls is
     still reading the right page, and one notch used to cost a whole page on any document of equal
     pages (#211). The cost: a reader who came from the right page and goes on to read the left
     page beside it returns to the right page. A step that moves nothing keeps it too, and so does a hit
