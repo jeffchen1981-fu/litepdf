@@ -139,7 +139,8 @@ inline CarriedPosition carry_from_spread_on(int page, int left_page, double pan_
     return {page, detail::carry_offset(-pan_y - top, page_h)};
 }
 
-// Paged spread, with the page the strip carried the reader in on (spec 7.3, #211):
+// Paged spread, with the page the strip carried the reader in on, or the page of a
+// search hit that was off screen (spec 7.3, #211, #214):
 // that page until the viewport top passes its bottom, wherever the reader has
 // scrolled inside the pair (above a short page's top, at offset 0, with all of it
 // on screen). Past its bottom only the other page of the pair can hold the

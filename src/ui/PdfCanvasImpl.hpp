@@ -209,8 +209,8 @@ struct PdfCanvas::Impl {
     // remembers no page and either page of a pair reaches the same pan, so the
     // carry back to the strip asks this one, while the viewport top is on it, until
     // the reader leaves the pair (spec 7.3, #211): an anchor that names a place
-    // other than a hit (set_pending_anchor, which every move to another pair
-    // installs), another view, set_dual_page. A scroll inside the pair, a clamp, a zoom or a resize
+    // (set_pending_anchor, which every move to another pair installs), except a
+    // hit, which holds its own page instead; another view; set_dual_page. A scroll inside the pair, a clamp, a zoom or a resize
     // is no such move, whatever it does to the pan.
     std::optional<int>            held_page;
 

@@ -591,8 +591,8 @@ strip").
     spread remembers no page and either page of a pair reaches the same pan, so without this every
     reader on a right page above the left page's bottom came back to the left page, a whole page
     away on any document of equal pages.) A held right page is measured by its own height even
-    while a page turn or a hit is still landing: the rule above that keeps a landing on the left
-    page is about the pan, and the held page does not come from the pan.
+    while a hit, or the End or PgDn that stays in the pair, is still landing: the rule above that
+    keeps a landing on the left page is about the pan, and the held page does not come from the pan.
     The hold ends at a move to another pair by any route but a search hit (a page turn, Home, End,
     Ctrl+G), at a switch to another tab, and at a layout switch. The canvas is shared between tabs and the hold
     is not part of a tab's state. A vertical step inside the pair keeps it (a scroll, a wheel notch,
@@ -909,7 +909,10 @@ two runs per layout; the paged arm ends at page 11's top after 10 PgDn, the stri
   `scripts/smoke-test.ps1`) measures the scaling with.
 - A switch out of a spread in the one render between a page turn and its landing keeps the page
   the turn asked for, but not its top or bottom: the offset comes from the outgoing pair's pan,
-  clamped to the left page (§7.3).
+  clamped to the left page (§7.3). A search hit in another pair that has not landed yet is the
+  same case: the hit's page is held, but whether the hold applies is still judged from the
+  outgoing pair's pan, so a reader far down the outgoing pair lands on the new pair's left page
+  (#214).
 
 ## 11. Risk and review
 
