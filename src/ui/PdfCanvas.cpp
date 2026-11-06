@@ -1909,8 +1909,9 @@ void PdfCanvas::left_half_failed(std::uint64_t seq) {
 }
 
 void PdfCanvas::reader_pan_y(float y) {
+    // A step inside the pair keeps held_page (#211): the page the strip carried
+    // in on is still the reader's, and the carry out measures the pan against it.
     if (y != impl_->pan_y) {
-        impl_->held_page.reset();
         if (impl_->left_failed_seq == impl_->next_seq) {
             set_pending_anchor(PageAnchor::none());
         }
@@ -1989,7 +1990,17 @@ void PdfCanvas::navigate_to_page(int target, PageAnchor anchor) {
     // Install BEFORE the page change so an observer that re-enters cannot see a
     // moved page with a stale anchor, and before next_render_seq() below, which
     // is what binds it to this batch.
+    // A target in the pair on screen leaves the pair where it is: End or PgDn in
+    // an odd document's last pair names its right page. The anchor still takes
+    // the reader to the pair's top, replacing one still landing, but the page
+    // the strip carried in stays the reader's (#211).
+    const int  pages     = impl_->view->page_count();
+    const bool same_pair = impl_->dual_page &&
+                           dual_page_compute_left(target, pages) ==
+                               dual_page_compute_left(impl_->view->current_page(), pages);
+    const std::optional<int> held = impl_->held_page;
     set_pending_anchor(std::move(anchor));
+    if (same_pair) impl_->held_page = held;
     change_current_page(target);
 
     HWND target_hwnd = hwnd_;

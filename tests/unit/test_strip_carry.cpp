@@ -103,6 +103,39 @@ TEST_CASE("StripCarry: a spread's held page is measured from its own top", "[ui]
     CHECK(carry_from_spread_on(6, 6, -20, sv, 500).offset_dip == 0.0);
 }
 
+TEST_CASE("StripCarry: a spread's held page answers while the viewport top is on it",
+          "[ui][strip]") {
+    // A short right page centred from 150 to 650 beside a tall left page, 0 to 1600.
+    const SpreadVertical sv{0, 150, 1600};
+
+    // Inside both pages: the held right page, where carry_from_spread says left.
+    const CarriedPosition on = carry_from_spread_held(7, 6, 7, -400, sv, 1600, 500);
+    CHECK(on.page == 7);
+    CHECK(on.offset_dip == Approx(250.0));
+
+    // At the held page's bottom, and a float's error past it: still the held page.
+    CHECK(carry_from_spread_held(7, 6, 7, -650, sv, 1600, 500).page == 7);
+    CHECK(carry_from_spread_held(7, 6, 7, -650.0001, sv, 1600, 500).page == 7);
+
+    // Past it only the left page holds the position, from the first whole DIP on.
+    CHECK(carry_from_spread_held(7, 6, 7, -651, sv, 1600, 500).page == 6);
+    const CarriedPosition past = carry_from_spread_held(7, 6, 7, -700, sv, 1600, 500);
+    CHECK(past.page == 6);
+    CHECK(past.offset_dip == Approx(700.0));
+}
+
+TEST_CASE("StripCarry: a spread's held left page gives way past its bottom",
+          "[ui][strip]") {
+    // The left page spans 40 to 540 of the union, the right one all of it.
+    const SpreadVertical sv{40, 0, 800};
+
+    CHECK(carry_from_spread_held(6, 6, 7, -300, sv, 500, 800).page == 6);
+
+    const CarriedPosition past = carry_from_spread_held(6, 6, 7, -700, sv, 500, 800);
+    CHECK(past.page == 7);
+    CHECK(past.offset_dip == Approx(700.0));
+}
+
 TEST_CASE("StripCarry: a spread's held page at its top measures exactly zero",
           "[ui][strip]") {
     // No float holds this top, and the pan is a float. Offset 0 is what lands the

@@ -1533,33 +1533,43 @@ TEST_CASE("PdfCanvas spread: a resize that clamps the pan keeps the carried page
     CHECK(Access::strip_position(rig.canvas()).page == 4);
 }
 
-// A reader in the spread is back on its current page, the left one (spec 7.3).
+// A reader who scrolls inside the pair keeps the page the strip carried in, while
+// the viewport top is still on it (spec 7.3, #211).
 
-TEST_CASE("PdfCanvas spread: a scroll ends the carried page",
+TEST_CASE("PdfCanvas spread: a scroll inside the pair keeps the carried page",
           "[ui][canvas][spread]") {
     Rig rig;
     enter_spread_from(rig, 2, 300.0);
     rig.kick(1);
     rig.land_both();
+    const float z_spread = rig.view().zoom_pct();
+    const float pan = rig.pan_y();
     Access::pan_by(rig.canvas(), 0.0f, -40.0f);
+    REQUIRE(rig.pan_y() == pan - 40.0f);
     leave_spread(rig);
+    const float z_strip = rig.view().zoom_pct();
 
-    CHECK(Access::strip_position(rig.canvas()).page == 1);
+    // The tall right page's top is the union's top.
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 2);
+    CHECK(at.offset_dip == Approx((40.0f - pan) * z_strip / z_spread).margin(1.0f));
 }
 
-TEST_CASE("PdfCanvas spread: a wheel notch ends the carried page",
+TEST_CASE("PdfCanvas spread: a wheel notch inside the pair keeps the carried page",
           "[ui][canvas][spread]") {
     Rig rig;
     enter_spread_from(rig, 2, 300.0);
     rig.kick(1);
     rig.land_both();
+    const float pan = rig.pan_y();
     Access::wheel(rig.canvas(), -WHEEL_DELTA);
+    REQUIRE(rig.pan_y() < pan);
     leave_spread(rig);
 
-    CHECK(Access::strip_position(rig.canvas()).page == 1);
+    CHECK(Access::strip_position(rig.canvas()).page == 2);
 }
 
-TEST_CASE("PdfCanvas spread: a notch away and back ends the carried page",
+TEST_CASE("PdfCanvas spread: a notch away and back keeps the carried page",
           "[ui][canvas][spread]") {
     Rig rig;
     // At the top of the pair, where the pan's stop brings the reader back exactly.
@@ -1571,7 +1581,120 @@ TEST_CASE("PdfCanvas spread: a notch away and back ends the carried page",
     REQUIRE(rig.pan_y() == 0.0f);
     leave_spread(rig);
 
-    CHECK(Access::strip_position(rig.canvas()).page == 1);
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 2);
+    CHECK(at.offset_dip == 0.0);
+}
+
+TEST_CASE("PdfCanvas spread: a scroll past a short carried page's bottom gives the taller page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    // Page 4, the short right page, is centred beside the tall left page 3: past
+    // its bottom only page 3 holds the viewport top.
+    enter_spread_from(rig, 4, 50.0);
+    rig.kick(3);
+    rig.land_both();
+    Access::pan_by(rig.canvas(), 0.0f, -500.0f);
+    const float z_spread = rig.view().zoom_pct();
+    const float pan = rig.pan_y();
+    REQUIRE(-pan > (kHeight + page_dip(rig.view(), 400.0f)) * 0.5f);
+    leave_spread(rig);
+    const float z_strip = rig.view().zoom_pct();
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 3);
+    CHECK(at.offset_dip == Approx(-pan * z_strip / z_spread).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: a scroll past a carried left page's bottom gives the right page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    // Page 1, the short left page, is centred beside the tall right page 2.
+    enter_spread_from(rig, 1, 100.0);
+    rig.kick(1);
+    rig.land_both();
+    Access::pan_by(rig.canvas(), 0.0f, -600.0f);
+    REQUIRE(-rig.pan_y() > (kHeight + page_dip(rig.view(), 400.0f)) * 0.5f);
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 2);
+}
+
+TEST_CASE("PdfCanvas spread: a scroll back onto the carried page returns to it",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 4, 50.0);
+    rig.kick(3);
+    rig.land_both();
+    const float pan = rig.pan_y();
+    // Off the short page and back: the excursion ends nothing.
+    Access::pan_by(rig.canvas(), 0.0f, -500.0f);
+    Access::pan_by(rig.canvas(), 0.0f, 500.0f);
+    REQUIRE(rig.pan_y() == Approx(pan).margin(0.01f));
+    leave_spread(rig);
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 4);
+    CHECK(at.offset_dip == Approx(50.0).margin(1.0));
+}
+
+// End and PgDn in the last pair of an odd document name its right page, the pair
+// already on screen: they go to its top, and the reader has not left the pair.
+TEST_CASE("PdfCanvas spread: End in the last pair keeps the carried page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 4, 50.0);
+    rig.kick(3);
+    rig.land_both();
+    Access::key(rig.canvas(), VK_END);
+    rig.land_both();
+    CHECK(rig.pan_y() == 0.0f);
+    leave_spread(rig);
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 4);
+    CHECK(at.offset_dip == 0.0);
+}
+
+TEST_CASE("PdfCanvas spread: PgDn in the last pair keeps the carried page",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 4, 50.0);
+    rig.kick(3);
+    rig.land_both();
+    Access::key(rig.canvas(), VK_NEXT);
+    rig.land_both();
+    CHECK(rig.pan_y() == 0.0f);
+    leave_spread(rig);
+
+    CHECK(Access::strip_position(rig.canvas()).page == 4);
+}
+
+TEST_CASE("PdfCanvas spread: End in the last pair replaces an anchor still landing",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 4, 50.0);
+    rig.kick(3);
+    rig.land_both();
+    // A place asked for earlier, whose render has not landed: End asks for the
+    // top since, and the landing must not take the reader away from it.
+    rig.canvas().set_pending_anchor(PageAnchor::bottom());
+    rig.kick(3);
+    Access::key(rig.canvas(), VK_END);
+    rig.land_both();
+    CHECK(rig.pan_y() == 0.0f);
+}
+
+TEST_CASE("PdfCanvas spread: PgDn in the last pair replaces an anchor still landing",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+    rig.canvas().set_pending_anchor(PageAnchor::bottom());
+    rig.kick(3);
+    Access::key(rig.canvas(), VK_NEXT);
+    rig.land_both();
+    CHECK(rig.pan_y() == 0.0f);
 }
 
 TEST_CASE("PdfCanvas spread: a step that moves nothing keeps the carried page",
