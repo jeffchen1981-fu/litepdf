@@ -475,6 +475,11 @@ private:
 
     bool    content_extent(ContentBox& out) const;
 
+    // (#194) The DIP size `page` will render to at the current render scale, sized
+    // from the document, for a half of a spread still landing. False for no page
+    // (page < 0) or a page with no size.
+    bool pending_page_size(int page, float rt_dpi, float& w, float& h) const;
+
     // True when current_bitmap is THIS view's rendering of THIS page, or of the
     // left page of THIS spread. set_view and navigate_to_page's single-page
     // branch both keep painting the outgoing bitmap until the incoming render
@@ -489,6 +494,12 @@ private:
     // True in a spread once both halves are this view's and this pair's, or the
     // left one is and the newest batch's right half failed (#198).
     bool spread_landed() const;
+
+    // (#194) True when the newest batch's right half is in or failed, or the pair
+    // has no right page. spread_landed() keeps no batch term (#198); apply_anchor
+    // asks this as well, so an older render of the right page does not end a
+    // landing.
+    bool right_half_answered() const;
 
     // True when the newest batch failed outright, so no pixmap is due: its single
     // page, or both halves of its pair, or the left half of a pair with no right

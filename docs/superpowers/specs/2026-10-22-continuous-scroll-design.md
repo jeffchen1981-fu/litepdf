@@ -892,10 +892,20 @@ two runs per layout; the paged arm ends at page 11's top after 10 PgDn, the stri
   on that page builds its text synchronously, as in paged mode (§5.2).
 - ~~A carry into a spread whose right page is taller than its left can be cut short~~ Fixed by
   #171: `apply_anchor` no longer re-clamps a `None` anchor until both halves have landed.
-  An arrow key, hand-tool step or wheel notch in the one render between the two completions
-  still measures the left page alone (`pan_by`, `on_wheel_scroll`, `on_hwheel_scroll`). Dropping
-  that input is not an option: `bitmap_is_stale` lapses when a render succeeds, and a right render
-  that fails would leave the spread's input dead.
+  ~~An arrow key, hand-tool step or wheel notch in the one render between the two completions
+  still measures the left page alone~~ Fixed by #194: once this pair's own left bitmap is in, a
+  half still due is sized from `DocumentView::known_page_size` at the render scale, rounded as the
+  worker rounds its pixmap. That is the right half beside the left page, the outgoing pair's right
+  bitmap left out, and after a same-pair re-render (a zoom, a resize) either half while the other
+  one of this batch is in: the slot then still holds the page at the old zoom (`right_bitmap_seq`
+  tells it apart). Before either half of such a re-render is in, both slots are measured as drawn,
+  and a failed half's kept render is measured as drawn. `apply_anchor` still waits for the real
+  bitmaps before it calls a landing final, and now for this batch's right render, not an older
+  one (`right_half_answered`). A reader's move now ends any pending anchor except a Hit
+  no slot has placed yet: the half still to land would place it again and throw the reader back,
+  where the left half already placed it against the sized page. Left as is: a page that cannot be
+  sized is measured as missing until it lands (it most likely fails to render too), and a size
+  lookup that fails is retried on each paint and input in that window.
 - A reader who reached a spread by turning pages, or left it and came back, is on its left page:
   two-page off from there lands on the right page only once the viewport top has passed the left
   page's bottom (§7.3, #197). Only a carry from the strip or a search hit off screen names a page,

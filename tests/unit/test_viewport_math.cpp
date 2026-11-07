@@ -11,6 +11,7 @@ using litepdf::ui::content_overflows;
 using litepdf::ui::pan_y_centring_quad;
 using litepdf::ui::place_bitmap;
 using litepdf::ui::quad_fully_visible;
+using litepdf::ui::rendered_px;
 
 TEST_CASE("ViewportMath bitmap px to dip divides by the render target dpi ratio",
           "[ui][viewport]") {
@@ -19,6 +20,17 @@ TEST_CASE("ViewportMath bitmap px to dip divides by the render target dpi ratio"
     REQUIRE(bitmap_px_to_dip(1000.0f, 192.0f) == Catch::Approx(500.0f));
     // Defensive: a zero or negative dpi must not divide by zero.
     REQUIRE(bitmap_px_to_dip(1000.0f, 0.0f)   == Catch::Approx(1000.0f));
+}
+
+TEST_CASE("ViewportMath rendered px rounds the far edge up as fz_round_rect does",
+          "[ui][viewport]") {
+    REQUIRE(rendered_px(400.0f, 1.0f) == 400.0f);
+    REQUIRE(rendered_px(400.0f, 1.18f) == 472.0f);    // 472.0000x
+    REQUIRE(rendered_px(400.0f, 1.181f) == 473.0f);   // 472.4
+    // Within the 0.001 slack the edge rounds down, as MuPDF's does.
+    REQUIRE(rendered_px(100.0005f, 1.0f) == 100.0f);
+    REQUIRE(rendered_px(0.0f, 2.0f) == 0.0f);
+    REQUIRE(rendered_px(std::numeric_limits<float>::quiet_NaN(), 1.0f) == 0.0f);
 }
 
 TEST_CASE("ViewportMath clamp pan centers content that fits", "[ui][viewport]") {

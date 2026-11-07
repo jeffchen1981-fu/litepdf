@@ -10,12 +10,23 @@
 // ID2D1RenderTarget::GetSize() reports DIPs. bitmap_px_to_dip is the one
 // conversion point; call it on the bitmap extent before anything else here.
 
+#include <cmath>
+
 namespace litepdf::ui {
 
 // Bitmap pixel extent -> render-target DIPs.
 inline float bitmap_px_to_dip(float px, float rt_dpi) noexcept {
     if (!(rt_dpi > 0.0f)) return px;   // also rejects NaN
     return px * 96.0f / rt_dpi;
+}
+
+// (#194) The pixel extent a page `extent_pt` long renders to at `render_scale`:
+// the worker sizes its pixmap with fz_round_rect, which rounds the far edge up
+// past a 0.001 slack. A page's bounds start at 0, so the near edge adds nothing.
+// Lets a half of a spread still landing be measured as its bitmap will be.
+inline float rendered_px(float extent_pt, float render_scale) noexcept {
+    const float px = std::ceil(extent_pt * render_scale - 0.001f);
+    return px > 0.0f ? px : 0.0f;   // also rejects NaN
 }
 
 // Clamp one axis of the pan offset.

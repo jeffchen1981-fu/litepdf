@@ -314,6 +314,10 @@ const std::vector<PageSize>& DocumentView::page_sizes() {
     return impl_->strip_sizes;
 }
 
+std::optional<PageSize> DocumentView::known_page_size(int page) noexcept {
+    return impl_->known_size(page);
+}
+
 DocumentView::ZoomMode DocumentView::zoom_mode() const noexcept {
     return impl_->zm;
 }

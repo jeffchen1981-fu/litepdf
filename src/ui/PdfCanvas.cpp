@@ -563,6 +563,15 @@ bool PdfCanvas::own_right_bitmap() const {
         && impl_->right_bitmap_page == right;
 }
 
+bool PdfCanvas::right_half_answered() const {
+    if (!impl_ || !impl_->view) return false;
+    const int total = impl_->view->page_count();
+    const int left  = dual_page_compute_left(impl_->view->current_page(), total);
+    return dual_page_compute_right(left, total) < 0
+        || (own_right_bitmap() && impl_->right_bitmap_seq == impl_->next_seq)
+        || impl_->right_failed_seq == impl_->next_seq;
+}
+
 bool PdfCanvas::spread_landed() const {
     if (!impl_ || !impl_->view) return false;
     const int total = impl_->view->page_count();
@@ -1432,6 +1441,7 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 impl_->right_bitmap       = std::move(bmp);
                 impl_->right_bitmap_epoch = epoch;
                 impl_->right_bitmap_page  = page;
+                impl_->right_bitmap_seq   = seq;
             } else {
                 impl_->current_bitmap = std::move(bmp);
                 impl_->bitmap_epoch   = epoch;
@@ -1598,6 +1608,16 @@ void PdfCanvas::resubmit_current_page() {
 // half that merely landed first does not: the left one is still coming, and
 // until then there is nothing rendered yet.
 //
+// A half still due is measured from its page's size (#194) once this pair's own
+// left bitmap is in: the right half beside a left page, or the left half beside
+// this batch's right page. What the slot holds meanwhile is not what lands: the
+// outgoing pair's right page, nothing, or this page at the zoom before a re-render.
+// Measuring that would let an arrow key, the hand tool or the wheel cut a pan set
+// for the whole pair, which nothing restores once the page lands, and a notch
+// would turn a pair whose left page fits instead of scrolling it. The outgoing
+// pair's right page is left out. apply_anchor still waits for the real bitmaps
+// before it calls a landing final.
+//
 // Returns false when there is nothing to measure: nothing rendered yet, or a page
 // that failed (newest_batch_failed tells them apart).
 bool PdfCanvas::content_extent(ContentBox& out) const {
@@ -1614,10 +1634,10 @@ bool PdfCanvas::content_extent(ContentBox& out) const {
         h = bitmap_px_to_dip(px.height, rt_dpi);
     };
 
-    float lw = 0.0f, lh = 0.0f;
-    if (!right_alone) dip_size(impl_->current_bitmap.Get(), lw, lh);
     if (!impl_->dual_page) {
-        out = ContentBox{0.0f, 0.0f, lw, lh};
+        float w = 0.0f, h = 0.0f;
+        dip_size(impl_->current_bitmap.Get(), w, h);
+        out = ContentBox{0.0f, 0.0f, w, h};
         return true;
     }
 
@@ -1639,15 +1659,41 @@ bool PdfCanvas::content_extent(ContentBox& out) const {
         return true;
     }
 
+    // This batch's halves (#194). A half is in once its slot holds this batch's
+    // render, and due until then unless it failed.
+    const int  total      = impl_->view ? impl_->view->page_count() : 0;
+    const int  left_page  = impl_->view
+        ? dual_page_compute_left(impl_->view->current_page(), total) : 0;
+    const int  right_page = dual_page_compute_right(left_page, total);
+    const bool own_left   = own_bitmap();
+    const bool own_right  = own_right_bitmap();
+    const bool left_in    = own_left && impl_->bitmap_seq == impl_->next_seq;
+    const bool right_in   = own_right && impl_->right_bitmap_seq == impl_->next_seq;
+    const bool left_due   = !left_in && impl_->left_failed_seq != impl_->next_seq;
+    const bool right_due  = !right_in && impl_->right_failed_seq != impl_->next_seq;
+
+    float lw = 0.0f, lh = 0.0f;
+    if (!(own_left && left_due && right_in
+          && pending_page_size(left_page, rt_dpi, lw, lh))) {
+        dip_size(impl_->current_bitmap.Get(), lw, lh);
+    }
     const Placement le = place_bitmap(lw, lh, slot_w, slot_h, 0.0f, 0.0f);
     float l = left_x0 + le.x;
     float r = left_x0 + le.x + le.w;
     float t = le.y;
     float b = le.y + le.h;
 
-    if (impl_->right_bitmap) {
-        float rw = 0.0f, rh = 0.0f;
+    // Beside a left bitmap of an older batch the right slot's own older render
+    // still counts: neither half of this batch is in, and both slots are measured
+    // as drawn.
+    float rw = 0.0f, rh = 0.0f;
+    bool  has_right = own_left && right_due && (left_in || !own_right)
+        && pending_page_size(right_page, rt_dpi, rw, rh);
+    if (!has_right && impl_->right_bitmap && (!own_left || own_right)) {
         dip_size(impl_->right_bitmap.Get(), rw, rh);
+        has_right = true;
+    }
+    if (has_right) {
         const Placement re = place_bitmap(rw, rh, slot_w, slot_h, 0.0f, 0.0f);
         l = std::min(l, right_x0 + re.x);
         r = std::max(r, right_x0 + re.x + re.w);
@@ -1655,6 +1701,18 @@ bool PdfCanvas::content_extent(ContentBox& out) const {
         b = std::max(b, re.y + re.h);
     }
     out = ContentBox{l, t, std::max(0.0f, r - l), std::max(0.0f, b - t)};
+    return true;
+}
+
+bool PdfCanvas::pending_page_size(int page, float rt_dpi, float& w, float& h) const {
+    if (!impl_ || !impl_->view || page < 0) return false;
+    // A fit zoom has already sized the pair; a custom zoom sizes this one page now.
+    // A page with no size most likely fails to render too, and is left out.
+    const auto size = impl_->view->known_page_size(page);
+    if (!size) return false;
+    const float scale = impl_->view->render_scale();
+    w = bitmap_px_to_dip(rendered_px(size->width_pt,  scale), rt_dpi);
+    h = bitmap_px_to_dip(rendered_px(size->height_pt, scale), rt_dpi);
     return true;
 }
 
@@ -1919,8 +1977,19 @@ void PdfCanvas::reader_pan_y(float y) {
     // A step inside the pair keeps held_page (#211): the page the strip carried
     // in on, or a search hit sent the reader to (#214), is still the reader's, and
     // the carry out measures the pan against it.
-    if (y != impl_->pan_y) {
-        if (impl_->left_failed_seq == impl_->next_seq) {
+    //
+    // A move ends the pending anchor: the reader has gone somewhere else. The pair
+    // can be scrolled before its right half lands (#194), and that half would
+    // place the anchor again, throwing the reader back. It placed nothing the left
+    // half had not: the pan was set against the right page sized from the
+    // document. A Hit whose page has not landed is kept, since nothing has
+    // centred it yet, unless the left half failed (#201): the hit may then never
+    // land, and the reader would be thrown to it later.
+    if (y != impl_->pan_y && impl_->anchor.pending()) {
+        float unused = 0.0f;
+        const bool hit_unplaced = impl_->anchor.kind() == PageAnchor::Kind::Hit
+            && !shown_page_height(static_cast<int>(impl_->anchor.hit_page()), unused);
+        if (impl_->left_failed_seq == impl_->next_seq || !hit_unplaced) {
             set_pending_anchor(PageAnchor::none());
         }
     }
@@ -1938,8 +2007,11 @@ bool PdfCanvas::apply_anchor(const PageAnchor& anchor) {
     // no extent. A left bitmap of this pair from an older batch does not count:
     // this batch's left half is still due, or has failed, and the pair would be
     // final at the old zoom or viewport.
+    // Nor does an older render of the right page (#194): a re-render of the pair
+    // keeps it in the slot until this batch's right half lands or fails.
     const bool extent_final = !impl_->dual_page
-        || (spread_landed() && impl_->bitmap_seq == impl_->next_seq);
+        || (spread_landed() && impl_->bitmap_seq == impl_->next_seq
+            && right_half_answered());
     bool placed = true;
     switch (anchor.kind) {
         case PageAnchor::Kind::Top:

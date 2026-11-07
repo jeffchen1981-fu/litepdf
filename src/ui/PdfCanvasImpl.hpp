@@ -204,6 +204,10 @@ struct PdfCanvas::Impl {
     // the incoming one lands.
     std::uint64_t                 right_bitmap_epoch = 0;
     int                           right_bitmap_page  = -1;
+    // (#194) The batch right_bitmap came from, the counterpart of bitmap_seq. A
+    // same-pair re-render (zoom, resize) keeps the older render in the slot until
+    // this batch's lands; content_extent then sizes the page instead.
+    std::uint64_t                 right_bitmap_seq   = 0;
     // The page of this spread the strip carried the reader in on, or the page of
     // the last search hit that was not already on screen (#214). A spread
     // remembers no page and either page of a pair reaches the same pan, so the
