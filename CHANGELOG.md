@@ -16,6 +16,9 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   used to take you back to the left page, one page before. If you scroll past the end
   of the right page, onto the part only the left page covers, you land on the left
   page (#211).
+- In continuous scroll, when a search takes you to a hit near the top of the right page
+  of a two-page spread, turning the spread off now keeps you on that page. It used to
+  take you to the top of the left page beside it, with the hit off screen (#214).
 
 ## [1.8.2] — 2026-11-02 — In continuous scroll, two-page on and straight back off keeps you on a right page
 

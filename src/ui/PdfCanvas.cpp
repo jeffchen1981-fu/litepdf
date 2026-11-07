@@ -382,7 +382,14 @@ bool PdfCanvas::change_current_page(int idx) {
 
 void PdfCanvas::set_pending_anchor(PageAnchor anchor) {
     if (!impl_) return;
-    if (anchor.kind != PageAnchor::Kind::None) impl_->held_page.reset();
+    if (anchor.kind == PageAnchor::Kind::Hit && impl_->dual_page && !impl_->strip) {
+        // A hit in a spread names its page, which the pan cannot: either page of
+        // the pair reaches the same pan. The carry out then agrees with where the
+        // reader was sent (#214). scroll_into_view has made the hit's pair current.
+        impl_->held_page = static_cast<int>(anchor.target.page);
+    } else if (anchor.kind != PageAnchor::Kind::None) {
+        impl_->held_page.reset();
+    }
     impl_->anchor.install(std::move(anchor));
 }
 
@@ -1910,7 +1917,8 @@ void PdfCanvas::left_half_failed(std::uint64_t seq) {
 
 void PdfCanvas::reader_pan_y(float y) {
     // A step inside the pair keeps held_page (#211): the page the strip carried
-    // in on is still the reader's, and the carry out measures the pan against it.
+    // in on, or a search hit sent the reader to (#214), is still the reader's, and
+    // the carry out measures the pan against it.
     if (y != impl_->pan_y) {
         if (impl_->left_failed_seq == impl_->next_seq) {
             set_pending_anchor(PageAnchor::none());
@@ -1992,8 +2000,8 @@ void PdfCanvas::navigate_to_page(int target, PageAnchor anchor) {
     // is what binds it to this batch.
     // A target in the pair on screen leaves the pair where it is: End or PgDn in
     // an odd document's last pair names its right page. The anchor still takes
-    // the reader to the pair's top, replacing one still landing, but the page
-    // the strip carried in stays the reader's (#211).
+    // the reader to the pair's top, replacing one still landing, but the held
+    // page stays the reader's (#211).
     const int  pages     = impl_->view->page_count();
     const bool same_pair = impl_->dual_page &&
                            dual_page_compute_left(target, pages) ==

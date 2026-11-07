@@ -319,12 +319,14 @@ CarriedPosition PdfCanvas::capture_layout_carry(double& pan_before) {
         const SpreadVertical sv = spread_vertical_for(sizes, left, total, zoom, vp_h);
         const double left_h  = page_h_dip(sizes, left, zoom);
         const double right_h = page_h_dip(sizes, right, zoom);
-        // Where the strip carried the reader in: the pan alone cannot say which
-        // page of the pair that was. It answers until the viewport top passes its
-        // bottom.
+        // Where the strip carried the reader in, or a search hit sent them: the
+        // pan alone cannot say which page of the pair that was. It answers until
+        // the viewport top passes its bottom. A held right page is measured by its
+        // own height even while a landing hides it from the rule below (#214).
         if (impl_->held_page) {
+            const int held_right = dual_page_compute_right(left, total);
             return carry_from_spread_held(*impl_->held_page, left, right, pan_y, sv, left_h,
-                                          right_h);
+                                          page_h_dip(sizes, held_right, zoom));
         }
         return carry_from_spread(left, right, pan_y, sv, left_h, right_h);
     }
