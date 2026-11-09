@@ -511,6 +511,16 @@ private:
     // slot showing it. False when no slot shows that page yet.
     bool shown_page_height(int page, float& out) const;
 
+    // (#195) DIPs per PDF point over the page `page` as drawn: the zoom the own
+    // bitmap of the slot showing it was rendered at, which trails zoom_pct()
+    // from a zoom or fit change until the replacement lands (drawn_zoom_pct).
+    // zoom_pct() when no slot shows that page. Everything that places PDF
+    // points over a paged bitmap -- hits, the selection, a press -- uses this.
+    float shown_page_pct(int page) const;
+
+    // The own bitmap of the slot showing `page`, or null when none shows it.
+    ID2D1Bitmap* shown_bitmap(int page) const;
+
     // Where on_paint draws the single-page bitmap, in canvas DIPs. False when
     // there is no bitmap or render target yet.
     bool single_page_placement(Placement& out) const;

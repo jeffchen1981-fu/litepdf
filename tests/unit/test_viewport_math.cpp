@@ -8,6 +8,7 @@
 using litepdf::ui::bitmap_px_to_dip;
 using litepdf::ui::clamp_pan;
 using litepdf::ui::content_overflows;
+using litepdf::ui::drawn_zoom_pct;
 using litepdf::ui::pan_y_centring_quad;
 using litepdf::ui::place_bitmap;
 using litepdf::ui::quad_fully_visible;
@@ -31,6 +32,39 @@ TEST_CASE("ViewportMath rendered px rounds the far edge up as fz_round_rect does
     REQUIRE(rendered_px(100.0005f, 1.0f) == 100.0f);
     REQUIRE(rendered_px(0.0f, 2.0f) == 0.0f);
     REQUIRE(rendered_px(std::numeric_limits<float>::quiet_NaN(), 1.0f) == 0.0f);
+}
+
+TEST_CASE("ViewportMath drawn zoom pct is the view's zoom for a bitmap at the current scale",
+          "[ui][viewport]") {
+    // spread-pairs.pdf page 1 at 496/420: 496 x 473 pixels at 96 dpi.
+    const float pct = 496.0f / 420.0f;
+    REQUIRE(drawn_zoom_pct(496.0f, 473.0f, 420.0f, 400.0f, pct, pct, 96.0f) == pct);
+    // At 200 % scaling the pixmap is twice the DIPs; the zoom is still pct.
+    REQUIRE(drawn_zoom_pct(992.0f, 945.0f, 420.0f, 400.0f, pct * 2.0f, pct, 192.0f) == pct);
+}
+
+TEST_CASE("ViewportMath drawn zoom pct is the bitmap's own scale after a zoom",
+          "[ui][viewport]") {
+    // (#195) Rendered at 2.0, while the view is already at 1.0.
+    REQUIRE(drawn_zoom_pct(840.0f, 800.0f, 420.0f, 400.0f, 1.0f, 1.0f, 96.0f)
+            == Catch::Approx(2.0f).margin(0.5f / 400.0f));
+    // The same pixmap on a 192 dpi target is half as many DIPs per point.
+    REQUIRE(drawn_zoom_pct(840.0f, 800.0f, 420.0f, 400.0f, 1.0f, 0.5f, 192.0f)
+            == Catch::Approx(1.0f).margin(0.5f / 400.0f));
+    // A tall page is read from its height, a wide one from its width: the
+    // longer side pins the scale closest.
+    REQUIRE(drawn_zoom_pct(496.0f, 1890.0f, 420.0f, 1600.0f, 1.0f, 1.0f, 96.0f)
+            == Catch::Approx(1889.5f / 1600.0f).margin(1e-6f));
+    REQUIRE(drawn_zoom_pct(1890.0f, 496.0f, 1600.0f, 420.0f, 1.0f, 1.0f, 96.0f)
+            == Catch::Approx(1889.5f / 1600.0f).margin(1e-6f));
+}
+
+TEST_CASE("ViewportMath drawn zoom pct falls back to the view's zoom without a page size",
+          "[ui][viewport]") {
+    REQUIRE(drawn_zoom_pct(840.0f, 800.0f, 0.0f, 0.0f, 1.0f, 1.5f, 96.0f) == 1.5f);
+    REQUIRE(drawn_zoom_pct(0.0f, 0.0f, 420.0f, 400.0f, 1.0f, 1.5f, 96.0f) == 1.5f);
+    REQUIRE(drawn_zoom_pct(840.0f, 800.0f, 420.0f,
+                           std::numeric_limits<float>::quiet_NaN(), 1.0f, 1.5f, 96.0f) == 1.5f);
 }
 
 TEST_CASE("ViewportMath clamp pan centers content that fits", "[ui][viewport]") {
