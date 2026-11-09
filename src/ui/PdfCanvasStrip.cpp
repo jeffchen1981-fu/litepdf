@@ -171,6 +171,21 @@ bool PdfCanvas::strip_active() const noexcept {
     return impl_ && impl_->view && impl_->strip && impl_->strip_view.has_layout();
 }
 
+namespace {
+
+// A move still landing on the page or pair on screen (#218). A Hit counts only
+// while its page is shown: one left by a spread turned to paged single before it
+// landed names a page paged single does not show, which can never place it, and
+// the pan is then the reader's own.
+bool landing_here(const AnchorSlot& a, int current_page, int page_count, bool dual_page) {
+    if (!a.landing()) return false;
+    return a.kind() != PageAnchor::Kind::Hit
+        || canonical_page(static_cast<int>(a.hit_page()), page_count, dual_page)
+               == canonical_page(current_page, page_count, dual_page);
+}
+
+}  // namespace
+
 void PdfCanvas::switch_layout(LayoutKind next, bool carry_position) {
     if (!impl_) return;
     // spec 3.4: a layout switch ends any live gesture, without committing. The
@@ -187,9 +202,18 @@ void PdfCanvas::switch_layout(LayoutKind next, bool carry_position) {
     CarriedPosition carried{};
     double pan_before  = 0.0;
     double zoom_before = 0.0;
+    // A search hit still landing (#218). The carry keeps the viewport top its
+    // landing would show, and the strip's zoom can push a hit low on the page
+    // below the viewport, so the strip places it once the carry has landed.
+    std::optional<litepdf::core::SearchSession::Hit> landing_hit;
     if (carry) {
         zoom_before = impl_->view->zoom_pct();
         carried = capture_layout_carry(pan_before);
+        if (next == LayoutKind::Strip && impl_->anchor.kind() == PageAnchor::Kind::Hit
+            && landing_here(impl_->anchor, impl_->view->current_page(),
+                            impl_->view->page_count(), impl_->dual_page)) {
+            landing_hit = impl_->anchor.hit();
+        }
     }
 
     // Before anything below: SetWindowPos sends WM_SIZE synchronously, and
@@ -245,6 +269,12 @@ void PdfCanvas::switch_layout(LayoutKind next, bool carry_position) {
     if (impl_->strip) impl_->strip_view.reset();
     // spec 7.3, deviation 1: applied after the new layout's fit.
     if (carry) apply_layout_carry(next, carried, pan_before, zoom_before);
+    // spec 6.3, as the strip's own Find: left alone when on screen, else centred.
+    if (landing_hit) {
+        impl_->strip_view.scroll_hit_into_view(static_cast<int>(landing_hit->page),
+                                               hit_top_pt(*landing_hit),
+                                               hit_bottom_pt(*landing_hit));
+    }
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -289,6 +319,30 @@ SpreadVertical spread_vertical_for(const std::vector<litepdf::core::PageSize>& s
     return spread_vertical(page_h_dip(sizes, left, zoom), h_right, slot_h);
 }
 
+// The pan `a`'s landing sets (PdfCanvas::apply_anchor), from the page sizes at
+// `zoom`. `content_h` is what the pan is clamped against: the page in paged single,
+// the union in a spread. `hit_page_top` is where a Hit's page sits at pan 0; only a
+// Hit reads it.
+double landing_pan_y(const AnchorSlot& a, double hit_page_top, double content_h,
+                     double vp_h, double zoom) {
+    const auto content = static_cast<float>(content_h);
+    const auto vp      = static_cast<float>(vp_h);
+    switch (a.kind()) {
+        case PageAnchor::Kind::Bottom:
+            return clamp_pan(vp - content, content, vp);
+        case PageAnchor::Kind::Hit: {
+            const auto& h = a.hit();
+            const float centre = pdf_point_to_dip((hit_top_pt(h) + hit_bottom_pt(h)) * 0.5f,
+                                                  static_cast<float>(zoom));
+            return pan_y_centring_quad(centre, static_cast<float>(hit_page_top), content, vp);
+        }
+        case PageAnchor::Kind::Top:
+        case PageAnchor::Kind::None:
+            break;
+    }
+    return 0.0;
+}
+
 }  // namespace
 
 CarriedPosition PdfCanvas::capture_layout_carry(double& pan_before) {
@@ -307,35 +361,50 @@ CarriedPosition PdfCanvas::capture_layout_carry(double& pan_before) {
     const double zoom  = v->zoom_pct();
     const double vp_h  = strip_viewport_dip().h;
     const int    total = v->page_count();
-    const double pan_y = impl_->pan_y;
+    // A move still landing (a page turn, a wheel flip, Home, End, Ctrl+G, a search
+    // hit) sets the pan once it has landed. Until then the pan can still be the one
+    // the move started from, on another page. The carry reads the pan the move's
+    // anchor sets, so it goes where the move was taking the reader (#218). Where the
+    // anchor has set a pan already (a hit on the page shown, a Bottom or a Hit placed
+    // when the first half of a pair landed), this is the same value.
+    const bool landing = landing_here(impl_->anchor, v->current_page(), total, impl_->dual_page);
     if (impl_->dual_page) {
         // From a spread, in the painted frame: the left page, or the right one
-        // once the viewport top has left it. A page turn still landing has not
-        // set the pan yet: it is the outgoing pair's, and says nothing about the
-        // right page of this one.
-        const bool turn_landing = impl_->anchor.pending() && !impl_->anchor.applied();
+        // once the viewport top has left it.
         const int left  = dual_page_compute_left(v->current_page(), total);
-        const int right = turn_landing ? -1 : dual_page_compute_right(left, total);
+        const int right = dual_page_compute_right(left, total);
         const SpreadVertical sv = spread_vertical_for(sizes, left, total, zoom, vp_h);
         const double left_h  = page_h_dip(sizes, left, zoom);
         const double right_h = page_h_dip(sizes, right, zoom);
+        // The landing measures what content_extent will: a right half of this
+        // batch that has failed is left out, as nothing more is coming for it (#198).
+        const bool right_failed = impl_->next_seq != 0
+            && impl_->right_failed_seq == impl_->next_seq;
+        const SpreadVertical at_landing = right_failed ? spread_vertical(left_h, -1.0, vp_h) : sv;
+        const double pan_y = landing
+            ? landing_pan_y(impl_->anchor,
+                            spread_page_top(at_landing, static_cast<int>(impl_->anchor.hit_page()),
+                                            left),
+                            at_landing.union_h, vp_h, zoom)
+            : impl_->pan_y;
         // Where the strip carried the reader in, or a search hit sent them: the
         // pan alone cannot say which page of the pair that was. It answers until
-        // the viewport top passes its bottom. A held right page is measured by its
-        // own height even while a landing hides it from the rule below (#214).
+        // the viewport top passes its bottom.
         if (impl_->held_page) {
-            const int held_right = dual_page_compute_right(left, total);
             return carry_from_spread_held(*impl_->held_page, left, right, pan_y, sv, left_h,
-                                          page_h_dip(sizes, held_right, zoom));
+                                          right_h);
         }
         return carry_from_spread(left, right, pan_y, sv, left_h, right_h);
     }
     // From paged single: a page that fits is centred, one that overflows starts
     // at the viewport top.
-    const int    cur = v->current_page();
-    const double h   = page_h_dip(sizes, cur, zoom);
+    const int    cur    = v->current_page();
+    const double h      = page_h_dip(sizes, cur, zoom);
+    const double origin = h <= vp_h ? (vp_h - h) / 2.0 : 0.0;
+    const double pan_y  = landing ? landing_pan_y(impl_->anchor, origin, h, vp_h, zoom)
+                                  : impl_->pan_y;
     pan_before = impl_->pan_x;
-    return carry_from_paged_single(cur, pan_y, h <= vp_h ? (vp_h - h) / 2.0 : 0.0, h);
+    return carry_from_paged_single(cur, pan_y, origin, h);
 }
 
 void PdfCanvas::apply_layout_carry(LayoutKind next, CarriedPosition c, double pan_before,

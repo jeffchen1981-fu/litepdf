@@ -1934,19 +1934,103 @@ TEST_CASE("PdfCanvas spread: a position past the left page survives two-page on,
     CHECK(at.offset_dip == Approx(1800.0).margin(1.0));
 }
 
-TEST_CASE("PdfCanvas spread: a carry to the strip stays on the page a turn is landing on",
+TEST_CASE("PdfCanvas spread: a carry to the strip lands at the top of a page a turn is landing on",
           "[ui][canvas][spread]") {
     Rig rig;
     rig.kick(3);
     rig.land_both();
 
-    // Past the left page of the pair the turn goes to, but the pan is the outgoing
-    // pair's: the turn's anchor sets it only when the render lands.
+    // Far down the outgoing pair, past where the pair the turn goes to has its left
+    // page's bottom. The turn's anchor sets the pan only when its render lands (#218).
     rig.canvas().set_pan(0.0f, -1000.0f);
     Access::navigate(rig.canvas(), 1);
     leave_spread(rig);
 
-    CHECK(Access::strip_position(rig.canvas()).page == 1);
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 1);
+    CHECK(at.offset_dip == 0.0);
+}
+
+TEST_CASE("PdfCanvas spread: a carry to the strip lands at the bottom of a pair a wheel flip is landing on",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+    REQUIRE(rig.pan_y() == 0.0f);
+
+    // At the outgoing pair's top, a notch up flips back to the pair (1, 2), whose
+    // bottom is the tall right page's.
+    Access::wheel(rig.canvas(), WHEEL_DELTA);
+    REQUIRE(rig.view().current_page() == 1);
+    const float z_spread = rig.view().zoom_pct();
+    leave_spread(rig);
+    const float z_strip = rig.view().zoom_pct();
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 2);
+    CHECK(at.offset_dip ==
+          Approx((1600.0f * z_spread - kHeight) * z_strip / z_spread).margin(2.0f));
+}
+
+TEST_CASE("PdfCanvas spread: a carry to the strip leaves out a right half that failed before the left landed",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+    // A Bottom into the pair (1, 2) whose tall right page fails first. The left
+    // half's landing measures the short left page alone, as content_extent does
+    // once the right half has failed (#198): it fits, so the pair's top.
+    rig.canvas().set_pending_anchor(PageAnchor::bottom());
+    rig.kick(1, Fail::Right);
+    rig.land_right_failure();
+    REQUIRE(rig.view().current_page() == 1);
+    leave_spread(rig);
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 1);
+    CHECK(at.offset_dip == 0.0);
+}
+
+TEST_CASE("PdfCanvas spread: a carry to the strip shows a hit in a pair still landing",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+    // Far down the tall right page 2: the outgoing pair's pan is past every part of
+    // the short page 4 the hit is on.
+    rig.canvas().set_pan(0.0f, -1000.0f);
+    rig.canvas().scroll_into_view(hit_at(4, 200.0f));
+    REQUIRE(rig.view().current_page() == 3);
+    rig.kick(3);
+    leave_spread(rig);
+
+    // Where the hit's landing puts the reader: the short page fits, so its top.
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 4);
+    CHECK(at.offset_dip == 0.0);
+}
+
+TEST_CASE("PdfCanvas spread: a carry to the strip shows a hit low on a page still landing",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+    rig.canvas().set_pan(0.0f, -100.0f);
+    const SearchSession::Hit hit = hit_at(3, 1500.0f);
+    rig.canvas().scroll_into_view(hit);
+    REQUIRE(rig.view().current_page() == 3);
+    rig.kick(3);
+    leave_spread(rig);
+
+    // The strip's zoom is about twice the spread's, so the viewport top the spread
+    // would have shown leaves this hit below the strip's viewport: the strip centres
+    // it, as its own Find does. (Every hit the spread centres lands about one
+    // viewport down at twice the zoom, so this alone cannot tell where the spread
+    // would have put it; the custom-zoom case below can.)
+    const float z = rig.view().zoom_pct();
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 3);
+    CHECK(at.offset_dip == Approx(1509.0f * z - kHeight * 0.5f).margin(1.0f));
 }
 
 TEST_CASE("PdfCanvas spread: a carry to the strip reaches the right page once a turn has landed",
@@ -2456,25 +2540,46 @@ TEST_CASE("PdfCanvas spread: a hit waiting for its slot holds the hit's page",
     CHECK(Access::strip_position(rig.canvas()).page == 2);
 }
 
-TEST_CASE("PdfCanvas spread: a held right page is measured whole while its slot is landing",
+TEST_CASE("PdfCanvas spread: a carry to the strip measures a landing hit from its own page's top",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+    // A custom zoom, which the strip keeps: the place the spread centres the hit
+    // in is still on screen there, so the strip does not move it.
+    rig.view().set_zoom_pct(1.2f);
+    // Low on the short left page 1, which sits centred beside the tall page 2.
+    rig.canvas().scroll_into_view(hit_at(1, 380.0f));
+    REQUIRE(rig.view().current_page() == 1);
+    rig.kick(1);
+    leave_spread(rig);
+    REQUIRE(rig.view().zoom_pct() == 1.2f);
+
+    // Centred in the viewport, measured from the page's own top: the same distance
+    // past the viewport's middle as the hit's centre is past the page's top.
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 1);
+    CHECK(at.offset_dip == Approx(389.0f * 1.2f - kHeight * 0.5f).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: a hit waiting for its slot is carried to the strip on screen",
           "[ui][canvas][spread]") {
     Rig rig;
     enter_spread_from(rig, 2, 300.0);
     rig.kick(1);
     rig.land_left();
-    const float z_spread = rig.view().zoom_pct();
     const float pan = rig.pan_y();
     REQUIRE(pan < 0.0f);
-    // An anchor waiting for the right slot: the carry may not judge the right page
-    // from that slot, but the held page's height is still the page's own.
+    // An anchor waiting for the right slot: the pan is still where the carry put
+    // it, 300 DIP into a page whose hit is far below (#218).
     rig.canvas().scroll_into_view(hit_at(2, 1500.0f));
     REQUIRE(rig.pan_y() == pan);
     leave_spread(rig);
-    const float z_strip = rig.view().zoom_pct();
 
+    const float z = rig.view().zoom_pct();
     const CarriedPosition at = Access::strip_position(rig.canvas());
     CHECK(at.page == 2);
-    CHECK(at.offset_dip == Approx(-pan * z_strip / z_spread).margin(1.0f));
+    CHECK(at.offset_dip == Approx(1509.0f * z - kHeight * 0.5f).margin(1.0f));
 }
 
 TEST_CASE("PdfCanvas spread: a click on the pair on screen keeps the carried page",
@@ -2593,6 +2698,102 @@ TEST_CASE("PdfCanvas single page: a Hit is placed by its own completion",
     rig.kick(2);
     rig.land_left();
     CHECK(rig.pan_y() == -10.0f);
+}
+
+namespace {
+
+// MainWindow's continuous toggle from paged single.
+void leave_single(Rig& rig) {
+    rig.view().set_continuous(true);
+    rig.canvas().switch_layout(LayoutKind::Strip, true);
+}
+
+}  // namespace
+
+TEST_CASE("PdfCanvas single page: a carry to the strip lands at the top of a page a turn is landing on",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Single);
+    rig.canvas().change_current_page(2);
+    rig.kick(2);
+    rig.land_left();
+    // Far down the tall page 2; the turn's anchor sets the pan only when it lands.
+    rig.canvas().set_pan(0.0f, -1000.0f);
+    Access::navigate(rig.canvas(), 3);
+    leave_single(rig);
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 3);
+    CHECK(at.offset_dip == 0.0);
+}
+
+TEST_CASE("PdfCanvas single page: a carry to the strip lands at the bottom of a page a wheel flip is landing on",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Single);
+    rig.canvas().change_current_page(2);
+    rig.kick(2);
+    rig.land_left();
+    REQUIRE(rig.pan_y() == 0.0f);
+    // At page 2's top a notch up flips back to page 1, which overflows the viewport.
+    Access::wheel(rig.canvas(), WHEEL_DELTA);
+    REQUIRE(rig.view().current_page() == 1);
+    const float z_single = rig.view().zoom_pct();
+    REQUIRE(400.0f * z_single > kHeight);
+    leave_single(rig);
+    const float z_strip = rig.view().zoom_pct();
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 1);
+    CHECK(at.offset_dip ==
+          Approx((400.0f * z_single - kHeight) * z_strip / z_single).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas single page: a carry to the strip leaves a hit on a page no longer shown",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+    // A hit on the right page of another pair, and two-page off before it lands:
+    // paged single shows that pair's left page, which can never place the hit.
+    rig.canvas().scroll_into_view(hit_at(4, 100.0f));
+    REQUIRE(rig.view().current_page() == 3);
+    rig.kick(3);
+    rig.view().set_dual_page(false);
+    rig.canvas().set_dual_page(false);
+    rig.kick(3);
+    rig.land_left();
+    // The reader scrolls page 3; the unplaced Hit outlives that (#194).
+    Access::pan_by(rig.canvas(), 0.0f, -500.0f);
+    REQUIRE(rig.pan_y() == -500.0f);
+    const float z_single = rig.view().zoom_pct();
+    leave_single(rig);
+    const float z_strip = rig.view().zoom_pct();
+
+    // The reader's own place on page 3, not the hit on page 4.
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 3);
+    CHECK(at.offset_dip == Approx(500.0f * z_strip / z_single).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas single page: a carry to the strip shows a hit on a page still landing",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Single);
+    rig.canvas().change_current_page(2);
+    rig.kick(2);
+    rig.land_left();
+    rig.canvas().scroll_into_view(hit_at(3, 800.0f));
+    REQUIRE(rig.view().current_page() == 3);
+    rig.kick(3);
+    const float z_single = rig.view().zoom_pct();
+    leave_single(rig);
+    const float z_strip = rig.view().zoom_pct();
+    // The strip's scroll bar narrows it, so the two zooms differ by a little.
+    REQUIRE(z_strip != z_single);
+
+    // Where the hit's landing centres it, and still on screen at the strip's zoom.
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 3);
+    CHECK(at.offset_dip ==
+          Approx((809.0f * z_single - kHeight * 0.5f) * z_strip / z_single).margin(1.0f));
 }
 
 // --- A page that cannot be sized ---

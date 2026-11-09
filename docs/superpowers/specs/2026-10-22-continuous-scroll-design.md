@@ -566,6 +566,17 @@ strip").
   (page, in-page offset in DIP), captured before the reset (§3.4):
   - **From paged single.** page = the current page; offset = how far the page has been scrolled
     into, `−pan_y − page_origin_y`, clamped to [0, the page's height] (0 when the page fits).
+  - **From either paged layout, while a move is still landing** (an anchor installed and not yet
+    applied: a page turn, a wheel flip, Home, End, Ctrl+G, a search hit off screen whose page is
+    the page, or in the pair, on screen). The pan is
+    still the outgoing page's or pair's: an anchor sets it when its render lands (a hit off
+    screen on the page already shown also sets it at once, to the same value). Every rule
+    here reads, in its place, the pan that anchor's landing sets, computed from the page sizes at
+    the zoom on screen: 0 for Top; the far end of the page, or of the union, for Bottom; the pan
+    that centres the hit's quad for Hit, clamped like `pan_y_for_hit`. The union leaves out a right
+    half of the newest batch that has already failed, as `content_extent` does once it knows (#198). The switch then goes
+    where the move was taking the reader: the top of the page or pair a turn asked for, the bottom
+    of the page or pair a wheel flip back lands on, or the hit's page (#218).
   - **From paged spread.** page = the spread's left page; offset = how far the viewport top is
     below that page's top inside the union placement (`content_extent`'s box), clamped to
     [0, the left page's height]. Once the viewport top is at or past the left page's bottom and
@@ -574,9 +585,7 @@ strip").
     hold such a position, and measuring it on the left page returned the reader to where the
     left page ends. Above the left page's bottom the left page stays the answer, even where the
     viewport top is inside both pages: a spread's current page is its left page, and the taller
-    page of the pair would move a reader who had not scrolled at all onto the next page. A page
-    turn still landing also stays on the left page: its anchor has not set the pan yet, so the
-    pan is the outgoing pair's and says nothing about this pair's right page.)
+    page of the pair would move a reader who had not scrolled at all onto the next page.)
   - **From paged spread, when the strip carried the reader in or a search hit sent them.** The
     carry into a spread holds the carried page, left or right, until the reader leaves the pair. A
     search hit that is not already on screen holds the hit's page in its place, in its own pair,
@@ -590,9 +599,7 @@ strip").
     the FitWidth round trip (row 18 of `scripts/smoke-test.ps1`) stays a measure of the scaling. (A
     spread remembers no page and either page of a pair reaches the same pan, so without this every
     reader on a right page above the left page's bottom came back to the left page, a whole page
-    away on any document of equal pages.) A held right page is measured by its own height even
-    while a hit, or the End or PgDn that stays in the pair, is still landing: the rule above that
-    keeps a landing on the left page is about the pan, and the held page does not come from the pan.
+    away on any document of equal pages.)
     The hold ends at a move to another pair by any route but a search hit (a page turn, Home, End,
     Ctrl+G), at a switch to another tab, and at a layout switch. The canvas is shared between tabs and the hold
     is not part of a tab's state. A vertical step inside the pair keeps it (a scroll, a wheel notch,
@@ -612,7 +619,10 @@ strip").
   - **Into the strip.** `scroll_y = anchor(page)` when the offset is 0, else `top(page) + offset` (the offset is measured from the page's top). A page that fits lands exactly where
     navigating to it would put it. The current page is the carried page, pinned (§4.6). The
     outgoing horizontal pan (paged single's `pan_x`; 0 from a spread), scaled by the zoom
-    ratio, becomes the strip's desired `pan_x`; only `pan_x_eff` clamps it.
+    ratio, becomes the strip's desired `pan_x`; only `pan_x_eff` clamps it. A search hit still
+    landing is then placed by the strip as its own Find does (§6.3): left alone when fully on
+    screen, else centred. The carry keeps the viewport top, and the strip's zoom (about twice a
+    spread's) can leave a hit low on the page below the viewport (#218).
   - **Into paged single.** Paged `pan_y` = −offset, clamped; `pan_x` = `pan_x_eff`.
   - **Into paged spread.** The spread containing the page; `pan_y` = −(the carried page's top in
     the union + offset), clamped to the union; `pan_x` = 0, because the union's horizontal layout
@@ -917,12 +927,18 @@ two runs per layout; the paged arm ends at page 11's top after 10 PgDn, the stri
   a spread that fits the viewport has no pan, so the reader returns to the top of the page they
   were on (§7.3). Holding the offset as well would hide the clamp the FitWidth round trip (row 18 of
   `scripts/smoke-test.ps1`) measures the scaling with.
-- A switch out of a spread in the one render between a page turn and its landing keeps the page
-  the turn asked for, but not its top or bottom: the offset comes from the outgoing pair's pan,
-  clamped to the left page (§7.3). A search hit in another pair that has not landed yet is the
-  same case: the hit's page is held, but whether the hold applies is still judged from the
-  outgoing pair's pan, so a reader far down the outgoing pair lands on the new pair's left page
-  (#214).
+- ~~A switch out of a spread in the one render between a page turn and its landing keeps the page
+  the turn asked for, but not its top or bottom~~, ~~and a search hit in another pair that has
+  not landed yet is judged from the outgoing pair's pan (#214)~~ Fixed by #218: while an anchor
+  is installed and not applied, the carry reads the pan that anchor's landing sets, from the page
+  sizes, instead of the outgoing pan, in paged single as well as in a spread; a hit still landing
+  is then placed by the strip's own Find rule (§7.3). Left as is: an anchor kept pending after a
+  failed render (#201) is carried as if it had landed: the retry would still send the reader
+  there. A move of theirs ends such an anchor first, except a Hit whose page has not landed
+  beside a left half that did not fail (a failed right page), which a move keeps (#194). A Hit
+  counts only while its page is the page, or in the pair, on screen: one left by a spread turned
+  to paged single before it landed names a page paged single does not show, can never be placed
+  there, and the reader's own pan is carried.
 
 ## 11. Risk and review
 

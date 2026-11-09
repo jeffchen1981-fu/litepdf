@@ -30,6 +30,12 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   over the old page until it was redrawn, longer if that redraw failed; in a
   two-page spread one page's highlights could be off while the other's were right. A
   click or a find in that moment also lands on the words you see (#195).
+- Switching to continuous scroll (turning it on, or turning two-page off while continuous
+  scroll is on) in the moment after a page turn or a search, before the new page appears,
+  now takes you where the move was going: the top of the page you turned to, the bottom
+  of the page or pages the wheel took you back to, or the search hit on screen. It used
+  to keep the page but put you as far down it as you had scrolled on the page before,
+  and from a two-page spread a search could leave you on the page beside the hit (#218).
 
 ## [1.8.2] — 2026-11-02 — In continuous scroll, two-page on and straight back off keeps you on a right page
 
