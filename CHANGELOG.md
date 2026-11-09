@@ -9,39 +9,47 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+## [1.8.3] — 2026-11-10 — Switching to continuous scroll keeps your place
+
 ### Fixed
 
 - In continuous scroll, scrolling inside a two-page spread you turned on from a right
-  page no longer loses that page when you turn the spread off. One notch of the wheel
-  used to take you back to the left page, one page before. If you scroll past the end
-  of the right page, onto the part only the left page covers, you land on the left
-  page (#211).
-- In continuous scroll, when a search takes you to a hit near the top of the right page
-  of a two-page spread, turning the spread off now keeps you on that page. It used to
-  take you to the top of the left page beside it, with the hit off screen (#214).
-- In a two-page spread, an arrow key, the hand tool or the wheel used in the moment
-  before both pages appear now scrolls the whole spread and keeps you where it took you.
-  It used to stop at the end of the page already shown and leave you there once the other
-  came in, so a tab switch, a zoom or turning two-page on could lose your place. A wheel
-  notch right after turning to a spread could skip it for the next one, or be undone when
-  the second page came in (#194).
-- After a zoom or a fit change, search highlights and selected text stay on their words
-  while the page is still shown at its old size. They used to be drawn at the new size
-  over the old page until it was redrawn, longer if that redraw failed; in a
-  two-page spread one page's highlights could be off while the other's were right. A
-  click or a find in that moment also lands on the words you see (#195).
+  page no longer loses that page when you turn the spread off. Even one notch of the
+  wheel used to take you back to the left page, one page before, unless the end of a
+  shorter left page had already gone off the top of the window. If you scroll past the
+  end of the right page, onto the part only the left page covers, you land on the left
+  page. Switching to another tab and back ends this (#211).
+- When a search moves a two-page spread to a hit near the top of its right page,
+  turning the spread off in continuous scroll, or choosing Continuous Scroll, now keeps
+  you on that page. It used to take you to the top of the left page beside it, with the
+  hit off screen (#214).
+- In a two-page spread whose right page is the taller one, an arrow key, the hand tool
+  or the wheel used in the moment before both pages appear (after a page turn, a tab
+  switch, a zoom or turning two-page on) now scrolls the whole spread and keeps you
+  where it took you. It used to stop at the end of the left page and leave you there
+  once the right page came in, or put you back where the page turn had placed you. A
+  wheel notch on a spread whose left page fits the window could also skip that spread
+  for the next one (#194).
+- Outside continuous scroll, after a zoom or a fit change, search highlights and
+  selected text stay on their words while the page is still shown at its old size. They
+  used to be drawn at the new size over the old page until it was redrawn, longer if
+  that redraw failed; in a two-page spread one page's highlights could be off while the
+  other's were right. A click or a find in that moment also lands on the words you
+  see (#195).
 - In continuous scroll, turning two-page on and straight back off now returns you to the
   same place in the page, not only to the same page. When the spread fit the window, or
   stopped scrolling before the place you were reading, you came back to the top of the
-  page or to where the spread stopped. Once you scroll inside the spread, or zoom or
-  resize it and leave it that way, you come back to where the spread is scrolled to: the
-  top of the page when the spread fits (#217).
+  page or to where the spread stopped. Once you scroll inside the spread, zoom or resize
+  it and leave it that way, or switch to another tab and back, you come back to where
+  the spread is scrolled to: the top of the page when the spread fits (#217).
 - Switching to continuous scroll (turning it on, or turning two-page off while continuous
-  scroll is on) in the moment after a page turn or a search, before the new page appears,
-  now takes you where the move was going: the top of the page you turned to, the bottom
-  of the page or pages the wheel took you back to, or the search hit on screen. It used
-  to keep the page but put you as far down it as you had scrolled on the page before,
-  and from a two-page spread a search could leave you on the page beside the hit (#218).
+  scroll is on) in the moment after going to another page or to a search hit, before the
+  new page appears, now takes you where the move was going: the top of the page you went
+  to, the place the wheel was taking you back to (the bottom of the page from a single
+  page; from a two-page spread, the same place in the page the spread would have shown),
+  or the search hit. It used to keep the page but put you as far down it as you had
+  scrolled on the page before, and from a two-page spread a search could leave you on
+  the page beside the hit (#218).
 
 ## [1.8.2] — 2026-11-02 — In continuous scroll, two-page on and straight back off keeps you on a right page
 
@@ -847,7 +855,7 @@ and Phase 12 (release hardening: crash-safe session restore).
 
 [Compare initial commit…0.0.1-phase0](https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.1-phase0)
 
-[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.8.2...HEAD
+[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.8.3...HEAD
 [0.0.12-phase10]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.12-phase10
 [0.0.11-phase9]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.11-phase9
 [0.0.10-phase8.5]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.10-phase8.5
