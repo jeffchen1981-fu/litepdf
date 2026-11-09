@@ -217,6 +217,20 @@ struct PdfCanvas::Impl {
     // hit, which holds its own page instead; another view; set_dual_page. A scroll inside the pair, a clamp, a zoom or a resize
     // is no such move, whatever it does to the pan.
     std::optional<int>            held_page;
+    // (#217) Where in held_page the strip carried the reader in: the offset below
+    // its top, at the zoom and viewport height of the carry. A spread that fits has
+    // no pan and one that overflows clamps it, so the pan cannot give this back. It
+    // answers the carry out while the reader has not moved since (any anchor that
+    // names a place, any change of the pan by the reader) and the zoom and the
+    // viewport height are still the carry's. Read only while held_page stands:
+    // every write of held_page either sets this (the carry in) or comes after an
+    // anchor cleared it (a search hit, navigate_to_page's same-pair restore).
+    struct HeldPlace {
+        double offset_dip = 0.0;
+        float  zoom       = 0.0f;
+        double vp_h       = 0.0;
+    };
+    std::optional<HeldPlace>      held_place;
 
     // --- Phase 7 Task 7: page-change observer ---
     // Fired by change_current_page() after a real page transition, and

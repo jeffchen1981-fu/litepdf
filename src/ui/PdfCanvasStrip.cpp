@@ -324,6 +324,12 @@ CarriedPosition PdfCanvas::capture_layout_carry(double& pan_before) {
         // the viewport top passes its bottom. A held right page is measured by its
         // own height even while a landing hides it from the rule below (#214).
         if (impl_->held_page) {
+            // And where in it, while the reader has not moved and nothing has
+            // refitted the pair since (#217): a spread that fits has no pan to say.
+            if (const auto& place = impl_->held_place;
+                place && place->zoom == v->zoom_pct() && place->vp_h == vp_h) {
+                return CarriedPosition{*impl_->held_page, place->offset_dip};
+            }
             const int held_right = dual_page_compute_right(left, total);
             return carry_from_spread_held(*impl_->held_page, left, right, pan_y, sv, left_h,
                                           page_h_dip(sizes, held_right, zoom));
@@ -379,6 +385,7 @@ void PdfCanvas::apply_layout_carry(LayoutKind next, CarriedPosition c, double pa
             impl_->pan_y = spread_pan_y_for(c, spread_page_top(sv, c.page, left),
                                             sv.union_h, vp.h);
             impl_->held_page = c.page;
+            impl_->held_place = Impl::HeldPlace{c.offset_dip, v->zoom_pct(), vp.h};
             break;
         }
         case LayoutKind::PagedSingle:
