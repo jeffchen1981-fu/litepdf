@@ -2668,6 +2668,191 @@ TEST_CASE("PdfCanvas spread: a spell in single page ends the carried page",
     CHECK(Access::strip_position(rig.canvas()).page == 1);
 }
 
+// --- The place a carry from the strip came in at (#217) ---
+//
+// A spread that fits has no pan, and one that overflows clamps the pan to the
+// union, so the pan alone cannot give back the place in the page the strip carried
+// in. Until the reader moves, the carry out takes that place. large.pdf's pages
+// (792 pt) fit the slot at FitWidth, about 642 DIP in the 850 DIP viewport, and
+// pair (29, 30) has the left page 29 and the right page 30.
+
+TEST_CASE("PdfCanvas spread: a place in a page that fits survives two-page on, then off",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Spread, kLarge);
+    int page = 0;
+    SECTION("the left page") { page = 29; }
+    SECTION("the right page") { page = 30; }
+    leave_spread(rig);
+    const float z_strip = rig.view().zoom_pct();
+    enter_spread_from(rig, page, 500.0);
+    // The offset is scaled into the spread and back, not carried as it was.
+    REQUIRE(rig.view().zoom_pct() != z_strip);
+    REQUIRE(rig.pan_y() == 0.0f);
+    leave_spread(rig);
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == page);
+    CHECK(at.offset_dip == Approx(500.0).margin(0.01));
+}
+
+TEST_CASE("PdfCanvas spread: a place the union clamps survives two-page on, then off",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    leave_spread(rig);
+    const float z_strip = rig.view().zoom_pct();
+    // Deep in the tall left page 3: scaled into the spread, past its pan's stop.
+    enter_spread_from(rig, 3, 2500.0);
+    const float z_spread = rig.view().zoom_pct();
+    REQUIRE(z_spread != z_strip);
+    REQUIRE(-rig.pan_y() < 2500.0f * z_spread / z_strip - 50.0f);
+    SECTION("before the pair lands") {}
+    SECTION("once the pair has landed") {
+        rig.kick(3);
+        rig.land_both();
+    }
+    leave_spread(rig);
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 3);
+    CHECK(at.offset_dip == Approx(2500.0).margin(0.01));
+}
+
+TEST_CASE("PdfCanvas spread: a scroll ends the place the strip carried in",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    leave_spread(rig);
+    const float z_strip = rig.view().zoom_pct();
+    enter_spread_from(rig, 3, 2500.0);
+    const float z_spread = rig.view().zoom_pct();
+    rig.kick(3);
+    rig.land_both();
+    const float stop = rig.pan_y();
+    Access::pan_by(rig.canvas(), 0.0f, 40.0f);
+    REQUIRE(rig.pan_y() == stop + 40.0f);
+    leave_spread(rig);
+
+    // The tall left page's top is the union's top.
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 3);
+    CHECK(at.offset_dip == Approx(-(stop + 40.0f) * z_strip / z_spread).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: a scroll away and back ends the place the strip carried in",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    leave_spread(rig);
+    const float z_strip = rig.view().zoom_pct();
+    enter_spread_from(rig, 3, 2500.0);
+    const float z_spread = rig.view().zoom_pct();
+    rig.kick(3);
+    rig.land_both();
+    const float stop = rig.pan_y();
+    Access::pan_by(rig.canvas(), 0.0f, 40.0f);
+    Access::pan_by(rig.canvas(), 0.0f, -40.0f);
+    REQUIRE(rig.pan_y() == stop);
+    leave_spread(rig);
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 3);
+    CHECK(at.offset_dip == Approx(-stop * z_strip / z_spread).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: a step that moves nothing keeps the place the strip carried in",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Spread, kLarge);
+    enter_spread_from(rig, 30, 500.0);
+    rig.kick(29);
+    rig.land_both();
+    Access::pan_by(rig.canvas(), 0.0f, -40.0f);
+    REQUIRE(rig.pan_y() == 0.0f);
+    leave_spread(rig);
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 30);
+    CHECK(at.offset_dip == Approx(500.0).margin(0.01));
+}
+
+TEST_CASE("PdfCanvas spread: a zoom leaves the place to the pan",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Spread, kLarge);
+    enter_spread_from(rig, 30, 500.0);
+    rig.kick(29);
+    rig.land_both();
+    REQUIRE(rig.view().zoom_in());
+    rig.kick(29);
+    rig.land_both();
+    REQUIRE(rig.pan_y() == 0.0f);
+    leave_spread(rig);
+
+    // The pan answers: the top of the page, still the one carried in.
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 30);
+    CHECK(at.offset_dip == 0.0);
+}
+
+TEST_CASE("PdfCanvas spread: a resize leaves the place to the pan",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Spread, kLarge);
+    enter_spread_from(rig, 30, 500.0);
+    rig.kick(29);
+    rig.land_both();
+    const float zoom = rig.view().zoom_pct();
+    // Shorter, but the pair still fits: FitWidth keeps the zoom and the pan stays 0.
+    REQUIRE(MoveWindow(rig.canvas().hwnd(), 0, 0, kWidth, kHeight - 100, FALSE));
+    rig.kick(29);
+    rig.land_both();
+    REQUIRE(rig.view().zoom_pct() == zoom);
+    REQUIRE(rig.pan_y() == 0.0f);
+    leave_spread(rig);
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 30);
+    CHECK(at.offset_dip == 0.0);
+}
+
+// The zoom and the viewport height are compared at the carry out, so one that is
+// undone before then leaves the reader where the carry put them: they have not moved.
+TEST_CASE("PdfCanvas spread: a zoom undone before two-page off keeps the place",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Spread, kLarge);
+    enter_spread_from(rig, 30, 500.0);
+    rig.kick(29);
+    rig.land_both();
+    const float zoom = rig.view().zoom_pct();
+    REQUIRE(rig.view().zoom_in());
+    rig.kick(29);
+    rig.land_both();
+    REQUIRE(rig.view().zoom_pct() != zoom);
+    rig.view().set_zoom_mode_fit_width();
+    rig.kick(29);
+    rig.land_both();
+    REQUIRE(rig.view().zoom_pct() == zoom);
+    REQUIRE(rig.pan_y() == 0.0f);
+    leave_spread(rig);
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 30);
+    CHECK(at.offset_dip == Approx(500.0).margin(0.01));
+}
+
+TEST_CASE("PdfCanvas spread: a hit in the pair ends the place the strip carried in",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    enter_spread_from(rig, 3, 2500.0);
+    rig.kick(3);
+    rig.land_both();
+    // Near the top of page 3, above the viewport at the pan's stop.
+    rig.canvas().scroll_into_view(hit_at(3, 0.0f));
+    rig.kick(3);
+    rig.land_both();
+    REQUIRE(rig.pan_y() == 0.0f);
+    leave_spread(rig);
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 3);
+    CHECK(at.offset_dip == 0.0);
+}
+
 // --- A single page: nothing waits for a right half ---
 
 TEST_CASE("PdfCanvas single page: a re-render clamps the pan at once",

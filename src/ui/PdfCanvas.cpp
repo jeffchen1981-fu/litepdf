@@ -382,6 +382,9 @@ bool PdfCanvas::change_current_page(int idx) {
 
 void PdfCanvas::set_pending_anchor(PageAnchor anchor) {
     if (!impl_) return;
+    // Any anchor that names a place moves the reader from where the strip carried
+    // them in (#217), even one that keeps the page held.
+    if (anchor.kind != PageAnchor::Kind::None) impl_->held_place.reset();
     if (anchor.kind == PageAnchor::Kind::Hit && impl_->dual_page && !impl_->strip) {
         // A hit in a spread names its page, which the pan cannot: either page of
         // the pair reaches the same pan. The carry out then agrees with where the
@@ -2011,7 +2014,8 @@ void PdfCanvas::left_half_failed(std::uint64_t seq) {
 void PdfCanvas::reader_pan_y(float y) {
     // A step inside the pair keeps held_page (#211): the page the strip carried
     // in on, or a search hit sent the reader to (#214), is still the reader's, and
-    // the carry out measures the pan against it.
+    // the carry out measures the pan against it. The place the strip carried in
+    // at is not (#217): the reader has moved, and the pan says where to.
     //
     // A move ends the pending anchor: the reader has gone somewhere else. The pair
     // can be scrolled before its right half lands (#194), and that half would
@@ -2020,6 +2024,7 @@ void PdfCanvas::reader_pan_y(float y) {
     // document. A Hit whose page has not landed is kept, since nothing has
     // centred it yet, unless the left half failed (#201): the hit may then never
     // land, and the reader would be thrown to it later.
+    if (y != impl_->pan_y) impl_->held_place.reset();
     if (y != impl_->pan_y && impl_->anchor.pending()) {
         float unused = 0.0f;
         const bool hit_unplaced = impl_->anchor.kind() == PageAnchor::Kind::Hit
