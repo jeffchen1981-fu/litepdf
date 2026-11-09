@@ -42,7 +42,8 @@
 //     the extent, so a Bottom or a Hit placed on the right page stays pending
 //     for the retry, and only a Top, which needs no extent, is marked. The reader
 //     moving the page ends that wait: PdfCanvas::reader_pan_y clears the anchor,
-//     or a later render would throw them back;
+//     or a later render would throw them back. Since #194 it clears any anchor
+//     the reader moves away from, except a Hit no slot has placed yet;
 //   - a same-page re-render after a completed navigation finds the anchor
 //     retired, so it keeps the user's pan instead of snapping to the top;
 //   - set_view clears outright (new view, new epoch, different document);
@@ -138,6 +139,9 @@ public:
         return anchor_.kind != PageAnchor::Kind::None;
     }
     bool applied() const noexcept { return applied_; }
+    PageAnchor::Kind kind() const noexcept { return anchor_.kind; }
+    // The page of a pending Hit; meaningless for any other kind.
+    std::size_t hit_page() const noexcept { return anchor_.target.page; }
 
 private:
     PageAnchor    anchor_{};

@@ -117,6 +117,13 @@ public:
     // cache (#49) still sees such a page as unknown. UI thread only.
     const std::vector<PageSize>& page_sizes();
 
+    // (#194) One page's size, or nothing when it has none to use: out of range,
+    // not usable, or unreadable. Sizes only that page, through the cache the fit
+    // already reads, so a spread's pair is sized by the time it renders. Never
+    // throws, so the paint path can ask. A failure is not cached: a later call
+    // tries again. Unlike page_sizes() there is no stand-in. UI thread only.
+    std::optional<PageSize> known_page_size(int page) noexcept;
+
     ZoomMode zoom_mode() const noexcept;
 
     // User-facing magnification. 1.0 means ONE PDF POINT MAPS TO ONE DIP -- the

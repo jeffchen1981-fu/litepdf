@@ -74,6 +74,9 @@ struct PdfCanvasTestAccess {
     }
     static void pan_by(PdfCanvas& c, float dx, float dy) { c.pan_by(dx, dy); }
     static void wheel(PdfCanvas& c, int delta) { c.on_wheel_scroll(delta); }
+    static void hwheel(PdfCanvas& c, int delta) {
+        c.on_hwheel_scroll(delta, HWheelSource::Tilt);
+    }
     static void key(PdfCanvas& c, WPARAM vk) { c.on_key_down(vk); }
     // What a wheel flip leaves behind, for a batch the test submitted itself.
     static void mark_wheel_flip(PdfCanvas& c) { c.impl_->wheel_flip_seq = c.impl_->next_seq; }
@@ -412,6 +415,371 @@ TEST_CASE("PdfCanvas spread: the outgoing pair's right bitmap does not count as 
     CHECK(rig.pan_y() == -1000.0f);
 }
 
+// --- Input before the right half lands (#194) ---
+//
+// Between the two completions only the left bitmap is in. The pair is measured with
+// its right page sized from the document, so input moves over the whole pair.
+
+TEST_CASE("PdfCanvas spread: an arrow key before the right half lands pans over the pair",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    SECTION("a tab switch back") {
+        rig.kick(1);
+        rig.land_both();
+        rig.reenter(-1000.0f);
+        rig.kick(1);
+    }
+    SECTION("a pair still showing the outgoing pair's short right page") {
+        rig.kick(3);
+        rig.land_both();
+        rig.kick(1);
+        rig.canvas().set_pan(0.0f, -1000.0f);
+    }
+    rig.land_left();
+    REQUIRE(rig.pan_y() == -1000.0f);
+
+    // The short left page alone fits, and would pin the pan to 0.
+    Access::pan_by(rig.canvas(), 0.0f, -10.0f);
+    CHECK(rig.pan_y() == -1010.0f);
+
+    rig.land_right();
+    CHECK(rig.pan_y() == -1010.0f);
+}
+
+TEST_CASE("PdfCanvas spread: an arrow key before the right half lands stops at the pair's bottom",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+    rig.reenter(0.0f);
+    rig.kick(1);
+    rig.land_left();
+    Access::pan_by(rig.canvas(), 0.0f, -5000.0f);
+    const float before = rig.pan_y();
+    CHECK(before == Approx(bottom_pan(rig.view(), kHeight)).margin(1.0f));
+
+    // The page is measured as its bitmap will be: the clamp at the landing moves
+    // nothing.
+    rig.land_right();
+    CHECK(rig.pan_y() == before);
+}
+
+TEST_CASE("PdfCanvas spread: an arrow key before the right half lands reaches the right page's edge",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+
+    // Wider than the slots: the pair's right edge is the right page's.
+    rig.view().set_zoom_pct(rig.view().zoom_pct() * 3.0f);
+    rig.reenter(0.0f);
+    rig.kick(1);
+    rig.land_left();
+    Access::pan_by(rig.canvas(), -5000.0f, 0.0f);
+    const float page_w = std::ceil(420.0f * rig.view().zoom_pct());
+    CHECK(rig.pan_x() == Approx(kWidth - (504.0f + page_w)).margin(1.0f));
+    rig.land_right();
+}
+
+TEST_CASE("PdfCanvas spread: a wheel notch before the right half lands scrolls the pair",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(0);
+    rig.land_left();
+
+    Access::navigate(rig.canvas(), 1);
+    rig.land_left();
+    REQUIRE(rig.pan_y() == 0.0f);
+
+    // The short left page alone fits: a notch would turn to the next pair and skip
+    // the tall right page.
+    Access::wheel(rig.canvas(), -WHEEL_DELTA);
+    CHECK(rig.view().current_page() == 1);
+    CHECK(rig.pan_y() < 0.0f);
+    rig.land_right();
+}
+
+TEST_CASE("PdfCanvas spread: the frame before the right half lands keeps the pan",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+    rig.reenter(-1000.0f);
+    rig.kick(1);
+    rig.land_left();
+
+    // At -1000 the short left page is above the viewport. Clamped against that page
+    // alone it would be drawn centred, white across the middle of its slot.
+    CHECK(Access::painted_pixel(rig.canvas(), 250, kHeight / 2) == kChrome);
+    rig.land_right();
+}
+
+TEST_CASE("PdfCanvas spread: the outgoing pair is measured as drawn until the left half lands",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+
+    // Both slots still show pair (1,2). Sizing the incoming short right page would
+    // make the pair fit and draw the short left page centred.
+    rig.kick(3);
+    rig.canvas().set_pan(0.0f, -1000.0f);
+    CHECK(Access::painted_pixel(rig.canvas(), 250, kHeight / 2) == kChrome);
+    rig.land_both();
+}
+
+TEST_CASE("PdfCanvas spread: a scroll before the right half lands outlives a page turn's Top",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(0);
+    rig.land_left();
+    Access::navigate(rig.canvas(), 1);
+    rig.land_left();
+    REQUIRE(rig.pan_y() == 0.0f);
+
+    SECTION("an arrow key or a hand drag") {
+        Access::pan_by(rig.canvas(), 0.0f, -100.0f);
+    }
+    SECTION("the wheel") {
+        Access::wheel(rig.canvas(), -WHEEL_DELTA);
+    }
+    const float place = rig.pan_y();
+    REQUIRE(place < 0.0f);
+
+    // The Top is placed already. Placed again now, it would throw the reader back.
+    rig.land_right();
+    CHECK(rig.pan_y() == place);
+}
+
+TEST_CASE("PdfCanvas spread: a failed right half leaves the left page alone in the extent",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1, Fail::Right);
+    rig.land_left();
+    rig.land_right_failure();
+    Access::pan_by(rig.canvas(), 0.0f, -10.0f);
+    CHECK(rig.pan_y() == 0.0f);
+}
+
+TEST_CASE("PdfCanvas spread: a right page that cannot be sized is left out until it lands",
+          "[ui][canvas][spread]") {
+    // damaged-pages.pdf: page 2, the right page of the first pair, has no size. In
+    // a 300 high canvas the left page overflows, so the range shows what was
+    // measured: the left page alone, not a stand-in beside it.
+    constexpr int height = 300;
+    Rig rig(kWidth, height, Layout::Spread, kDamaged);
+    rig.kick(0);
+    rig.land_left();
+    rig.kick(1);
+    rig.land_left();
+    const float left_h = Access::left_bitmap(rig.canvas())->GetSize().height;
+    REQUIRE(left_h > static_cast<float>(height));
+    Access::pan_by(rig.canvas(), 0.0f, -5000.0f);
+    CHECK(rig.pan_y() == Approx(height - left_h).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: a right page that cannot be sized leaves the outgoing one out",
+          "[ui][canvas][spread]") {
+    // damaged-pages.pdf: pair (3,4) shows only its tall right page, 300 x 800 pt.
+    Rig rig(kWidth, kHeight, Layout::Spread, kDamaged);
+    rig.kick(0);
+    rig.land_left();
+    rig.kick(3);
+    rig.land_left_failure();
+    rig.land_right();
+
+    // Pair (1,2): the slot keeps page 4 until page 2's failure comes back. The
+    // short left page alone fits.
+    rig.kick(1);
+    rig.land_left();
+    REQUIRE(Access::right_bitmap(rig.canvas()) != nullptr);
+    Access::pan_by(rig.canvas(), 0.0f, -10.0f);
+    CHECK(rig.pan_y() == 0.0f);
+}
+
+TEST_CASE("PdfCanvas spread: a scroll beside a failed left page ends a Hit on that page",
+          "[ui][canvas][spread]") {
+    constexpr int height = 300;
+    Rig rig(kWidth, height);
+    rig.canvas().set_pending_anchor(PageAnchor::hit(hit_at(1, 380.0f)));
+    rig.kick(1, Fail::Left);
+    rig.land_left_failure();
+    rig.land_right();
+    Access::pan_by(rig.canvas(), 0.0f, -100.0f);
+    REQUIRE(rig.pan_y() == -100.0f);
+
+    // The retry renders the left page. The hit is no longer the reader's.
+    rig.kick(1);
+    rig.land_both();
+    CHECK(rig.pan_y() == -100.0f);
+}
+
+// --- A same-pair re-render: one half of this batch in, the other still due (#194) ---
+
+TEST_CASE("PdfCanvas spread: after a zoom both older renders are measured until a half lands",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+
+    // Both slots show the pair at the old zoom, and nothing of this batch is in.
+    const float old_bottom = bottom_pan(rig.view(), kHeight);
+    rig.view().set_zoom_pct(rig.view().zoom_pct() * 2.0f);
+    rig.kick(3);
+    Access::pan_by(rig.canvas(), 0.0f, -100000.0f);
+    CHECK(rig.pan_y() == Approx(old_bottom).margin(1.0f));
+    rig.land_both();
+}
+
+TEST_CASE("PdfCanvas spread: after a zoom the right page is measured at the new zoom",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+
+    // The right slot still holds the tall page at the old zoom, half its new height.
+    rig.view().set_zoom_pct(rig.view().zoom_pct() * 2.0f);
+    rig.kick(1);
+    rig.land_left();
+    Access::pan_by(rig.canvas(), 0.0f, -100000.0f);
+    const float before = rig.pan_y();
+    CHECK(before == Approx(bottom_pan(rig.view(), kHeight)).margin(1.0f));
+
+    rig.land_right();
+    CHECK(rig.pan_y() == before);
+}
+
+TEST_CASE("PdfCanvas spread: after a zoom the left page is measured at the new zoom",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+
+    // The left slot still holds the tall page at the old zoom.
+    rig.view().set_zoom_pct(rig.view().zoom_pct() * 2.0f);
+    rig.kick(3);
+    rig.land_right();
+    Access::pan_by(rig.canvas(), 0.0f, -100000.0f);
+    const float before = rig.pan_y();
+    CHECK(before == Approx(bottom_pan(rig.view(), kHeight)).margin(1.0f));
+
+    rig.land_left();
+    CHECK(rig.pan_y() == before);
+}
+
+TEST_CASE("PdfCanvas spread: a Bottom anchor waits for this batch's right half beside an older render",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+
+    // A zoom renders the pair again; the right slot keeps the older render until
+    // this batch's lands. The left half alone does not end the landing.
+    rig.canvas().set_pending_anchor(PageAnchor::bottom());
+    rig.view().set_zoom_pct(rig.view().zoom_pct() * 2.0f);
+    rig.kick(1);
+    rig.land_left();
+
+    // Another zoom before the right half comes in: the anchor carries forward.
+    rig.view().set_zoom_pct(rig.view().zoom_pct() * 1.5f);
+    rig.kick(1);
+    rig.land_both();
+    CHECK(rig.pan_y() == Approx(bottom_pan(rig.view(), kHeight)).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: a Bottom on the cover ends its landing with the left half",
+          "[ui][canvas][spread]") {
+    constexpr int height = 300;
+    Rig rig(kWidth, height);
+    rig.canvas().set_pending_anchor(PageAnchor::bottom());
+    rig.kick(0);
+    rig.land_left();
+    REQUIRE(rig.pan_y() < -10.0f);
+
+    // The cover has no right half to wait for: a re-render keeps the pan.
+    rig.canvas().set_pan(0.0f, -10.0f);
+    rig.kick(0);
+    rig.land_left();
+    CHECK(rig.pan_y() == -10.0f);
+}
+
+TEST_CASE("PdfCanvas spread: a failed left half keeps its older render in the extent after a zoom",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+
+    // Nothing at the new zoom is coming for the left page: the older render on
+    // screen is what the pair measures.
+    const float old_bottom = bottom_pan(rig.view(), kHeight);
+    rig.view().set_zoom_pct(rig.view().zoom_pct() * 2.0f);
+    rig.kick(3, Fail::Left);
+    rig.land_left_failure();
+    rig.land_right();
+    Access::pan_by(rig.canvas(), 0.0f, -100000.0f);
+    CHECK(rig.pan_y() == Approx(old_bottom).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: a scroll before the right half lands outlives a wheel turn's Bottom",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+
+    // At the top of pair (3,4) a notch up turns back to pair (1,2), at its bottom.
+    Access::wheel(rig.canvas(), WHEEL_DELTA);
+    REQUIRE(rig.view().current_page() == 1);
+    rig.land_left();
+    REQUIRE(rig.pan_y() == Approx(bottom_pan(rig.view(), kHeight)).margin(1.0f));
+
+    SECTION("the wheel") {
+        Access::wheel(rig.canvas(), WHEEL_DELTA);
+    }
+    SECTION("an arrow key or a hand drag") {
+        Access::pan_by(rig.canvas(), 0.0f, 100.0f);
+    }
+    const float place = rig.pan_y();
+    REQUIRE(rig.view().current_page() == 1);
+    REQUIRE(place > bottom_pan(rig.view(), kHeight) + 1.0f);
+
+    rig.land_right();
+    CHECK(rig.pan_y() == place);
+}
+
+TEST_CASE("PdfCanvas spread: a scroll leaves a Hit whose page has not landed",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+
+    // The hit is on the right page, still due: nothing has placed it yet.
+    rig.reenter(0.0f);
+    rig.canvas().set_pending_anchor(PageAnchor::hit(hit_at(2, 860.0f)));
+    rig.kick(1);
+    rig.land_left();
+    Access::pan_by(rig.canvas(), 0.0f, -10.0f);
+    REQUIRE(rig.pan_y() == -10.0f);
+
+    rig.land_right();
+    CHECK(rig.pan_y() == Approx(centred_pan(rig.view(), 860.0f, kHeight)).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: a tilt wheel before the right half lands reaches the right page's edge",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(1);
+    rig.land_both();
+
+    rig.view().set_zoom_pct(rig.view().zoom_pct() * 3.0f);
+    rig.reenter(0.0f);
+    rig.kick(1);
+    rig.land_left();
+    for (int i = 0; i < 100; ++i) Access::hwheel(rig.canvas(), WHEEL_DELTA);
+    const float page_w = std::ceil(420.0f * rig.view().zoom_pct());
+    CHECK(rig.pan_x() == Approx(kWidth - (504.0f + page_w)).margin(1.0f));
+    rig.land_right();
+}
+
 // --- apply_anchor: Bottom and Hit ---
 
 TEST_CASE("PdfCanvas spread: a Bottom anchor reaches the right page in the same batch",
@@ -430,8 +798,11 @@ TEST_CASE("PdfCanvas spread: a Bottom anchor outlives a batch that lands only on
     rig.kick(1);
     rig.land_left();
 
-    // A resize or a zoom: the anchor would be retired by this batch had the left
-    // half alone counted as placing it.
+    // A zoom: the anchor would be retired by this batch had the left half alone
+    // counted as placing it, and the pan would stay at the old zoom's bottom. The
+    // right page is measured from its size meanwhile (#194), so without the zoom
+    // both outcomes would read the same.
+    rig.view().set_zoom_pct(rig.view().zoom_pct() * 2.0f);
     rig.kick(1);
     rig.land_left();
     rig.land_right();
@@ -446,13 +817,19 @@ TEST_CASE("PdfCanvas spread: a Hit anchor outlives a batch that lands only one h
     rig.canvas().set_pending_anchor(PageAnchor::hit(h));
     rig.kick(1);
     rig.land_left();
-    const float left_alone = static_cast<float>(height) - page_dip(rig.view(), 400.0f);
-    CHECK(rig.pan_y() == Approx(left_alone).margin(1.0f));
+    // Centred at once against the pair, its right page sized from the document
+    // (#194), but not final.
+    const float first = centred_pan(rig.view(), 380.0f, height);
+    CHECK(rig.pan_y() == Approx(first).margin(1.0f));
 
+    // A zoom: had the left half alone placed the hit, it would stay where it was.
+    rig.view().set_zoom_pct(rig.view().zoom_pct() * 2.0f);
     rig.kick(1);
     rig.land_left();
     rig.land_right();
-    CHECK(rig.pan_y() == Approx(centred_pan(rig.view(), 380.0f, height)).margin(1.0f));
+    const float second = centred_pan(rig.view(), 380.0f, height);
+    REQUIRE(std::fabs(second - first) > 100.0f);
+    CHECK(rig.pan_y() == Approx(second).margin(1.0f));
 }
 
 TEST_CASE("PdfCanvas spread: a Hit on the right page stays unmeasured until its slot lands",
@@ -1081,7 +1458,7 @@ TEST_CASE("PdfCanvas spread: a step that moves nothing leaves the anchor to the 
     CHECK(rig.pan_y() == Approx(bottom_pan(rig.view(), kHeight)).margin(1.0f));
 }
 
-TEST_CASE("PdfCanvas spread: a scroll while a later batch lands leaves its anchor alone",
+TEST_CASE("PdfCanvas spread: a scroll while a later batch lands keeps the reader's place",
           "[ui][canvas][spread]") {
     Rig rig;
     rig.kick(3, Fail::Left);
@@ -1089,15 +1466,18 @@ TEST_CASE("PdfCanvas spread: a scroll while a later batch lands leaves its ancho
     rig.land_right();
 
     // The failure belongs to the batch before this one: this pair is landing as
-    // usual, and its right half still applies the anchor.
+    // usual. The left half placed the anchor against this batch's right page,
+    // sized from the document beside the older render (#194), so the right half
+    // has nothing to correct and would only throw the reader back.
     rig.canvas().set_pending_anchor(PageAnchor::bottom());
     rig.kick(3);
     rig.land_left();
     Access::pan_by(rig.canvas(), 0.0f, 100.0f);
-    REQUIRE(rig.pan_y() > bottom_pan(rig.view(), kHeight) + 1.0f);
+    const float place = rig.pan_y();
+    REQUIRE(place > bottom_pan(rig.view(), kHeight) + 1.0f);
 
     rig.land_right();
-    CHECK(rig.pan_y() == Approx(bottom_pan(rig.view(), kHeight)).margin(1.0f));
+    CHECK(rig.pan_y() == place);
 }
 
 TEST_CASE("PdfCanvas single page: a scroll ends an anchor a failed re-render left open",

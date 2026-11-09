@@ -19,6 +19,12 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 - In continuous scroll, when a search takes you to a hit near the top of the right page
   of a two-page spread, turning the spread off now keeps you on that page. It used to
   take you to the top of the left page beside it, with the hit off screen (#214).
+- In a two-page spread, an arrow key, the hand tool or the wheel used in the moment
+  before both pages appear now scrolls the whole spread and keeps you where it took you.
+  It used to stop at the end of the page already shown and leave you there once the other
+  came in, so a tab switch, a zoom or turning two-page on could lose your place. A wheel
+  notch right after turning to a spread could skip it for the next one, or be undone when
+  the second page came in (#194).
 
 ## [1.8.2] — 2026-11-02 — In continuous scroll, two-page on and straight back off keeps you on a right page
 
