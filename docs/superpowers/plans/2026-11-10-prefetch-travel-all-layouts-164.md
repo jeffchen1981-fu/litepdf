@@ -24,10 +24,15 @@
 
 ## Review Focus
 
-1. **A session restore on a document that shrank since it was saved.** The kick passes the saved page as written (`MainWindow.cpp:1226`), which can be past the end while the view holds the clamped page. A seed taken from that page would make the reader's next move wrong. Pinned in Task 2 by the "own page" case, proven by the mutation that seeds from the argument.
+1. **A kick whose page argument is not the view's page, such as a saved page past the end of a document that shrank.** The restore kick passes the saved page as written (`MainWindow.cpp:1226`), which can be past the end while the view holds the clamped page.
+   - On today's restore path the key is already set by then: `change_current_page` runs first. So the seed does not fire there.
+   - The rule still matters. A seed taken from the argument would make the reader's next move wrong on any future path that kicks with an unset key.
+   - Pinned in Task 2 by the "own page" case, proven by the mutation that seeds from the argument.
 2. **Two-page view turned off with the continuous preference on, on a held right page.** The view goes spread → strip in one command (`set_dual_page(false)`, then `set_continuous(true)`, then the carry onto the right page L+1). The carry must not read as a forward move, and the reader's backward direction must survive into single page. Pinned in Task 2 by the "held right page" case, which fails on the pre-fix code and before Task 2's reset.
 
 Checked and left out: a resubmit of the same page (zoom step, resize) records nothing, because the kick no longer records. A zero-page view never reaches `note_travel` from `set_current_page` (the `pc <= 0` return comes first), and the seed on one is arithmetic only. The cover page and the odd tail go through the same `canonical_page` call that case 3 pins.
+
+`set_continuous`'s reset is pinned by no case, and that is accepted. On today's paths it changes the outcome only with the spread and continuous flags on together, which the app never sets (§3.2). It stays because §3.3 requires it, so that any switch drops the reference.
 
 ---
 
@@ -88,7 +93,7 @@ void spread_issue_example(DocumentView& view) {
 }  // namespace
 ```
 
-Four cases, each on `auto view = one_worker_view(disp, 1);` (one worker, the #49 one-byte budget):
+Four cases. Each opens with `InlineDispatcher disp; auto view = one_worker_view(disp, 1);`, which gives one worker and the #49 one-byte budget. In the tables, `== Backward` is shorthand for `REQUIRE(view->prefetch_travel() == TravelDirection::Backward);`. The enumerators of a scoped enum need the qualification. A row with an empty name continues the case above it.
 
 | Name (after `DocumentView travel: `) | Body | Assertion |
 |---|---|---|
@@ -115,7 +120,10 @@ Why it is exact (§5.3 case 6): every page is over a third of the one-byte budge
 - [ ] **Step 3: Run them to verify they fail**
 
 Build, then run `build\tests\Release\litepdf_unit_tests.exe "[travel]"`.
-Expected: the spread, strip and L1 cases FAIL (direction `Forward`, and page 6 in L1 rather than 4). The snap case PASSES, because the pre-fix code records no move outside the prefetch. Its proof is the mutation in Step 6.
+Expected: all four cases FAIL.
+- The spread and strip cases read `Forward`, and the L1 case finds page 6 in L1 rather than page 4.
+- The snap case fails at its **first** assertion. The pre-fix code records no move outside the prefetch, so the direction is still the default `Forward` where it should be `Backward`.
+- That first assertion keeps the case honest: the direction really is `Backward` before the go-to. The final `Forward` is proven by the mutation in Step 6.
 
 - [ ] **Step 4: Make `set_current_page` the one writer**
 
@@ -124,7 +132,7 @@ In `DocumentView.cpp`:
 - In `Impl`, rename `last_prefetch_page` to `last_travel_key`. Rewrite the comment at :85-87 to say what the two fields are now:
   - `last_travel_key` is the key of the reader's last page change: the page, or the pair's left page in the spread. It is −1 before the first change and after a layout switch.
   - `travel` is the direction of the last real move.
-  - Only `note_travel` writes them.
+  - Only `note_travel` writes `travel`. (Task 2 adds the layout setters' reset of the key and updates this comment.)
 - Add `Impl::note_travel(int page, int count) noexcept` beside `estimated_bytes`, with the body in §3.1:
   - The key is `litepdf::ui::canonical_page(page, count, dual_page && !continuous)`.
   - `travel = litepdf::core::travel_direction(key, last_travel_key, travel)`. The call is **qualified** (§3.1).
@@ -134,8 +142,8 @@ In `DocumentView.cpp`:
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Build, then run `build\tests\Release\litepdf_unit_tests.exe "[prefetch]"`.
-Expected: all four new cases, the two #49 cases and the text-prefetch cases PASS.
+Build, then run `build\tests\Release\litepdf_unit_tests.exe "[prefetch],[text_prefetch]"`. In Catch2 the comma means OR. The text-prefetch cases carry `[text_prefetch]` only, and they exercise `set_current_page`.
+Expected: all four new cases, the two #49 cases and the six text-prefetch cases PASS.
 
 - [ ] **Step 6: Prove the snap case can fail**
 
@@ -163,7 +171,10 @@ git commit -m "fix(core): record the prefetch travel direction where the page ch
 
 - [ ] **Step 1: Write the tests**
 
-Six cases, each on `auto view = one_worker_view(disp, 1);`, named `DocumentView travel: ...` and tagged `[core][view][prefetch][travel]`:
+Seven cases, named `DocumentView travel: ...` and tagged `[core][view][prefetch][travel]`.
+- Each opens with `InlineDispatcher disp; auto view = one_worker_view(disp, 1);`.
+- `== Forward` is shorthand for `REQUIRE(view->prefetch_travel() == TravelDirection::Forward);`.
+- A row with an empty name continues the case above it.
 
 | Name (after `DocumentView travel: `) | Body | Assertion |
 |---|---|---|
@@ -174,13 +185,17 @@ Six cases, each on `auto view = one_worker_view(disp, 1);`, named `DocumentView 
 | `the first kick after a switch keys the view's own page (#164)` | `move_to 6; move_to 7; set_continuous(true); set_continuous(false); kick(*view, 20); move_to 7` | `== Forward` |
 | `spread off into the strip onto the held right page is not a move (#164)` | `set_dual_page(true); move_to 3, 5, 3;` | `== Backward` |
 | | `set_dual_page(false); set_continuous(true); move_to 4;` (the carry onto the held right page) `set_continuous(false); move_to 4; kick 4` | `== Backward` |
+| `a carry onto the current page sets the reference (#164)` | `move_to 5; move_to 3;` | `== Backward` |
+| | `set_continuous(true); move_to 3` (single page 3 → strip: the carry lands on the page already current) `; move_to 4` (the first scroll) | `== Forward` |
+
+The last case pins §3.1's rule that `note_travel` runs **before** the unchanged-page return. Without that rule, the carry onto page 3 records nothing, the key stays −1, and the first scroll keeps the old `Backward`.
 
 `kick(*view, 20)` is the session restore kick on a document that shrank (Review Focus 1): the saved page is past the end of 8 pages, and the view holds page 7. Its renders fail inside `RenderEngine`'s `fz_catch` (MuPDF prints an error), as they would in the app.
 
 - [ ] **Step 2: Run them, before the change**
 
 Build, then run `"[travel]"`.
-Expected: `turning the spread on` FAILS (key 4, then 4 → 3 reads Backward). `held right page` FAILS at its last assertion (3 → 4 reads Forward). The other four, and Task 1's cases, PASS.
+Expected: `turning the spread on` FAILS (key 4, then 4 → 3 reads Backward). `held right page` FAILS at its last assertion (3 → 4 reads Forward). The other five, and Task 1's cases, PASS.
 - The `continuous ... current value` case passes here because Task 1 already records moves. §5.3 lists it as failing on the pre-fix code, but this order never runs it there. The proof that matters for it is mutation (a) in Step 7, the only one that tests the guard.
 
 - [ ] **Step 3: Reset the key on an actual flag change**
@@ -188,11 +203,12 @@ Expected: `turning the spread on` FAILS (key 4, then 4 → 3 reads Backward). `h
 - `set_dual_page`: after the existing `if (impl_->dual_page == on) return;`, add `impl_->last_travel_key = -1;` beside `impl_->dual_page = on;`.
 - `set_continuous`: `if (impl_->continuous == on) return;`, then assign, then `impl_->last_travel_key = -1;`. It stays `noexcept`. Neither setter touches `travel`.
 - Comment each reset briefly: a switch is not a move (§3.3), and the guard exists because `apply_effective_layout` calls `set_continuous` on every tab switch.
+- Update Task 1's `Impl` comment: `note_travel` is the only writer of `travel`, and the two layout setters also reset `last_travel_key` to −1.
 
 - [ ] **Step 4: Run them, with the reset and no seed**
 
 Build, then run `"[travel]"`.
-Expected: `turning the spread on`, `held right page` and the other passing cases PASS. `the first page turn after spread off counts` and `... continuous flip on a tab switch counts` FAIL: the key is −1 at the page turn, so the direction stays `Backward`. This is the no-seed proof (§5.3 cases 7 and 8). Record both failures in the commit body.
+Expected: `turning the spread on`, `held right page`, `a carry onto the current page` and the other passing cases PASS. `the first page turn after spread off counts` and `... continuous flip on a tab switch counts` FAIL: the key is −1 at the page turn, so the direction stays `Backward`. This is the no-seed proof (§5.3 cases 7 and 8). Record both failures in the commit body.
 
 - [ ] **Step 5: Seed the key in the kick**
 
@@ -205,16 +221,17 @@ It seeds from `impl_->current_page`, **never** from the `page` argument (§3.1, 
 
 - [ ] **Step 6: Run them to verify they pass**
 
-Build, then run `"[prefetch]"`.
-Expected: all ten #164 cases, the two #49 cases and the text-prefetch cases PASS.
+Build, then run `"[prefetch],[text_prefetch]"`.
+Expected: all eleven #164 cases, the two #49 cases and the six text-prefetch cases PASS.
 
-- [ ] **Step 7: Prove the guard and the seed's source can fail**
+- [ ] **Step 7: Prove the guard, the seed's source and the call's place can fail**
 
 Apply each mutation alone, rebuild, run `"[travel]"`, then restore and rebuild:
 - (a) In `set_continuous`, reset on every call, by removing the `== on` return. Expected: `setting continuous to its current value keeps the reference` FAILS (`Forward`).
 - (b) Seed from `page` instead of `impl_->current_page`. Expected: `the first kick after a switch keys the view's own page` FAILS (key 20, so 7 reads `Backward`).
+- (c) In `set_current_page`, move `impl_->note_travel(clamped, pc);` below the `if (clamped == impl_->current_page) return false;`. Expected: `a carry onto the current page sets the reference` FAILS at its last assertion (key −1 at page 4, so it stays `Backward`).
 
-After both restores, `"[travel]"` passes and `git diff` shows only the intended change.
+After all three restores, `"[travel]"` passes and `git diff` shows only the intended change.
 
 - [ ] **Step 8: Run the full suite**
 
@@ -228,6 +245,6 @@ git add src/core/DocumentView.cpp tests/unit/test_document_view.cpp
 git commit -m "fix(core): a layout switch is not a prefetch travel move (#164)"
 ```
 
-The body names the four proofs:
+The body names the five proofs:
 - Step 4's two no-seed failures.
-- Step 7's two mutations.
+- Step 7's three mutations.
