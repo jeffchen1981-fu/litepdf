@@ -66,30 +66,34 @@ bool DocumentView::set_current_page(int idx) {
     const int pc = page_count();
     if (pc <= 0) return false;
     const int clamped = std::clamp(idx, 0, pc - 1);
-    note_travel(clamped);                       // NEW: before the no-change return
+    impl_->note_travel(clamped, pc);            // NEW: before the no-change return
     if (clamped == impl_->current_page) return false;
     ...                                         // unchanged
 }
 ```
 
-`note_travel(page)` is a file-local helper at namespace scope in `DocumentView.cpp`, taking the
-`Impl&`. It must not be a member of `DocumentView` or of `Impl`: inside either, the unqualified
-`travel_direction` would find the test observer of §5 if it bore that name, and ordinary lookup
-that finds a class member suppresses argument-dependent lookup. The call is written qualified,
-`litepdf::core::travel_direction(...)`, all the same.
+`note_travel` is a member function of `DocumentView::Impl`, beside the existing
+`Impl::estimated_bytes`. It cannot be a namespace-scope helper: `Impl` is a private member type
+(`DocumentView.hpp:369-371`), so a non-member function cannot name `Impl&`. The call to the free
+function is qualified, `litepdf::core::travel_direction(...)`. An unqualified call would be found
+by class-scope lookup first, and that lookup reaches `DocumentView`'s members, where a member of
+that name would hide the free function. §5.1 names the observer `prefetch_travel` for the same
+reason.
 
 ```cpp
-const int key = litepdf::ui::canonical_page(page, pc,
-                                            impl.dual_page && !impl.continuous);
-impl.travel = litepdf::core::travel_direction(key, impl.last_travel_key, impl.travel);
-impl.last_travel_key = key;
+void DocumentView::Impl::note_travel(int page, int page_count) noexcept {
+    const int key = litepdf::ui::canonical_page(page, page_count, dual_page && !continuous);
+    travel = litepdf::core::travel_direction(key, last_travel_key, travel);
+    last_travel_key = key;
+}
 ```
 
 - It runs **before** the early return for an unchanged page. A layout switch that carries or
   snaps the page (§3.3) therefore sets the key, even when the page does not move.
 - `request_render_with_prefetch` no longer records a move: lines 491-492 go. It does one thing in
   their place. When the key is −1, it **seeds** the key from the view's own current page:
-  `if (impl_->last_travel_key < 0) note_travel(*impl_, impl_->current_page);`. From −1,
+  `if (impl_->last_travel_key < 0) impl_->note_travel(impl_->current_page, total);`, where
+  `total` is the `page_count()` it already reads. From −1,
   `travel_direction` keeps the direction, so a seed is never a move.
   - The seed covers the one switch that sets no page: spread → single. `IDM_VIEW_DUAL_PAGE` snaps
     the page only when the spread turns **on** (`MainWindow.cpp:1865-1870`), and
@@ -98,9 +102,10 @@ impl.last_travel_key = key;
     the switch (19 → 20) reads as no move. That is a regression against today's code, where the
     kick records page 19.
   - The seed also covers a tab whose continuous flag flips on a tab switch (§4).
-  - It seeds from `current_page`, not from the `page` argument, so the session restore kick cannot
-    seed the key. That kick passes the saved page as written (`MainWindow.cpp:1226`), which can be
-    past the end while the view holds the clamped page.
+  - It seeds from `current_page`, not from the `page` argument. The session restore kick passes
+    the saved page as written (`MainWindow.cpp:1226`), which can be past the end while the view
+    holds the clamped page. That page therefore never becomes the key. Any seed uses the view's
+    clamped page.
   - Seeding inside `set_dual_page` / `set_continuous` instead would not work. It would key the page
     before the switch's carry moves it, and bring back the L → L+1 move that §3.3 removes.
 
@@ -183,10 +188,14 @@ one stale direction at most, the size of this bug. Not worth a guard.
     again (§3.1). This is a real switch of B's layout, so it is handled as one.
   - A strip tab-switch kick restores B's strip position, and `strip_after_change` can then change
     B's current page. That change is recorded as a move, like any other strip page change.
-- **Session restore**, in paged view, sets the page through `set_current_page` once, from the
-  initial key −1. That is no move, and the default Forward stays, as today. In the strip, the kick
-  navigates to page 0 and then `strip_navigate(st.page)` records a Forward move. That is also
-  Forward.
+- **Session restore**, and any newly opened document, ends Forward, as today.
+  - Adding the tab runs `on_tab_switch`, whose kick (`MainWindow.cpp:929`) seeds the key at
+    page 0.
+  - In paged view, restore's `change_current_page(st.page)` (`MainWindow.cpp:1201`) then records
+    0 → N, which is Forward. Today's code reaches the same result through the two prefetches
+    (0, then N).
+  - In the strip, the kick navigates to page 0, and then `strip_navigate(st.page)` records the
+    same Forward move.
 
 ## 5. Testing
 
@@ -205,8 +214,10 @@ includes `core/detail/PrefetchPlan.hpp` (standard library only):
 [[nodiscard]] TravelDirection prefetch_travel() const noexcept;
 ```
 
-It is not named `travel_direction`. A member of that name would hide the free function from
-every unqualified call inside `DocumentView` (§3.1).
+It is defined in `DocumentView.cpp` beside `queued_render_count()`:
+`TravelDirection DocumentView::prefetch_travel() const noexcept { return impl_->travel; }`.
+It is not named `travel_direction`, because a member of that name would hide the free function
+from every unqualified call inside `DocumentView` (§3.1).
 
 ### 5.2 The tests drive the view the way the app does
 
@@ -266,10 +277,12 @@ it would hide exactly that path. The new cases do not use it for the switch.
    - Mutation: no seed. The direction stays Backward.
 
 Two ways to prove a case can fail:
-- Cases 1, 2 and 6 fail on the pre-fix production code: revert `DocumentView.cpp` and keep only
-  the observer.
-- Cases 3, 4, 5, 7 and 8 pass on the pre-fix code too, because it never records a move outside
-  the prefetch. Each one is proven by its named mutation instead.
+- Cases 1, 2, 5 and 6 fail on the pre-fix production code: revert `DocumentView.cpp` and keep
+  only the observer. Case 5 fails there because the pre-fix code records no move without a
+  prefetch, so its direction stays at the default Forward while the case wants Backward.
+- Cases 3, 4, 7 and 8 pass on the pre-fix code too: each ends at the direction the pre-fix code
+  also reaches. Each one is proven by its named mutation instead. Case 5 also gets its mutation,
+  because only that mutation tests the guard on an unchanged flag.
 
 In both cases, apply the change, see the case fail, and restore (`mutation-test-hygiene`).
 
