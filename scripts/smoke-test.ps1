@@ -1415,18 +1415,41 @@ try {
     # the spread's FitWidth is ((client_w DIPs - 8) / 2) / 612 (PdfCanvas::
     # apply_viewport's 8 DIP gutter). Unscaled carries land elsewhere.
     #
-    # The round trip only tells a scaled carry from an unscaled one when the
-    # spread's pan clamps the offset: unclamped, the two scalings cancel and an
-    # unscaled build lands on the same pos. Whether the spread's page overflows at
-    # all depends on the window's aspect (a 1024x768 window at 100 % fits it with
-    # 5 DIPs to spare), so the row sets the window height first: the spread's
-    # overflow becomes about 0.35 of the offset the carry brings into it (the
-    # spread is a scroll bar wider than the strip, which only adds a few DIPs), and
-    # the clamp is asserted once the spread is shown.
+    # Two round trips from that place. The first moves nothing in the spread, and
+    # comes back to the place itself (#217): the spread holds the place the strip
+    # carried in, which its clamped pan cannot give back. The second ends the hold
+    # with a switch to another tab and back, which restores the spread tab's pan, so
+    # its carry out comes from the pan. That one tells a scaled carry from an
+    # unscaled one only because the spread's pan clamps the offset: unclamped, the
+    # two scalings cancel and an unscaled build lands on the same pos. Whether the
+    # spread's page overflows at all depends on the window's aspect (a 1024x768
+    # window at 100 % fits it with 5 DIPs to spare), so the row sets the window
+    # height first: the spread's overflow becomes about 0.35 of the offset the carry
+    # brings into it (the spread is a scroll bar wider than the strip, which only
+    # adds a few DIPs), and the clamp is asserted once the spread is shown. The
+    # clamp is also what lets the first round trip tell the held place from the pan.
+    # The second tab is opened before anything is measured.
     $procStrip = Start-StripLaunch -Fixture $largeFixture -Step "strip carry at FitWidth"
+    Send-ForwardedFile -Path $bookmarksFixture
+    $tabsRaw = Wait-UxProbeState -Probe tab-enum -Until { param($s) $s.count -eq 2 -and $s.active -eq 1 }
+    $tabs = $null
+    try { $tabs = $tabsRaw | ConvertFrom-Json -ErrorAction Stop } catch {}
+    if ($null -eq $tabs -or $tabs.count -ne 2 -or $tabs.active -ne 1) {
+        throw "precondition: forwarded bookmarks.pdf: expected 2 tabs, the second active: $tabsRaw"
+    }
+    & $uxProbe send-cmd 40033 | Out-Null
+    $tabsRaw = Wait-UxProbeState -Probe tab-enum -Until { param($s) $s.count -eq 2 -and $s.active -eq 0 }
+    $tabs = $null
+    try { $tabs = $tabsRaw | ConvertFrom-Json -ErrorAction Stop } catch {}
+    if ($null -eq $tabs -or $tabs.count -ne 2 -or $tabs.active -ne 0) {
+        throw "precondition: back to tab 1: expected 2 tabs, the first active: $tabsRaw"
+    }
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll -and $pb.text -eq "1" }
+    if ($null -eq $st.cs -or -not $st.cs.vscroll -or $st.pb.text -ne "1") {
+        throw "precondition: tab 1 is not shown in the strip at page 1: $(Format-StripState $st)"
+    }
     $dipOf = { param($px, $s) $px * 96.0 / $s.dpi }
-    $cs = Read-UxProbeJson -Probe canvas-scroll
-    if ($null -eq $cs) { throw "precondition: canvas-scroll probe failed at FitWidth" }
+    $cs = $st.cs
     $estZ0 = (& $dipOf $cs.client_w $cs) / 612.0
     $estZ1 = (((& $dipOf $cs.client_w $cs) - 8.0) / 2.0) / 612.0
     $estSpreadOffset = (3 * $stripNotchDip - 8.0) * $estZ1 / $estZ0
@@ -1468,17 +1491,49 @@ try {
         throw "precondition: the carried offset ($($offset0 * $z1 / $z0) DIPs) does not clamp at the spread's overflow ($($h1 - $vpH) DIPs), so an unscaled carry would land on the same pos"
     }
     $offsetSpread = [Math]::Min($offset0 * $z1 / $z0, $h1 - $vpH)
-    & $uxProbe send-cmd 40062 | Out-Null
-    $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll }
-    if ($null -eq $st.cs -or -not $st.cs.vscroll) { throw "two-page off at FitWidth: the strip did not return: $(Format-StripState $st)" }
+    # Where a carry out from the spread's pan lands: the clamped offset, scaled back.
     $fitExpected = { param($s)
         $z2 = (& $dipOf $s.client_w $s) / 612.0
         29 * (792.0 * $z2 + 8.0) + 8.0 + $offsetSpread * $z2 / $z1
     }
+
+    # The first round trip: two-page off straight away comes back to the place.
+    & $uxProbe send-cmd 40062 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll }
+    if ($null -eq $st.cs -or -not $st.cs.vscroll) { throw "two-page off at FitWidth: the strip did not return: $(Format-StripState $st)" }
+    $heldExpected = { param($s)
+        $z2 = (& $dipOf $s.client_w $s) / 612.0
+        29 * (792.0 * $z2 + 8.0) + 8.0 + $offset0 * $z2 / $z0
+    }
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll -and $pb.text -eq "30" -and [Math]::Abs($cs.pos - [Math]::Round((& $heldExpected $cs))) -le 1 }
+    $heldPredicted = [Math]::Round((& $heldExpected $st.cs))
+    if ($null -eq $st.cs -or $st.pb.text -ne "30" -or [Math]::Abs($st.cs.pos - $heldPredicted) -gt 1) {
+        throw "two-page on, then off, at FitWidth with no move: expected page box 30 and pos $heldPredicted (+/- 1), the place the strip carried in, not $([Math]::Round((& $fitExpected $st.cs))) from the clamped pan (pos0 $fitPos0): $(Format-StripState $st)"
+    }
+    Write-Host "[OK] continuous strip: FitWidth two-page round trip keeps the place in the page: pos $fitPos0 -> $($st.cs.pos) (predicted $heldPredicted)"
+
+    # The second round trip: a switch to tab 2 and back ends the hold, so the carry
+    # out takes the spread tab's restored pan, clamped and scaled.
+    & $uxProbe send-cmd 40062 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) -not $cs.vscroll }
+    if ($null -eq $st.cs -or $st.cs.vscroll) { throw "two-page on again at FitWidth: the scroll bar stayed: $(Format-StripState $st)" }
+    & $uxProbe send-cmd 40034 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll -and $pb.text -ne "30" }
+    if ($null -eq $st.cs -or -not $st.cs.vscroll -or $st.pb.text -eq "30") {
+        throw "precondition: tab 2 is not shown in the strip: $(Format-StripState $st)"
+    }
+    & $uxProbe send-cmd 40033 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) -not $cs.vscroll -and $pb.text -eq "30" }
+    if ($null -eq $st.cs -or $st.cs.vscroll -or $st.pb.text -ne "30") {
+        throw "precondition: tab 1 is not back in the spread at page box 30: $(Format-StripState $st)"
+    }
+    & $uxProbe send-cmd 40062 | Out-Null
+    $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll }
+    if ($null -eq $st.cs -or -not $st.cs.vscroll) { throw "two-page off after a tab switch at FitWidth: the strip did not return: $(Format-StripState $st)" }
     $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll -and $pb.text -eq "30" -and [Math]::Abs($cs.pos - [Math]::Round((& $fitExpected $cs))) -le 1 }
     $fitPredicted = [Math]::Round((& $fitExpected $st.cs))
     if ($null -eq $st.cs -or $st.pb.text -ne "30" -or [Math]::Abs($st.cs.pos - $fitPredicted) -gt 1) {
-        throw "two-page on, then off, at FitWidth: expected page box 30 and pos $fitPredicted (+/- 1) (pos0 $fitPos0, z0 $z0, z1 $z1, offset in the spread $offsetSpread): $(Format-StripState $st)"
+        throw "two-page on, a tab switch, then off, at FitWidth: expected page box 30 and pos $fitPredicted (+/- 1) (pos0 $fitPos0, z0 $z0, z1 $z1, offset in the spread $offsetSpread): $(Format-StripState $st)"
     }
     Write-Host "[OK] continuous strip: FitWidth two-page round trip scales the carry: pos $fitPos0 -> $($st.cs.pos) (predicted $fitPredicted; zoom $z0 -> $z1 -> back)"
     Stop-LitePDF -Process $procStrip -Step "strip carry at FitWidth"
