@@ -51,6 +51,7 @@
 //     safe precisely because of the seq match: a stale completion can never take
 //     an anchor that belongs to a different batch.
 
+#include <algorithm>
 #include <cstdint>
 #include <utility>
 
@@ -87,6 +88,14 @@ struct PageAnchor {
         return a;
     }
 };
+
+// A hit quad's top and bottom edge, in points from the top of its page.
+inline float hit_top_pt(const litepdf::core::SearchSession::Hit& h) noexcept {
+    return std::min({h.geom.ul_y, h.geom.ur_y, h.geom.ll_y, h.geom.lr_y});
+}
+inline float hit_bottom_pt(const litepdf::core::SearchSession::Hit& h) noexcept {
+    return std::max({h.geom.ul_y, h.geom.ur_y, h.geom.ll_y, h.geom.lr_y});
+}
 
 // The canvas's single pending-anchor slot. Nothing outside PdfCanvas owns one.
 class AnchorSlot {
@@ -142,6 +151,12 @@ public:
     PageAnchor::Kind kind() const noexcept { return anchor_.kind; }
     // The page of a pending Hit; meaningless for any other kind.
     std::size_t hit_page() const noexcept { return anchor_.target.page; }
+    // The pending Hit itself; meaningless for any other kind.
+    const litepdf::core::SearchSession::Hit& hit() const noexcept { return anchor_.target; }
+    // Installed and not applied yet: a move that has not finished landing. Its
+    // anchor sets the pan when it does; until then the pan can still be the one
+    // the move started from (#218).
+    bool landing() const noexcept { return pending() && !applied_; }
 
 private:
     PageAnchor    anchor_{};
