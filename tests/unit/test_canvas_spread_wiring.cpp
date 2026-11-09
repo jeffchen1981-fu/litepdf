@@ -1663,7 +1663,7 @@ TEST_CASE("PdfCanvas spread: each slot paints only its own page's hits",
 // --- #195: PDF points over a bitmap still at the old zoom ---
 //
 // A zoom changes zoom_pct() at once; the bitmap on screen keeps its scale until
-// the replacement lands. Page 1 in single page at FitWidth is 1000 wide and 952
+// the replacement lands. Page 1 in single page at FitWidth is 1000 wide and 953
 // tall, so it overflows the 850 viewport and starts at the canvas origin.
 
 namespace {
@@ -1805,6 +1805,29 @@ TEST_CASE("PdfCanvas single page: a find measures the hit on the bitmap's own zo
     rig.canvas().scroll_into_view(h);
     CHECK(rig.pan_y() == Approx(static_cast<float>(kHeight) * 0.5f - 609.0f * old_pct)
                              .margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas single page: a find after a zoom in places a hit seen only on the old bitmap",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Single);
+    rig.canvas().change_current_page(2);
+    rig.kick(2);
+    rig.land_left();
+    REQUIRE(rig.pan_y() == 0.0f);
+
+    // 300 pt down page 2 is on screen on the bitmap drawn, and below the viewport
+    // at twice the zoom: the render at the new zoom has to place it.
+    const SearchSession::Hit h = hit_at(2, 300.0f);
+    rig.view().set_zoom_pct(rig.view().zoom_pct() * 2.0f);
+    rig.kick(2);
+    REQUIRE((300.0f + 18.0f) * rig.view().zoom_pct() > static_cast<float>(kHeight));
+
+    // MainWindow::on_find_next: the find, then its Navigate kick.
+    rig.canvas().scroll_into_view(h);
+    CHECK(rig.pan_y() == 0.0f);   // nothing moves before the render lands
+    rig.kick(2);
+    rig.land_left();
+    CHECK(rig.pan_y() == Approx(centred_pan(rig.view(), 300.0f, kHeight)).margin(1.0f));
 }
 
 TEST_CASE("PdfCanvas spread: each slot's hits sit on that slot's own zoom",

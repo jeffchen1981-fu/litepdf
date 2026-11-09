@@ -47,10 +47,15 @@ TEST_CASE("ViewportMath drawn zoom pct is the bitmap's own scale after a zoom",
           "[ui][viewport]") {
     // (#195) Rendered at 2.0, while the view is already at 1.0.
     REQUIRE(drawn_zoom_pct(840.0f, 800.0f, 420.0f, 400.0f, 1.0f, 1.0f, 96.0f)
-            == Catch::Approx(2.0f).margin(0.5f / 400.0f));
+            == Catch::Approx(839.5f / 420.0f).margin(1e-6f));
     // The same pixmap on a 192 dpi target is half as many DIPs per point.
     REQUIRE(drawn_zoom_pct(840.0f, 800.0f, 420.0f, 400.0f, 1.0f, 0.5f, 192.0f)
-            == Catch::Approx(1.0f).margin(0.5f / 400.0f));
+            == Catch::Approx(839.5f / 420.0f / 2.0f).margin(1e-6f));
+    // A zoom 0.1 % out, rendered at 0.999: the width rounds to the current
+    // scale's 420, the height does not (1599 against 1600). One side is enough
+    // to tell the bitmap is older; 1.5 px off at the page's foot otherwise.
+    REQUIRE(drawn_zoom_pct(420.0f, 1599.0f, 420.0f, 1600.0f, 1.0f, 1.0f, 96.0f)
+            == Catch::Approx(1598.5f / 1600.0f).margin(1e-6f));
     // A tall page is read from its height, a wide one from its width: the
     // longer side pins the scale closest.
     REQUIRE(drawn_zoom_pct(496.0f, 1890.0f, 420.0f, 1600.0f, 1.0f, 1.0f, 96.0f)

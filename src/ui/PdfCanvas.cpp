@@ -518,8 +518,10 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     }
 
     const D2D1_SIZE_F vp  = impl_->rt->GetSize();
-    // The page as drawn, which a zoom's render has not replaced yet (#195).
+    // The page as drawn, which a zoom's render may not have replaced yet (#195).
     const float       pct = shown_page_pct(target_pg);
+    // drawn_zoom_pct returns zoom_pct() itself for a bitmap at the current scale.
+    const bool        drawn_at_zoom = pct == impl_->view->zoom_pct();
 
     const float q_min_y_pt = std::min({ h.geom.ul_y, h.geom.ur_y,
                                         h.geom.ll_y, h.geom.lr_y });
@@ -530,7 +532,17 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     const float origin_y  = page_origin_y(page_h, vp.height) + impl_->pan_y;
     const float q_top_dip = origin_y + pdf_point_to_dip(q_min_y_pt, pct);
     const float q_bot_dip = origin_y + pdf_point_to_dip(q_max_y_pt, pct);
-    if (quad_fully_visible(q_top_dip, q_bot_dip, vp.height)) {
+    const bool visible = quad_fully_visible(q_top_dip, q_bot_dip, vp.height);
+    if (visible && !drawn_at_zoom) {
+        // Visible on a page still drawn at an older zoom (#195): the render at
+        // the new zoom moves the hit, and a None anchor would keep the pan and
+        // leave it wherever that puts it, off screen after a zoom in. Nothing
+        // moves now; the completion places the hit.
+        set_pending_anchor(PageAnchor::hit(h));
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+    if (visible) {
         // Visible on the page already showing: DO NOT anchor. The header
         // contract is "If already visible, no scroll -- only the invalidate",
         // and MainWindow kicks a render after every find, so an anchor here
@@ -542,10 +554,10 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
         return;
     }
 
-    // Same page, off screen: scroll now AND anchor. The anchor is computed from
-    // the same bitmap the completion will replace with an identical one (same
-    // page, same scale), so the two agree; it exists so a render that changes
-    // the page height under us still lands the hit correctly.
+    // Same page, off screen: scroll now AND anchor. The scroll is computed from
+    // the bitmap on screen; the anchor exists so a render that changes the page
+    // under us -- a zoom's, at another scale (#195) -- still lands the hit
+    // correctly.
     set_pending_anchor(PageAnchor::hit(h));
     impl_->pan_y = pan_y_for_hit(h);
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -618,6 +630,9 @@ bool PdfCanvas::shown_page_height(int page, float& out) const {
 float PdfCanvas::shown_page_pct(int page) const {
     if (!impl_ || !impl_->view) return 1.0f;
     const float pct = impl_->view->zoom_pct();
+    // The strip places its pages from its own layout (a press there comes
+    // through page_point_at too), whatever a paged slot may still hold.
+    if (layout() == LayoutKind::Strip) return pct;
     ID2D1Bitmap* const bm = hwnd_ ? shown_bitmap(page) : nullptr;
     if (!bm) return pct;
     // The fit's own cache, so a paint asks no more of MuPDF than content_extent.
