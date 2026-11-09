@@ -2577,7 +2577,11 @@ TEST_CASE("PdfCanvas spread: a place in a page that fits survives two-page on, t
     int page = 0;
     SECTION("the left page") { page = 29; }
     SECTION("the right page") { page = 30; }
+    leave_spread(rig);
+    const float z_strip = rig.view().zoom_pct();
     enter_spread_from(rig, page, 500.0);
+    // The offset is scaled into the spread and back, not carried as it was.
+    REQUIRE(rig.view().zoom_pct() != z_strip);
     REQUIRE(rig.pan_y() == 0.0f);
     leave_spread(rig);
 
@@ -2594,6 +2598,7 @@ TEST_CASE("PdfCanvas spread: a place the union clamps survives two-page on, then
     // Deep in the tall left page 3: scaled into the spread, past its pan's stop.
     enter_spread_from(rig, 3, 2500.0);
     const float z_spread = rig.view().zoom_pct();
+    REQUIRE(z_spread != z_strip);
     REQUIRE(-rig.pan_y() < 2500.0f * z_spread / z_strip - 50.0f);
     SECTION("before the pair lands") {}
     SECTION("once the pair has landed") {
@@ -2662,7 +2667,7 @@ TEST_CASE("PdfCanvas spread: a step that moves nothing keeps the place the strip
     CHECK(at.offset_dip == Approx(500.0).margin(0.01));
 }
 
-TEST_CASE("PdfCanvas spread: a zoom ends the place the strip carried in",
+TEST_CASE("PdfCanvas spread: a zoom leaves the place to the pan",
           "[ui][canvas][spread]") {
     Rig rig(kWidth, kHeight, Layout::Spread, kLarge);
     enter_spread_from(rig, 30, 500.0);
@@ -2680,7 +2685,7 @@ TEST_CASE("PdfCanvas spread: a zoom ends the place the strip carried in",
     CHECK(at.offset_dip == 0.0);
 }
 
-TEST_CASE("PdfCanvas spread: a resize ends the place the strip carried in",
+TEST_CASE("PdfCanvas spread: a resize leaves the place to the pan",
           "[ui][canvas][spread]") {
     Rig rig(kWidth, kHeight, Layout::Spread, kLarge);
     enter_spread_from(rig, 30, 500.0);
@@ -2698,6 +2703,31 @@ TEST_CASE("PdfCanvas spread: a resize ends the place the strip carried in",
     const CarriedPosition at = Access::strip_position(rig.canvas());
     CHECK(at.page == 30);
     CHECK(at.offset_dip == 0.0);
+}
+
+// The zoom and the viewport height are compared at the carry out, so one that is
+// undone before then leaves the reader where the carry put them: they have not moved.
+TEST_CASE("PdfCanvas spread: a zoom undone before two-page off keeps the place",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Spread, kLarge);
+    enter_spread_from(rig, 30, 500.0);
+    rig.kick(29);
+    rig.land_both();
+    const float zoom = rig.view().zoom_pct();
+    REQUIRE(rig.view().zoom_in());
+    rig.kick(29);
+    rig.land_both();
+    REQUIRE(rig.view().zoom_pct() != zoom);
+    rig.view().set_zoom_mode_fit_width();
+    rig.kick(29);
+    rig.land_both();
+    REQUIRE(rig.view().zoom_pct() == zoom);
+    REQUIRE(rig.pan_y() == 0.0f);
+    leave_spread(rig);
+
+    const CarriedPosition at = Access::strip_position(rig.canvas());
+    CHECK(at.page == 30);
+    CHECK(at.offset_dip == Approx(500.0).margin(0.01));
 }
 
 TEST_CASE("PdfCanvas spread: a hit in the pair ends the place the strip carried in",

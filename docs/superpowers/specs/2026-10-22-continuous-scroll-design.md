@@ -585,9 +585,7 @@ strip").
     float), the carry out takes the held page instead of the two rules above; offset = how far the
     viewport top is below that page's top in the union, clamped to [0, its height]. Past the held
     page's bottom only the other page of the pair holds the position, so the two rules above
-    answer; a scroll back onto the held page makes it the answer again (#211). Only the page is held: the offset still
-    comes from the pan, so a position the union clamped comes back clamped, and
-    the FitWidth round trip (row 18 of `scripts/smoke-test.ps1`) stays a measure of the scaling. (A
+    answer; a scroll back onto the held page makes it the answer again (#211). (A
     spread remembers no page and either page of a pair reaches the same pan, so without this every
     reader on a right page above the left page's bottom came back to the left page, a whole page
     away on any document of equal pages.) A held right page is measured by its own height even
@@ -607,6 +605,22 @@ strip").
     left the pair, and the offset is measured at the zoom on screen. A sideways step keeps it as
     well: the hold answers for the vertical position, and pan_x plays no part in the carry out of
     a spread.
+  - **From paged spread, when the strip carried the reader in and nothing has moved since
+    (#217).** The carry into a spread also holds the place it brought in: the offset in the
+    carried page, at the spread's zoom, with that zoom and the viewport height. A spread that
+    fits has no pan, and one that overflows clamps the pan to the union, so the pan cannot give
+    that place back. While it stands, the carry out is (the held page, that offset), and a round
+    trip with no move between comes back to the place the reader left. It ends for good at any
+    anchor that names a place (a search hit, which holds its own page instead, and the End or
+    PgDn that stays in the pair, which takes the reader to its top) and at any change of the pan
+    by the reader (a scroll, a wheel notch, the Home or End that scrolls to the top). A step that
+    moves nothing keeps it. It does not answer while the zoom or the viewport height differs from
+    the carry's: a zoom, a resize, or a FitWidth refit makes the pan the answer. A zoom or resize
+    that is undone before two-page off brings it back, since the reader has not moved. Anything
+    that ends the held page ends this too. Row 18 of
+    `scripts/smoke-test.ps1` asserts the round trip with no move, then measures the zoom scaling
+    through a round trip whose hold a tab switch has ended: the tab's restored pan is clamped,
+    which is what tells a scaled carry from an unscaled one.
   - **From the strip.** page = the derived current page; offset = viewport top − `top(page)`,
     clamped to [0, the page's height].
   - **Into the strip.** `scroll_y = anchor(page)` when the offset is 0, else `top(page) + offset` (the offset is measured from the page's top). A page that fits lands exactly where
@@ -913,10 +927,11 @@ two runs per layout; the paged arm ends at page 11's top after 10 PgDn, the stri
   pages, so a reader who came from the right page returns to it after reading the left page beside
   it, and a click or Ctrl+G on the left page of the pair on screen does not change that either. A
   hit already on screen names nothing: it moves nothing, and the hold stays as it was.
-- A round trip keeps the page, not always the place in it: the offset comes back from the pan, and
-  a spread that fits the viewport has no pan, so the reader returns to the top of the page they
-  were on (§7.3). Holding the offset as well would hide the clamp the FitWidth round trip (row 18 of
-  `scripts/smoke-test.ps1`) measures the scaling with.
+- ~~A round trip keeps the page, not always the place in it~~ Fixed by #217: the carry into a
+  spread holds the place as well as the page until the reader moves (§7.3). Left as is: once
+  the reader has scrolled, zoomed or resized inside the spread, the place comes from the pan
+  again, so a spread that fits returns them to the top of the page and one that overflows to
+  where its pan stops. A zoom or resize undone before two-page off brings the held place back.
 - A switch out of a spread in the one render between a page turn and its landing keeps the page
   the turn asked for, but not its top or bottom: the offset comes from the outgoing pair's pan,
   clamped to the left page (§7.3). A search hit in another pair that has not landed yet is the

@@ -1506,6 +1506,7 @@ try {
         29 * (792.0 * $z2 + 8.0) + 8.0 + $offset0 * $z2 / $z0
     }
     $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll -and $pb.text -eq "30" -and [Math]::Abs($cs.pos - [Math]::Round((& $heldExpected $cs))) -le 1 }
+    if ($null -eq $st.cs) { throw "two-page on, then off, at FitWidth with no move: canvas-scroll probe failed: $(Format-StripState $st)" }
     $heldPredicted = [Math]::Round((& $heldExpected $st.cs))
     if ($null -eq $st.cs -or $st.pb.text -ne "30" -or [Math]::Abs($st.cs.pos - $heldPredicted) -gt 1) {
         throw "two-page on, then off, at FitWidth with no move: expected page box 30 and pos $heldPredicted (+/- 1), the place the strip carried in, not $([Math]::Round((& $fitExpected $st.cs))) from the clamped pan (pos0 $fitPos0): $(Format-StripState $st)"
@@ -1531,6 +1532,7 @@ try {
     $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll }
     if ($null -eq $st.cs -or -not $st.cs.vscroll) { throw "two-page off after a tab switch at FitWidth: the strip did not return: $(Format-StripState $st)" }
     $st = Wait-StripState -Until { param($cs, $pb) $cs.vscroll -and $pb.text -eq "30" -and [Math]::Abs($cs.pos - [Math]::Round((& $fitExpected $cs))) -le 1 }
+    if ($null -eq $st.cs) { throw "two-page on, a tab switch, then off, at FitWidth: canvas-scroll probe failed: $(Format-StripState $st)" }
     $fitPredicted = [Math]::Round((& $fitExpected $st.cs))
     if ($null -eq $st.cs -or $st.pb.text -ne "30" -or [Math]::Abs($st.cs.pos - $fitPredicted) -gt 1) {
         throw "two-page on, a tab switch, then off, at FitWidth: expected page box 30 and pos $fitPredicted (+/- 1) (pos0 $fitPos0, z0 $z0, z1 $z1, offset in the spread $offsetSpread): $(Format-StripState $st)"
