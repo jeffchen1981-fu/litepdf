@@ -29,6 +29,33 @@ inline float rendered_px(float extent_pt, float render_scale) noexcept {
     return px > 0.0f ? px : 0.0f;   // also rejects NaN
 }
 
+// (#195) DIPs per PDF point of a page's bitmap as drawn: what places anything
+// given in PDF points (search hits, the selection, a press) over that bitmap. A
+// zoom or fit change moves the view's zoom_pct at once, while the bitmap on
+// screen keeps the scale it was rendered at until its replacement lands.
+//
+//   A bitmap of the size the current render scale gives is taken to be at the
+//   current zoom, exactly: the common case keeps its numbers.
+//   Any other size gives its own scale, read from the page's longer side, which
+//   pins it closest. MuPDF rounds the far edge up (rendered_px), so `px - 0.5`
+//   is the middle of the extents that round to `px`: off by at most half a
+//   pixel anywhere on the page.
+//   With no usable page or bitmap size, the view's zoom.
+inline float drawn_zoom_pct(float bitmap_w_px, float bitmap_h_px,
+                            float page_w_pt, float page_h_pt,
+                            float render_scale, float zoom_pct, float rt_dpi) noexcept {
+    if (!(page_w_pt > 0.0f) || !(page_h_pt > 0.0f)) return zoom_pct;   // also NaN
+    if (rendered_px(page_w_pt, render_scale) == bitmap_w_px
+        && rendered_px(page_h_pt, render_scale) == bitmap_h_px) {
+        return zoom_pct;
+    }
+    const bool  tall = page_h_pt >= page_w_pt;
+    const float px   = tall ? bitmap_h_px : bitmap_w_px;
+    const float pt   = tall ? page_h_pt : page_w_pt;
+    if (!(px > 0.0f)) return zoom_pct;
+    return bitmap_px_to_dip((px - 0.5f) / pt, rt_dpi);
+}
+
 // Clamp one axis of the pan offset.
 //
 //   content <= viewport : the axis is centered by place_bitmap, so the pan is

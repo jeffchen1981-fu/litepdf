@@ -78,6 +78,15 @@ struct PdfCanvasTestAccess {
         c.on_hwheel_scroll(delta, HWheelSource::Tilt);
     }
     static void key(PdfCanvas& c, WPARAM vk) { c.on_key_down(vk); }
+    // Where a press at client pixel (x, y) falls on the single page shown.
+    static litepdf::core::SelPoint page_point_at(PdfCanvas& c, int x, int y) {
+        Placement pl;
+        REQUIRE(c.single_page_placement(pl));
+        return c.page_point_at(x, y, pl);
+    }
+    static float pan_y_for_hit(const PdfCanvas& c, const SearchSession::Hit& h) {
+        return c.pan_y_for_hit(h);
+    }
     // What a wheel flip leaves behind, for a batch the test submitted itself.
     static void mark_wheel_flip(PdfCanvas& c) { c.impl_->wheel_flip_seq = c.impl_->next_seq; }
 
@@ -1649,6 +1658,211 @@ TEST_CASE("PdfCanvas spread: each slot paints only its own page's hits",
         CHECK(Access::painted_pixel(canvas, qx, qy) == kWhite);
     }
     rig.canvas().set_hits_source(nullptr);
+}
+
+// --- #195: PDF points over a bitmap still at the old zoom ---
+//
+// A zoom changes zoom_pct() at once; the bitmap on screen keeps its scale until
+// the replacement lands. Page 1 in single page at FitWidth is 1000 wide and 953
+// tall, so it overflows the 850 viewport and starts at the canvas origin.
+
+namespace {
+
+// Hits only on `page`, each hit_at(page, 100).
+PdfCanvas::HitsFn hit_on(int page) {
+    return [page](std::size_t p) {
+        return static_cast<int>(p) == page
+                   ? std::vector<SearchSession::Hit>{hit_at(page, 100.0f)}
+                   : std::vector<SearchSession::Hit>{};
+    };
+}
+
+// The middle of hit_at(page, 100) at `pct`, from the page's top-left corner.
+int quad_mid_x(float pct) { return static_cast<int>(150.0f * pct); }
+int quad_mid_y(float pct) { return static_cast<int>(109.0f * pct); }
+
+// Whether the overlay changes the pixel at (x, y): painted with `show(false)`,
+// then with `show(true)`. The fixture's pages are not blank, so a pixel is
+// compared with itself rather than with white.
+template <class Show>
+bool overlay_paints(PdfCanvas& canvas, int x, int y, Show show) {
+    show(false);
+    const std::uint32_t bare = Access::painted_pixel(canvas, x, y);
+    show(true);
+    return Access::painted_pixel(canvas, x, y) != bare;
+}
+
+}  // namespace
+
+TEST_CASE("PdfCanvas single page: a hit sits on the bitmap's own zoom until the new one lands",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Single);
+    rig.canvas().change_current_page(1);
+    rig.kick(1);
+    rig.land_left();
+    auto& canvas = rig.canvas();
+    const auto hits = [&canvas](bool on) { canvas.set_hits_source(on ? hit_on(1) : nullptr); };
+
+    const float old_pct = rig.view().zoom_pct();
+    rig.view().set_zoom_pct(old_pct * 0.5f);
+    rig.kick(1);
+    const float new_pct = rig.view().zoom_pct();
+
+    // The older bitmap is still drawn at the origin, at its own zoom.
+    CHECK(overlay_paints(canvas, quad_mid_x(old_pct), quad_mid_y(old_pct), hits));
+    CHECK_FALSE(overlay_paints(canvas, quad_mid_x(new_pct), quad_mid_y(new_pct), hits));
+
+    // Landed: the page is 500 wide and centred, and the hit follows it.
+    rig.land_left();
+    const int left = (kWidth - 500) / 2;
+    const int top  = (kHeight - static_cast<int>(page_dip(rig.view(), 400.0f))) / 2;
+    CHECK(overlay_paints(canvas, left + quad_mid_x(new_pct), top + quad_mid_y(new_pct), hits));
+    CHECK_FALSE(overlay_paints(canvas, quad_mid_x(old_pct), quad_mid_y(old_pct), hits));
+    hits(false);
+}
+
+TEST_CASE("PdfCanvas single page: the selection sits on the bitmap's own zoom until the new one lands",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Single);
+    rig.canvas().change_current_page(1);
+    rig.kick(1);
+    rig.land_left();
+    litepdf::core::TextSelection sel;
+    sel.page  = 1;
+    litepdf::core::Quad q;   // hit_at(1, 100)'s quad
+    q.ul_x = q.ll_x = 100.0f;
+    q.ur_x = q.lr_x = 200.0f;
+    q.ul_y = q.ur_y = 100.0f;
+    q.ll_y = q.lr_y = 118.0f;
+    sel.quads = {q};
+    auto& view = rig.view();
+    const auto shown = [&view, &sel](bool on) {
+        if (on) {
+            view.set_selection(sel);
+        } else {
+            view.clear_selection();
+        }
+    };
+
+    const float old_pct = view.zoom_pct();
+    view.set_zoom_pct(old_pct * 0.5f);
+    rig.kick(1);
+    const float new_pct = view.zoom_pct();
+
+    CHECK(overlay_paints(rig.canvas(), quad_mid_x(old_pct), quad_mid_y(old_pct), shown));
+    CHECK_FALSE(overlay_paints(rig.canvas(), quad_mid_x(new_pct), quad_mid_y(new_pct), shown));
+}
+
+TEST_CASE("PdfCanvas single page: a press maps through the bitmap's own zoom until the new one lands",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Single);
+    rig.canvas().change_current_page(1);
+    rig.kick(1);
+    rig.land_left();
+
+    const float old_pct = rig.view().zoom_pct();
+    rig.view().set_zoom_pct(old_pct * 0.5f);
+    rig.kick(1);
+
+    // The point drawn there, on the page the reader is looking at.
+    const auto p = Access::page_point_at(rig.canvas(), quad_mid_x(old_pct),
+                                         quad_mid_y(old_pct));
+    CHECK(p.x == Approx(150.0f).margin(1.0f));
+    CHECK(p.y == Approx(109.0f).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas single page: a hit is centred on the bitmap's own zoom until the new one lands",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Single);
+    rig.canvas().change_current_page(2);
+    rig.kick(2);
+    rig.land_left();
+    const SearchSession::Hit h = hit_at(2, 1000.0f);
+    const float before = Access::pan_y_for_hit(rig.canvas(), h);
+    REQUIRE(before == Approx(centred_pan(rig.view(), 1000.0f, kHeight)).margin(1.0f));
+
+    rig.view().set_zoom_pct(rig.view().zoom_pct() * 0.5f);
+    rig.kick(2);
+    CHECK(Access::pan_y_for_hit(rig.canvas(), h) == Approx(before).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas single page: a find measures the hit on the bitmap's own zoom",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Single);
+    rig.canvas().change_current_page(2);
+    rig.kick(2);
+    rig.land_left();
+    REQUIRE(rig.pan_y() == 0.0f);
+
+    // 600 pt down page 2 is below the viewport on the bitmap drawn, and would be
+    // inside it at the new zoom.
+    const float old_pct = rig.view().zoom_pct();
+    const SearchSession::Hit h = hit_at(2, 600.0f);
+    rig.view().set_zoom_pct(old_pct * 0.5f);
+    rig.kick(2);
+    REQUIRE((600.0f + 18.0f) * rig.view().zoom_pct() < static_cast<float>(kHeight));
+
+    rig.canvas().scroll_into_view(h);
+    CHECK(rig.pan_y() == Approx(static_cast<float>(kHeight) * 0.5f - 609.0f * old_pct)
+                             .margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas single page: a find after a zoom in places a hit seen only on the old bitmap",
+          "[ui][canvas][spread]") {
+    Rig rig(kWidth, kHeight, Layout::Single);
+    rig.canvas().change_current_page(2);
+    rig.kick(2);
+    rig.land_left();
+    REQUIRE(rig.pan_y() == 0.0f);
+
+    // 300 pt down page 2 is on screen on the bitmap drawn, and below the viewport
+    // at twice the zoom: the render at the new zoom has to place it.
+    const SearchSession::Hit h = hit_at(2, 300.0f);
+    rig.view().set_zoom_pct(rig.view().zoom_pct() * 2.0f);
+    rig.kick(2);
+    REQUIRE((300.0f + 18.0f) * rig.view().zoom_pct() > static_cast<float>(kHeight));
+
+    // MainWindow::on_find_next: the find, then its Navigate kick.
+    rig.canvas().scroll_into_view(h);
+    CHECK(rig.pan_y() == 0.0f);   // nothing moves before the render lands
+    rig.kick(2);
+    rig.land_left();
+    CHECK(rig.pan_y() == Approx(centred_pan(rig.view(), 300.0f, kHeight)).margin(1.0f));
+}
+
+TEST_CASE("PdfCanvas spread: each slot's hits sit on that slot's own zoom",
+          "[ui][canvas][spread]") {
+    Rig rig;
+    rig.kick(3);
+    rig.land_both();
+    auto& canvas = rig.canvas();
+    const auto hits = [&canvas](bool on) {
+        canvas.set_hits_source(on ? hits_on_every_page() : nullptr);
+    };
+
+    // The right slot will still draw page 4's older 496 x 473 render, centred in
+    // the slot. The left page lands 248 x 945: it overflows, so it starts at the
+    // top and the pair is not moved down.
+    const int right_x   = 504;
+    const int right_top = (kHeight - static_cast<int>(page_dip(rig.view(), 400.0f))) / 2;
+
+    const float old_pct = rig.view().zoom_pct();
+    rig.view().set_zoom_pct(old_pct * 0.5f);
+    rig.kick(3);
+    rig.land_left();
+    const float new_pct = rig.view().zoom_pct();
+    hits(true);
+    REQUIRE(overlay_has(canvas, 4));
+
+    CHECK(overlay_paints(canvas, right_x + quad_mid_x(old_pct),
+                         right_top + quad_mid_y(old_pct), hits));
+    CHECK_FALSE(overlay_paints(canvas, right_x + quad_mid_x(new_pct),
+                               right_top + quad_mid_y(new_pct), hits));
+    // The left slot already shows this batch's render.
+    const int left_x = (496 - 248) / 2;
+    CHECK(overlay_paints(canvas, left_x + quad_mid_x(new_pct), quad_mid_y(new_pct), hits));
+    CHECK_FALSE(overlay_paints(canvas, left_x + quad_mid_x(old_pct), quad_mid_y(old_pct), hits));
+    hits(false);
 }
 
 // --- apply_viewport and the carry ---

@@ -340,7 +340,9 @@ public:
     // and to that pair's left page. Installs a pending Hit anchor on every path
     // EXCEPT the already-visible one, which drops any pending anchor instead,
     // so the caller (MainWindow) must follow this with kick_render -- both to
-    // render and to bind that anchor to the submission it opens.
+    // render and to bind that anchor to the submission it opens. Visible on a
+    // page still drawn at an older zoom (#195) is not final: the render at the
+    // new zoom moves the hit, so that path anchors without scrolling now.
     //
     // In the strip (spec 6.3) it scrolls the strip itself and installs no
     // anchor: no scroll when the quad is inside the viewport by the same 24 DIP
@@ -510,6 +512,17 @@ private:
     // The height in DIPs of the page `page`, read from the own bitmap of the
     // slot showing it. False when no slot shows that page yet.
     bool shown_page_height(int page, float& out) const;
+
+    // (#195) DIPs per PDF point over the page `page` as drawn: the zoom the own
+    // bitmap of the slot showing it was rendered at, which trails zoom_pct()
+    // from a zoom or fit change until the replacement lands (drawn_zoom_pct).
+    // zoom_pct() when no slot shows that page, and in the strip, which places
+    // pages from its own layout. Everything that places PDF
+    // points over a paged bitmap -- hits, the selection, a press -- uses this.
+    float shown_page_pct(int page) const;
+
+    // The own bitmap of the slot showing `page`, or null when none shows it.
+    ID2D1Bitmap* shown_bitmap(int page) const;
 
     // Where on_paint draws the single-page bitmap, in canvas DIPs. False when
     // there is no bitmap or render target yet.

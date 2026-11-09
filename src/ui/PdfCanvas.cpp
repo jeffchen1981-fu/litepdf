@@ -518,7 +518,10 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     }
 
     const D2D1_SIZE_F vp  = impl_->rt->GetSize();
-    const float       pct = impl_->view->zoom_pct();
+    // The page as drawn, which a zoom's render may not have replaced yet (#195).
+    const float       pct = shown_page_pct(target_pg);
+    // drawn_zoom_pct returns zoom_pct() itself for a bitmap at the current scale.
+    const bool        drawn_at_zoom = pct == impl_->view->zoom_pct();
 
     const float q_min_y_pt = std::min({ h.geom.ul_y, h.geom.ur_y,
                                         h.geom.ll_y, h.geom.lr_y });
@@ -529,7 +532,17 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     const float origin_y  = page_origin_y(page_h, vp.height) + impl_->pan_y;
     const float q_top_dip = origin_y + pdf_point_to_dip(q_min_y_pt, pct);
     const float q_bot_dip = origin_y + pdf_point_to_dip(q_max_y_pt, pct);
-    if (quad_fully_visible(q_top_dip, q_bot_dip, vp.height)) {
+    const bool visible = quad_fully_visible(q_top_dip, q_bot_dip, vp.height);
+    if (visible && !drawn_at_zoom) {
+        // Visible on a page still drawn at an older zoom (#195): the render at
+        // the new zoom moves the hit, and a None anchor would keep the pan and
+        // leave it wherever that puts it, off screen after a zoom in. Nothing
+        // moves now; the completion places the hit.
+        set_pending_anchor(PageAnchor::hit(h));
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+    if (visible) {
         // Visible on the page already showing: DO NOT anchor. The header
         // contract is "If already visible, no scroll -- only the invalidate",
         // and MainWindow kicks a render after every find, so an anchor here
@@ -541,10 +554,10 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
         return;
     }
 
-    // Same page, off screen: scroll now AND anchor. The anchor is computed from
-    // the same bitmap the completion will replace with an identical one (same
-    // page, same scale), so the two agree; it exists so a render that changes
-    // the page height under us still lands the hit correctly.
+    // Same page, off screen: scroll now AND anchor. The scroll is computed from
+    // the bitmap on screen; the anchor exists so a render that changes the page
+    // under us -- a zoom's, at another scale (#195) -- still lands the hit
+    // correctly.
     set_pending_anchor(PageAnchor::hit(h));
     impl_->pan_y = pan_y_for_hit(h);
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -592,23 +605,43 @@ bool PdfCanvas::newest_batch_failed() const {
         || impl_->right_failed_seq == impl_->next_seq;
 }
 
-bool PdfCanvas::shown_page_height(int page, float& out) const {
-    if (!impl_ || !impl_->view || !hwnd_) return false;
-    ID2D1Bitmap* bm = nullptr;
+ID2D1Bitmap* PdfCanvas::shown_bitmap(int page) const {
+    if (!impl_ || !impl_->view) return nullptr;
     if (!impl_->dual_page) {
-        if (page == impl_->view->current_page() && own_bitmap()) {
-            bm = impl_->current_bitmap.Get();
-        }
-    } else {
-        const std::optional<Slot> slot = spread_slot_of(
-            page, impl_->view->current_page(), impl_->view->page_count());
-        if (slot == Slot::Left && own_bitmap()) bm = impl_->current_bitmap.Get();
-        if (slot == Slot::Right && own_right_bitmap()) bm = impl_->right_bitmap.Get();
+        return page == impl_->view->current_page() && own_bitmap()
+            ? impl_->current_bitmap.Get() : nullptr;
     }
+    const std::optional<Slot> slot = spread_slot_of(
+        page, impl_->view->current_page(), impl_->view->page_count());
+    if (slot == Slot::Left && own_bitmap()) return impl_->current_bitmap.Get();
+    if (slot == Slot::Right && own_right_bitmap()) return impl_->right_bitmap.Get();
+    return nullptr;
+}
+
+bool PdfCanvas::shown_page_height(int page, float& out) const {
+    if (!hwnd_) return false;
+    ID2D1Bitmap* const bm = shown_bitmap(page);
     if (!bm) return false;
     out = bitmap_px_to_dip(bm->GetSize().height,
                            static_cast<float>(GetDpiForWindow(hwnd_)));
     return true;
+}
+
+float PdfCanvas::shown_page_pct(int page) const {
+    if (!impl_ || !impl_->view) return 1.0f;
+    const float pct = impl_->view->zoom_pct();
+    // The strip places its pages from its own layout (a press there comes
+    // through page_point_at too), whatever a paged slot may still hold.
+    if (layout() == LayoutKind::Strip) return pct;
+    ID2D1Bitmap* const bm = hwnd_ ? shown_bitmap(page) : nullptr;
+    if (!bm) return pct;
+    // The fit's own cache, so a paint asks no more of MuPDF than content_extent.
+    const auto size = impl_->view->known_page_size(page);
+    if (!size) return pct;
+    const D2D1_SIZE_F px = bm->GetSize();   // PIXELS
+    return drawn_zoom_pct(px.width, px.height, size->width_pt, size->height_pt,
+                          impl_->view->render_scale(), pct,
+                          static_cast<float>(GetDpiForWindow(hwnd_)));
 }
 
 bool PdfCanvas::single_page_placement(Placement& out) const {
@@ -757,7 +790,9 @@ litepdf::core::SelPoint PdfCanvas::page_point_at(int x_px, int y_px,
     const float dpi = static_cast<float>(GetDpiForWindow(hwnd_));
     return canvas_dip_to_page_point(client_px_to_dip(static_cast<float>(x_px), dpi),
                                     client_px_to_dip(static_cast<float>(y_px), dpi),
-                                    page, impl_->view ? impl_->view->zoom_pct() : 1.0f);
+                                    page,
+                                    impl_->view ? shown_page_pct(impl_->view->current_page())
+                                                : 1.0f);
 }
 
 void PdfCanvas::cancel_gesture() {
@@ -1924,7 +1959,7 @@ float PdfCanvas::pan_y_for_hit(const litepdf::core::SearchSession::Hit& h) const
     if (!shown_page_height(static_cast<int>(h.page), src_h)) return impl_->pan_y;
 
     const D2D1_SIZE_F vp  = impl_->rt->GetSize();
-    const float       pct = impl_->view->zoom_pct();
+    const float       pct = shown_page_pct(static_cast<int>(h.page));   // #195
 
     // Quad centre in PDF points -> DIPs, measured from the page's own top.
     const float q_min_y_pt = std::min({ h.geom.ul_y, h.geom.ur_y,
@@ -2290,7 +2325,6 @@ void PdfCanvas::on_paint() {
         const int   left_page   = impl_->view
             ? dual_page_compute_left(impl_->view->current_page(), total_pages) : 0;
         const int   right_page  = dual_page_compute_right(left_page, total_pages);
-        const float pct         = impl_->view ? impl_->view->zoom_pct() : 1.0f;
 
         auto draw_slot = [&](ID2D1Bitmap* bm, float x0, const Placement& pl, int page) {
             if (!bm) return;
@@ -2325,7 +2359,10 @@ void PdfCanvas::on_paint() {
                                   D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
             // #191: the hits of this slot's page, inside its clip so a hit on a
             // part of the page the band hides is hidden with it. overlay_hits()
-            // already left out a slot still showing another page.
+            // already left out a slot still showing another page. Placed at the
+            // zoom this slot's bitmap was rendered at: after a zoom the halves
+            // land one at a time, each over its own older render (#195).
+            const float pct = shown_page_pct(page);
             for (const auto& hit : impl_->painted_hits) {
                 if (static_cast<int>(hit.page) == page) {
                     paint_hit(hit, dst.left, dst.top, pct);
@@ -2390,11 +2427,13 @@ void PdfCanvas::on_paint() {
             // page_pt * render_scale pixels wide, and dividing that by
             // rt_dpi/96 to reach DIPs cancels the dpi factor back out. Using
             // render_scale() here instead would double every rectangle at
-            // 200% scaling.
-            const float pct = impl_->view->zoom_pct();
+            // 200% scaling. The zoom is the one THIS bitmap was rendered at:
+            // after a zoom it stays on screen until the new render lands
+            // (#195).
+            const int   pg  = impl_->view->current_page();
+            const float pct = shown_page_pct(pg);
             const float ox  = dst.left;
             const float oy  = dst.top;
-            const int   pg  = impl_->view->current_page();
 
             // overlay_hits() already checked the source and both fill brushes.
             for (const auto& hit : impl_->painted_hits) {

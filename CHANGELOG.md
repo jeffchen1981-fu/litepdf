@@ -25,6 +25,11 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   came in, so a tab switch, a zoom or turning two-page on could lose your place. A wheel
   notch right after turning to a spread could skip it for the next one, or be undone when
   the second page came in (#194).
+- After a zoom or a fit change, search highlights and selected text stay on their words
+  while the page is still shown at its old size. They used to be drawn at the new size
+  over the old page until it was redrawn, longer if that redraw failed; in a
+  two-page spread one page's highlights could be off while the other's were right. A
+  click or a find in that moment also lands on the words you see (#195).
 
 ## [1.8.2] — 2026-11-02 — In continuous scroll, two-page on and straight back off keeps you on a right page
 
