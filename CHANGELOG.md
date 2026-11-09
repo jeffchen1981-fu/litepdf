@@ -21,15 +21,15 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   page. Switching to another tab and back ends this (#211).
 - When a search moves a two-page spread to a hit near the top of its right page,
   turning the spread off in continuous scroll, or choosing Continuous Scroll, now keeps
-  you on that page. It used to take you to the top of the left page beside it, with the
-  hit off screen (#214).
-- In a two-page spread whose right page is the taller one, an arrow key, the hand tool
-  or the wheel used in the moment before both pages appear (after a page turn, a tab
-  switch, a zoom or turning two-page on) now scrolls the whole spread and keeps you
-  where it took you. It used to stop at the end of the left page and leave you there
-  once the right page came in, or put you back where the page turn had placed you. A
-  wheel notch on a spread whose left page fits the window could also skip that spread
-  for the next one (#194).
+  you on that page. It used to take you to the left page beside it, with the hit off
+  screen (#214).
+- In a two-page spread whose right page is the taller one and runs below the window, an
+  arrow key, the hand tool or the wheel used in the moment before both pages appear
+  (after a page turn, a tab switch, a zoom or turning two-page on) now scrolls the whole
+  spread and keeps you where it took you. It used to stop at the end of the left page
+  and leave you there once the right page came in, or put you back where the page turn
+  had placed you. A wheel notch on such a spread whose left page fits the window could
+  also skip that spread for the next one (#194).
 - Outside continuous scroll, after a zoom or a fit change, search highlights and
   selected text stay on their words while the page is still shown at its old size. They
   used to be drawn at the new size over the old page until it was redrawn, longer if
@@ -45,11 +45,10 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 - Switching to continuous scroll (turning it on, or turning two-page off while continuous
   scroll is on) in the moment after going to another page or to a search hit, before the
   new page appears, now takes you where the move was going: the top of the page you went
-  to, the place the wheel was taking you back to (the bottom of the page from a single
-  page; from a two-page spread, the same place in the page the spread would have shown),
-  or the search hit. It used to keep the page but put you as far down it as you had
-  scrolled on the page before, and from a two-page spread a search could leave you on
-  the page beside the hit (#218).
+  to, the place in the page that the wheel's turn back would have shown, or the search
+  hit. It used to keep the page but put you as far down it as you had scrolled on the
+  page before, and from a two-page spread a search could leave you on the page beside
+  the hit (#218).
 
 ## [1.8.2] — 2026-11-02 — In continuous scroll, two-page on and straight back off keeps you on a right page
 
