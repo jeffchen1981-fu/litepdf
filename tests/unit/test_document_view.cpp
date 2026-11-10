@@ -663,6 +663,113 @@ TEST_CASE("DocumentView travel: the prefetch after spread off renders the neighb
     REQUIRE_FALSE(view->l1_contains(6));
 }
 
+// #164: a layout switch is not a move. The key resets when the flag really
+// changes, and the next single-page kick seeds it from the view's own page.
+TEST_CASE("DocumentView travel: turning the spread on is not a move (#164)",
+          "[core][view][prefetch][travel]") {
+    InlineDispatcher disp;
+    auto view = one_worker_view(disp, 1);
+
+    move_to(*view, 2);
+    move_to(*view, 4);  // Forward; page 4 is the right page of (3,4)
+    view->set_dual_page(true);
+    move_to(*view, 3);  // the snap
+
+    REQUIRE(view->prefetch_travel() == TravelDirection::Forward);
+}
+
+TEST_CASE("DocumentView travel: setting continuous to its current value keeps the reference (#164)",
+          "[core][view][prefetch][travel]") {
+    InlineDispatcher disp;
+    auto view = one_worker_view(disp, 1);
+
+    view->set_continuous(true);
+    move_to(*view, 4);
+    move_to(*view, 5);  // Forward
+    view->set_continuous(true);  // what every tab switch does
+    move_to(*view, 4);
+
+    REQUIRE(view->prefetch_travel() == TravelDirection::Backward);
+}
+
+TEST_CASE("DocumentView travel: the first page turn after spread off counts (#164)",
+          "[core][view][prefetch][travel]") {
+    InlineDispatcher disp;
+    auto view = one_worker_view(disp, 1);
+
+    spread_issue_example(*view);  // ends Backward, at single page 5
+    move_to(*view, 6);
+    kick(*view, 6);
+
+    REQUIRE(view->prefetch_travel() == TravelDirection::Forward);
+}
+
+TEST_CASE("DocumentView travel: the first page turn after a continuous flip on a tab switch counts (#164)",
+          "[core][view][prefetch][travel]") {
+    InlineDispatcher disp;
+    auto view = one_worker_view(disp, 1);
+
+    view->set_continuous(true);
+    move_to(*view, 5);
+    move_to(*view, 3);  // Backward
+    view->set_continuous(false);
+    kick(*view, 3);  // a tab switch to a paged-single target sets no page
+    move_to(*view, 4);
+    kick(*view, 4);
+
+    REQUIRE(view->prefetch_travel() == TravelDirection::Forward);
+}
+
+TEST_CASE("DocumentView travel: the first kick after a switch keys the view's own page (#164)",
+          "[core][view][prefetch][travel]") {
+    InlineDispatcher disp;
+    auto view = one_worker_view(disp, 1);
+
+    move_to(*view, 6);
+    move_to(*view, 7);  // Forward
+    view->set_continuous(true);
+    view->set_continuous(false);
+    // A session restore kick on a document that shrank: the saved page is
+    // past the end, and the view holds page 7. Its renders fail in MuPDF.
+    kick(*view, 20);
+    move_to(*view, 7);
+
+    REQUIRE(view->prefetch_travel() == TravelDirection::Forward);
+}
+
+TEST_CASE("DocumentView travel: spread off into the strip onto the held right page is not a move (#164)",
+          "[core][view][prefetch][travel]") {
+    InlineDispatcher disp;
+    auto view = one_worker_view(disp, 1);
+
+    view->set_dual_page(true);
+    for (int p : {3, 5, 3}) move_to(*view, p);
+    REQUIRE(view->prefetch_travel() == TravelDirection::Backward);
+
+    view->set_dual_page(false);
+    view->set_continuous(true);
+    move_to(*view, 4);  // the carry onto the held right page
+    view->set_continuous(false);
+    move_to(*view, 4);
+    kick(*view, 4);
+    REQUIRE(view->prefetch_travel() == TravelDirection::Backward);
+}
+
+TEST_CASE("DocumentView travel: a carry onto the current page sets the reference (#164)",
+          "[core][view][prefetch][travel]") {
+    InlineDispatcher disp;
+    auto view = one_worker_view(disp, 1);
+
+    move_to(*view, 5);
+    move_to(*view, 3);
+    REQUIRE(view->prefetch_travel() == TravelDirection::Backward);
+
+    view->set_continuous(true);
+    move_to(*view, 3);  // single page 3 -> strip: the carry lands on the current page
+    move_to(*view, 4);  // the first scroll
+    REQUIRE(view->prefetch_travel() == TravelDirection::Forward);
+}
+
 // #159: a tab going to the background keeps only the L1 pixmaps of the pages
 // it shows, at its current render scale and polarity.
 namespace {

@@ -91,8 +91,8 @@ struct DocumentView::Impl {
     // last_travel_key is the key of the reader's last page change: the page,
     // or the pair's left page in the spread. It is -1 before the first change
     // and after a layout switch. travel is the direction of the last real
-    // move. Only note_travel writes travel. (Task 2 adds the layout setters'
-    // reset of the key and updates this comment.)
+    // move. Only note_travel writes travel; besides it, set_dual_page and
+    // set_continuous reset last_travel_key to -1 when their flag changes.
     int                    last_travel_key = -1;
     TravelDirection        travel        = TravelDirection::Forward;
     // (#49) Page sizes request_render_with_prefetch and set_viewport have looked
@@ -305,7 +305,11 @@ bool DocumentView::set_current_page(int idx) {
 }
 
 void DocumentView::set_continuous(bool on) noexcept {
+    // (#164) Only an actual change resets the travel key: apply_effective_layout
+    // calls this on every tab switch, and a same-value call is not a switch.
+    if (impl_->continuous == on) return;
     impl_->continuous = on;
+    impl_->last_travel_key = -1;  // a layout switch is not a move
 }
 
 bool DocumentView::continuous() const noexcept {
@@ -446,6 +450,7 @@ void DocumentView::set_dual_page(bool on) {
     if (on) impl_->text_wanted->store(-1, std::memory_order_relaxed);
     if (impl_->dual_page == on) return;
     impl_->dual_page = on;
+    impl_->last_travel_key = -1;  // (#164) a layout switch is not a move
     // (Phase 8 D9 addendum / D10) Drain in-flight single-page renders
     // so their bitmaps don't land in the wrong slot of the new layout.
     // Caller kicks a fresh dual-page render afterwards.
@@ -506,6 +511,10 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb,
     //    size cannot be read counts as unknown, which falls back to both
     //    neighbours, and the render reports the failure as it always has.
     const int   total    = page_count();
+    // (#164) Spread -> single sets no page, so after a layout switch this is
+    // where the travel key comes back. From -1 it is never a move. Seeded
+    // from the view's own page: `page` can be past the end on a restore.
+    if (impl_->last_travel_key < 0) impl_->note_travel(impl_->current_page, total);
     const bool  has_prev = page - 1 >= 0;
     const bool  has_next = page + 1 < total;
     const float scale    = render_scale();
