@@ -7,6 +7,7 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 #include "app/SearchDispatcher.hpp"
@@ -572,6 +573,94 @@ TEST_CASE("DocumentView prefetches one neighbour past the byte budget (#49)",
     // End: forward onto the last page, whose only neighbour is page 6.
     REQUIRE(queued_by(*view, 7) == 2);
     REQUIRE(queued_by(*view, 7) == 2);  // a resubmit of the same page
+}
+
+// #164: the direction the single-page prefetch uses follows the reader's moves
+// in every layout. move_to() is what every layout's page change reduces to;
+// kick() is MainWindow::kick_render's single-page branch, which calls no
+// set_current_page first. 8 pages: spread pairs (0) (1,2) (3,4) (5,6) (7).
+namespace {
+
+using litepdf::core::TravelDirection;
+
+void move_to(DocumentView& view, int page) { (void)view.set_current_page(page); }
+
+void kick(DocumentView& view, int page) {
+    view.request_render_with_prefetch(page,
+        [](fz_pixmap* p, fz_context* ctx) { if (p) fz_drop_pixmap(ctx, p); }, {});
+}
+
+// Spec 5.3 case 1: single page 1; spread forward to (7), back to (5,6); spread
+// off; the single-page kick for page 5, with no page change before it.
+void spread_issue_example(DocumentView& view) {
+    move_to(view, 1);
+    kick(view, 1);
+    view.set_dual_page(true);
+    for (int p : {1, 3, 5, 7, 5}) move_to(view, p);
+    view.set_dual_page(false);
+    kick(view, 5);
+}
+
+}  // namespace
+
+TEST_CASE("DocumentView travel: spread moves set the direction single page resumes with (#164)",
+          "[core][view][prefetch][travel]") {
+    InlineDispatcher disp;
+    auto view = one_worker_view(disp, 1);
+
+    spread_issue_example(*view);
+
+    REQUIRE(view->prefetch_travel() == TravelDirection::Backward);
+}
+
+TEST_CASE("DocumentView travel: strip moves set the direction single page resumes with (#164)",
+          "[core][view][prefetch][travel]") {
+    InlineDispatcher disp;
+    auto view = one_worker_view(disp, 1);
+
+    move_to(*view, 1);
+    kick(*view, 1);
+    view->set_continuous(true);
+    for (int p : {1, 2, 5, 3}) move_to(*view, p);  // the carry, then the scroll
+    view->set_continuous(false);
+    move_to(*view, 3);  // the carry back (PdfCanvasStrip.cpp:428)
+    kick(*view, 3);
+
+    REQUIRE(view->prefetch_travel() == TravelDirection::Backward);
+}
+
+TEST_CASE("DocumentView travel: a spread snap to the left page is not a move (#164)",
+          "[core][view][prefetch][travel]") {
+    InlineDispatcher disp;
+    auto view = one_worker_view(disp, 1);
+
+    move_to(*view, 4);
+    view->set_dual_page(true);
+    for (int p : {3, 5, 3}) move_to(*view, p);  // the snap, then (5,6), (3,4)
+    REQUIRE(view->prefetch_travel() == TravelDirection::Backward);
+
+    move_to(*view, 6);  // a go-to on a right page
+    move_to(*view, 5);  // its snap to the pair's left page
+    REQUIRE(view->prefetch_travel() == TravelDirection::Forward);
+}
+
+TEST_CASE("DocumentView travel: the prefetch after spread off renders the neighbour behind (#164)",
+          "[core][view][prefetch][travel]") {
+    InlineDispatcher disp;
+    // One worker and a one-byte budget: one neighbour is prefetched, and L1
+    // keeps only its newest entry, so once the prefetch lands L1 holds just
+    // that neighbour. The only earlier renders are pages 1 and 2.
+    auto view = one_worker_view(disp, 1);
+
+    spread_issue_example(*view);
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!view->l1_contains(4) && !view->l1_contains(6) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(view->l1_contains(4));
+    REQUIRE_FALSE(view->l1_contains(6));
 }
 
 // #159: a tab going to the background keeps only the L1 pixmaps of the pages
