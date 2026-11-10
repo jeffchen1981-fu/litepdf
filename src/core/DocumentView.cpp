@@ -88,11 +88,13 @@ struct DocumentView::Impl {
     // (#55) The L1 entry count the cache was built with, for l1_capacity().
     std::size_t            l1_capacity   = 5;
     // (#164) Which way the reader is going, for the single-page prefetch.
-    // last_travel_key is the key of the reader's last page change: the page,
-    // or the pair's left page in the spread. It is -1 before the first change
-    // and after a layout switch. travel is the direction of the last real
-    // move. Only note_travel writes travel; besides it, set_dual_page and
-    // set_continuous reset last_travel_key to -1 when their flag changes.
+    // last_travel_key is the key of the reader's last page change, or of the
+    // current page the single-page kick seeds it with: the page, or the pair's
+    // left page in the spread. It is -1 before the first change and after a
+    // layout switch, until either sets it. travel is the direction of the
+    // last real move. Only note_travel writes travel; besides it,
+    // set_dual_page and set_continuous reset last_travel_key to -1 when their
+    // flag changes.
     int                    last_travel_key = -1;
     TravelDirection        travel        = TravelDirection::Forward;
     // (#49) Page sizes request_render_with_prefetch and set_viewport have looked
@@ -287,8 +289,9 @@ bool DocumentView::set_current_page(int idx) {
     if (pc <= 0) return false;
     const int max_idx = pc - 1;
     const int clamped = std::clamp(idx, 0, max_idx);
-    // (#164) Before the early return: a change onto the current page from
-    // another layout (a carry, a snap) can still be a move in the new key.
+    // (#164) Before the early return: after a layout switch, a carry or snap
+    // onto the current page sets the reference, so the next move is not lost.
+    // It is never a move itself: the key is then -1 or already this page's.
     impl_->note_travel(clamped, pc);
     if (clamped == impl_->current_page) return false;
     impl_->current_page = clamped;
