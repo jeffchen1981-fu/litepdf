@@ -40,6 +40,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Character-for-character equality. PowerShell's -eq/-ne/-ceq/-cne compare
+# strings culture-aware, which ignores characters with no sort weight: a soft
+# hyphen (U+00AD), a zero-width joiner (U+200D), U+FEFF or U+0000 appended to
+# a value still compares equal to the value without it (#190).
+function Test-OrdinalEqual([string]$a, [string]$b) {
+    return [string]::Equals($a, $b, [StringComparison]::Ordinal)
+}
+
 # Returns an array of failure messages (empty = pass). Pure: no I/O, so the
 # self-test can feed it synthetic cli output.
 function Test-CliIdentity {
@@ -52,9 +60,11 @@ function Test-CliIdentity {
     )
     $failures = @()
     # Keys match case-insensitively (@{}): they are literals in litepdf-cli's
-    # printf, not git data. Values that can hold letters (the build id, the
-    # -dev suffix) compare with -cne (#106); the other comparisons have a
-    # digit-only side or test for empty, so case cannot change their result.
+    # printf, not git data. Values compare ordinally (Test-OrdinalEqual):
+    # case-sensitive (#106) and without dropping zero-weight characters
+    # (#190), which a digit-only expected side does not prevent. The empty
+    # build id test stays culture-aware so an id of only such characters
+    # fails as empty.
     $kv = @{}
     foreach ($line in $CliOutput) {
         $t = "$line".Trim()
@@ -67,19 +77,19 @@ function Test-CliIdentity {
     if ($failures.Count -gt 0) { return ,$failures }
 
     $numeric = $kv["version"] -replace '-.*$', ''
-    if ($numeric -ne $Expected) {
+    if (-not (Test-OrdinalEqual $numeric $Expected)) {
         $failures += "litepdf-cli version '$($kv["version"])' does not match VERSION '$Expected'"
     }
-    if ($ProductVersion -ne "$Expected.0") {
+    if (-not (Test-OrdinalEqual $ProductVersion "$Expected.0")) {
         $failures += "litepdf.exe ProductVersion '$ProductVersion' does not match '$Expected.0'"
     }
     if ($Mode -eq "Release") {
-        if ($kv["release"] -ne "1") { $failures += "build is not classified as a release (release=$($kv["release"]))" }
-        if ($kv["version"] -ne $Expected) { $failures += "release version must be the bare triple '$Expected', got '$($kv["version"])'" }
-        if ($kv["build"] -cne $Tag) { $failures += "release build id '$($kv["build"])' does not equal the tag '$Tag'" }
+        if (-not (Test-OrdinalEqual $kv["release"] "1")) { $failures += "build is not classified as a release (release=$($kv["release"]))" }
+        if (-not (Test-OrdinalEqual $kv["version"] $Expected)) { $failures += "release version must be the bare triple '$Expected', got '$($kv["version"])'" }
+        if (-not (Test-OrdinalEqual $kv["build"] $Tag)) { $failures += "release build id '$($kv["build"])' does not equal the tag '$Tag'" }
     } elseif ($Mode -eq "Dev") {
-        if ($kv["release"] -ne "0") { $failures += "build is not classified as dev (release=$($kv["release"]))" }
-        if ($kv["version"] -cne "$Expected-dev") { $failures += "dev version must be '$Expected-dev', got '$($kv["version"])'" }
+        if (-not (Test-OrdinalEqual $kv["release"] "0")) { $failures += "build is not classified as dev (release=$($kv["release"]))" }
+        if (-not (Test-OrdinalEqual $kv["version"] "$Expected-dev")) { $failures += "dev version must be '$Expected-dev', got '$($kv["version"])'" }
         if ($kv["build"] -eq "") { $failures += "dev build id is empty (no git provenance)" }
     }
     return ,$failures
@@ -138,6 +148,28 @@ function Invoke-SelfTest {
     CheckOnly $f "release build id" "14: case-mismatched tag alone fails -ExpectRelease"
     $f = Test-CliIdentity @("version=1.3.0-DEV", "build=v1.3.0-18-gf7b1ed6", "release=0") "1.3.0" "1.3.0.0" "Dev" ""
     CheckOnly $f "dev version must be" "15: case-mismatched -dev suffix alone fails -ExpectDev"
+
+    # #190: a zero-weight character must not vanish from any compared value.
+    # Built with [char] so this file holds no such character itself.
+    $shy = [string][char]0x00AD
+    $f = Test-CliIdentity $rel "1.3.0" "1.3.0.0" "Release" "v1.3.0$shy"
+    CheckOnly $f "release build id" "16: tag with a soft hyphen alone fails -ExpectRelease"
+    $f = Test-CliIdentity @("version=1.3.0-dev$shy", "build=v1.3.0-18-gf7b1ed6", "release=0") "1.3.0" "1.3.0.0" "Dev" ""
+    CheckOnly $f "dev version must be" "17: -dev suffix with a soft hyphen alone fails -ExpectDev"
+    $f = Test-CliIdentity @("version=1.3.0", "build=v1.3.0", "release=1$shy") "1.3.0" "1.3.0.0" "Release" "v1.3.0"
+    CheckOnly $f "build is not classified as a release" "18: release flag with a soft hyphen alone fails -ExpectRelease"
+    $f = Test-CliIdentity @("version=1.3.0-dev", "build=v1.3.0-18-gf7b1ed6", "release=0$shy") "1.3.0" "1.3.0.0" "Dev" ""
+    CheckOnly $f "build is not classified as dev" "19: dev flag with a soft hyphen alone fails -ExpectDev"
+    $f = Test-CliIdentity $dev "1.3.0" "1.3.0.0$shy" "Local" ""
+    CheckOnly $f "litepdf.exe ProductVersion" "20: ProductVersion with a soft hyphen alone fails"
+    $f = Test-CliIdentity @("version=1.3.0$shy", "build=gabc1234", "release=0") "1.3.0" "1.3.0.0" "Local" ""
+    CheckOnly $f "litepdf-cli version" "21: version with a soft hyphen alone fails the numeric check"
+    # The bare-triple check cannot fail alone here: its value is also the
+    # numeric one. Require both messages so each check is still proven.
+    $f = Test-CliIdentity @("version=1.3.0$shy", "build=v1.3.0", "release=1") "1.3.0" "1.3.0.0" "Release" "v1.3.0"
+    $both = ($f.Count -eq 2) -and $f[0].StartsWith("litepdf-cli version") -and $f[1].StartsWith("release version must be the bare triple")
+    Check $both "22: release version with a soft hyphen fails both the numeric and the bare-triple check"
+    if (-not $both) { foreach ($x in $f) { Write-Host "       got: $x" } }
 
     if ($script:selfTestOk) { Write-Host "[OK] version-sync self-test: $script:selfTestCount/$script:selfTestCount passed"; exit 0 }
     Write-Host "[FAIL] version-sync self-test had failures"
