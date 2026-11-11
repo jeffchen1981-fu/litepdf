@@ -4,6 +4,8 @@ Status: designed in chat 2026-11-11; behaviour decisions made by the user, appro
 Fable reviews against `82f56a0` and a D2D spike.
 Spec gate (Full tier): round 1 (Opus + Sonnet) fixed in place — the strip's drawn rect (R3, §3.4),
 the smoke direction row (§5.5), the shared canvas rig (§5.0), and the landing tests (§5.4).
+Codex lens (terra, gpt-6.1-terra, luna, one commit `3f3dc02`) fixed in place — selection scope in
+the spread (§2, §3.4), the direction row's clamp and preconditions (§5.4 fixture, §5.5).
 Issue: #53. Related decisions: Phase 8 D9 (per-tab view flags are not persisted),
 `project_litepdf_held_place_217`, `project_litepdf_continuous_scroll_55`.
 
@@ -20,8 +22,10 @@ identity (design §10 rules out *rotate-and-save*, not this).
 ## 2. Goal and non-goals
 
 Goal: the reader can turn the whole document by 90° steps in the active tab, in all three layouts
-(single page, two-page spread, continuous strip), with fit modes, search highlights, the text
-selection, drag-select and copy all correct in the rotated view.
+(single page, two-page spread, continuous strip), with fit modes and search highlights correct in
+the rotated view, and the text selection, drag-select and copy correct wherever they exist today:
+single page and strip. The spread has no selection (text-selection spec §1; the press path refuses
+it at `PdfCanvas.cpp:902-905`), and rotation does not add one.
 
 Non-goals (decided with the user):
 
@@ -42,7 +46,7 @@ Non-goals (decided with the user):
 
 | # | Decision | Why |
 |---|---|---|
-| R1 | Render unrotated; draw the bitmap through a D2D world transform. | Bitmaps, `RenderRequest`, L1/L2, `StripSchedule`, text pages and search results stay rotation-free: no cache key axis, no stale-rotation bitmap, no re-render at custom zoom. |
+| R1 | Render unrotated; draw the bitmap through a D2D world transform. | Bitmaps, `RenderRequest`, L1/L2, `StripSchedule`, text pages and search results stay rotation-free: no cache key axis, no stale-rotation bitmap, no rasterisation at custom zoom (the kick's request is an L1 hit, which posts a completion without counting in `renders_started`, `RenderEngine.cpp:183-205`). |
 | R2 | One pure page↔view transform serves drawing, overlays, presses and scroll-into-view. | Bitmap and overlays are placed by the same matrix, so they cannot drift apart. |
 | R3 | The transform's extent is the **drawn rect**: the rect the page's bitmap is actually drawn into in that paint, never `page_pt × zoom`. Overlays and presses on that page use the same rect. | `fz_round_rect` puts the pixmap's rounding slack at the far edge; a rotation flips it to the near edge, so a transform built from any other extent moves the bitmap against its overlays. The drawn rect is the bitmap's natural size for a fresh bitmap (paged, and the strip's Ready branch, which draws unresampled on purpose) and the layout rect where a stale bitmap is stretched or no bitmap is drawn (§3.4). |
 | R4 | `DocumentView` keeps unrotated sizes internally and reports view-frame sizes publicly. | The "a page's size never changes for the Document's life" invariant of the caches still holds. |
@@ -112,6 +116,7 @@ rect arithmetic. That stays true outside the per-page blocks below.
 
 - **`view_px(bm)`** replaces the six `bm->GetSize()` readers (`PdfCanvas.cpp:628, 644, 652, 1670,
   2308`; `PdfCanvasStrip.cpp:950`) and swaps at 90/270. Placement, `content_extent`,
+  `shown_page_height` (`:628`, read by `pan_y_for_hit` for a spread hit's page origin),
   `shown_page_pct`'s `drawn_zoom_pct` and the cursor tests then see view-frame extents.
 - **The drawn rect (R3), per branch.** Each is the view-frame rect the page is drawn into today,
   with its origin unchanged:
@@ -127,8 +132,8 @@ rect arithmetic. That stays true outside the per-page blocks below.
   the flipped axis; the 8 DIP gap absorbs it, and bitmap, overlays and presses still agree.
 - **Per page** (single page; each spread slot; each strip page): take the drawn rect, then
   `SetTransform(draw_affine(rot, rect))`, and in the local frame draw the bitmap into
-  `[0, uw] x [0, uh]`, then the hits (`paint_hit(hit, 0, 0, pct)`) and the selection, then
-  `SetTransform(identity)`. The overlay origin becomes the local origin; today it is
+  `[0, uw] x [0, uh]`, then the hits (`paint_hit(hit, 0, 0, pct)`) and, outside the spread, the
+  selection, then `SetTransform(identity)`. The overlay origin becomes the local origin; today it is
   `dst.left / dst.top` (`PdfCanvas.cpp:2373, 2440-2441`) or the strip rect
   (`PdfCanvasStrip.cpp:982-983`).
 - The spread's `PushAxisAlignedClip` (`PdfCanvas.cpp:2360-2362`) is pushed under identity, before
@@ -147,7 +152,8 @@ rect arithmetic. That stays true outside the per-page blocks below.
   (`stext-search.c:261-265, 304-305`), so drag direction does not matter. `TextSelection` stays in
   page space and survives a rotation.
 - **Scroll-into-view** takes the hit's view-frame box from `local_rect_to_view`: `scroll_into_view`
-  (`PdfCanvas.cpp:474-567`), `pan_y_for_hit` (`:1953-1983`), `quad_fully_visible`,
+  (`PdfCanvas.cpp:474-567`, both its strip branch at `:480-489`, which today passes the quad's raw
+  y extent to `scroll_hit_into_view`, and its paged branch), `pan_y_for_hit` (`:1953-1983`), `quad_fully_visible`,
   `StripViewport::scroll_hit_into_view`, `hit_top_pt` / `hit_bottom_pt` (`PageAnchor.hpp:93-98`)
   and `landing_pan_y` (`PdfCanvasStrip.cpp:326-344`). At 90/270 the vertical extent comes from the
   quad's x extent. `hit_top_pt` / `hit_bottom_pt` gain the rotation and the page's view-frame size
@@ -259,11 +265,12 @@ Real `PdfCanvas` on a hidden window (`reference_litepdf_canvas_test_rig`), throu
 
 New fixture `tests/fixtures/rotation-marker.pdf`, generated by
 `scripts/generate-rotation-fixture.py` (reportlab, `pageCompression=0, invariant=1`, as the other
-generators; a second run is byte-identical). Two A4 portrait pages (595.276 x 841.89 pt, so the
+generators; a second run is byte-identical). Three A4 portrait pages (595.276 x 841.89 pt, so the
 drawn extent has fractional slack at zoom 1.0):
 - page 1: a solid black square near the top-left corner, and one line of known text near the top;
 - page 2: one unique word near the **top-right** corner (x ≈ 480 pt), used by the scroll and smoke
-  direction cases.
+  direction cases;
+- page 3: blank, so that centring a hit on page 2 is never clamped by the end of the document.
 
 Cases:
 
@@ -274,8 +281,9 @@ Cases:
 3. `page_point_at` at a known canvas point returns the expected page point at each rotation.
 4. A search hit's highlight rectangle lands over the rotated text (pixel check against the word's
    painted ink).
-5. `scroll_into_view` at 90° uses the hit's x extent: page 2's top-right word, at a zoom where the
-   turned page overflows the rig viewport, ends up vertically in view.
+5. `scroll_into_view` at 90° uses the hit's x extent, in both layouts: page 2's top-right word, at
+   a zoom where the turned page overflows the rig viewport, ends up vertically in view in single
+   page (`pan_y`) and in the strip (`scroll_y`, the `:480-489` branch).
 6. Spread on `spread-pairs.pdf` (not `spread-unequal.pdf`, which never pairs on screen): the right
    slot draws rotated inside its clip, its hit is placed in the right slot, and a pair of unequal
    pages gives the expected extent.
@@ -313,11 +321,15 @@ layout is the strip. New probe work, listed so the plan carries it: a `find-text
   strip's range, which is predictable: `8 + n·(h_view·z + 8)` with the refitted `z`. Four turns
   restore the original range. Proven able to fail by not posting the command.
 - **Direction row:** open `rotation-marker.pdf`, post `IDM_VIEW_ROTATE_CW`, open the find bar,
-  `find-text` page 2's unique word, post `IDM_FIND_NEXT` (40043). Page 2 is off screen before the
-  search, so the strip must scroll, and it centres the hit: the `canvas-scroll` position is
-  predicted from the word's view-frame top (`x·z` clockwise, `(W − x)·z` counter-clockwise), and the
-  two predictions differ by `(2x − W)·z`, several hundred DIP. The row asserts the clockwise
-  prediction within a tolerance well under that gap. This catches a swapped command binding, which
+  `find-text` page 2's unique word, post `IDM_FIND_NEXT` (40043). The prediction is computed from
+  the probe's own readings, never from an assumed window: `client_h`, `dpi` and the range from
+  `canvas-scroll` after the turn give the refitted `z` and the layout; the hit's view-frame centre
+  is page 2's top plus `x·z` clockwise or `(W − x)·z` counter-clockwise; the expected position is
+  that centre minus half the viewport, clamped to `[0, max − page]` exactly as `move_to` does
+  (`StripViewport.hpp:145-147`). Preconditions the row asserts before it searches: page 2 is not in
+  view (position 0 and page 2's top below `client_h`), and neither prediction is clamped (page 3
+  follows). Then the two predictions differ by `(2x − W)·z`, several hundred DIP at fit width, and
+  the row asserts the clockwise one within a tolerance well under that gap. This catches a swapped command binding, which
   no unit test can (`MainWindow` is not in the test binary). Proven able to fail by posting
   `IDM_VIEW_ROTATE_CCW` instead.
 - **Accelerator row:** real `SendInput` `Ctrl+Shift+=` only after asserting
