@@ -12,6 +12,9 @@ Generate the continuous-scroll strip fixtures (#55, spec section 9.4):
   tests/fixtures/strip-images.cbz      300 PNGs, 200 x 300 grayscale, each a flat
                                        fill with its index drawn in Pillow's
                                        default font, named 001.png ... 300.png.
+  tests/fixtures/strip-chapters.fb2    200 sections, each a title and the same
+                                       10 Lorem ipsum paragraphs as the EPUB
+                                       (#169).
 
 They feed the page-sizing gate (spec section 4.4): litepdf-cli
 --bench-page-sizes times DocumentView::page_sizes() on each of them. The
@@ -20,6 +23,10 @@ for a 100 ms gate. strip-images.cbz is too small as well: its images are under
 1 KB each, so it could not show what sizing a real-size CBZ costs. The CBZ gate
 is measured on local real-size archives instead (#176; spec
 docs/superpowers/specs/2026-10-25-cbz-header-sizing-176-design.md, section 6).
+There is no XPS fixture: XPS missed the gate (#169, spec section 4.4) on a
+document written by WPF's XpsDocumentWriter, whose cost is the size of each
+page's FixedPage part. A committed fixture small enough to keep in the repo
+would not show that cost.
 
 Determinism (the --check contract, as in generate-large-fixture.py):
   * PDF: reportlab invariant mode (rl_config.invariant = 1) pins the timestamp
@@ -34,8 +41,9 @@ Determinism (the --check contract, as in generate-large-fixture.py):
   * The CBZ's PNG bytes are compressed by Pillow's own bundled zlib, so they are
     reproducible only with the pinned Pillow version (12.2.0); the benchmark
     workflow installs that version before running --check.
+  * FB2: plain UTF-8 XML with "\n" line ends, built from fixed strings.
 
---check regenerates all three to a temp dir, asserts byte identity with the
+--check regenerates all four to a temp dir, asserts byte identity with the
 committed files, asserts the PDF has zero FlateDecode streams and that every
 zip entry is stored, and exits 1 on any drift.
 
@@ -46,7 +54,7 @@ White page fills are required because LitePDF's PdfCanvas uses a dark D2D
 surface; see generate-search-fixture.py for the full rationale.
 
 Usage:
-  python scripts/generate-strip-fixtures.py            # write the three fixtures
+  python scripts/generate-strip-fixtures.py            # write the four fixtures
   python scripts/generate-strip-fixtures.py --check    # verify byte identity
   python scripts/generate-strip-fixtures.py --pdf-pages 10000 --pdf-out %TEMP%\\strip-10000.pdf
 """
@@ -75,9 +83,11 @@ FIXTURE_DIR = os.path.normpath(os.path.join(
 PDF_NAME = "strip-1000.pdf"
 EPUB_NAME = "strip-chapters.epub"
 CBZ_NAME = "strip-images.cbz"
+FB2_NAME = "strip-chapters.fb2"
 
 PDF_PAGES = 1000
 EPUB_CHAPTERS = 200
+FB2_SECTIONS = 200
 EPUB_PARAGRAPHS = 10
 CBZ_IMAGES = 300
 CBZ_SIZE = (200, 300)
@@ -218,12 +228,41 @@ def build_cbz(out_path):
     write_stored_zip(out_path, entries)
 
 
+# --- FB2 --------------------------------------------------------------------
+
+def fb2_section(n):
+    paragraphs = "\n".join("<p>%s</p>" % LOREM for _ in range(EPUB_PARAGRAPHS))
+    return "<section>\n<title><p>Chapter %d</p></title>\n%s\n</section>" % (n, paragraphs)
+
+
+def build_fb2(out_path):
+    sections = "\n".join(fb2_section(n) for n in range(1, FB2_SECTIONS + 1))
+    text = """<?xml version="1.0" encoding="UTF-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
+<description>
+<title-info>
+<genre>prose</genre>
+<author><nickname>litepdf</nickname></author>
+<book-title>LitePDF strip fixture</book-title>
+<lang>en</lang>
+</title-info>
+</description>
+<body>
+%s
+</body>
+</FictionBook>
+""" % sections
+    with open(out_path, "wb") as f:
+        f.write(text.encode("utf-8"))
+
+
 # --- driver -----------------------------------------------------------------
 
 BUILDERS = [
     (PDF_NAME, lambda p: build_pdf(p, PDF_PAGES)),
     (EPUB_NAME, build_epub),
     (CBZ_NAME, build_cbz),
+    (FB2_NAME, build_fb2),
 ]
 
 
@@ -254,7 +293,7 @@ def check():
                           % (name, flate))
                     failed = True
                     continue
-            else:
+            elif name.endswith((".epub", ".cbz")):
                 with zipfile.ZipFile(tmp) as z:
                     deflated = [i.filename for i in z.infolist()
                                 if i.compress_type != zipfile.ZIP_STORED]
