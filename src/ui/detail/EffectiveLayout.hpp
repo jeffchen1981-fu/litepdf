@@ -54,8 +54,8 @@ inline ContinuousToggle continuous_toggle(bool pref_on, bool spread_on) noexcept
 // 7.3), by case-insensitive extension, and a document with at least one page.
 // CBZ passes since #176: a page is sized from its image header, read ahead for
 // all pages at once (docs/superpowers/specs/2026-10-25-cbz-header-sizing-176-design.md).
-// FB2 passes since #169: MuPDF lays the whole book out when it opens, so sizing
-// its pages reads nothing. XPS stays out: sizing a page parses that page's whole
+// FB2 passes since #169: the book is laid out by the page count Document::open
+// takes, so sizing its pages afterwards reads nothing. XPS stays out: sizing a page parses that page's whole
 // FixedPage part, and an 870-page document missed the gate (spec 4.4; #227).
 inline bool strip_format_ok(const std::filesystem::path& source, int page_count) {
     if (page_count < 1) return false;
