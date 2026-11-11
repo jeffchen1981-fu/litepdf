@@ -163,7 +163,7 @@ rect arithmetic. That stays true outside the per-page blocks below.
   (`MainWindow.cpp:1689-1725`). The handler returns early without an active view.
 - Handler: `view->rotate_cw()` (or `ccw`), `canvas_->on_rotation_changed()`,
   `kick_render(page, KickReason::Rotate)`. Every branch of `kick_render` already refreshes the zoom
-  readout (`MainWindow.cpp:354, 395, 416`), so a fit-mode refit shows its new percentage.
+  readout (`MainWindow.cpp:355, 396, 416`), so a fit-mode refit shows its new percentage.
 - Tab switch needs nothing new: the rotation lives on the tab's `DocumentView`, and the canvas
   reads it at paint time.
 
