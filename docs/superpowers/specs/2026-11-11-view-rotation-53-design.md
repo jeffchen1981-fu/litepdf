@@ -322,8 +322,7 @@ layout is the strip. New probe work, listed so the plan carries it: a `find-text
 `scripts/ux-probe.ps1` that sets the find bar's EDIT text (the way `page-box-go` sets the page box,
 `ux-probe.ps1:568`), and a `SendInput` helper for the accelerator row.
 
-- **Range row:** on `rotation-marker.pdf` (not `simple.pdf`, which turned at fit width can fit the
-  window and drop the scroll bar; plan correction 3), post `WM_COMMAND IDM_VIEW_ROTATE_CW`; the
+- **Range row:** on `rotation-marker.pdf`, the direction row's launch (plan correction 3), post `WM_COMMAND IDM_VIEW_ROTATE_CW`; the
   existing `canvas-scroll` probe reads the strip's range, which is predictable:
   `8 + n·(h_view·z + 8)` with the refitted `z`. Four turns restore the original range. Proven able
   to fail by not posting the command.
