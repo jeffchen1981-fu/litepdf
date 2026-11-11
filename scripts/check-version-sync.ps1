@@ -43,7 +43,8 @@ $ErrorActionPreference = "Stop"
 # Character-for-character equality. PowerShell's -eq/-ne/-ceq/-cne compare
 # strings culture-aware, which ignores characters with no sort weight: a soft
 # hyphen (U+00AD), a zero-width joiner (U+200D), U+FEFF or U+0000 appended to
-# a value still compares equal to the value without it (#190).
+# a value still compares equal to the value without it (#190). PowerShell 7
+# (ICU) drops a zero-width space (U+200B) as well; 5.1 does not.
 function Test-OrdinalEqual([string]$a, [string]$b) {
     return [string]::Equals($a, $b, [StringComparison]::Ordinal)
 }
@@ -170,6 +171,10 @@ function Invoke-SelfTest {
     $both = ($f.Count -eq 2) -and $f[0].StartsWith("litepdf-cli version") -and $f[1].StartsWith("release version must be the bare triple")
     Check $both "22: release version with a soft hyphen fails both the numeric and the bare-triple check"
     if (-not $both) { foreach ($x in $f) { Write-Host "       got: $x" } }
+    # The empty-id test stays culture-aware on purpose: an id made only of a
+    # zero-weight character is no git provenance and must fail as empty.
+    $f = Test-CliIdentity @("version=1.3.0-dev", "build=$shy", "release=0") "1.3.0" "1.3.0.0" "Dev" ""
+    CheckOnly $f "dev build id is empty" "23: dev id of only a soft hyphen fails -ExpectDev as empty"
 
     if ($script:selfTestOk) { Write-Host "[OK] version-sync self-test: $script:selfTestCount/$script:selfTestCount passed"; exit 0 }
     Write-Host "[FAIL] version-sync self-test had failures"
