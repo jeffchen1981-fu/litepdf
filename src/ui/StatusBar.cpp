@@ -773,8 +773,10 @@ bool StatusBar::page_box_has_focus() const {
 }
 
 bool StatusBar::page_box_enabled() const {
-    // `edit` too: if the status bar control failed to create, the constructor
-    // returned with no box, yet set_page() still records page_count.
+    // `edit` too: there is no box if the status bar control failed to create
+    // (the constructor returned early) or if the bar was created but the EDIT
+    // inside it was not (the constructor does not check that CreateWindowExW).
+    // Either way set_page() still records page_count.
     return impl_ && impl_->edit && impl_->page_count > 0;
 }
 
