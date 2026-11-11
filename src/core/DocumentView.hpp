@@ -46,6 +46,7 @@
 // forward-declared. RenderEngine.hpp is MuPDF-free.
 #include "core/RenderEngine.hpp"
 #include "core/TextSelection.hpp"
+#include "core/detail/PrefetchPlan.hpp"  // TravelDirection (standard library only)
 
 // Forward decls — keep this header MuPDF-free. Callers that need to
 // fz_drop_pixmap the ref delivered to a RenderCb will include
@@ -303,6 +304,10 @@ public:
     // (#49) Render requests queued in this view's engine and not yet taken by
     // a worker, cancelled ones included. Test observability only.
     [[nodiscard]] std::size_t queued_render_count() const noexcept;
+
+    // (#164) The direction the next single-page prefetch uses. Test
+    // observability only.
+    [[nodiscard]] TravelDirection prefetch_travel() const noexcept;
 
     // (#55) Renders this view's engine has started: not cancelled before a
     // worker took them, not served from L1, not thumbnails. Test observability

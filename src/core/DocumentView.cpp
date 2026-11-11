@@ -16,6 +16,7 @@
 #include "core/detail/PageSizeFill.hpp"
 #include "core/detail/PrefetchPlan.hpp"
 #include "core/detail/ZoomMath.hpp"
+#include "ui/PdfCanvasLayout.hpp"
 #include "ui/ThumbnailPane.hpp"
 
 // DocumentView is MuPDF-aware only to the extent of holding an
@@ -82,13 +83,19 @@ struct DocumentView::Impl {
     float                  dpi          = 96.0f;
     bool                   invert_colors = false;  // Phase 8 D7/D9
     bool                   dual_page     = false;  // Phase 8 D10
-    // (#49) The L1 byte budget, and what request_render_with_prefetch needs
-    // to tell which way the reader is going: the page it last ran for (-1
-    // before the first) and the direction of the last real move.
+    // (#49) The L1 byte budget request_render_with_prefetch plans against.
     std::size_t            l1_budget     = kDefaultL1BudgetBytes;
     // (#55) The L1 entry count the cache was built with, for l1_capacity().
     std::size_t            l1_capacity   = 5;
-    int                    last_prefetch_page = -1;
+    // (#164) Which way the reader is going, for the single-page prefetch.
+    // last_travel_key is the key of the reader's last page change, or of the
+    // current page the single-page kick seeds it with: the page, or the pair's
+    // left page in the spread. It is -1 before the first change and after a
+    // layout switch, until either sets it. travel is the direction of the
+    // last real move. Only note_travel writes travel; besides it,
+    // set_dual_page and set_continuous reset last_travel_key to -1 when their
+    // flag changes.
+    int                    last_travel_key = -1;
     TravelDirection        travel        = TravelDirection::Forward;
     // (#49) Page sizes request_render_with_prefetch and set_viewport have looked
     // up, so a page turn loads only the page it has not sized yet; a page's size
@@ -118,6 +125,15 @@ struct DocumentView::Impl {
         } catch (const std::exception&) {
             return std::nullopt;
         }
+    }
+
+    // (#164) Records a page change. Keyed by the spread pair in the spread, so
+    // a snap to the pair's left page is not a move; a change to the same key
+    // keeps the direction (travel_direction).
+    void note_travel(int page, int count) noexcept {
+        const int key = litepdf::ui::canonical_page(page, count, dual_page && !continuous);
+        travel = litepdf::core::travel_direction(key, last_travel_key, travel);
+        last_travel_key = key;
     }
 
     // Estimated L1 bytes of `page` at `scale`; 0 when its size is unknown.
@@ -273,6 +289,10 @@ bool DocumentView::set_current_page(int idx) {
     if (pc <= 0) return false;
     const int max_idx = pc - 1;
     const int clamped = std::clamp(idx, 0, max_idx);
+    // (#164) Before the early return: after a layout switch, a carry or snap
+    // onto the current page sets the reference, so the next move is not lost.
+    // It is never a move itself: the key is then -1 or already this page's.
+    impl_->note_travel(clamped, pc);
     if (clamped == impl_->current_page) return false;
     impl_->current_page = clamped;
     // (#98) The slot holds only the current page's text.
@@ -288,7 +308,11 @@ bool DocumentView::set_current_page(int idx) {
 }
 
 void DocumentView::set_continuous(bool on) noexcept {
+    // (#164) Only an actual change resets the travel key: apply_effective_layout
+    // calls this on every tab switch, and a same-value call is not a switch.
+    if (impl_->continuous == on) return;
     impl_->continuous = on;
+    impl_->last_travel_key = -1;  // a layout switch is not a move
 }
 
 bool DocumentView::continuous() const noexcept {
@@ -429,6 +453,7 @@ void DocumentView::set_dual_page(bool on) {
     if (on) impl_->text_wanted->store(-1, std::memory_order_relaxed);
     if (impl_->dual_page == on) return;
     impl_->dual_page = on;
+    impl_->last_travel_key = -1;  // (#164) a layout switch is not a move
     // (Phase 8 D9 addendum / D10) Drain in-flight single-page renders
     // so their bitmaps don't land in the wrong slot of the new layout.
     // Caller kicks a fresh dual-page render afterwards.
@@ -488,9 +513,11 @@ void DocumentView::request_render_with_prefetch(int page, RenderCb cb,
     //    This path never threw before #49, and still does not: a page whose
     //    size cannot be read counts as unknown, which falls back to both
     //    neighbours, and the render reports the failure as it always has.
-    impl_->travel = travel_direction(page, impl_->last_prefetch_page, impl_->travel);
-    impl_->last_prefetch_page = page;
     const int   total    = page_count();
+    // (#164) Spread -> single sets no page, so after a layout switch this is
+    // where the travel key comes back. From -1 it is never a move. Seeded
+    // from the view's own page: `page` can be past the end on a restore.
+    if (impl_->last_travel_key < 0) impl_->note_travel(impl_->current_page, total);
     const bool  has_prev = page - 1 >= 0;
     const bool  has_next = page + 1 < total;
     const float scale    = render_scale();
@@ -549,6 +576,10 @@ void DocumentView::cancel_thumbnail_renders() {
 
 std::size_t DocumentView::queued_render_count() const noexcept {
     return impl_->engine->pending_count();
+}
+
+TravelDirection DocumentView::prefetch_travel() const noexcept {
+    return impl_->travel;
 }
 
 std::size_t DocumentView::renders_started() const noexcept {
