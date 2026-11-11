@@ -58,13 +58,15 @@ call: O(N²) in all, 11 ms at 1,500 chapters. That is MuPDF's and stays (§7).
 
 Goal: `Document::page_size(i)` costs O(spine position) instead of O(spine position²) for a
 multi-chapter document, with results bit-identical to today's, so `page_sizes()` on a
-1,500-chapter ePub passes the §4.4 gate.
+1,500-chapter ePub passes the §4.4 gate. `Document::with_rendered_page`, which printing calls
+once per page in a loop on the UI thread, uses the same table.
 
 Non-goals:
 
 - No MuPDF patch. The spine walk in `epub_load_page` / `epub_count_pages` stays (§7).
 - No change to page counting, layout, or the order or content of `page_sizes()`.
-- The other per-page paths keep loading by flat number (§6).
+- The per-page paths on the render workers' and the search's own documents keep loading by flat
+  number (§6).
 
 ## 4. Design
 
@@ -96,37 +98,58 @@ table does not rely on that.)
 
 ### 4.2 Built at open, on the open thread
 
-`Document::Impl` gains `std::optional<detail::ChapterPages> chapters`. It is filled right after
-the page count is read, in both places that read it (`open`, and `authenticate` for a document
-that needed a password), and cleared wherever the page count is cleared (`close`, and at the
-start of `open`):
+`Document::Impl` gains `std::optional<detail::ChapterPages> chapters`. One helper,
+`read_chapter_pages(ctx, doc, page_count)`, builds it, and both places that read the page count
+assign its result right after a successful read: `open` (on the open thread) and `authenticate`
+(on the UI thread, for a document that needed a password). It is assigned, never merged, so a
+document without a table replaces any earlier one. It is also reset in `close()` and at the start
+of `open` (next to `reset_cbz()`; `open` does not clear `page_count` there today, the table is
+the new addition).
 
-- `fz_count_chapters`; when it returns 1 or less, no table (PDF, CBZ, FB2, XPS, SVG and
-  single-chapter ePubs: `fz_load_page` already finds the page on the first chapter, so nothing
-  changes for them).
-- Otherwise `fz_count_chapter_pages(c)` for every chapter, inside one `fz_try`, then
-  `from_counts(counts, page_count)`. The counts come from the per-chapter cache that the page
-  count has just filled, so this costs only the spine walks: 2.2 ms at 1,500 chapters, 0.02 ms
-  at 200 (§2), off the UI thread.
-- If MuPDF throws, or `from_counts` refuses the counts, there is no table and the error is
-  reported and marked handled (`fz_report_error`, #146). The open still succeeds: the page count
-  was read, and `page_size` then loads by flat number as it does today.
+Only ePub has chapters in MuPDF 1.27.2 (`epub-doc.c` is the only handler that sets
+`count_chapters`), and an ePub never asks for a password, so `authenticate` never builds a table
+today. It calls the helper anyway, so the page count and the table cannot come from different
+reads if that ever changes; that branch is untested by design.
 
-No allocation or C++ object lives inside the `fz_try` (#179): the `std::vector<int>` is sized
-with `fz_count_chapters`'s result before the `fz_try` and only written to inside it.
+The helper:
 
-### 4.3 `Document::page_size`
+- First `fz_try`: `nc = fz_count_chapters(ctx, doc)`. When it is 1 or less, no table (PDF, CBZ,
+  FB2, XPS, SVG and single-chapter ePubs: `fz_load_page` already finds the page on the first
+  chapter, so nothing changes for them).
+- Between the two `fz_try` blocks, in plain C++: a `std::vector<int>` of `nc` zeros.
+- Second `fz_try`: `fz_count_chapter_pages(c)` for every chapter, written through the vector's
+  `data()` pointer. The counts come from the per-chapter cache the page count has just filled,
+  so this costs only the spine walks: 2.2 ms at 1,500 chapters, 0.02 ms at 200 (§2).
+- Then `from_counts(counts, page_count)`.
+- A MuPDF throw: `fz_report_error` in that `fz_catch` (#146), no table. `from_counts` refusing
+  the counts: no table, nothing reported (there is no MuPDF error then, and `fz_report_error`
+  would print a stale one). A `std::bad_alloc` from the vector or the table: caught around the
+  plain C++ part, no table. In every case the open still succeeds, because the page count was
+  read, and pages load by flat number as they do today.
 
-Unchanged for PDF (#165) and for CBZ header sizing (#176). For the other formats, inside the
-existing `fz_try`:
+No allocation, C++ object with a destructor, or `throw` lives inside either `fz_try` (#179).
+
+The table must only ever hold locations of the document it was built from: for a chapter at or
+past the chapter count, `epub_load_page` returns NULL and `fz_load_chapter_page` then writes
+through it (`document.c:950-953`). Building it from the same `fz_document` right after its page
+count, assigning it at every successful open, and resetting it on `close` is what guarantees
+that.
+
+### 4.3 `Document::page_size` and `Document::with_rendered_page`
+
+`page_size` is unchanged for PDF (#165) and for CBZ header sizing (#176). For the other formats,
+and in `with_rendered_page` for every format, the `fz_load_page` call inside the existing
+`fz_try` becomes:
 
 - table present and `locate(index)` answers → `fz_load_chapter_page(ctx, doc, chapter, page)`;
 - otherwise → `fz_load_page(ctx, doc, index)`, as today (an out-of-range index therefore throws
-  exactly as before, and `page_size` turns it into its `std::runtime_error`).
+  exactly as before, and `page_size` turns it into its `std::runtime_error`, `with_rendered_page`
+  into its `false`).
 
 `fz_load_page` itself ends in `fz_load_chapter_page(chapter, page)` for the same location, so the
-loaded page, its bounds and its errors are the same; only the chapter search before it changes.
-The location is computed before the `fz_try` (it is plain C++).
+loaded page, its bounds, its content and its errors are the same; only the chapter search before
+it changes. The location is computed before the `fz_try`, into two plain ints and a bool (no
+object with a destructor crosses into the `fz_try`).
 
 ### 4.4 Threads
 
@@ -141,28 +164,36 @@ chapters, plus the single-chapter control and `strip-chapters.epub`, on a Releas
 branch and of main, P-cores, interleaved. Also `--benchmark` `open_ms` at 1,500 chapters before
 and after, to show the table's cost at open is within noise.
 
-## 6. The other per-page paths: out of scope
+## 6. The other per-page paths
 
-Every `fz_load_page` in litepdf (`git grep fz_load_page src`), with the cost of loading by flat
-number at 1,500 chapters / 4,500 pages:
+Every `fz_load_page` in litepdf (`git grep fz_load_page src`: `Document.cpp` ×5,
+`RenderEngine.cpp` ×1), with the cost of loading by flat number at 1,500 chapters / 4,500 pages.
+One `fz_load_page` of the last page costs 2.2 ms there; `fz_count_pages` costs about the same
+(it runs the same per-chapter walk as the table build).
 
-| path | thread | pages per call | extra cost by flat number |
-|---|---|---|---|
-| `Document::page_size` → `page_sizes()`, `known_page_size`, print sizing | UI | every page | **2.5 s total: fixed here** |
-| `RenderEngine` worker, display-list miss | worker | one | ≤ 2.2 ms per render |
-| `TextPageAccess::build` (text prefetch on a worker; `text_for` on the UI thread at a press) | worker / UI | one | ≤ 2.2 ms per page |
-| `page_hits_on` from `SearchSession` (whole-document search) | search | one per task, every page in a search | 0.86 s → 3.6 s for a whole-book text scan (probe: load + `fz_new_stext_page_from_page`); 459 → 709 ms at 800 chapters; none at 200 |
-| `Document::with_rendered_page` (print), `page_text` (CLI), `page_hits` | UI / CLI | one | ≤ 2.2 ms per page |
+| path | document | thread | loop over every page? | extra cost by flat number | here |
+|---|---|---|---|---|---|
+| `Document::page_size` → `page_sizes()`, `known_page_size`, print sizing | Document's | UI | yes (`page_sizes`) | 2.5 s per `page_sizes()` | **fixed** |
+| `Document::with_rendered_page` (print) | Document's | UI, modal, messages pumped by `abort_proc` | yes, a whole-book print | ≤ 2.2 ms per page, 2.5 s over a 4,500-page print | **fixed** (same table, one line) |
+| `Document::page_text` | Document's | CLI (`main.cpp`, page 0) | no | ≤ 2.2 ms | flat |
+| `Document::page_hits` → `page_hits_on` | Document's | CLI (`bench_selection`) | no | ≤ 2.2 ms | flat |
+| `Document::text_page` → `TextPageAccess::build` (`text_for` at a press) | Document's | UI | no | ≤ 4.5 ms (it also calls `fz_count_pages`) | flat |
+| `TextPageAccess::build` (text prefetch, #98) | worker's own | worker | no | ≤ 4.5 ms per page | flat |
+| `RenderEngine` worker, display-list miss | worker's own | worker | no | ≤ 2.2 ms per render | flat |
+| `page_hits_on` from `SearchSession` | search's own | search | yes, a whole-document search | text scan 0.86 → 3.6 s at 1,500 chapters; 459 → 709 ms at 800; none at 200 (probe: load + `fz_new_stext_page_from_page`) | flat |
 
-Only `page_sizes()` loops over every page on the UI thread, so only it turns the per-page cost
-into a frozen window. The others pay at most 2.2 ms per page on a book far beyond a typical one.
-The whole-document search is the one other loop: about 4× slower at 1,500 chapters, on its own
-thread, with hits appearing as it goes.
+Kept on flat numbers:
 
-They are left as they are because each of them runs on a `fz_document` of its own (one per
-render worker and one for search), so each would need its own table, and #229 is reconsidering
-exactly those copies (one worker for reflowable documents, sharing the Document's laid-out copy,
-opening the search copy at the first search). `ChapterPages` is the unit any of them can reuse.
+- `page_text`, `page_hits` and `text_page` load from the Document's own document and could use
+  the table, but each is one page per call, off any loop. `page_hits` and `text_page` go through
+  `page_hits_on` and `TextPageAccess::build`, which the search and the workers share on their own
+  documents, so routing them would change those shared helpers for a few ms per press.
+- The workers and the search each run on a `fz_document` of their own, so each would need a
+  table of its own, and #229 is reconsidering exactly those copies (one worker for reflowable
+  documents, sharing the Document's laid-out copy, opening the search copy at the first search).
+  The whole-document search is the one remaining loop: about 4× slower at 1,500 chapters, on its
+  own thread, with hits appearing as it goes. `ChapterPages` is the unit any of them can reuse.
+
 A follow-up issue for the search scan and the workers is proposed in the PR, not filed without
 the user's approval.
 
@@ -177,12 +208,30 @@ The remaining O(N²) (`epub_load_page` and `epub_count_pages` walk the spine fro
 ### 8.1 Fixture `tests/fixtures/chapter-sizes.epub`
 
 Written by `scripts/generate-strip-fixtures.py` (one more builder in `BUILDERS`, so `--check`
-covers it byte for byte; stored entries, fixed date, as the other zips). 12 chapters. Chapter k
-(1-based) carries `<style>@page{margin:0 Mpt}</style>` with M = 200 + 10k, which pushes MuPDF's
-text width under its 72 pt floor, so the page is 72 + 2M pt wide: every chapter has its own width
-(492 … 712 pt). Chapter k has 1 + (7k mod 25) short paragraphs, so chapters hold different page
-counts (2 to 10, 68 pages in all with the probe). A page loaded from the wrong chapter therefore
-has the wrong width.
+covers it byte for byte; stored entries, fixed date, as the other zips; the module docstring's
+fixture list and "all four" are updated). 12 chapters, `OEBPS/c01.xhtml` … `c12.xhtml`, with
+the existing `CONTAINER_XML` and an OPF of the existing shape. Chapter k (1-based) is exactly:
+
+```
+<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>Chapter k</title><style>@page{margin:0 Mpt}</style></head>
+<body>
+<h1>Chapter k</h1>
+<p>S</p> repeated 1 + (7k mod 25) times, one per line
+</body>
+</html>
+```
+
+with M = 200 + 10k and S the one sentence `Lorem ipsum dolor sit amet, consectetur adipiscing
+elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.` (not the module's
+longer `LOREM`, which gives 125 pages). The side margins push MuPDF's text width under its 72 pt
+floor (`fz_layout_html`), so the page is 72 + 2M pt wide: every chapter has its own width
+(492 … 712 pt, step 20), every page is 600 pt high. The paragraph counts give the chapters
+different page counts (4, 6, 9, 2, 5, 8, 10, 3, 6, 9, 2, 4: 68 pages with the prototype; the
+committed file's count is read from it and pinned). A page loaded from the wrong chapter
+therefore has the wrong width. A page from the right chapter but the wrong page within it has
+the right size, so only the unit test of `locate` (§8.2) sees that mistake.
 
 ### 8.2 Unit tests
 
@@ -199,16 +248,25 @@ has the wrong width.
   `fz_load_page` + `fz_bound_page` for every page, bit for bit (the existing `OwnDocument`
   helper), and the fixture's widths are not all equal (so the oracle is not vacuous).
   Mutation check: a `locate` that maps to the next chapter, or to chapter 0, fails it.
-- **Speed (the gate as a test):** a 1,500-chapter ePub of one short paragraph per chapter is
-  written to a temporary directory at test time with MuPDF's zip writer (stored entries; not
-  committed: 1,500 chapters is about 700 KB). Sizing every page with `Document::page_size`, best
-  of 3 on one open document, must take under 250 ms. Probe on that shape: 860 ms by flat number,
-  5.3 ms by location, so the bound fails the old code by 3.4× on this machine and leaves the new
-  code a 47× margin for slower runners. Mutation check: reverting `page_size` to `fz_load_page`
-  fails it.
+- **Print path:** on `chapter-sizes.epub`, `with_rendered_page(i, 1, 1, false, …)` hands the
+  callback the width and height of `fz_round_rect` of the test's own `fz_load_page` +
+  `fz_bound_page`, for every page. Mutation check: the same wrong-chapter mutants, applied to
+  `with_rendered_page`'s lookup, fail it.
+- **Speed (the gate as a test):** a 1,500-chapter ePub is written to a fresh temporary directory
+  at test time with MuPDF's zip writer (`fz_write_zip_entry` always stores). Each chapter is
+  `<h1>Chapter k</h1><p>S</p>` in the template above without the `<style>`, so one page each.
+  It is generated rather than committed, as a binary of over a megabyte that only a timing
+  test reads. Sizing every page with `Document::page_size`, best of 3 on one open document, must
+  take under 250 ms. Probe on that shape (one 60-word paragraph per chapter): 860-1,129 ms by
+  flat number, 5.3-8.5 ms by location across three runs, so the bound fails the old code by at
+  least 3.4× on this machine and leaves the new code a 29× margin for slower runners. The
+  implementer re-measures on the committed shape and records both readings. Mutation check:
+  reverting `page_size` to `fz_load_page` fails it.
 - `page_size(page_count())` on `chapter-sizes.epub` still throws `std::runtime_error`.
 
-`tests/unit/test_strip_fixtures.cpp` pins the new fixture's page count (68) and chapter count.
+`tests/unit/test_strip_fixtures.cpp` pins the new fixture's page count (read from the committed
+file) and, through `Document` only, that its pages have 12 distinct widths (`Document` has no
+chapter count, and none is added for a test).
 
 ### 8.3 Gate
 
