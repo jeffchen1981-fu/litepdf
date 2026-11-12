@@ -111,9 +111,10 @@ struct PdfCanvas::Impl {
     int                           wheel_residual = 0;
     // The horizontal wheel's own leftover delta (#56), in "rightward" units
     // (see rightward_delta). Separate from wheel_residual so a diagonal
-    // touchpad swipe cannot feed horizontal motion into a vertical notch, and
-    // cleared only by bitmap_is_stale() -- never by the pending-flip latch,
-    // since this axis never turns the page.
+    // touchpad swipe cannot feed horizontal motion into a vertical notch.
+    // Cleared only by on_hwheel_scroll, when the bitmap_is_stale() predicate
+    // says the bitmap on screen belongs to another view or page -- never by the
+    // pending-flip latch, since this axis never turns the page.
     int                           hwheel_residual = 0;
     // Non-zero between a wheel-driven page flip and the completion that lands the
     // new page. Without it, every further notch in that window flips again:

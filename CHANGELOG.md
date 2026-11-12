@@ -13,6 +13,23 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 - Rotate the view in 90° steps: View > Rotate Clockwise / Counterclockwise (#53).
 
+### Changed
+
+- FB2 books now open in continuous scroll, like ePub. An FB2 book is laid out
+  while it opens, as it always was, so continuous scroll reads nothing more to
+  size its pages: sizing every page of a 3,700-page book takes under 1 ms (#169).
+  XPS documents still open one page at a time. Finding an XPS page's size means
+  reading that whole page, and an 870-page XPS took about 0.2 s, longer than the
+  0.1 s continuous scroll allows itself before it shows a document (#169).
+
+### Fixed
+
+- An ePub split into many files (chapters) no longer freezes the window the
+  first time it is shown in continuous scroll. Finding each page's size took
+  longer the more chapters the book had, growing much faster than the book:
+  0.26 s for 800 chapters and 2.5 s for 1,500. It now takes 3 ms and 10 ms.
+  Printing finds each page the same way (#230).
+
 ## [1.8.3] — 2026-11-10 — Switching to continuous scroll keeps your place
 
 ### Fixed

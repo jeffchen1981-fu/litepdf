@@ -232,6 +232,33 @@ TEST_CASE("StatusBarMath format_zoom_pct is empty for zero and negatives",
     REQUIRE(format_zoom_pct(-huge).empty());
 }
 
+TEST_CASE("StatusBarMath format_zoom_pct at the low threshold", "[statusbar]") {
+    // p = pct * 100.0f; p < 0.5f is empty. 0.005f is slightly below 0.005,
+    // but its product rounds UP to exactly 0.5f, so the threshold value
+    // itself is shown, as 1%.
+    constexpr float at = 0.005f;
+    REQUIRE(at * 100.0f == 0.5f);
+    REQUIRE(format_zoom_pct(at) == L"1%");
+    REQUIRE(format_zoom_pct(std::nextafter(at, 1.0f)) == L"1%");
+    REQUIRE(format_zoom_pct(std::nextafter(at, 0.0f)).empty());
+}
+
+TEST_CASE("StatusBarMath format_zoom_pct at the high threshold", "[statusbar]") {
+    // p >= 9999.5f is empty. 99.995f is slightly above 99.995 and its product
+    // rounds to exactly 9999.5f. So does the product of the next float DOWN
+    // (an exact tie, broken to even), so the last value shown as 9999% is two
+    // floats below 99.995f.
+    constexpr float at = 99.995f;
+    const float below1 = std::nextafter(at, 0.0f);
+    const float below2 = std::nextafter(below1, 0.0f);
+    REQUIRE(at * 100.0f == 9999.5f);
+    REQUIRE(below1 * 100.0f == 9999.5f);
+    REQUIRE(format_zoom_pct(std::nextafter(at, 1000.0f)).empty());
+    REQUIRE(format_zoom_pct(at).empty());
+    REQUIRE(format_zoom_pct(below1).empty());
+    REQUIRE(format_zoom_pct(below2) == L"9999%");
+}
+
 TEST_CASE("StatusBarMath format_zoom_pct is empty for non-finite input",
           "[statusbar]") {
     REQUIRE(format_zoom_pct(std::numeric_limits<float>::quiet_NaN()).empty());

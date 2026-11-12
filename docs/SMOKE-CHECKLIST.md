@@ -28,6 +28,7 @@ Build: `cmake --build build --target litepdf --config Release` → `build\Releas
 - [ ] Two strip tabs keep their own positions across tab switches
 - [ ] An `.xps` file opens one page at a time, with View → Continuous Scroll greyed
 - [ ] A `.cbz` file opens in continuous scroll (#176)
+- [ ] `tests\fixtures\strip-chapters.fb2` opens in continuous scroll; the scroll bar reaches its last page (#169)
 
 ## Phase 12 hardening
 - [ ] session.json appears under %LOCALAPPDATA%\LitePDF after opening a doc + 2 s
