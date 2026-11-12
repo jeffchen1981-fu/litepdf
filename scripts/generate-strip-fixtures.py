@@ -15,6 +15,13 @@ Generate the continuous-scroll strip fixtures (#55, spec section 9.4):
   tests/fixtures/strip-chapters.fb2    200 sections, each a title and the same
                                        10 Lorem ipsum paragraphs as the EPUB
                                        (#169).
+  tests/fixtures/chapter-sizes.epub    12 chapters, chapter k with @page side
+                                       margins of 200 + 10k pt (so its pages are
+                                       72 + 2 * margin wide: one width per
+                                       chapter) and 1 + 7k % 25 one-sentence
+                                       paragraphs (different page counts). The
+                                       oracle for loading pages by chapter
+                                       location (#230), not a gate fixture.
 
 They feed the page-sizing gate (spec section 4.4): litepdf-cli
 --bench-page-sizes times DocumentView::page_sizes() on each of them. The
@@ -43,7 +50,7 @@ Determinism (the --check contract, as in generate-large-fixture.py):
     workflow installs that version before running --check.
   * FB2: plain UTF-8 XML with "\n" line ends, built from fixed strings.
 
---check regenerates all four to a temp dir, asserts byte identity with the
+--check regenerates all five to a temp dir, asserts byte identity with the
 committed files, asserts the PDF has zero FlateDecode streams and that every
 zip entry is stored, and exits 1 on any drift.
 
@@ -54,7 +61,7 @@ White page fills are required because LitePDF's PdfCanvas uses a dark D2D
 surface; see generate-search-fixture.py for the full rationale.
 
 Usage:
-  python scripts/generate-strip-fixtures.py            # write the four fixtures
+  python scripts/generate-strip-fixtures.py            # write the five fixtures
   python scripts/generate-strip-fixtures.py --check    # verify byte identity
   python scripts/generate-strip-fixtures.py --pdf-pages 10000 --pdf-out %TEMP%\\strip-10000.pdf
 """
@@ -91,6 +98,13 @@ FB2_SECTIONS = 200
 EPUB_PARAGRAPHS = 10
 CBZ_IMAGES = 300
 CBZ_SIZE = (200, 300)
+
+SIZES_EPUB_NAME = "chapter-sizes.epub"
+SIZES_CHAPTERS = 12
+# One sentence, not LOREM: the page counts in the #230 spec (section 8.1)
+# come from this text.
+SIZES_TEXT = ("Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod "
+              "tempor incididunt ut labore et dolore magna aliqua.")
 
 ZIP_DATE_TIME = (2026, 1, 1, 0, 0, 0)
 
@@ -165,18 +179,19 @@ def chapter_name(n):
     return "ch%03d.xhtml" % n
 
 
-def content_opf():
+def content_opf(chapters=EPUB_CHAPTERS, name=chapter_name,
+                title="LitePDF strip fixture", identifier="litepdf-strip-chapters"):
     manifest = "\n".join(
         '    <item id="ch%03d" href="%s" media-type="application/xhtml+xml"/>'
-        % (n, chapter_name(n)) for n in range(1, EPUB_CHAPTERS + 1))
+        % (n, name(n)) for n in range(1, chapters + 1))
     spine = "\n".join(
-        '    <itemref idref="ch%03d"/>' % n for n in range(1, EPUB_CHAPTERS + 1))
+        '    <itemref idref="ch%03d"/>' % n for n in range(1, chapters + 1))
     return """<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="bookid">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <dc:title>LitePDF strip fixture</dc:title>
+    <dc:title>%s</dc:title>
     <dc:language>en</dc:language>
-    <dc:identifier id="bookid">litepdf-strip-chapters</dc:identifier>
+    <dc:identifier id="bookid">%s</dc:identifier>
   </metadata>
   <manifest>
 %s
@@ -185,7 +200,7 @@ def content_opf():
 %s
   </spine>
 </package>
-""" % (manifest, spine)
+""" % (title, identifier, manifest, spine)
 
 
 def chapter_xhtml(n):
@@ -209,6 +224,44 @@ def build_epub(out_path):
     ]
     for n in range(1, EPUB_CHAPTERS + 1):
         entries.append(("OEBPS/" + chapter_name(n), chapter_xhtml(n).encode("utf-8")))
+    write_stored_zip(out_path, entries)
+
+
+# --- EPUB, one page width per chapter (#230) ---------------------------------
+
+def sizes_chapter_name(k):
+    return "c%02d.xhtml" % k
+
+
+def sizes_chapter_xhtml(k):
+    # @page side margins of 200 + 10k pt push MuPDF's text width under its
+    # 72 pt floor (fz_layout_html), so the page is 72 + 2 * margin wide: each
+    # chapter has its own width. 1 + 7k % 25 paragraphs give the chapters
+    # different page counts. k is 1-based.
+    margin = 200 + 10 * k
+    paragraphs = "\n".join("<p>%s</p>" % SIZES_TEXT for _ in range(1 + (7 * k) % 25))
+    return """<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>Chapter %d</title><style>@page{margin:0 %dpt}</style></head>
+<body>
+<h1>Chapter %d</h1>
+%s
+</body>
+</html>
+""" % (k, margin, k, paragraphs)
+
+
+def build_sizes_epub(out_path):
+    opf = content_opf(SIZES_CHAPTERS, sizes_chapter_name,
+                      "LitePDF chapter sizes fixture", "litepdf-chapter-sizes")
+    entries = [
+        ("mimetype", b"application/epub+zip"),
+        ("META-INF/container.xml", CONTAINER_XML.encode("utf-8")),
+        ("OEBPS/content.opf", opf.encode("utf-8")),
+    ]
+    for k in range(1, SIZES_CHAPTERS + 1):
+        entries.append(("OEBPS/" + sizes_chapter_name(k),
+                        sizes_chapter_xhtml(k).encode("utf-8")))
     write_stored_zip(out_path, entries)
 
 
@@ -263,6 +316,7 @@ BUILDERS = [
     (EPUB_NAME, build_epub),
     (CBZ_NAME, build_cbz),
     (FB2_NAME, build_fb2),
+    (SIZES_EPUB_NAME, build_sizes_epub),
 ]
 
 
