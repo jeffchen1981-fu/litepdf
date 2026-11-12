@@ -11,11 +11,16 @@
 #include <mupdf/fitz.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <system_error>
+#include <utility>
 #include <vector>
 
 #include <windows.h>
@@ -240,4 +245,205 @@ TEST_CASE("Document::with_rendered_page draws each page of a multi-chapter ePub 
         INFO("first differing byte " << (diff.first - got.begin()) << " of " << got.size());
         CHECK(diff.first == got.end());
     }
+}
+
+namespace {
+
+// #230: a fresh directory under %TEMP%, removed with everything in it when the
+// guard goes. Declared before any document that opens a file in it, so it is
+// destroyed after they have closed the file (MuPDF opens it without
+// FILE_SHARE_DELETE). The error_code overload: a throwing destructor would
+// terminate.
+struct TempDir {
+    std::filesystem::path path;
+    TempDir() {
+        path = std::filesystem::temp_directory_path() /
+               ("litepdf-230-" + std::to_string(GetCurrentProcessId()) + "-" +
+                std::to_string(GetTickCount64()));
+        std::filesystem::create_directories(path);
+    }
+    ~TempDir() { std::error_code ec; std::filesystem::remove_all(path, ec); }
+    TempDir(const TempDir&) = delete;
+    TempDir& operator=(const TempDir&) = delete;
+};
+
+std::string utf8_of(const std::filesystem::path& p) {
+    const auto u8 = p.u8string();
+    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+}
+
+// An ePub of `chapters` spine items, each one heading and one sentence (one
+// page), written with MuPDF's zip writer (1.27.2 stores every entry). False
+// when MuPDF throws.
+bool write_many_chapter_epub(const std::filesystem::path& file, int chapters) {
+    const std::string sentence =
+        "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod "
+        "tempor incididunt ut labore et dolore magna aliqua.";
+    // Every string is built here, before the fz_try (#179).
+    std::vector<std::pair<std::string, std::string>> entries;
+    entries.emplace_back("mimetype", "application/epub+zip");
+    entries.emplace_back(
+        "META-INF/container.xml",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<container version=\"1.0\" xmlns=\"urn:oasis:names:tc:opendocument:xmlns:container\">"
+        "<rootfiles><rootfile full-path=\"OEBPS/content.opf\" "
+        "media-type=\"application/oebps-package+xml\"/></rootfiles></container>\n");
+    std::string manifest;
+    std::string spine;
+    for (int k = 1; k <= chapters; ++k) {
+        const std::string id = "c" + std::to_string(k);
+        manifest += "<item id=\"" + id + "\" href=\"" + id +
+                    ".xhtml\" media-type=\"application/xhtml+xml\"/>\n";
+        spine += "<itemref idref=\"" + id + "\"/>\n";
+    }
+    entries.emplace_back(
+        "OEBPS/content.opf",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        "<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"2.0\" unique-identifier=\"b\">\n"
+        "<metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:title>t</dc:title>"
+        "<dc:language>en</dc:language><dc:identifier id=\"b\">litepdf-230</dc:identifier></metadata>\n"
+        "<manifest>\n" + manifest + "</manifest>\n<spine>\n" + spine + "</spine>\n</package>\n");
+    for (int k = 1; k <= chapters; ++k) {
+        const std::string n = std::to_string(k);
+        entries.emplace_back(
+            "OEBPS/c" + n + ".xhtml",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<html xmlns=\"http://www.w3.org/1999/xhtml\">\n"
+            "<head><title>Chapter " + n + "</title></head>\n<body>\n<h1>Chapter " + n +
+            "</h1>\n<p>" + sentence + "</p>\n</body>\n</html>\n");
+    }
+    const std::string name = utf8_of(file);
+    const auto* const data = entries.data();
+    const std::size_t count = entries.size();
+
+    fz_context* ctx = fz_new_context(nullptr, nullptr, FZ_STORE_DEFAULT);
+    if (!ctx) return false;
+    fz_zip_writer* zip = nullptr;
+    fz_buffer* buf = nullptr;
+    bool ok = true;
+    fz_var(zip);
+    fz_var(buf);
+    fz_try(ctx) {
+        zip = fz_new_zip_writer(ctx, name.c_str());
+        for (std::size_t i = 0; i < count; ++i) {
+            buf = fz_new_buffer_from_copied_data(
+                ctx, reinterpret_cast<const unsigned char*>(data[i].second.data()),
+                data[i].second.size());
+            fz_write_zip_entry(ctx, zip, data[i].first.c_str(), buf, 0);
+            fz_drop_buffer(ctx, buf);
+            buf = nullptr;
+        }
+        fz_close_zip_writer(ctx, zip);
+    }
+    fz_always(ctx) {
+        fz_drop_buffer(ctx, buf);
+        fz_drop_zip_writer(ctx, zip);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        ok = false;
+    }
+    fz_drop_context(ctx);
+    return ok;
+}
+
+// The best of three runs of `run`, in ms.
+double best_of_3_ms(const std::function<void()>& run) {
+    double best = 1e300;
+    for (int r = 0; r < 3; ++r) {
+        const auto t0 = std::chrono::steady_clock::now();
+        run();
+        const auto t1 = std::chrono::steady_clock::now();
+        best = std::min(best, std::chrono::duration<double, std::milli>(t1 - t0).count());
+    }
+    return best;
+}
+
+// Every page of `own`'s document, loaded by chapter location in chapter order,
+// with `use` run on each. False when MuPDF throws.
+bool for_each_page_by_location(OwnDocument& own, void (*use)(fz_context*, fz_page*)) {
+    fz_context* const ctx = own.ctx;
+    fz_document* const doc = own.doc;
+    fz_page* page = nullptr;
+    bool ok = true;
+    fz_var(page);
+    fz_try(ctx) {
+        const int nc = fz_count_chapters(ctx, doc);
+        for (int c = 0; c < nc; ++c) {
+            const int m = fz_count_chapter_pages(ctx, doc, c);
+            for (int k = 0; k < m; ++k) {
+                page = fz_load_chapter_page(ctx, doc, c, k);
+                use(ctx, page);
+                fz_drop_page(ctx, page);
+                page = nullptr;
+            }
+        }
+    }
+    fz_always(ctx) { fz_drop_page(ctx, page); }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        ok = false;
+    }
+    return ok;
+}
+
+void bound_only(fz_context* ctx, fz_page* page) { (void)fz_bound_page(ctx, page); }
+
+void small_pixmap(fz_context* ctx, fz_page* page) {
+    fz_drop_pixmap(ctx, fz_new_pixmap_from_page(ctx, page, fz_scale(0.05f, 0.05f),
+                                                fz_device_bgr(ctx), 1));
+}
+
+}  // namespace
+
+TEST_CASE("Document on a 1500-chapter ePub: sizing and printing every page cost what loading by chapter costs",
+          "[document][pages]") {
+    // #230: fz_load_page walks the chapters from the first for every page,
+    // and an ePub's chapter page count walks the spine from its head, so
+    // sizing or printing every page by flat number grows with the cube of the
+    // chapter count (about 1 s here). By chapter location it costs what the
+    // test's own chapter-order loop costs. The bound is relative, so it scales
+    // with the machine.
+    const TempDir dir;   // first: destroyed after both documents
+    const std::filesystem::path file = dir.path / "chapters-1500.epub";
+    REQUIRE(write_many_chapter_epub(file, 1500));
+
+    Document doc;
+    REQUIRE_FALSE(doc.open(file).has_value());
+    REQUIRE(doc.page_count() == 1500);
+    const std::string file_utf8 = utf8_of(file);
+    OwnDocument own(file_utf8.c_str());
+    REQUIRE(own.page_count() == 1500);
+    const std::size_t n = doc.page_count();
+
+    bool own_ok = true;
+    const double ref_size_ms = best_of_3_ms([&] {
+        own_ok = for_each_page_by_location(own, bound_only) && own_ok;
+    });
+    const double ref_render_ms = best_of_3_ms([&] {
+        own_ok = for_each_page_by_location(own, small_pixmap) && own_ok;
+    });
+    REQUIRE(own_ok);
+
+    const double size_ms = best_of_3_ms([&] {
+        for (std::size_t i = 0; i < n; ++i) (void)doc.page_size(i);
+    });
+    bool rendered_ok = true;
+    const double render_ms = best_of_3_ms([&] {
+        for (std::size_t i = 0; i < n; ++i) {
+            rendered_ok = doc.with_rendered_page(i, 0.05f, 0.05f, false,
+                                                 [](int, int, const std::uint8_t*) {}) &&
+                          rendered_ok;
+        }
+    });
+    REQUIRE(rendered_ok);
+
+    INFO("page_size " << size_ms << " ms against chapter-order bounds " << ref_size_ms << " ms");
+    INFO("with_rendered_page " << render_ms << " ms against chapter-order render " << ref_render_ms
+                               << " ms");
+    CHECK(size_ms < 4.0 * ref_size_ms + 25.0);
+    CHECK(render_ms < 4.0 * ref_render_ms + 25.0);
+    // The readings, for the record, also when everything passes.
+    WARN("page_size " << size_ms << " / " << ref_size_ms << " ms; with_rendered_page "
+                      << render_ms << " / " << ref_render_ms << " ms");
 }
