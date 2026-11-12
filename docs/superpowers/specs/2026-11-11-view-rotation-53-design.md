@@ -128,7 +128,10 @@ rect arithmetic. That stays true outside the per-page blocks below.
   One helper, `drawn_rect(page)`, answers this for the strip, and the paint, the overlays and the
   press path all call it, so the three cannot disagree. At rotation 0 the transform is a pure
   translation to the rect's top-left, so every drawn pixel and every press mapping is what it is
-  today. At 90/180/270 the strip's fresh page sits up to the slack (< 1 DIP) off the layout rect on
+  today. The one exception is a strip overlay quad of off-page text (MuPDF keeps off-page
+  characters; no `FZ_STEXT_CLIP`) that reaches past its page's bottom into the next page: the
+  strip now draws each page's overlays right after that page, so the quad is drawn before, and
+  so under, the next page. At 90/180/270 the strip's fresh page sits up to the slack (< 1 DIP) off the layout rect on
   the flipped axis; the 8 DIP gap absorbs it, and bitmap, overlays and presses still agree.
 - **Per page** (single page; each spread slot; each strip page): take the drawn rect, then
   `SetTransform(draw_affine(rot, rect))`, and in the local frame draw the bitmap into

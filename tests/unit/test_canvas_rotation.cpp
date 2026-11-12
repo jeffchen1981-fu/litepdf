@@ -602,10 +602,16 @@ TEST_CASE("PdfCanvas rotation: a failed strip page keeps its placeholder in the 
     const auto r = Access::strip_page_rect(rig.canvas(), 2);
     check_is_layout_rect(Access::strip_drawn_rect(rig.canvas(), 2), r);
     CHECK(r.w == Approx(rig.view().document().page_size(0).height_pt));
+    // An integral left edge (194 in this rig), so the 1 DIP stroke covers the
+    // column r.x wholly. On a fractional edge that column is part chrome, part
+    // page, and would pass the checks below with no border drawn.
+    REQUIRE(r.x == std::floor(r.x));
 
-    // The border's left column, mid-height: neither the page nor the chrome.
+    // The border's left column, mid-height: the border colour, neither the page
+    // nor the chrome.
     const std::uint32_t px = Access::painted_pixel(
         rig.canvas(), static_cast<int>(r.x), static_cast<int>(r.y + r.h * 0.5));
     CHECK(px != kWhite);
     CHECK(px != kChrome);
+    CHECK(px == 0x00C0C0C0u);
 }
