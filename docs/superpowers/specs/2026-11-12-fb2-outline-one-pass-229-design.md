@@ -61,10 +61,17 @@ Non-goals:
 ### 3.1 Index
 
 `htdoc_update_outline` builds an index, then resolves each node from it. The index is an `fz_tree` (string keys, no
-length limit; `fz_hash_table` has a 48-byte key limit, which would leave long ids on the slow path):
+length limit; `fz_hash_table` has a 48-byte key limit, which would leave long ids on the slow path) of the ids the
+outline points at, nothing else (PR-gate change: indexing every id in the tree would make a book with a few titles and
+an id on every paragraph pay an entry per paragraph):
 
 - Built only when the outline is non-empty.
-- One pre-order walk of `html->tree.root`, in exactly the order of `find_box_target`:
+- First, one slot array (one slot per outline node, an upper bound) and the tree of wanted ids: each node's target id
+  (`strchr(uri, '#')`, non-empty after it), inserted once, its value the address of its own slot. These are the
+  index's only allocations: one array plus two per distinct wanted id.
+- Then one pre-order walk of `html->tree.root`, in exactly the order of `find_box_target`, that records the first
+  match of each wanted id in its slot and ignores every other id. It stops as soon as every wanted id has a match;
+  it allocates nothing. The order:
   1. the box's own id, if any. Value: the address of `find_first_content(box)->y` when that returns a flow, else the
      address of `box->s.layout.y`;
   2. if the box is `BOX_FLOW`: each flow of `box->u.flow.head` in order. Key `flow->box->id` when non-NULL, value
@@ -75,14 +82,13 @@ length limit; `fz_hash_table` has a 48-byte key limit, which would leave long id
   of the id'd box until a `BOX_FLOW`, so the walk costs O(boxes + ids × that chain's depth). A chain of N nested
   id'd boxes would make it quadratic in N; real documents nest a few levels, and MuPDF's own layout recursion is
   as deep as that chain. Accepted, not optimised.
-- Before each insert, `fz_tree_lookup` the key and skip it if present. `fz_tree_insert` sends an equal key to the
-  right, so without the lookup a later duplicate could be the one found. The index therefore holds the first match in
-  walk order, the one the root walk would reach first.
-- The value is a `float *` into the laid-out tree, never NULL, so `fz_tree_lookup`'s NULL means "absent" without
-  ambiguity (a stored y of exactly 0.0f is still present). Each entry costs two allocations, the node and
-  `fz_strdup` of its key (`tree.c:36-41`), and no allocation for the value; the tree is dropped with
-  `fz_drop_tree(ctx, tree, NULL)`. The pointers are only read inside this call, while the layout that wrote them is
-  current.
+- Each wanted id is inserted once (`fz_tree_lookup` first: `fz_tree_insert` sends an equal key to the right), and a
+  slot is filled only while it is still empty, so it holds the first match in walk order, the one the root walk
+  would reach first.
+- A slot holds a `float *` into the laid-out tree; an empty slot (NULL) means "no match", without ambiguity (a stored y
+  of exactly 0.0f is still a match). Each tree entry costs two allocations, the node and `fz_strdup` of its key
+  (`tree.c:36-41`); the tree is dropped with `fz_drop_tree(ctx, tree, NULL)` and the array with `fz_free`. The
+  pointers are only read inside this call, while the layout that wrote them is current.
 
 ### 3.2 Resolving each node
 
@@ -138,13 +144,19 @@ since #146 is that every `fz_catch` that does not rethrow clears it this way. Up
   `a/source/html/html-doc.c`.
 - New block after the `config.h` prune block, same shape:
   1. Read `source/html/html-doc.c`. If it contains the current marker, do nothing.
-  2. Else `git -C <mupdf root> checkout -- source/html/html-doc.c`. Non-zero rc: FATAL_ERROR, saying the file is not
-     the current patch level and could not be restored, which also happens in a tree with no `.git`.
+  2. Else, unless the file carries an earlier version of this marker, `git diff --quiet` on it: local changes that
+     are not this patch (someone's experiment in the shared checkout) are a FATAL_ERROR asking to save or revert
+     them, never silently discarded (PR-gate change). Then `git -C <mupdf root> checkout --
+     source/html/html-doc.c`. Non-zero rc: FATAL_ERROR, saying the file is not the current patch level and could not
+     be restored, which also happens in a tree with no `.git`.
   3. `git -C <mupdf root> apply --whitespace=nowarn <absolute patch path>` (a relative path is resolved against
      `-C` and not found). Non-zero rc: FATAL_ERROR, saying MuPDF's `html-doc.c` no longer matches the patch (most
      likely a MuPDF bump) and the patch must be re-based or dropped.
   4. Re-read the file; FATAL_ERROR if the marker is still absent (do not trust the exit code alone).
   5. Delete the `mupdf_ext` build stamp, as the prune block does, so MSBuild rebuilds.
+- Each build directory also records, in `mupdf-patch-level.txt`, the patch version its MuPDF was last built for; a
+  different version deletes that directory's stamp (PR-gate change). Step 5 alone only reaches the build directory
+  whose configure applied the patch, while worktrees share one MuPDF tree through a junction.
 - A second check, on every configure, outside the marker guard: the patch copies `find_first_content` and the value
   rules of `find_box_target` / `find_flow_target` from `source/html/html-outline.c`, a file the patch does not touch.
   Upstream master has already changed `find_flow_target` (it returns `find_flow_top(flow)`, which skips anchors and
@@ -166,8 +178,9 @@ since #146 is that every `fz_catch` that does not rethrow clears it this way. Up
 
 - A small core accessor, `litepdf::core::mupdf_patch_notice()` (new `src/core/MuPdfPatchNotice.{hpp,cpp}`), returns
   `litepdf_mupdf_patch_notice_v1` (declared `extern "C"`). The About box adds its text on the line after
-  `Engine: MuPDF 1.27.2` (`src/ui/MainWindow.cpp`), through `ascii_to_wide`. Because the app references the symbol, a
-  `libmupdf.lib` built without the patch fails the app's link, not only the tests'.
+  `Engine: MuPDF 1.27.2` (`src/ui/MainWindow.cpp`), through `ascii_to_wide`, and `litepdf-cli --version` prints it
+  as a `mupdf=` line. Because the app and the CLI reference the symbol, a `libmupdf.lib` built without the patch fails
+  their links, not only the tests' (so a benchmark cannot measure the old code).
 - `installer/make-license-rtf.py`: the MuPDF line notes the modification, in the file's own language (zh-TW), with
   the date and the patch folder. The generated `installer/LICENSE-DISPLAY.rtf` is regenerated and committed in the
   same PR: its sync gate runs only in `release.yml`, so a stale `.rtf` passes PR CI and fails the next release.
@@ -276,9 +289,10 @@ its store and calls the allocator again (`memory.c`, `do_scavenging_malloc`), so
 without any throw reaching the index's catch.
 
 A first, non-failing run of `fz_count_pages` on a small fixture counts the allocation calls N of that call. The index
-build is the last thing in the call that allocates, and it makes two allocations per distinct id it stores (node and
-key copy, `tree.c:36-41`). The fixture's distinct ids D are known from its construction (user ids plus one generated
-`'N` id per heading without an id), so calls N - 2D + 1 .. N are the index's.
+build is the last thing in the call that allocates: one slot array, then two allocations per distinct wanted id (node
+and key copy, `tree.c:36-41`). The fixture's wanted ids W are known from its construction (one generated `'N` id per
+heading without an id; paragraph ids are not wanted), so the last A = 1 + 2W calls are the index's. Below, read
+"N - 2D" as N - A.
 
 - Every K in N - 2D + 1 .. N (any index allocation fails, and so does everything after it): `fz_count_pages`
   succeeds, every outline node equals the reference of 6.1, and `fz_caught(ctx)` is 0 when read inside the test's

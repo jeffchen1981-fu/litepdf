@@ -398,6 +398,44 @@ TEST_CASE("MuPDF outline patch: book without titles opens", "[mupdf][outline]") 
     REQUIRE(with_ids == without_ids);
 }
 
+TEST_CASE("MuPDF outline patch: ids outside the outline cost nothing", "[mupdf][outline]") {
+    // The index holds only the ids the outline points at. A book with a few
+    // titles and an id on every paragraph (common in books converted from
+    // HTML) must not pay an index entry per paragraph.
+    auto book = [](int ids) {
+        Lcg rng{11};
+        std::string body;
+        for (int s = 0; s < 4; ++s) {
+            body += "<section>" + title("Chapter " + std::to_string(s));
+            for (int p = 0; p < 25; ++p) {
+                const int n = s * 25 + p;
+                body += para(rng, n < ids ? pool_id(n) : std::string());
+            }
+            body += "</section>\n";
+        }
+        return fb2(body);
+    };
+    AllocState state;
+    fz_alloc_context alloc{&state, counting_malloc, counting_realloc, counting_free};
+    Context c(&alloc);
+    {
+        Doc warm(c.ctx, book(0));
+        REQUIRE(count_pages(c.ctx, warm.doc).threw == 0);
+    }
+    auto calls_for = [&](int ids) {
+        Doc d(c.ctx, book(ids));
+        state.calls = 0;
+        REQUIRE(count_pages(c.ctx, d.doc).threw == 0);
+        const int calls = state.calls;
+        REQUIRE(require_outline_matches_root_walk(c.ctx, d.doc) == 4);
+        return calls;
+    };
+    const int without_ids = calls_for(0);
+    const int with_ids = calls_for(100);
+    INFO("allocation calls: " << without_ids << " without paragraph ids, " << with_ids << " with");
+    REQUIRE(with_ids == without_ids);
+}
+
 TEST_CASE("MuPDF outline patch: negative first match falls back to the root walk",
           "[mupdf][outline]") {
     // Spec 6.2. MuPDF folds a first child's negative top margin into its
@@ -440,9 +478,10 @@ TEST_CASE("MuPDF outline patch: negative first match falls back to the root walk
 
 TEST_CASE("MuPDF outline patch: allocation failure in the index falls back",
           "[mupdf][outline]") {
-    // Spec 6.5. The index is the last thing fz_count_pages allocates, two
-    // allocations (node, key copy) per distinct id. This book has 4
-    // generated ids (titles without one) and 3 paragraph ids.
+    // Spec 6.5. The index is the last thing fz_count_pages allocates: one
+    // slot array, then two allocations (node, key copy) per distinct id the
+    // outline points at. This book's outline points at 4 generated ids
+    // (titles without one); its 3 paragraph ids are not indexed.
     Lcg rng{5};
     std::string body;
     for (int s = 0; s < 4; ++s) {
@@ -452,7 +491,7 @@ TEST_CASE("MuPDF outline patch: allocation failure in the index falls back",
         body += "</section>\n";
     }
     const std::string text = fb2(body);
-    const int distinct_ids = 7;
+    const int index_allocations = 1 + 2 * 4;  // slot array + 4 wanted ids
 
     AllocState state;
     fz_alloc_context alloc{&state, counting_malloc, counting_realloc, counting_free};
@@ -471,7 +510,7 @@ TEST_CASE("MuPDF outline patch: allocation failure in the index falls back",
     };
     const int n = measure();
     REQUIRE(measure() == n);
-    const int first_index_call = n - 2 * distinct_ids + 1;
+    const int first_index_call = n - index_allocations + 1;
     INFO("allocation calls in fz_count_pages: " << n);
     REQUIRE(first_index_call > 1);
 

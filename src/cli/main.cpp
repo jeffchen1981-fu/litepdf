@@ -21,6 +21,7 @@
 #include "app/SearchDispatcher.hpp"
 #include "core/Document.hpp"
 #include "core/DocumentView.hpp"
+#include "core/MuPdfPatchNotice.hpp"
 #include "core/Version.hpp"
 
 #include <algorithm>
@@ -274,6 +275,11 @@ int main(int argc, char* argv[]) {
         std::printf("version=%s\nbuild=%s\nrelease=%d\n",
                     id.display_version.c_str(), id.build_id.c_str(),
                     id.is_release ? 1 : 0);
+        // #229: which local MuPDF patch this build carries. Referencing the
+        // patch's symbol also makes a stale libmupdf.lib fail this
+        // executable's link, so a benchmark cannot measure the old code.
+        const std::string_view mupdf = litepdf::core::mupdf_patch_notice();
+        std::printf("mupdf=%.*s\n", static_cast<int>(mupdf.size()), mupdf.data());
         return 0;
     }
 

@@ -13,10 +13,11 @@ source/html/html-doc.c only. htdoc_update_outline, which htdoc_layout runs
 after every layout, resolved each outline entry with htdoc_resolve_link,
 one fz_find_html_target walk of the whole box tree per entry. An FB2 book
 has one entry per section title, so N titles cost O(N^2): 7.2 s of a 7.6 s
-page count for a 1,500-section book (#229). The patch walks the box tree
-once in find_box_target's order, records the first y for each id in an
-fz_tree, and resolves each entry from it. An entry whose first match is not
-at y >= 0, or every entry when building the index fails, goes through
+page count for a 1,500-section book (#229). The patch collects the ids the
+outline points at into an fz_tree, walks the box tree once in
+find_box_target's order until each of them has its first match (other ids
+cost nothing), and resolves each entry from that. An entry whose first match
+is not at y >= 0, or every entry when building the index fails, goes through
 htdoc_resolve_link as before, so every entry gets exactly the position it
 got before. htdoc_resolve_link itself (link following) is unchanged.
 
@@ -40,10 +41,10 @@ ImportMuPDF.cmake, src/core/MuPdfPatchNotice.*, its test case, the About
 line, and the licence-text note.
 
 diff --git a/source/html/html-doc.c b/source/html/html-doc.c
-index 4bfa1f325..fdfdf45d3 100644
+index 4bfa1f325..d178d0358 100644
 --- a/source/html/html-doc.c
 +++ b/source/html/html-doc.c
-@@ -82,8 +82,107 @@ htdoc_count_pages(fz_context *ctx, fz_document *doc_, int chapter)
+@@ -82,8 +82,153 @@ htdoc_count_pages(fz_context *ctx, fz_document *doc_, int chapter)
  	return 1;
  }
  
@@ -53,8 +54,9 @@ index 4bfa1f325..fdfdf45d3 100644
 + *
 + * Resolving each outline entry with htdoc_resolve_link walks the box tree
 + * from the root once per entry, so a book with N titles costs O(N^2) after
-+ * every layout. This walks the tree once, in the order of find_box_target
-+ * (html-outline.c), and records the first match for each id. An entry whose
++ * every layout. This collects the ids the outline points at, walks the tree
++ * once in the order of find_box_target (html-outline.c) until each of them
++ * has its first match, and resolves every entry from that. An entry whose
 + * first match is at y >= 0 gets exactly what the root walk returns for it;
 + * any other value, or a failure while building the index, falls back to
 + * htdoc_resolve_link, the original code. */
@@ -74,45 +76,89 @@ index 4bfa1f325..fdfdf45d3 100644
 +	return NULL;
 +}
 +
-+/* Keeps the first value for each id: fz_tree_insert sends an equal key to
-+ * the right, where a lookup could find it before the earlier one. The root
-+ * is updated in place after every insert; fz_tree_new_node throws before it
-+ * links anything, so after a throw *index is still the whole tree. */
++/* The ids the outline points at, each with a slot for the address of its
++ * first match's y. */
++typedef struct
++{
++	fz_tree *wanted;	/* id -> its slot (float **) */
++	float **slots;
++	int count;	/* distinct wanted ids */
++	int found;	/* slots filled */
++} lp_index;
++
++static int
++lp_count_nodes(fz_outline *node)
++{
++	int n = 0;
++	for (; node; node = node->next)
++		n += 1 + lp_count_nodes(node->down);
++	return n;
++}
++
++/* Adds each entry's target id once: fz_tree_insert sends an equal key to
++ * the right, so it is looked up first. The root is updated in place after
++ * every insert; fz_tree_new_node throws before it links anything, so after
++ * a throw index->wanted is still the whole tree. */
  static void
 -htdoc_update_outline(fz_context *ctx, fz_document *doc, fz_outline *node)
-+lp_put_first(fz_context *ctx, fz_tree **index, const char *id, float *y)
++lp_want_targets(fz_context *ctx, lp_index *index, fz_outline *node)
 +{
-+	if (!fz_tree_lookup(ctx, *index, id))
-+		*index = fz_tree_insert(ctx, *index, id, y);
++	for (; node; node = node->next)
++	{
++		const char *s = strchr(node->uri, '#');
++		if (s && s[1] != 0 && !fz_tree_lookup(ctx, index->wanted, s+1))
++		{
++			index->wanted = fz_tree_insert(ctx, index->wanted, s+1, &index->slots[index->count]);
++			index->count++;
++		}
++		lp_want_targets(ctx, index, node->down);
++	}
++}
++
++/* Records y as id's first match if the outline points at id and no match
++ * was recorded yet. Returns 1 once every wanted id has its match. */
++static int
++lp_record(fz_context *ctx, lp_index *index, const char *id, float *y)
++{
++	float **slot = fz_tree_lookup(ctx, index->wanted, id);
++	if (slot && !*slot)
++	{
++		*slot = y;
++		index->found++;
++	}
++	return index->found == index->count;
 +}
 +
 +/* The walk of find_box_target: a box's own id first, then a flow box's
-+ * flows in order, otherwise the box's children; then the next box. */
-+static void
-+lp_index_boxes(fz_context *ctx, fz_tree **index, fz_html_box *box)
++ * flows in order, otherwise the box's children; then the next box. Stops,
++ * returning 1, once every wanted id has its first match. */
++static int
++lp_index_boxes(fz_context *ctx, lp_index *index, fz_html_box *box)
 +{
 +	while (box)
 +	{
 +		if (box->id)
 +		{
 +			fz_html_flow *flow = lp_find_first_content(box);
-+			lp_put_first(ctx, index, box->id, flow ? &flow->y : &box->s.layout.y);
++			if (lp_record(ctx, index, box->id, flow ? &flow->y : &box->s.layout.y))
++				return 1;
 +		}
 +		if (box->type == BOX_FLOW)
 +		{
 +			fz_html_flow *flow;
 +			for (flow = box->u.flow.head; flow; flow = flow->next)
-+				if (flow->box->id)
-+					lp_put_first(ctx, index, flow->box->id, &flow->y);
++				if (flow->box->id && lp_record(ctx, index, flow->box->id, &flow->y))
++					return 1;
 +		}
-+		else
-+			lp_index_boxes(ctx, index, box->down);
++		else if (lp_index_boxes(ctx, index, box->down))
++			return 1;
 +		box = box->next;
 +	}
++	return 0;
 +}
 +
 +static void
-+lp_update_outline_from_index(fz_context *ctx, fz_document *doc_, fz_tree *index, fz_outline *node)
++lp_update_outline_from_index(fz_context *ctx, fz_document *doc_, lp_index *index, fz_outline *node)
 +{
 +	html_document *doc = (html_document*)doc_;
 +	while (node)
@@ -121,7 +167,8 @@ index 4bfa1f325..fdfdf45d3 100644
 +		const char *s = strchr(node->uri, '#');
 +		if (s && s[1] != 0)
 +		{
-+			float *yp = fz_tree_lookup(ctx, index, s+1);
++			float **slot = fz_tree_lookup(ctx, index->wanted, s+1);
++			float *yp = slot ? *slot : NULL;
 +			if (yp)
 +			{
 +				float y = *yp;
@@ -152,7 +199,7 @@ index 4bfa1f325..fdfdf45d3 100644
  {
  	while (node)
  	{
-@@ -91,11 +190,39 @@ htdoc_update_outline(fz_context *ctx, fz_document *doc, fz_outline *node)
+@@ -91,11 +236,51 @@ htdoc_update_outline(fz_context *ctx, fz_document *doc, fz_outline *node)
  		node->page = dest.loc;
  		node->x = dest.x;
  		node->y = dest.y;
@@ -165,29 +212,41 @@ index 4bfa1f325..fdfdf45d3 100644
 +static void
 +htdoc_update_outline(fz_context *ctx, fz_document *doc, fz_outline *node)
 +{
-+	fz_tree *index = NULL;
++	lp_index index = { NULL, NULL, 0, 0 };
++	int built = 0;
 +
 +	if (!node)
 +		return;
 +
 +	fz_var(index);
++	fz_var(built);
 +	fz_try(ctx)
-+		lp_index_boxes(ctx, &index, ((html_document*)doc)->html->tree.root);
++	{
++		/* At most one slot per entry; the slots exist before any key
++		 * points at them. */
++		index.slots = fz_calloc(ctx, lp_count_nodes(node), sizeof *index.slots);
++		lp_want_targets(ctx, &index, node);
++		built = 1;
++	}
 +	fz_catch(ctx)
 +	{
 +		/* Today the update cannot fail, so it must not start failing the
-+		 * page count: drop what was built and use the root walk. The error
-+		 * is reported, which also clears it from the context. */
-+		fz_drop_tree(ctx, index, NULL);
-+		index = NULL;
++		 * page count: use the root walk (what was built is dropped below).
++		 * The error is reported, which also clears it from the context. */
 +		fz_report_error(ctx);
 +	}
 +
-+	if (index)
-+		lp_update_outline_from_index(ctx, doc, index, node);
++	if (built)
++	{
++		/* The walk allocates nothing. */
++		if (index.count > 0)
++			lp_index_boxes(ctx, &index, ((html_document*)doc)->html->tree.root);
++		lp_update_outline_from_index(ctx, doc, &index, node);
++	}
 +	else
 +		lp_update_outline_root_walk(ctx, doc, node);
-+	fz_drop_tree(ctx, index, NULL);
++	fz_drop_tree(ctx, index.wanted, NULL);
++	fz_free(ctx, index.slots);
 +}
 +
  static void

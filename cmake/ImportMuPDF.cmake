@@ -200,6 +200,21 @@ set(_HTML_DOC_C "${_MUPDF_ROOT}/source/html/html-doc.c")
 set(_HTML_OUTLINE_C "${_MUPDF_ROOT}/source/html/html-outline.c")
 file(READ "${_HTML_DOC_C}" _html_doc)
 if(NOT _html_doc MATCHES "${_LITEPDF_PATCH_VER}")
+    # Restoring the file discards its working-tree changes. Those are only
+    # ours to discard when they are an earlier version of this patch; anything
+    # else (someone's own experiment in the shared checkout) stops here.
+    if(NOT _html_doc MATCHES "LITEPDF_PATCH_HTDOC_OUTLINE_V")
+        execute_process(
+            COMMAND git -C "${_MUPDF_ROOT}" diff --quiet -- source/html/html-doc.c
+            RESULT_VARIABLE _dirty)
+        if(_dirty EQUAL 1)
+            message(FATAL_ERROR
+                "#229 patch: MuPDF source/html/html-doc.c has local changes that are "
+                "not litepdf's patch, and applying the patch would discard them. "
+                "Save or revert them (git -C \"${_MUPDF_ROOT}\" diff -- "
+                "source/html/html-doc.c), then configure again.")
+        endif()
+    endif()
     execute_process(
         COMMAND git -C "${_MUPDF_ROOT}" checkout -- source/html/html-doc.c
         RESULT_VARIABLE _gitrc)
@@ -231,6 +246,23 @@ if(NOT _html_doc MATCHES "${_LITEPDF_PATCH_VER}")
     message(STATUS "MuPDF html-doc.c patched (${_LITEPDF_PATCH_VER}).")
     file(REMOVE
         "${CMAKE_BINARY_DIR}/mupdf_ext-prefix/src/mupdf_ext-stamp/Release/mupdf_ext-build")
+endif()
+
+# The block above deletes the stamp only in the build directory whose
+# configure applied the patch. Worktrees share one MuPDF tree through a
+# junction, so another build directory can find the marker already in place
+# while its stamp still stands for a library built before the patch. Each
+# build directory therefore records the patch version its MuPDF was last
+# built for, and a different one deletes its own stamp.
+set(_LITEPDF_PATCH_LEVEL_FILE "${CMAKE_BINARY_DIR}/mupdf-patch-level.txt")
+set(_litepdf_patch_level "")
+if(EXISTS "${_LITEPDF_PATCH_LEVEL_FILE}")
+    file(READ "${_LITEPDF_PATCH_LEVEL_FILE}" _litepdf_patch_level)
+endif()
+if(NOT _litepdf_patch_level STREQUAL _LITEPDF_PATCH_VER)
+    file(REMOVE
+        "${CMAKE_BINARY_DIR}/mupdf_ext-prefix/src/mupdf_ext-stamp/Release/mupdf_ext-build")
+    file(WRITE "${_LITEPDF_PATCH_LEVEL_FILE}" "${_LITEPDF_PATCH_VER}")
 endif()
 
 # Every configure: the patch copies find_first_content and the value rules of
