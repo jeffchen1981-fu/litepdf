@@ -1,6 +1,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <future>
@@ -896,6 +897,20 @@ TEST_CASE("DocumentView rotation: fit width refits from the turned size",
         view.set_viewport(1000.0f, 800.0f, 96.0f);
         CHECK(view.zoom_pct() == 1.5f);
     }
+}
+
+TEST_CASE("DocumentView rotation: fit page refits from the turned size",
+          "[core][view][rotation]") {
+    InlineDispatcher disp;
+    DocumentView view(open_simple(), disp);
+    const auto real = view.document().page_size(0);
+
+    view.set_zoom_mode_fit_page();
+    view.rotate_cw();
+    view.set_viewport(1000.0f, 800.0f, 96.0f);
+    const float expected = std::min(1000.0f / real.height_pt, 800.0f / real.width_pt);
+    CHECK(view.zoom_pct() == Catch::Approx(expected));
+    CHECK(view.zoom_pct() == Catch::Approx(1.1876f).margin(0.001f));
 }
 
 TEST_CASE("DocumentView rotation: a resize after the turn fits the turned page",

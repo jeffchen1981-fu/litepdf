@@ -119,8 +119,7 @@ public:
     // cache (#49) still sees such a page as unknown. The sizing is still once;
     // the reported frame follows rotation() (#53 spec §3.3): width and height
     // swap at a quarter or three-quarter turn, stand-ins included. The
-    // returned list stays valid until the next rotate_*() or page_sizes()
-    // call. UI thread only.
+    // returned list stays valid until the next rotate_*(). UI thread only.
     const std::vector<PageSize>& page_sizes();
 
     // (#194) One page's size, or nothing when it has none to use: out of range,
