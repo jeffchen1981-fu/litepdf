@@ -113,15 +113,18 @@ reads if that ever changes; that branch is untested by design.
 
 The helper:
 
-- First `fz_try`: `nc = fz_count_chapters(ctx, doc)`. When it is 1 or less, no table (PDF, CBZ,
-  FB2, XPS, SVG and single-chapter ePubs: `fz_load_page` already finds the page on the first
-  chapter, so nothing changes for them).
+- First `fz_try`: `nc = fz_count_chapters(ctx, doc)`. Its `fz_catch` reports and returns no
+  table, so `nc` is never read after a throw and takes no `fz_var` (#178: only a local read after
+  a throw does). When `nc` is 1 or less, no table (PDF, CBZ, FB2, XPS, SVG and single-chapter
+  ePubs: `fz_load_page` already finds the page on the first chapter, so nothing changes for
+  them).
 - Between the two `fz_try` blocks, in plain C++: a `std::vector<int>` of `nc` zeros.
 - Second `fz_try`: `fz_count_chapter_pages(c)` for every chapter, written through the vector's
   `data()` pointer. The counts come from the per-chapter cache the page count has just filled,
   so this costs only the spine walks: 2.2 ms at 1,500 chapters, 0.02 ms at 200 (§2).
 - Then `from_counts(counts, page_count)`.
-- A MuPDF throw: `fz_report_error` in that `fz_catch` (#146), no table. `from_counts` refusing
+- A MuPDF throw: each of the two `fz_catch` blocks calls `fz_report_error` (#146) and returns
+  no table. `from_counts` refusing
   the counts: no table, nothing reported (there is no MuPDF error then, and `fz_report_error`
   would print a stale one). A `std::bad_alloc` from the vector or the table: caught around the
   plain C++ part, no table. In every case the open still succeeds, because the page count was
@@ -134,6 +137,17 @@ past the chapter count, `epub_load_page` returns NULL and `fz_load_chapter_page`
 through it (`document.c:950-953`). Building it from the same `fz_document` right after its page
 count, assigning it at every successful open, and resetting it on `close` is what guarantees
 that.
+
+**Invariant: nothing re-lays-out an open document.** The table, like the cached `page_count`
+(`Impl`'s comment on it says the same), is valid only while the chapters' page counts stay what
+they were at open. MuPDF changes them only through a new layout (`fz_layout_document` →
+`epub_layout` → `invalidate_accelerator`) or a CSS change (`fz_set_user_css`,
+`fz_set_use_document_css`, which `count_chapter_pages` notices and recounts on). litepdf calls
+none of them (`git grep` over `src`). Under that invariant every per-chapter count
+`fz_load_page` would ask for on its way is a cached int that cannot throw, so skipping those
+calls changes neither the page nor the errors. A future change that re-lays-out or changes CSS
+must reset both `page_count` and `chapters` and read them again; the `Impl` comment on
+`chapters` says so.
 
 ### 4.3 `Document::page_size` and `Document::with_rendered_page`
 
@@ -148,7 +162,8 @@ and in `with_rendered_page` for every format, the `fz_load_page` call inside the
 
 `fz_load_page` itself ends in `fz_load_chapter_page(chapter, page)` for the same location, so the
 loaded page, its bounds, its content and its errors are the same; only the chapter search before
-it changes. The location is computed before the `fz_try`, into two plain ints and a bool (no
+it changes (under the invariant of §4.2: the per-chapter counts that search would read are cached
+and cannot throw). The location is computed before the `fz_try`, into two plain ints and a bool (no
 object with a destructor crosses into the `fz_try`).
 
 ### 4.4 Threads
@@ -248,20 +263,28 @@ the right size, so only the unit test of `locate` (§8.2) sees that mistake.
   `fz_load_page` + `fz_bound_page` for every page, bit for bit (the existing `OwnDocument`
   helper), and the fixture's widths are not all equal (so the oracle is not vacuous).
   Mutation check: a `locate` that maps to the next chapter, or to chapter 0, fails it.
-- **Print path:** on `chapter-sizes.epub`, `with_rendered_page(i, 1, 1, false, …)` hands the
-  callback the width and height of `fz_round_rect` of the test's own `fz_load_page` +
-  `fz_bound_page`, for every page. Mutation check: the same wrong-chapter mutants, applied to
-  `with_rendered_page`'s lookup, fail it.
-- **Speed (the gate as a test):** a 1,500-chapter ePub is written to a fresh temporary directory
-  at test time with MuPDF's zip writer (`fz_write_zip_entry` always stores). Each chapter is
-  `<h1>Chapter k</h1><p>S</p>` in the template above without the `<style>`, so one page each.
-  It is generated rather than committed, as a binary of over a megabyte that only a timing
-  test reads. Sizing every page with `Document::page_size`, best of 3 on one open document, must
-  take under 250 ms. Probe on that shape (one 60-word paragraph per chapter): 860-1,129 ms by
-  flat number, 5.3-8.5 ms by location across three runs, so the bound fails the old code by at
-  least 3.4× on this machine and leaves the new code a 29× margin for slower runners. The
-  implementer re-measures on the committed shape and records both readings. Mutation check:
-  reverting `page_size` to `fz_load_page` fails it.
+- **Print path, content:** on `chapter-sizes.epub`, for every page, `with_rendered_page(i, 1, 1,
+  false, …)` hands the callback the same width, height and BGRA bytes as the test's own render
+  of `fz_load_page(i)` through the same steps (`fz_round_rect` of the bounds, a BGR pixmap with
+  alpha cleared to 0xFF, a draw device, `fz_run_page`). Bytes, not only the size: a page from the
+  right chapter but the wrong page within it has the right size and different text. Mutation
+  checks: a wrong chapter, and `page + 1` within the chapter, in `with_rendered_page`'s lookup,
+  each fail it.
+- **Speed (the gate as a test), sizing and print:** a 1,500-chapter ePub is written to a fresh
+  temporary directory at test time with MuPDF's zip writer (`fz_write_zip_entry` always stores).
+  Each chapter is the template above without the `<style>` and with one `<p>S</p>`, so one page
+  each (755 KB with Python's zipfile). It is generated rather than committed, as a binary only a
+  timing test reads. Two timed loops over every page, each best of 3 on one open document:
+  `page_size`, and `with_rendered_page` at scale 0.05. Each is bounded against a reference the
+  test times itself on the same book in its own MuPDF context: the same work through
+  `fz_load_chapter_page` in chapter order (bounds; and a 0.05-scale pixmap from the page). The
+  bound is 4 × reference + 25 ms, so it scales with the machine. Probe on this exact shape,
+  three runs each: sizing 906-1,093 ms by flat number against 6.2-9.6 ms by location; rendering
+  at 0.05, 959-1,028 ms against 46-82 ms. The flat route therefore fails sizing by about 30× and
+  rendering by about 3×, the location route passes each with room for noise. The implementer
+  records the readings of both routes (via the mutations). Mutation checks: reverting
+  `page_size` alone to `fz_load_page` fails the sizing loop; reverting `with_rendered_page` alone
+  fails the rendering loop.
 - `page_size(page_count())` on `chapter-sizes.epub` still throws `std::runtime_error`.
 
 `tests/unit/test_strip_fixtures.cpp` pins the new fixture's page count (read from the committed
@@ -277,3 +300,15 @@ The §4.4 note in the continuous-scroll spec gains the 1,500-chapter reading bef
 Under `[Unreleased]` → `### Fixed`: an ePub split into many hundreds of files no longer freezes
 the window when it is first shown in continuous scroll, with the 1,500-chapter before/after
 numbers (#230).
+
+## 10. Review
+
+**Spec gate (Full, routine), 2026-11-12.** Round 1 on fbbc79d: Opus 2 findings (§6's reason for
+leaving the Document's own paths alone was false and print loops on the UI thread; the fixture
+numbers could not be reproduced from the spec), Sonnet 5 (the same two, the `TextPageAccess`
+cost, the untestable `authenticate` branch, wording of the reset). Fixed in 41abadd: print joins
+the fix, exact fixture template, one build helper. Codex on 41abadd: terra 3, gpt-6.1-terra 3,
+luna 4; fixed here: the no-re-layout invariant stated (§4.2), a `fz_report_error` in each
+`fz_catch`, the speed test's numbers re-measured on its own shape and made relative to a
+reference, a print speed loop, and a print test that compares bytes. Declined: `fz_var(nc)`
+(luna), because the catch returns and #178 asks for `fz_var` only on a local read after a throw.
