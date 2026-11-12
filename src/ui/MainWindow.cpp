@@ -8,6 +8,7 @@
 #include "app/SingleInstance.hpp"
 #include "core/Document.hpp"
 #include "core/DocumentView.hpp"
+#include "core/MuPdfPatchNotice.hpp" // #229 modified-MuPDF notice
 #include "core/SearchSession.hpp"
 #include "core/TabList.hpp"
 #include "core/Version.hpp"          // #60 build identity
@@ -1990,8 +1991,11 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     text += L"\nA lightweight PDF / ePub / CBZ / XPS viewer for Windows.\n\n"
                             L"License: AGPL-3.0\n"
                             // Source of truth: third_party/mupdf FZ_VERSION; update on bumps.
-                            L"Engine: MuPDF 1.27.2\n"
-                            L"Rendering: Direct2D\n\n"
+                            L"Engine: MuPDF 1.27.2\n";
+                    // #229: the notice that litepdf's MuPDF is modified, from
+                    // the patch itself (third_party/mupdf-patches/).
+                    text += litepdf::core::ascii_to_wide(litepdf::core::mupdf_patch_notice());
+                    text += L"\nRendering: Direct2D\n\n"
                             L"Releases: https://github.com/jeffchen1981-fu/litepdf/releases";
                     MessageBoxW(hwnd, text.c_str(), kWindowTitle, MB_ICONINFORMATION);
                     return 0;

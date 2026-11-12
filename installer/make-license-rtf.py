@@ -25,6 +25,7 @@ AGPL 要求您同樣需將您的原始碼公開 (AGPL §13)。
 ─────────────────────────────────────────────
 
 • MuPDF 1.27.2 — (c) Artifex Software, Inc. — AGPL-3.0
+  （litepdf 於 2026-11-12 修改：目錄一次解析，見原始碼 third_party/mupdf-patches/）
 • FreeType 2.13.3 — The FreeType Project — FTL
 • libjpeg 9f — Independent JPEG Group — IJG License
 • OpenJPEG — UCLouvain / OpenJPEG contributors — BSD-2-Clause
