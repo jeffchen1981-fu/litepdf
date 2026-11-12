@@ -294,9 +294,10 @@ TEST_CASE("MuPDF outline patch: notice symbol is linked", "[mupdf][outline]") {
 }
 
 TEST_CASE("MuPDF outline patch: outline matches the root walk", "[mupdf][outline]") {
-    // Spec 6.1. Only title and subtitle are headings in an FB2, and only
-    // inside a section (html-parse.c, get_heading_from_tag); only headings
-    // become outline nodes.
+    // Spec 6.1. In FB2 markup the headings are title and subtitle, and only
+    // inside a section (html-parse.c, get_heading_from_tag; h1-h6 would be
+    // headings too, but FB2's default CSS makes them no block, so they get
+    // no heading level); only headings become outline nodes.
     Lcg rng{229};
     std::string body;
     int headings = 0;
