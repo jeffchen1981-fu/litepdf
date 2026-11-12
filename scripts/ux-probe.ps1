@@ -20,6 +20,8 @@
 #   ux-probe.ps1 canvas-wheel <delta> [count]             - Post <count> WM_MOUSEWHEEL (default 1) of <delta> to the canvas centre
 #   ux-probe.ps1 canvas-key <vk_hex>                      - Post WM_KEYDOWN/UP <vk_hex> to the canvas (Home/End/PgUp/PgDn are canvas keys)
 #   ux-probe.ps1 menu-state <id> [id...]                  - JSON: for each command id, found/grayed/checked in the main menu (after WM_INITMENUPOPUP to its submenu)
+#   ux-probe.ps1 find-text <query>                        - Set the find bar's query text (no Enter); the bar arms its own debounce
+#   ux-probe.ps1 send-chord <vk_hex> [vk_hex...]          - Real key-downs in order, key-ups in reverse (SendInput); exit 2 unless litepdf is the foreground window
 #
 # The probe is per-monitor DPI aware (see below), so every size it reports is in physical
 # pixels; divide by dpi / 96 for DIPs.
@@ -569,6 +571,81 @@ switch ($Action) {
     [void][W.U32]::SendMessage($edit, $WM_SETTEXT, [IntPtr]::Zero, [string]$Arg1)
     Post-Key $edit 0x0D
     Write-Host "Posted page-box-go $Arg1 to HWND 0x$($edit.ToInt64().ToString('X8'))"
+  }
+  'find-text' {
+    # Set the find bar's query: WM_SETTEXT on its EDIT child, as page-box-go does for the
+    # page box. No Enter: the edit's EN_CHANGE arms the find bar's debounce, and the query
+    # reaches the search when it fires. The bar must already be shown (IDM_FIND), or
+    # show_or_focus overwrites this text with its prefill.
+    if (-not $Arg1) { Write-Error "Usage: find-text <query>"; exit 1 }
+    $h = Get-LitePdfHwnd
+    if ($h -eq [IntPtr]::Zero) { Write-Error "litepdf window not found"; exit 1 }
+    $fb = Find-ChildByClass $h 'LitePDFFindBar'
+    if ($fb -eq [IntPtr]::Zero) { Write-Error "find bar not found"; exit 1 }
+    $edit = Find-ChildByClass $fb 'Edit'
+    if ($edit -eq [IntPtr]::Zero) { Write-Error "find bar edit not found"; exit 1 }
+    $WM_SETTEXT = 0x000C
+    [void][W.U32]::SendMessage($edit, $WM_SETTEXT, [IntPtr]::Zero, [string]$Arg1)
+    Write-Host "Set find-text '$Arg1' on HWND 0x$($edit.ToInt64().ToString('X8'))"
+  }
+  'send-chord' {
+    # Real input for an accelerator row: TranslateAccelerator reads the async modifier
+    # state, which a posted WM_KEYDOWN does not set. SendInput types into whatever window
+    # is in front, so refuse (exit 2) unless that is litepdf's main window. The message
+    # goes to stderr, never Write-Error: smoke-test.ps1 runs this script in-process with
+    # $ErrorActionPreference = Stop, which would turn it into a throw.
+    $vks = @()
+    if ($Arg1) { $vks += $Arg1 }
+    if ($Rest) { $vks += $Rest }
+    if (-not $vks) { Write-Error "Usage: send-chord <vk_hex> [vk_hex...]"; exit 1 }
+    $codes = @($vks | ForEach-Object { [uint16][Convert]::ToInt32(($_ -replace '^0x', ''), 16) })
+    $h = Get-LitePdfHwnd
+    if ($h -eq [IntPtr]::Zero) { Write-Error "litepdf window not found"; exit 1 }
+    # The INPUT struct must be the full union size: type, 4 bytes of padding on x64, then
+    # the union, whose largest member is MOUSEINPUT (40 bytes in all on x64). A struct
+    # holding only KEYBDINPUT is too small, and SendInput returns 0 with error 87.
+    Add-Type -Namespace W -Name Kbd -MemberDefinition @"
+[StructLayout(LayoutKind.Sequential)]
+public struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr dwExtraInfo; }
+[StructLayout(LayoutKind.Sequential)]
+public struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public IntPtr dwExtraInfo; }
+[StructLayout(LayoutKind.Explicit)]
+public struct InputUnion { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
+[StructLayout(LayoutKind.Sequential)]
+public struct INPUT { public uint type; public InputUnion u; }
+[DllImport("user32.dll", SetLastError=true)]
+public static extern uint SendInput(uint count, INPUT[] inputs, int size);
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+// Key-downs in order, then key-ups in reverse, in one SendInput call. Built here, not
+// in PowerShell, where a write to a nested struct field changes a copy.
+public static INPUT[] Chord(ushort[] vks) {
+  int n = vks.Length;
+  INPUT[] a = new INPUT[2 * n];
+  for (int i = 0; i < n; i++) {
+    a[i].type = 1;                       // INPUT_KEYBOARD
+    a[i].u.ki.wVk = vks[i];
+    a[n + i].type = 1;
+    a[n + i].u.ki.wVk = vks[n - 1 - i];
+    a[n + i].u.ki.dwFlags = 2;           // KEYEVENTF_KEYUP
+  }
+  return a;
+}
+"@
+    $size = [System.Runtime.InteropServices.Marshal]::SizeOf([type][W.Kbd+INPUT])
+    if ([IntPtr]::Size -eq 8 -and $size -ne 40) { throw "send-chord: INPUT is $size bytes, expected 40 on x64" }
+    $fg = [W.Kbd]::GetForegroundWindow()
+    if ($fg -ne $h) {
+      [Console]::Error.WriteLine("send-chord: litepdf (HWND 0x$($h.ToInt64().ToString('X8'))) is not the foreground window (HWND 0x$($fg.ToInt64().ToString('X8')))")
+      exit 2
+    }
+    $inputs = [W.Kbd]::Chord([uint16[]]$codes)
+    $sent = [W.Kbd]::SendInput([uint32]$inputs.Length, $inputs, $size)
+    if ($sent -ne $inputs.Length) {
+      $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+      throw "send-chord: SendInput sent $sent of $($inputs.Length) inputs (error $err)"
+    }
+    Write-Host ("Sent chord " + (($codes | ForEach-Object { '0x{0:X2}' -f $_ }) -join ' ') + " to the foreground window HWND 0x$($h.ToInt64().ToString('X8'))")
+    exit 0
   }
   'canvas-wheel' {
     # Post <count> WM_MOUSEWHEEL to the canvas: wParam = delta << 16 as a 32-bit value

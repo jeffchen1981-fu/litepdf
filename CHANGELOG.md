@@ -9,6 +9,10 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+### Added
+
+- Rotate the view in 90° steps: View > Rotate Clockwise / Counterclockwise (#53).
+
 ## [1.8.3] — 2026-11-10 — Switching to continuous scroll keeps your place
 
 ### Fixed

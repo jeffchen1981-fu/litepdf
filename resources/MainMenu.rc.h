@@ -75,9 +75,13 @@
 // #55: continuous scroll. The next id of the same reservation.
 #define IDM_VIEW_CONTINUOUS  40066   // View > Continuous Scroll (no accelerator)
 
-// Next free ID: 40067. Reserve 40067-40070 for future Phase 8.x cleanups.
+// #53: view rotation. The next two ids of the same reservation.
+#define IDM_VIEW_ROTATE_CW   40067   // Ctrl+Shift+=
+#define IDM_VIEW_ROTATE_CCW  40068   // Ctrl+Shift+-
 
-// #52: text selection. A fresh block, outside the Phase 8.x reservation (now 40067-40070).
+// Next free ID: 40069. Reserve 40069-40070 for future Phase 8.x cleanups.
+
+// #52: text selection. A fresh block, outside the Phase 8.x reservation (now 40069-40070).
 #define IDM_EDIT_COPY        40071   // Ctrl+C
 #define IDM_EDIT_SELECT_ALL  40072   // Ctrl+A
 

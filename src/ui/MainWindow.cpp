@@ -1721,6 +1721,13 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 CheckMenuItem(popup, IDM_VIEW_CONTINUOUS,
                               MF_BYCOMMAND
                               | (cont.checked ? MF_CHECKED : MF_UNCHECKED));
+                // #53: the rotate commands need a document, the same test as
+                // the handler's early return; a grayed item also swallows its
+                // accelerator.
+                const UINT rotate_state =
+                    MF_BYCOMMAND | (v ? MF_ENABLED : MF_GRAYED);
+                EnableMenuItem(popup, IDM_VIEW_ROTATE_CW,  rotate_state);
+                EnableMenuItem(popup, IDM_VIEW_ROTATE_CCW, rotate_state);
                 return 0;
             }
             // #52 Edit popup. TranslateAcceleratorW sends WM_INITMENUPOPUP
@@ -1869,6 +1876,23 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                         if (canvas_) canvas_->change_current_page(p);   // snap: no anchor
                     }
                     kick_render(p, litepdf::ui::KickReason::Spread);
+                    return 0;
+                }
+                case IDM_VIEW_ROTATE_CW:
+                case IDM_VIEW_ROTATE_CCW: {
+                    // #53, spec 3.6: the canvas turns the view and lands the
+                    // turned page first; a kick before it would lay out the old
+                    // sizes. In a spread the kick takes the pair's left page,
+                    // as IDM_VIEW_DUAL_PAGE's does.
+                    auto* v = active_view();
+                    if (!v || !canvas_) return 0;
+                    canvas_->rotate(id == IDM_VIEW_ROTATE_CW);
+                    int p = v->current_page();
+                    if (v->dual_page()) {
+                        p = litepdf::ui::dual_page_compute_left(
+                                p, v->page_count());
+                    }
+                    kick_render(p, litepdf::ui::KickReason::Rotate);
                     return 0;
                 }
                 case IDM_VIEW_CONTINUOUS: {
@@ -2748,6 +2772,10 @@ int MainWindow::run(HINSTANCE hInstance, int nCmdShow,
         // Ctrl+D is reserved for a future "Duplicate Tab" affordance.
         { FCONTROL | FSHIFT | FVIRTKEY, 'I', IDM_VIEW_INVERT    },
         { FCONTROL | FSHIFT | FVIRTKEY, 'D', IDM_VIEW_DUAL_PAGE },
+        // #53: View > Rotate Clockwise / Counterclockwise, Zoom In / Out's keys
+        // with Shift added.
+        { FCONTROL | FSHIFT | FVIRTKEY, VK_OEM_PLUS,  IDM_VIEW_ROTATE_CW  },  // Ctrl+Shift+=
+        { FCONTROL | FSHIFT | FVIRTKEY, VK_OEM_MINUS, IDM_VIEW_ROTATE_CCW },  // Ctrl+Shift+-
         // Phase 5: tab management.
         { FCONTROL | FVIRTKEY,          'W',     IDM_TAB_CLOSE  },
         { FCONTROL | FVIRTKEY,          VK_TAB,  IDM_TAB_NEXT   },

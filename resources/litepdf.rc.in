@@ -73,6 +73,8 @@ IDM_MAIN_MENU MENU
         MENUITEM "&Invert Colors\tCtrl+Shift+I", IDM_VIEW_INVERT
         MENUITEM "&Two-Page Spread\tCtrl+Shift+D", IDM_VIEW_DUAL_PAGE
         MENUITEM "&Continuous Scroll", IDM_VIEW_CONTINUOUS
+        MENUITEM "Rotate C&lockwise\tCtrl+Shift+=", IDM_VIEW_ROTATE_CW
+        MENUITEM "Rotate Counterclock&wise\tCtrl+Shift+-", IDM_VIEW_ROTATE_CCW
         MENUITEM "Status &Bar", IDM_VIEW_STATUS_BAR
         MENUITEM SEPARATOR
         MENUITEM "Zoom &In\tCtrl+=",  IDM_ZOOM_IN
