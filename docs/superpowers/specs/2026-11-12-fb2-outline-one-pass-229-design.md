@@ -2,6 +2,9 @@
 
 Status: design agreed in chat 2026-11-12 after two independent reviews of the scope and of this design; the user
 asked for this written spec before any code.
+Spec gate (Full tier): round 1 (Opus + Sonnet) and the Codex lens (terra, gpt-6.1-terra, luna) fixed in place. The
+main changes: the negative-y CSS, the empty-heading fixture, the allocation-failure test, the versioned link symbol,
+and the `html-outline.c` hash check.
 Issue: #229 (body + 3 comments hold the measurements). Base: main at 80d4f4a.
 Scope decided with the user: this PR is the MuPDF patch only. PR 2 = one render worker for FB2. A lazy
 `SearchSession` is decided after this PR is measured (only for documents that need no password, since #130 records
@@ -68,7 +71,10 @@ length limit; `fz_hash_table` has a 48-byte key limit, which would leave long id
      `&flow->y`;
   3. otherwise: recurse into `box->down`;
   4. then `box->next`.
-- `find_first_content` is `static` in `html-outline.c`, so the patch has its own copy.
+- `find_first_content` is `static` in `html-outline.c`, so the patch has its own copy. It follows the `down` chain
+  of the id'd box until a `BOX_FLOW`, so the walk costs O(boxes + ids × that chain's depth). A chain of N nested
+  id'd boxes would make it quadratic in N; real documents nest a few levels, and MuPDF's own layout recursion is
+  as deep as that chain. Accepted, not optimised.
 - Before each insert, `fz_tree_lookup` the key and skip it if present. `fz_tree_insert` sends an equal key to the
   right, so without the lookup a later duplicate could be the one found. The index therefore holds the first match in
   walk order, the one the root walk would reach first.
@@ -117,9 +123,11 @@ since #146 is that every `fz_catch` that does not rethrow clears it this way. Up
 - The patched file carries a marker comment `LITEPDF_PATCH_HTDOC_OUTLINE_V1`. Any change to the patch bumps the
   number, so the configure step (section 4) re-applies it.
 - The patch defines one external symbol:
-  `const char litepdf_mupdf_patch_notice[] = "Modified by litepdf on 2026-11-12: one-pass outline resolve (#229)";`
+  `const char litepdf_mupdf_patch_notice_v1[] = "Modified by litepdf on 2026-11-12: one-pass outline resolve (#229)";`
   It serves two purposes: the AGPL-3.0 section 5(a) notice that MuPDF was modified and when, and a link-time proof
-  that the patched `html-doc.c` is in the linked library (section 5.1).
+  that the patched `html-doc.c` is in the linked library (section 5.1). The symbol's name carries the marker's
+  version and is renamed with it (`_v2`, ...), so a library built from an older patch level also fails the link, not
+  only an unpatched one.
 - The patch file starts with a header saying what it changes, why, the date, and that it is to be dropped once
   upstream fixes the outline update.
 
@@ -157,7 +165,7 @@ since #146 is that every `fz_catch` that does not rethrow clears it this way. Up
 ### 5.1 Notice in the app and the licence text
 
 - A small core accessor, `litepdf::core::mupdf_patch_notice()` (new `src/core/MuPdfPatchNotice.{hpp,cpp}`), returns
-  `litepdf_mupdf_patch_notice` (declared `extern "C"`). The About box adds its text on the line after
+  `litepdf_mupdf_patch_notice_v1` (declared `extern "C"`). The About box adds its text on the line after
   `Engine: MuPDF 1.27.2` (`src/ui/MainWindow.cpp`), through `ascii_to_wide`. Because the app references the symbol, a
   `libmupdf.lib` built without the patch fails the app's link, not only the tests'.
 - `installer/make-license-rtf.py`: the MuPDF line notes the modification, in the file's own language (zh-TW), with
@@ -175,15 +183,17 @@ No change to `Document`, `DocumentView`, `RenderEngine` or `SearchSession`.
 ## 6. Tests
 
 New `tests/unit/test_mupdf_outline_patch.cpp`, raw MuPDF API on its own `fz_context`, FB2 generated in memory and
-opened with `fz_open_document_with_stream(ctx, "application/x-fictionbook", stream)`. ASCII test names prefixed
+opened with `fz_open_document_with_stream(ctx, "application/x-fictionbook", stream)` after
+`fz_register_document_handlers(ctx)` (a fresh context has none, `document.c:242-245`). ASCII test names prefixed
 `MuPDF outline patch:`.
 
 ### 6.1 Equivalence
 
 One generated FB2 covering:
 
-- nested `section`s with `title`s and `subtitle`s (only these two are headings for FB2, `html-parse.c:1328-1331`,
-  and only headings become outline nodes, `html-outline.c:409-411`);
+- nested `section`s with `title`s and `subtitle`s, plus one `<h1>` (FB2 markup uses `title` and `subtitle`, which
+  MuPDF makes headings for FB2, `html-parse.c:1328-1331`; `h1`-`h6` are headings in every document, `:1314-1326`;
+  only headings become outline nodes, `html-outline.c:409-411`);
 - titles without ids (generated `'N` ids);
 - an id longer than 48 characters on a title;
 - an empty heading, `<title id="…"/>`, whose box has no flow content, so its value is `box->s.layout.y` (the
@@ -191,8 +201,10 @@ One generated FB2 covering:
 - duplicates: about 20 `<title id>`s each repeating the id of an earlier `<p id>` (the first match is the
   paragraph), with the duplicated ids sorting in the middle of about 200 other user ids. With one duplicate and
   only generated `'N` ids around it (they sort below letters), `fz_tree` happens to keep the first insert even
-  without the lookup-before-insert, so such a fixture cannot tell the lookup is there. The fixture's ability to tell
-  is proven by 6.4, not assumed.
+  without the lookup-before-insert, so such a fixture cannot tell the lookup is there. Whether a given insertion
+  sequence exposes the mutant depends on the tree's rotations, so the fixture is not trusted on its shape: 6.4 runs
+  the no-lookup mutant against it, and the fixture is adjusted (more duplicates, three or more repeats of one id,
+  other key orders) until that mutant fails. The final construction is recorded in the test.
 
 After `fz_count_pages` and `fz_load_outline`, for every node: `node->page` (as a location) and `node->y` equal
 `fz_resolve_link_dest(ctx, doc, node->uri)`, which still runs the root walk. Fixture-proving assertions first, all
@@ -217,7 +229,7 @@ first title of the book, and gives that title an id which a paragraph several pa
 
 ### 6.3 The patch is in the binary
 
-- Link-time: the test references `litepdf_mupdf_patch_notice` through the accessor and checks its text. An unpatched
+- Link-time: the test references `litepdf_mupdf_patch_notice_v1` through the accessor and checks its text. An unpatched
   library fails the test executable's link (and the app's, 5.1). Deterministic.
 - Speed guard (regression, not the stale-lib oracle): 200 vs 800 sections of the probe's density (a title plus 10
   paragraphs of 60 words each, about 1,200 flow nodes per section; sparser sections shrink the unpatched ratio
@@ -235,27 +247,36 @@ Before the CMake block exists on the branch, the unpatched private build (sectio
 
 - the test file with the accessor temporarily stubbed out (a throwaway local edit, never committed): 6.3's speed
   guard must fail (ratio about x21);
-- the test file as written: the link must fail on `litepdf_mupdf_patch_notice`.
+- the test file as written: the link must fail on `litepdf_mupdf_patch_notice_v1`.
 
 After the patch exists, mutants of the patch (throwaway, never committed), each of which the named test must fail:
 
 - no lookup before insert: 6.1's duplicate assertions;
 - a negative first y used directly instead of the fallback: 6.2;
 - the `box->s.layout.y` value dropped (an id'd box with no flow content skipped): 6.1's empty-heading node;
-- the `fz_catch` without `fz_report_error`: 6.5's error-state check.
+- the `fz_catch` without `fz_report_error`: 6.5's error-state check;
+- the catch rethrowing instead of falling back: 6.5's index-allocation range.
 
 All results are recorded in the PR.
 
 ### 6.5 The fallback under allocation failure
 
-A context built with a custom `fz_alloc_context` that counts allocations and can fail the K-th one. A first,
-non-failing run of `fz_count_pages` on a small fixture counts the allocations N of that call. The index build is the
-last thing in the call that allocates, so allocation N belongs to it.
+A context built with a custom `fz_alloc_context` that counts allocation calls and, once armed at K, fails the K-th
+call and every later one until disarmed. Failing only the K-th call is not enough: on a NULL return MuPDF scavenges
+its store and calls the allocator again (`memory.c`, `do_scavenging_malloc`), so a single failure can be absorbed
+without any throw reaching the index's catch.
 
-- K = N (fail the last index allocation): `fz_count_pages` succeeds, every outline node equals the reference of 6.1,
-  and `fz_caught(ctx)` is 0 afterwards (the catch cleared the error).
-- Every other K in 1..N on a fresh document: no crash; when `fz_count_pages` succeeds, the outline equals the
-  reference; when it throws, that is a layout allocation, which throws today too.
+A first, non-failing run of `fz_count_pages` on a small fixture counts the allocation calls N of that call. The index
+build is the last thing in the call that allocates, and it makes two allocations per distinct id it stores (node and
+key copy, `tree.c:36-41`). The fixture's distinct ids D are known from its construction (user ids plus one generated
+`'N` id per heading without an id), so calls N - 2D + 1 .. N are the index's.
+
+- Every K in N - 2D + 1 .. N (any index allocation fails, and so does everything after it): `fz_count_pages`
+  succeeds, every outline node equals the reference of 6.1, and `fz_caught(ctx)` is 0 afterwards (the catch
+  cleared the error). The fallback itself allocates nothing, so it runs under the armed allocator.
+- Every K in 1 .. N - 2D on a fresh document: no crash. Those are layout allocations, and `fz_count_pages` throws,
+  as it does today.
+- Fixture-proving: in the non-failing run, N - 2D is greater than 0 and the count is the same on a second run.
 
 ## 7. Development and measurement
 
@@ -284,8 +305,8 @@ last thing in the call that allocates, so allocation N belongs to it.
   link once. To be said in the PR and to the user before merging.
 - Worktrees on older branches then build against the patched library. Harmless: the outline results are identical.
 - Two build directories sharing one MuPDF tree: the stamp is per build directory, so one directory can link a library
-  built before the patch was applied. The link-time symbol (6.3) turns that into a link error instead of a silent slow
-  build.
+  built before the patch, or before its current version, was applied. The versioned link-time symbol (3.4, 6.3)
+  turns either into a link error instead of a silently stale build.
 - A MuPDF bump: the configure fails until the patch is re-based or dropped (section 4 step 3), or until the copied
   rules are re-checked against a changed `html-outline.c` (the hash check in section 4). The equivalence test (6.1)
   is the guard behind both. Dropping the patch once upstream fixes the update also means removing the symbol's users
