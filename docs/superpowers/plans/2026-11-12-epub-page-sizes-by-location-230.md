@@ -15,7 +15,10 @@
 - Branch `claude/issue-230-epub-sizing-f3694d`, base `main` @ `75ef154`. Find code by name if a line moved.
 - **Build:** Release only, never Debug. `$cmake` / `$ctest` are the BuildTools binaries under `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\`, never the ones on PATH. Build: `& $cmake --build build --target litepdf_unit_tests --config Release`. `third_party\mupdf` is a junction to the main checkout's; remove it with `cmd /c rmdir` before the worktree is cleaned up.
 - **Run tests from PowerShell, from the worktree root** (fixtures resolve from there): `build\tests\Release\litepdf_unit_tests.exe "<tag or exact name>"`. Full suite: `& $ctest --test-dir build -C Release`, **serially, no `-j`**. Read the count with `-N`; never hard-code it.
-- New `TEST_CASE` names are ASCII and start with `ChapterPages: ` (pure unit) or `Document::page_size` (document tests, as the existing ones). A comma in a name must be escaped as `\,` in a filter.
+- New `TEST_CASE` names are ASCII and start with `ChapterPages: ` (pure unit, tags `[core][chapters]`) or `Document` (document tests, as the existing `Document::page_size …` ones, tags `[document][pages]`). Every new case carries its tags in its macro, so the filters below run it; check with `--list-tests "<tags>"`. A comma in a name must be escaped as `\,` in a filter.
+- Test files list every header they use directly (`<set>`, `<vector>`, `<cstdint>`, `<chrono>`, `<filesystem>`, `<functional>`, `<system_error>`, `<new>` …); `Document.hpp` does not bring them. `Document::with_rendered_page` is `[[nodiscard]]`: tests `REQUIRE` its result.
+- **Python:** the generator runs with plain `python` (it has the CI's pinned reportlab 4.4.10 and Pillow 12.2.0 in its user site-packages). Never `python -I`, which hides them.
+- **Pinned timing runs** go through cmd from PowerShell: `cmd /c start "" /b /wait /affinity FFFF <exe> <args>` (P-cores; `start` alone is PowerShell's Start-Process).
 - MuPDF rules: every `fz_catch` calls `fz_report_error` (#146); no C++ object with a destructor, no allocation and no `throw` inside a `fz_try` (#179); a local assigned inside `fz_try` and read after a throw is `fz_var`'d (#178).
 - Mutation steps follow the `mutation-test-hygiene` skill: apply, rebuild, see the named case fail, restore, rebuild, see it pass. `git diff` is clean of the mutation before the commit.
 - Commits: conventional, English, ending with `Co-Authored-By: <the model that wrote the commit> <noreply@anthropic.com>`. `git add` files by name (a junctioned `third_party/mupdf` breaks `git commit -a`). Do not push.
@@ -179,7 +182,7 @@ private:
 
 - [ ] **Step 4: build and run** `build\tests\Release\litepdf_unit_tests.exe "[chapters]"` — both pass.
 
-- [ ] **Step 5: mutation.** Replace `upper_bound` with `lower_bound` (then a page at a chapter start maps to the chapter before). Rebuild, see `ChapterPages: locate matches a walk from the first chapter` fail; restore; rebuild; pass.
+- [ ] **Step 5: mutation.** Make `locate` pick the FIRST chapter sharing the found start instead of the last: after computing `chapter`, add `while (chapter > 0 && starts_[chapter - 1] == starts_[chapter]) --chapter;` (an empty chapter before a non-empty one then claims its pages; no out-of-range read, unlike a `lower_bound` swap, which reads `starts_[-1]` at index 0). Rebuild, see `ChapterPages: locate matches a walk from the first chapter` fail on the `{0, 2, 0, 0, 3, 0}` table; restore; rebuild; pass.
 
 - [ ] **Step 6: commit** `feat(core): ChapterPages maps a flat page to its chapter (#230)`.
 
@@ -187,7 +190,7 @@ private:
 
 **Files:** modify `scripts/generate-strip-fixtures.py`, `tests/unit/test_strip_fixtures.cpp`; create `tests/fixtures/chapter-sizes.epub` (generated).
 
-- [ ] **Step 1:** in the generator, add `SIZES_EPUB_NAME = "chapter-sizes.epub"`, `SIZES_CHAPTERS = 12`, `SIZES_TEXT = ("Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod " "tempor incididunt ut labore et dolore magna aliqua.")` (spec §8.1: NOT the module's longer `LOREM`), chapter files `OEBPS/c%02d.xhtml`, and:
+- [ ] **Step 1:** in the generator, add `SIZES_EPUB_NAME = "chapter-sizes.epub"`, `SIZES_CHAPTERS = 12`, `SIZES_TEXT = ("Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod " "tempor incididunt ut labore et dolore magna aliqua.")` (spec §8.1: NOT the module's longer `LOREM`), chapter files `OEBPS/c%02d.xhtml` for k = 1 ... 12 (1-based: `range(1, SIZES_CHAPTERS + 1)`, as the spec's widths 492 ... 712 assume), and:
 
 ```python
 def sizes_chapter_xhtml(k):
@@ -208,7 +211,7 @@ def sizes_chapter_xhtml(k):
 """ % (k, margin, k, paragraphs)
 ```
 
-and `build_sizes_epub(out_path)` writing `mimetype`, `META-INF/container.xml` (the existing `CONTAINER_XML`), an OPF for 12 items (generalise `content_opf()` to take the chapter count and a name function rather than copying it), and the 12 chapters, through `write_stored_zip`. Add `(SIZES_EPUB_NAME, build_sizes_epub)` to `BUILDERS`. Update the module docstring (the fixture list and "regenerates all four" → five).
+and `build_sizes_epub(out_path)` writing `mimetype`, `META-INF/container.xml` (the existing `CONTAINER_XML`), an OPF for 12 items (generalise `content_opf()` to take the chapter count and a name function rather than copying it), and the 12 chapters, through `write_stored_zip`. Add `(SIZES_EPUB_NAME, build_sizes_epub)` to `BUILDERS`. Update every "four" in the module (the header list, the Usage line "write the four fixtures", "regenerates all four") → five, and add the fixture to the header list.
 
 - [ ] **Step 2:** run `python scripts/generate-strip-fixtures.py`, then `python scripts/generate-strip-fixtures.py --check` → five `[OK]` lines; `git status` shows only the new `.epub` and the script among fixtures (the four existing fixtures byte-identical, so unchanged).
 
@@ -222,7 +225,7 @@ and `build_sizes_epub(out_path)` writing `mimetype`, `META-INF/container.xml` (t
 
 - [ ] **Step 1: tests first.** (a) Add `"tests/fixtures/chapter-sizes.epub"` to the fixture list of `Document::page_size equals the loaded page's bounds on every fixture`. It passes today too (both routes load the same page); it must keep passing, and its mutants (Step 5) prove it can fail. (b) Add `CHECK_THROWS_AS(doc.page_size(doc.page_count()), std::runtime_error)` on `chapter-sizes.epub` as its own case `Document::page_size past the last page of a multi-chapter ePub throws`. (c) New case `Document::with_rendered_page draws each page of a multi-chapter ePub as fz_load_page does` (spec §8.2 "Print path, content"). Give `OwnDocument` a method `bool rendered(int index, std::vector<std::uint8_t>& bgra, int& w, int& h)` that does exactly what `Document::with_rendered_page` does at scale 1, no rotation, on `fz_load_page(index)`: `fz_round_rect(fz_transform_rect(fz_bound_page(...), fz_scale(1,1)))`, `fz_new_pixmap_with_bbox(ctx, fz_device_bgr(ctx), bbox, nullptr, 1)`, `fz_clear_pixmap_with_value(ctx, pix, 0xFF)`, `fz_new_draw_device(ctx, fz_identity, pix)`, `fz_run_page(ctx, page, dev, m, nullptr)`, `fz_close_device`; then copy the samples out AFTER the `fz_try` (read `with_rendered_page`'s body first and mirror its exact calls and order, including how it hands rows to the callback — stride vs width × 4). The case, for every page: call `doc.with_rendered_page(i, 1.0f, 1.0f, false, cb)` where `cb` copies `w`, `h` and the bytes, then `CHECK` width, height and `bytes == own_bytes`. On a mismatch report the page and the first differing offset, not the whole buffer.
 
-- [ ] **Step 2:** in `Document.cpp`: `#include "core/detail/ChapterPages.hpp"`; `Impl` gains `std::optional<detail::ChapterPages> chapters;` with a comment pointing at #230 and at the NULL-write precondition (spec §4.2 last paragraph). Add, in the anonymous namespace after `read_page_count`:
+- [ ] **Step 2:** in `Document.cpp`: `#include "core/detail/ChapterPages.hpp"`; `Impl` gains `std::optional<detail::ChapterPages> chapters;` with a comment pointing at #230 that says both rules of spec §4.2's last two paragraphs: the table only ever holds locations of this `fz_document` (else `fz_load_chapter_page` writes through NULL), and a future re-layout or CSS change must reset both `page_count` and `chapters` and read them again. Add, in the anonymous namespace after `read_page_count`:
 
 ```cpp
 // #230: the chapter table of a multi-chapter document, read right after its
@@ -274,19 +277,27 @@ bool chapter_location(const std::optional<detail::ChapterPages>& table, std::siz
 }
 ```
 
-Before each `fz_try`: `int chapter = 0, page_in_chapter = 0; const bool by_location = chapter_location(impl_->chapters, index, chapter, page_in_chapter);`. Inside, the `fz_load_page` call becomes:
+Before each `fz_try`: `int chapter = 0, page_in_chapter = 0;` and `const bool by_location = chapter_location(impl_->chapters, <index>, chapter, page_in_chapter);`. Inside, the `fz_load_page` call becomes, in `page_size` (which uses `impl_->ctx`/`impl_->doc` and the parameter `index`):
+
+```cpp
+page = by_location
+    ? fz_load_chapter_page(impl_->ctx, impl_->doc, chapter, page_in_chapter)
+    : fz_load_page(impl_->ctx, impl_->doc, static_cast<int>(index));
+```
+
+and in `with_rendered_page` (locals `ctx`/`doc`, parameter `page_idx`):
 
 ```cpp
 page = by_location
     ? fz_load_chapter_page(ctx, doc, chapter, page_in_chapter)
-    : fz_load_page(ctx, doc, static_cast<int>(index));
+    : fz_load_page(ctx, doc, static_cast<int>(page_idx));
 ```
 
 Extend the comments above both calls: why (the #230 walk) and that the fallback keeps today's errors. `with_rendered_page` already holds `doc_mutex` before the lookup.
 
 - [ ] **Step 4:** build, run `"[document][pages]"` → all pass.
 
-- [ ] **Step 5: mutations** (each: apply, rebuild, the named case fails, restore). In `chapter_location`, (i) `chapter = std::min(loc->chapter + 1, <last chapter>)` and (ii) `chapter = 0`: `Document::page_size equals the loaded page's bounds on every fixture` and `Document::with_rendered_page draws each page …` both fail. (iii) In `with_rendered_page` only, `page_in_chapter + 1` when the page is not the chapter's last (the size stays right): the render case fails on its bytes while the page_size case passes.
+- [ ] **Step 5: mutations** (each: apply, rebuild, the named case fails, restore). In `chapter_location`, (i) `chapter = std::min(loc->chapter + 1, <last chapter>)` and (ii) `chapter = 0`: `Document::page_size equals the loaded page's bounds on every fixture` and `Document::with_rendered_page draws each page …` both fail. (iii) In `with_rendered_page` only, `page_in_chapter + 1` (MuPDF does not range-check the page number: past a chapter's last page it draws a blank page of the right size): the render case fails on its bytes while the page_size case passes.
 
 - [ ] **Step 6: commit** `fix(core): load a multi-chapter page by its chapter location (#230)`.
 
@@ -294,17 +305,17 @@ Extend the comments above both calls: why (the #230 walk) and that the fallback 
 
 **Files:** modify `tests/unit/test_document_page_size.cpp`.
 
-- [ ] **Step 1:** add a helper that writes a 1,500-chapter ePub to a fresh directory under `%TEMP%` with MuPDF's zip writer (`fz_new_zip_writer`, `fz_write_zip_entry` — it always stores, `compress` is ignored —, `fz_close_zip_writer`, `fz_drop_zip_writer`; buffers from `fz_new_buffer_from_copied_data`), following #178/#179 (all strings built before each `fz_try`; one `fz_try` per entry is fine). Entries: `mimetype`, `META-INF/container.xml`, `OEBPS/content.opf` (1,500 items + itemrefs), and chapter k = the spec §8.1 template without the `<style>`, with one `<p>S</p>` (one page each). The directory is removed at the end of the case (RAII guard outside any `fz_try`). Measure the flat route on this exact shape once (mutation in Step 3) before trusting the 250 ms bound; if the flat route is under 750 ms on this machine, raise the chapter count, not the bound.
+- [ ] **Step 1:** add a helper that writes a 1,500-chapter ePub to a fresh directory under `%TEMP%` with MuPDF's zip writer (`fz_new_zip_writer`, `fz_write_zip_entry` — it always stores, `compress` is ignored —, `fz_close_zip_writer`, `fz_drop_zip_writer`; buffers from `fz_new_buffer_from_copied_data`), following #178/#179 (all strings built before each `fz_try`; one `fz_try` per entry is fine). Entries: `mimetype`, `META-INF/container.xml`, `OEBPS/content.opf` (1,500 items + itemrefs), and chapter k = the spec §8.1 template without the `<style>`, with one `<p>S</p>` (one page each). The directory is removed at the end of the case by an RAII guard declared BEFORE the `Document` and `OwnDocument` (so it is destroyed after both have closed the file: MuPDF opens it without FILE_SHARE_DELETE) whose destructor calls the `std::error_code` overload of `std::filesystem::remove_all` (a throwing destructor would terminate); precedent `RemoveOnExit` in `tests/unit/test_document_page_count.cpp`. Measure the flat route on this exact shape once (mutation in Step 3) before trusting the 250 ms bound; if the flat route is under 750 ms on this machine, raise the chapter count, not the bound.
 
-- [ ] **Step 2:** the case `Document on a 1500-chapter ePub: sizing and printing every page cost what loading by chapter costs` (spec §8.2 "Speed"): open the book with `Document` and with `OwnDocument`; check `page_count() == 1500` on both. Reference timings in `OwnDocument`, each best of 3, walking `fz_count_chapters` / `fz_count_chapter_pages` / `fz_load_chapter_page` in chapter order: (a) bounds of every page; (b) a pixmap of every page at `fz_scale(0.05f, 0.05f)` (`fz_new_pixmap_from_page`, BGR, alpha 1). Then, best of 3 each: (A) `doc.page_size(i)` for every page; (B) `doc.with_rendered_page(i, 0.05f, 0.05f, false, noop)` for every page. `INFO` all four readings; `CHECK(A < 4 * a + 25)` and `CHECK(B < 4 * b + 25)` (ms). Use `std::chrono::steady_clock`. Time only the loops, never the open.
+- [ ] **Step 2:** the case `Document on a 1500-chapter ePub: sizing and printing every page cost what loading by chapter costs` (spec §8.2 "Speed"): open the book with `Document` and with `OwnDocument`; check `page_count() == 1500` on both. Reference timings in `OwnDocument`, each best of 3, walking `fz_count_chapters` / `fz_count_chapter_pages` / `fz_load_chapter_page` in chapter order: (a) bounds of every page; (b) a pixmap of every page at `fz_scale(0.05f, 0.05f)` (`fz_new_pixmap_from_page`, BGR, alpha 1). Then, best of 3 each: (A) `doc.page_size(i)` for every page; (B) `doc.with_rendered_page(i, 0.05f, 0.05f, false, noop)` for every page, its results ANDed into a `bool` that is `REQUIRE`d after the timed span. `INFO` all four readings; `CHECK(A < 4 * a + 25)` and `CHECK(B < 4 * b + 25)` (ms). Use `std::chrono::steady_clock`. Time only the loops, never the open.
 
-- [ ] **Step 3: mutations.** (i) `page_size` forced to the flat route: the sizing check fails (expected ~1,000 ms against a bound of ~50 ms), the print check passes. (ii) `with_rendered_page` forced to the flat route: the print check fails (expected ~1,000 ms against ~250-350 ms), the sizing check passes. Restore; rebuild; pass. Record all readings for the PR body. If (ii) does not fail by at least 2× on this machine, raise the chapter count (the flat cost grows with its cube, the reference linearly), not the factor.
+- [ ] **Step 3: mutations.** (i) `page_size` forced to the flat route: the sizing check fails (expected ~1,000 ms against a bound of ~50 ms), the print check passes. (ii) `with_rendered_page` forced to the flat route: the print check fails (expected ~1,000 ms against ~250-350 ms), the sizing check passes. Restore; rebuild; pass. Record all readings for the PR body. If (ii) does not fail by at least 2× on this machine, raise the chapter count (the flat cost grows with its cube, the reference with its square: spec §2), not the factor, and change the `page_count()` check and the case name with it.
 
 - [ ] **Step 4: commit** `test(core): a 1500-chapter ePub is sized and printed at chapter-load cost (#230)`.
 
 ## Task 5: measurements, spec record, CHANGELOG
 
-- [ ] **Step 1:** Release build of the branch; copy its `litepdf-cli.exe` aside. Baseline: the copy of main's (75ef154) `litepdf-cli.exe` made before Task 1. Books from the session's `make-epub.py` (seed 169; 200/400/800/1,500 chapters; the 1,500-section single chapter control) plus `tests/fixtures/strip-chapters.epub`. For each, interleaving before/after, pinned (`start "" /b /wait /affinity FFFF`), file read once first: `--bench-page-sizes --iterations 3`, three runs each, report the median of the three medians. `--benchmark --iterations 3` `open_ms` at 1,500 chapters before/after.
+- [ ] **Step 1:** Release build of the branch; copy its `litepdf-cli.exe` aside. Baseline: main's (75ef154) `litepdf-cli.exe`, copied before Task 1 to `C:\Users\User\AppData\Local\Temp\claude\67c68501fcd677a8\a935507d-36e8-473b-a245-4fbc9509bb2e\scratchpad\before\litepdf-cli.exe` (if it is gone: build main in a separate worktree with the same junction and copy its `build\Release\litepdf-cli.exe`). Books from `C:\Users\User\AppData\Local\Temp\claude\67c68501fcd677a8\a935507d-36e8-473b-a245-4fbc9509bb2e\scratchpad\make-epub.py` (seed 169; `python make-epub.py <out> <N> 10` for N = 200/400/800/1,500, plus `--one-chapter` for the 1,500-section control; already built in `C:\Users\User\AppData\Local\Temp\claude\67c68501fcd677a8\a935507d-36e8-473b-a245-4fbc9509bb2e\scratchpad\books\` as n200/n400/n800/n1500/one1500.epub) plus `tests/fixtures/strip-chapters.epub`. For each, interleaving before/after, pinned (`cmd /c start "" /b /wait /affinity FFFF ...`), file read once first: `--bench-page-sizes --iterations 3`, three runs each, report the median of the three medians. `--benchmark --iterations 3` `open_ms` at 1,500 chapters before/after.
 - [ ] **Step 2:** fill spec §5 with the table; add the 1,500-chapter before/after line to the continuous-scroll spec §4.4's EPUB notes. Commit `docs(spec): #230 readings`.
 - [ ] **Step 3:** CHANGELOG `[Unreleased]` → `### Fixed` line (spec §9), with the measured numbers. Commit `docs(changelog): #230`.
 - [ ] **Step 4:** full ctest serially from PowerShell; record the count.
