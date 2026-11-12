@@ -220,8 +220,14 @@ or padding (`html-layout.c:3055`); a later sibling's top margin collapses with t
 the same way (`:3086-3090`). The parent's padding plays no part. So the test's user CSS gives the heading itself a top
 padding and a negative top margin. A selector such as `section>title` would hit every title, so the test's book has
 exactly one `subtitle`, the first child of the first section, and the CSS is `subtitle{padding-top:1px;
-margin-top:-200px}`. That subtitle carries an id which a paragraph at least 4 pages later repeats. Everything after
-the subtitle moves up by the same 200 pt, so that paragraph stays at y > 0.
+margin-top:-200px}`. That subtitle carries an id which a paragraph in the next section, several pages later,
+repeats. Everything after the subtitle moves up by the same 200 pt, so that paragraph stays at y > 0.
+
+Two facts found while writing the test (Task 2) shape it. The subtitle is empty: a heading with text resolves to its
+first line, and MuPDF places a line that would start above the page at the page's top, so only a heading without
+text keeps its box's negative y. And the repeat is in the next section, not the same one: `find_box_target` returns
+an own-id match, negative or not, for the whole sibling list it is in, and only a parent skips a negative result
+and goes on (a same-section repeat resolves to "none").
 
 - Precondition, asserted from the public API: `fz_resolve_link_dest` for that id lands on the later paragraph's page
   (the root walk skipped the negative first match). If the CSS does not reach y < 0, the id resolves to page 0 and
