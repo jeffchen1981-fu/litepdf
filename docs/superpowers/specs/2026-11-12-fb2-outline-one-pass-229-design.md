@@ -1,0 +1,233 @@
+# One-pass outline resolve, carried as a local MuPDF patch (#229 PR 1) — design
+
+Status: design agreed in chat 2026-11-12 after two independent reviews of the scope and of this design; the user
+asked for this written spec before any code.
+Issue: #229 (body + 3 comments hold the measurements). Base: main at 80d4f4a.
+Scope decided with the user: this PR is the MuPDF patch only. PR 2 = one render worker for FB2. A lazy
+`SearchSession` is decided after this PR is measured (only for documents that need no password, since #130 records
+"opened in the ctor, not lazily"). Sharing one laid-out document across contexts goes to a new issue. A "still
+loading" indicator is declined: after this fix the 1,500-section first page is estimated at about 1.7 s.
+
+## 1. Problem
+
+A large FB2 opens slowly, and the cost grows with the square of the number of section titles. MuPDF 1.27.2 lays an
+HTML-engine document out in `htdoc_layout` (`third_party/mupdf/source/html/html-doc.c`):
+
+```c
+static void
+htdoc_layout(fz_context *ctx, fz_document *doc_, float w, float h, float em)
+{
+	html_document *doc = (html_document*)doc_;
+
+	fz_layout_html(ctx, doc->html, w, h, em);
+
+	htdoc_update_outline(ctx, doc_, doc->outline);
+}
+```
+
+`htdoc_update_outline` calls `htdoc_resolve_link` once per outline node, and each call runs `fz_find_html_target`
+(`source/html/html-outline.c`), which walks the box tree from the root, every flow node included, until it meets the
+id. An FB2 has one outline node per section title, so N titles cost O(N^2) flow visits.
+
+Measured in #229 (probe timing each phase, 1,500 sections, 6.5 MB): parse 241 ms, `fz_layout_html` 263 ms, the
+outline update 7,240 ms. The update is 78-95 % of `fz_count_pages` at every size. Every copy of the document pays it
+on its first layout: `Document` at open, each render worker before the first page, `SearchSession` at the first
+search. GUI first page: 16.5 s with 1 worker, 22.7 s with 2.
+
+There is no API to skip it: the update runs inside the document's own layout callback, and `fz_load_outline` forces a
+layout first. MuPDF master (2026-11-12) still does one root walk per node. So the fix is a patch to MuPDF, carried
+until upstream fixes it.
+
+## 2. Goal and non-goals
+
+Goal: `fz_count_pages` on a laid-out FB2 costs about the layout alone, so its time grows with the book, not with the
+square of its titles. Every outline node gets exactly the page and y it gets today.
+
+Non-goals:
+
+- Any litepdf-side change to how many copies of a document exist (PR 2, the new issue).
+- `htdoc_resolve_link` itself, used when a link is followed (`resolve_link_dest`). It stays a root walk: one walk per
+  click is fine, and it is the reference the tests compare against.
+- EPUB: its outline comes from the NCX or nav file and is resolved only when followed (#229 comment 1). HTML, XHTML
+  and MOBI take the same `htdoc` path but are disabled in litepdf's build (`FZ_ENABLE_HTML 0`, `FZ_ENABLE_MOBI 0`).
+
+## 3. The patch (`source/html/html-doc.c` only)
+
+### 3.1 Index
+
+`htdoc_update_outline` builds an index, then resolves each node from it. The index is an `fz_tree` (string keys, no
+length limit; `fz_hash_table` has a 48-byte key limit, which would leave long ids on the slow path):
+
+- Built only when the outline is non-empty.
+- One pre-order walk of `html->tree.root`, in exactly the order of `find_box_target`:
+  1. the box's own id, if any. Value: the address of `find_first_content(box)->y` when that returns a flow, else the
+     address of `box->s.layout.y`;
+  2. if the box is `BOX_FLOW`: each flow of `box->u.flow.head` in order. Key `flow->box->id` when non-NULL, value
+     `&flow->y`;
+  3. otherwise: recurse into `box->down`;
+  4. then `box->next`.
+- `find_first_content` is `static` in `html-outline.c`, so the patch has its own copy.
+- Before each insert, `fz_tree_lookup` the key and skip it if present. `fz_tree_insert` sends an equal key to the
+  right, so without the lookup a later duplicate could be the one found. The index therefore holds the first match in
+  walk order, the one the root walk would reach first.
+- The value is a `float *` into the laid-out tree, never NULL, so `fz_tree_lookup`'s NULL means "absent" without
+  ambiguity (a stored y of exactly 0.0f is still present). No allocation per entry beyond the tree node; the tree is
+  dropped with `fz_drop_tree(ctx, tree, NULL)`. The pointers are only read inside this call, while the layout that
+  wrote them is current.
+
+### 3.2 Resolving each node
+
+For each outline node (recursion into `node->down` unchanged):
+
+- Parse `node->uri` as `htdoc_resolve_link` does: `strchr(uri, '#')`; no `#`, or nothing after it, gives
+  `fz_make_link_dest_none()`.
+- Look the id up.
+  - Absent: `fz_make_link_dest_none()` (the root walk returns -1 for an absent id, which gives the same).
+  - Present, `*value >= 0`: `int page = y / page_h;` then `fz_make_link_dest_xyz(0, page, 0, y - page * page_h, 0)`,
+    the same arithmetic as `htdoc_resolve_link`.
+  - Present, `*value < 0`: call `htdoc_resolve_link(ctx, doc, node->uri)`.
+
+Why the fallback is needed and sufficient. `find_box_target` returns the first match it reaches; a parent passes a
+child's result up only when it is `>= 0`, and `find_flow_target` returns the first matching flow of a list even when
+negative. So when the first match in walk order has y >= 0, the root walk returns exactly it, at any depth. When it is
+negative, the root walk may go on to a later match. The fallback is the original code, so the result is identical in
+that case too, at the original cost, which is fine for a case that needs a negative layout position.
+
+Generated ids (`'1`, `'2`, ... from `add_html_outline`) can coincide with a user id; both sides take the first in walk
+order, so this does not change the result.
+
+### 3.3 Failure
+
+The index build runs in `fz_try`, with the tree pointer declared `fz_var`. On any throw (allocation), the tree built
+so far is dropped and every node is resolved with `htdoc_resolve_link`, the code as it is today. Today the outline
+update cannot fail; it must not start failing the page count, and through it the open.
+
+### 3.4 Marker and notice
+
+- The patched file carries a marker comment `LITEPDF_PATCH_HTDOC_OUTLINE_V1`. Any change to the patch bumps the
+  number, so the configure step (section 4) re-applies it.
+- The patch defines one external symbol:
+  `const char litepdf_mupdf_patch_notice[] = "Modified by litepdf on 2026-11-12: one-pass outline resolve (#229)";`
+  It serves two purposes: the AGPL-3.0 section 5(a) notice that MuPDF was modified and when, and a link-time proof
+  that the patched `html-doc.c` is in the linked library (section 5.1).
+- The patch file starts with a header saying what it changes, why, the date, and that it is to be dropped once
+  upstream fixes the outline update.
+
+## 4. Applying it (`cmake/ImportMuPDF.cmake`)
+
+- The patch lives at `third_party/mupdf-patches/0001-htdoc-one-pass-outline.patch`, LF (`.gitattributes`
+  `* text=auto eol=lf`), generated with `git diff -- source/html/html-doc.c` from the MuPDF root so paths are
+  `a/source/html/html-doc.c`.
+- New block after the `config.h` prune block, same shape:
+  1. Read `source/html/html-doc.c`. If it contains the current marker, do nothing.
+  2. Else `git -C <mupdf root> checkout -- source/html/html-doc.c`. Non-zero rc: FATAL_ERROR, saying the file is not
+     the current patch level and could not be restored, which also happens in a tree with no `.git`.
+  3. `git -C <mupdf root> apply --whitespace=nowarn <patch>`. Non-zero rc: FATAL_ERROR, saying MuPDF's `html-doc.c`
+     no longer matches the patch (most likely a MuPDF bump) and the patch must be re-based or dropped.
+  4. Re-read the file; FATAL_ERROR if the marker is still absent (do not trust the exit code alone).
+  5. Delete the `mupdf_ext` build stamp, as the prune block does, so MSBuild rebuilds.
+- Line endings: the working file is CRLF under `core.autocrlf=true`; `git apply` converts the preimage, and an LF
+  patch applied with `--check` to the shared checkout's CRLF file returns 0 (git 2.53). The CI runner's behaviour is
+  proven by the PR's first CI run, not before.
+- Release: `git-archive-all` packs working-tree files, so the source tarball carries the patched `html-doc.c` with
+  its marker, and the tarball build-back (no `.git`) skips the block. The tarball is then the source that was built.
+- Rejected: a CMake `string(REPLACE)` that injects multi-line C (fragile against CRLF and upstream edits); a vcxproj
+  edit compiling a replacement `html-doc.c` (heavier, and diverges from upstream's file list).
+
+## 5. litepdf changes
+
+### 5.1 Notice in the app and the licence text
+
+- A small core accessor, `litepdf::core::mupdf_patch_notice()` (new `src/core/MuPdfPatchNotice.{hpp,cpp}`), returns
+  `litepdf_mupdf_patch_notice` (declared `extern "C"`). The About box adds its text on the line after
+  `Engine: MuPDF 1.27.2` (`src/ui/MainWindow.cpp`), through `ascii_to_wide`. Because the app references the symbol, a
+  `libmupdf.lib` built without the patch fails the app's link, not only the tests'.
+- `installer/make-license-rtf.py`: the MuPDF line notes the modification, in the file's own language (zh-TW), with
+  the date and the patch folder.
+- `CHANGELOG.md` `[Unreleased]` `### Fixed`: one entry for the faster FB2 open, saying MuPDF is now carried with one
+  local change.
+
+### 5.2 Nothing else
+
+No change to `Document`, `DocumentView`, `RenderEngine` or `SearchSession`.
+
+## 6. Tests
+
+New `tests/unit/test_mupdf_outline_patch.cpp`, raw MuPDF API on its own `fz_context`, FB2 generated in memory and
+opened with `fz_open_document_with_stream(ctx, "application/x-fictionbook", stream)`. ASCII test names prefixed
+`MuPDF outline patch:`.
+
+### 6.1 Equivalence
+
+One generated FB2 covering: nested `section`s with `title`s and `subtitle`s (both are headings for FB2); a `<p id>`
+that is not a heading; a `<title id>` whose id equals an earlier `<p id>` (duplicate, first match is the paragraph);
+an id longer than 48 characters on a title; titles without ids (generated `'N` ids); an empty section at the top
+(`box->s.layout.y` path, y can be 0).
+
+After `fz_count_pages` and `fz_load_outline`, for every node: `node->page` (as a location) and `node->y` equal
+`fz_resolve_link_dest(ctx, doc, node->uri)`, which still runs the root walk. Fixture-proving assertions first: the
+node count, at least one node with page > 0, and that the duplicate-id title resolves to the paragraph's position
+(not its own).
+
+### 6.2 Negative y (the fallback)
+
+MuPDF collapses a first child's top margin into its parent with `fz_max` unless the child has a top border or padding
+(`html-layout.c:3053-3060`), so a plain negative `margin-top` may never produce y < 0. The test sets user CSS that
+avoids the collapse (a parent with top padding or border, and a child with a large negative `margin-top`) and gives
+the negatively placed title an id that a later paragraph repeats.
+
+- Precondition, asserted: `fz_resolve_link_dest` for that id gives a different position than the first element's
+  (the root walk skipped the negative first match and returned the later paragraph). If no CSS reaches y < 0, the
+  test fails here, not silently.
+- Then the equivalence check of 6.1 on this document. A wrong implementation that returns the negative first y fails
+  it.
+- The exact CSS is found while writing the test and recorded in it.
+
+### 6.3 The patch is in the binary
+
+- Link-time: the test references `litepdf_mupdf_patch_notice` through the accessor and checks its text. An unpatched
+  library fails the test executable's link (and the app's, 5.1). Deterministic.
+- Speed guard (regression, not the stale-lib oracle): 200 vs 800 sections, `fz_count_pages` on a fresh document each
+  time (open excluded), thread pinned to one core with `SetThreadAffinityMask` for the measurement, cost read with
+  `QueryThreadCycleTime`, minimum of 3 per size. Ratio 800/200 must be < 12. From the probe's table, layout plus
+  outline update goes 35 + 83 = 118 ms -> 142 + 2,356 = 2,498 ms over the same step (about x21) unpatched; patched it
+  is the layout alone, about x4. Cycles on one pinned core remove the P-core / E-core split
+  (`reference_litepdf_bench_machine_noise`).
+- Runtime: about 1-2 s patched.
+
+### 6.4 Proving the tests can fail
+
+Before the CMake block exists on the branch, the unpatched private build (section 7) runs:
+
+- the test file with the accessor temporarily stubbed out (a throwaway local edit, never committed): 6.3's speed
+  guard must fail (ratio about x21);
+- the test file as written: the link must fail on `litepdf_mupdf_patch_notice`.
+
+Both results are recorded in the PR.
+
+## 7. Development and measurement
+
+- The shared checkout `C:\Users\User\projects\litepdf\third_party\mupdf` is not modified before merge. This worktree's
+  `third_party/mupdf` is a `git worktree` of the shared submodule repo, detached at 73d3100, plus a copy of the
+  shared `thirdparty/` made with `robocopy /E /XF .git`: the nested submodules' `.git` files hold relative gitdir
+  paths that would point nowhere from the new location and break git there. Copy, not junctions, so removing the
+  worktree later cannot delete through a junction. `git worktree add` writes only metadata under the shared
+  `.git/modules/third_party/mupdf/worktrees/`; it is removed with the worktree.
+- Order: configure and build this tree at 80d4f4a (unpatched; the configure rewrites the vcxproj and config.h in the
+  private tree only), measure "before", run 6.4, then add the CMake block and the patch, rebuild, measure "after".
+  The full MuPDF build runs in the background.
+- Measurements, before and after on the same base and machine, interleaved, pinned to the P-cores, best of 3:
+  `litepdf-cli <book> --benchmark` at 200 / 800 / 1,500 sections (`make-fb2.py`, seed 169, 10 paragraphs per
+  section), and the GUI first page (`--log-timings` T0 -> T4) at 800 and 1,500 sections.
+
+## 8. Risks
+
+- After merge, the first configure on main in a worktree whose `third_party/mupdf` is a junction patches the shared
+  checkout and rebuilds the shared `libmupdf.lib` in place. Another session linking it at that moment may fail its
+  link once. To be said in the PR and to the user before merging.
+- Worktrees on older branches then build against the patched library. Harmless: the outline results are identical.
+- Two build directories sharing one MuPDF tree: the stamp is per build directory, so one directory can link a library
+  built before the patch was applied. The link-time symbol (6.3) turns that into a link error instead of a silent slow
+  build.
+- A MuPDF bump: the configure fails until the patch is re-based or dropped (section 4 step 3). Dropping it once
+  upstream fixes the update also means removing the symbol's users (5.1, 6.3).
