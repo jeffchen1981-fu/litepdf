@@ -10,9 +10,13 @@
 
 #include <mupdf/fitz.h>
 
+#include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <windows.h>
 
@@ -63,6 +67,56 @@ struct OwnDocument {
         fz_catch(ctx) { fz_report_error(ctx); ok = false; }
         return ok;
     }
+
+    // #230: what Document::with_rendered_page hands its callback for
+    // fz_load_page(index) at scale 1, no rotation: the same MuPDF calls in the
+    // same order, then the same over-white compositing. False when any step
+    // throws.
+    bool rendered(int index, std::vector<std::uint8_t>& bgra, int& w, int& h) {
+        fz_page* page = nullptr;
+        fz_pixmap* pix = nullptr;
+        fz_device* dev = nullptr;
+        bool ok = true;
+        fz_var(page);
+        fz_var(pix);
+        fz_var(dev);
+        fz_try(ctx) {
+            page = fz_load_page(ctx, doc, index);
+            const fz_matrix m = fz_scale(1.0f, 1.0f);
+            const fz_irect bbox = fz_round_rect(fz_transform_rect(fz_bound_page(ctx, page), m));
+            pix = fz_new_pixmap_with_bbox(ctx, fz_device_bgr(ctx), bbox, nullptr, 1);
+            fz_clear_pixmap_with_value(ctx, pix, 0xFF);
+            dev = fz_new_draw_device(ctx, fz_identity, pix);
+            fz_run_page(ctx, page, dev, m, nullptr);
+            fz_close_device(ctx, dev);
+        }
+        fz_always(ctx) {
+            if (dev) fz_drop_device(ctx, dev);
+            if (page) fz_drop_page(ctx, page);
+        }
+        fz_catch(ctx) { fz_report_error(ctx); ok = false; }
+        if (!ok) {
+            if (pix) fz_drop_pixmap(ctx, pix);
+            return false;
+        }
+        w = fz_pixmap_width(ctx, pix);
+        h = fz_pixmap_height(ctx, pix);
+        const std::uint8_t* samples = fz_pixmap_samples(ctx, pix);
+        const std::size_t n = static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4;
+        bgra.assign(samples, samples + n);
+        fz_drop_pixmap(ctx, pix);
+        for (std::size_t i = 0; i < n; i += 4) {
+            std::uint8_t* p = bgra.data() + i;
+            const int a = p[3];
+            if (a == 255) continue;
+            const int inv = 255 - a;
+            p[0] = static_cast<std::uint8_t>(std::min(255, p[0] + inv));
+            p[1] = static_cast<std::uint8_t>(std::min(255, p[1] + inv));
+            p[2] = static_cast<std::uint8_t>(std::min(255, p[2] + inv));
+            p[3] = 255;
+        }
+        return true;
+    }
 };
 
 ULONGLONG read_operations() {
@@ -99,6 +153,8 @@ TEST_CASE("Document::page_size equals the loaded page's bounds on every fixture"
         "tests/fixtures/selection.pdf",  "tests/fixtures/simple.pdf",
         "tests/fixtures/spread-unequal.pdf", "tests/fixtures/type3.pdf",
         "tests/fixtures/sample.epub",    "tests/fixtures/sample.cbz",
+        // #230: 12 chapters of 12 page widths, loaded by chapter location.
+        "tests/fixtures/chapter-sizes.epub",
     };
     for (const char* path : fixtures) {
         INFO(path);
@@ -141,4 +197,47 @@ TEST_CASE("Document::page_size reads nothing from the file", "[document][pages]"
     CHECK(read_operations() == before);
     CHECK(size.width_pt == 595.0f);
     CHECK(size.height_pt == 842.0f);
+}
+
+TEST_CASE("Document::page_size past the last page of a multi-chapter ePub throws",
+          "[document][pages]") {
+    // #230: an index the chapter table does not hold falls back to
+    // fz_load_page, which refuses it as before.
+    Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/chapter-sizes.epub").has_value());
+    CHECK_THROWS_AS(doc.page_size(doc.page_count()), std::runtime_error);
+}
+
+TEST_CASE("Document::with_rendered_page draws each page of a multi-chapter ePub as fz_load_page does",
+          "[document][pages]") {
+    // #230: printing loads a page by its chapter location. The bytes, not
+    // only the size: a page from the right chapter but the wrong page within
+    // it has the right size and different text.
+    const char* const path = "tests/fixtures/chapter-sizes.epub";
+    Document doc;
+    REQUIRE_FALSE(doc.open(path).has_value());
+    OwnDocument own(path);
+    const int n = own.page_count();
+    REQUIRE(n == static_cast<int>(doc.page_count()));
+    for (int i = 0; i < n; ++i) {
+        INFO("page " << i);
+        std::vector<std::uint8_t> want;
+        int want_w = 0, want_h = 0;
+        REQUIRE(own.rendered(i, want, want_w, want_h));
+
+        std::vector<std::uint8_t> got;
+        int got_w = -1, got_h = -1;
+        REQUIRE(doc.with_rendered_page(
+            static_cast<std::size_t>(i), 1.0f, 1.0f, false,
+            [&](int w, int h, const std::uint8_t* bgra) {
+                got_w = w;
+                got_h = h;
+                got.assign(bgra, bgra + static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4);
+            }));
+        REQUIRE(got_w == want_w);
+        REQUIRE(got_h == want_h);
+        const auto diff = std::mismatch(got.begin(), got.end(), want.begin());
+        INFO("first differing byte " << (diff.first - got.begin()) << " of " << got.size());
+        CHECK(diff.first == got.end());
+    }
 }

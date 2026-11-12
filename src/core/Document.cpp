@@ -3,6 +3,7 @@
 #include "core/MuPDFRoot.hpp"
 #include "core/EscrowContext.hpp"
 #include "core/detail/CbzPageSizer.hpp"
+#include "core/detail/ChapterPages.hpp"
 #include "core/detail/PageHitsAccess.hpp"
 #include "core/detail/TextPageAccess.hpp"
 #include "core/SearchQuery.hpp"
@@ -18,10 +19,13 @@
 #include <cstdio>
 #include <fstream>
 #include <mutex>
+#include <new>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 // SecureZeroMemory is a volatile-write loop the optimizer cannot elide,
 // unlike std::memset which can be DCE'd when the buffer's lifetime ends
@@ -49,6 +53,18 @@ struct Document::Impl {
     // fails -- and page_count() runs inside window procedures (#119). Nothing
     // in LitePDF re-lays-out a document after it opens.
     std::size_t page_count = 0;
+
+    // #230: where each flat page lies in a multi-chapter document (an ePub's
+    // spine items), read right after page_count from the same document, so
+    // pages load with fz_load_chapter_page instead of fz_load_page, which
+    // walks the chapters from the first (O(c^2) per page in chapter c for an
+    // ePub). Empty for a single chapter. Two rules hold it valid: it only
+    // ever holds locations of this fz_document (fz_load_chapter_page writes
+    // through NULL for a chapter past the last), so it is assigned at every
+    // successful open and reset on close; and, like page_count, it assumes
+    // nothing re-lays-out the document: a future fz_layout_document or CSS
+    // change must reset both and read them again.
+    std::optional<detail::ChapterPages> chapters;
 
     // #176: a CBZ page's size from its image header. `cbz_path` is the
     // absolute UTF-8 path of an open .cbz (absolute, so a later change of the
@@ -235,6 +251,59 @@ bool read_page_count(fz_context* ctx, fz_document* doc, std::size_t& out) {
     return true;
 }
 
+// #230: the chapter table of a multi-chapter document, read right after its
+// page count from the same fz_document. The counts come from the per-chapter
+// cache the page count has just filled, so this costs only MuPDF's spine walks
+// (about 2 ms at 1,500 chapters). Nothing for a single chapter (fz_load_page
+// finds every page on its first try), when MuPDF throws, or when the counts do
+// not add up to the page count; pages then load by flat number, as before.
+std::optional<detail::ChapterPages> read_chapter_pages(fz_context* ctx, fz_document* doc,
+                                                       std::size_t page_count) {
+    int nc = 0;
+    fz_try(ctx) { nc = fz_count_chapters(ctx, doc); }
+    fz_catch(ctx) {
+        fz_report_error(ctx);   // also marks it handled (#146)
+        return std::nullopt;    // nc is never read after a throw (#178)
+    }
+    if (nc <= 1) return std::nullopt;
+
+    // Allocated here, between the two fz_try blocks: no allocation and no
+    // object with a destructor inside one (#179).
+    std::vector<int> counts;
+    try {
+        counts.assign(static_cast<std::size_t>(nc), 0);
+    } catch (const std::bad_alloc&) {
+        return std::nullopt;
+    }
+    int* const out = counts.data();
+    fz_try(ctx) {
+        for (int c = 0; c < nc; ++c) out[c] = fz_count_chapter_pages(ctx, doc, c);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);   // also marks it handled (#146)
+        return std::nullopt;
+    }
+    try {
+        return detail::ChapterPages::from_counts(counts, page_count);
+    } catch (const std::bad_alloc&) {
+        return std::nullopt;
+    }
+}
+
+// #230: where fz_load_page would find flat page `index`, from the chapter
+// table, as plain ints filled before a fz_try (no object with a destructor
+// crosses into it). False when there is no table or the index is past it;
+// the caller then loads by flat number, as before, with the same errors.
+bool chapter_location(const std::optional<detail::ChapterPages>& table, std::size_t index,
+                      int& chapter, int& page) noexcept {
+    if (!table) return false;
+    const auto loc = table->locate(index);
+    if (!loc) return false;
+    chapter = loc->chapter;
+    page = loc->page;
+    return true;
+}
+
 } // namespace
 
 std::optional<Document::OpenError> Document::open(const std::filesystem::path& path) {
@@ -243,6 +312,7 @@ std::optional<Document::OpenError> Document::open(const std::filesystem::path& p
     if (!looks_like_supported_document(path)) return OpenError::UnsupportedFormat;
 
     impl_->reset_cbz();
+    impl_->chapters.reset();
 
     // UTF-8 conversion — fz_open_document takes UTF-8 char*. On Windows,
     // path.string() returns ACP (CP950/936/etc); path.u8string() returns
@@ -299,6 +369,7 @@ std::optional<Document::OpenError> Document::open(const std::filesystem::path& p
         close();
         return OpenError::Corrupted;
     }
+    impl_->chapters = read_chapter_pages(impl_->ctx, impl_->doc, impl_->page_count);
     return std::nullopt;
 }
 
@@ -310,6 +381,7 @@ bool Document::is_open() const noexcept {
 
 void Document::close() noexcept {
     impl_->reset_cbz();
+    impl_->chapters.reset();
     if (impl_->doc) {
         fz_drop_document(impl_->ctx, impl_->doc);
         impl_->doc = nullptr;
@@ -348,11 +420,18 @@ bool Document::with_rendered_page(
     bool         ok   = false;
 
     fz_device* dev = nullptr;
+    // #230: a multi-chapter page by its chapter location. Printing calls this
+    // once per page, and fz_load_page would walk the chapters from the first
+    // for each one.
+    int chapter = 0, page_in_chapter = 0;
+    const bool by_location = chapter_location(impl_->chapters, page_idx, chapter, page_in_chapter);
     fz_var(page);
     fz_var(pix);
     fz_var(dev);
     fz_try(ctx) {
-        page = fz_load_page(ctx, doc, static_cast<int>(page_idx));
+        page = by_location
+            ? fz_load_chapter_page(ctx, doc, chapter, page_in_chapter)
+            : fz_load_page(ctx, doc, static_cast<int>(page_idx));
         if (page) {
             fz_matrix m = fz_scale(scale_x_px_per_pt, scale_y_px_per_pt);
             if (rotate_90) m = fz_pre_rotate(m, 90.0f);
@@ -458,6 +537,10 @@ bool Document::authenticate(std::string_view password) {
         // as a wrong password and burn the user's retries. Callers check
         // is_open() (DocumentView refuses a closed document).
         if (read_page_count(impl_->ctx, impl_->doc, impl_->page_count)) {
+            // Only ePub has chapters in MuPDF 1.27.2 and an ePub never asks
+            // for a password, so this builds no table today; it keeps the
+            // table and the page count from one read if that changes.
+            impl_->chapters = read_chapter_pages(impl_->ctx, impl_->doc, impl_->page_count);
             impl_->authenticated = true;
         } else {
             close();
@@ -495,6 +578,10 @@ PageSize Document::page_size(std::size_t index) const {
         }
     }
 
+    // #230: where a multi-chapter page lies, computed before the fz_try.
+    int chapter = 0, page_in_chapter = 0;
+    const bool by_location = chapter_location(impl_->chapters, index, chapter, page_in_chapter);
+
     fz_page* page = nullptr;
     fz_rect bounds = {};
     fz_var(page);
@@ -504,7 +591,12 @@ PageSize Document::page_size(std::size_t index) const {
         // for a loaded PDF page (pdf_bound_page, pdf-page.c). fz_load_page
         // would also load every annotation and scan the resources for
         // transparency, one file read per object not yet loaded, and this
-        // runs on the UI thread (#165). Other formats load the page.
+        // runs on the UI thread (#165). Other formats load the page: a
+        // multi-chapter one (ePub) by its chapter location, because
+        // fz_load_page finds the chapter by walking the chapters from the
+        // first, and an ePub's chapter page count walks its spine from the
+        // head, so sizing every page cost O(N^3) for N chapters (#230). Any
+        // other index loads by flat number, with fz_load_page's errors.
         pdf_document* pdf = pdf_specifics(impl_->ctx, impl_->doc);
         if (pdf) {
             pdf_obj* obj = pdf_lookup_page_obj(impl_->ctx, pdf, static_cast<int>(index));
@@ -513,7 +605,9 @@ PageSize Document::page_size(std::size_t index) const {
             pdf_page_obj_transform(impl_->ctx, obj, &box, &ctm);
             bounds = fz_transform_rect(box, ctm);
         } else {
-            page = fz_load_page(impl_->ctx, impl_->doc, static_cast<int>(index));
+            page = by_location
+                ? fz_load_chapter_page(impl_->ctx, impl_->doc, chapter, page_in_chapter)
+                : fz_load_page(impl_->ctx, impl_->doc, static_cast<int>(index));
             bounds = fz_bound_page(impl_->ctx, page);
         }
     }
