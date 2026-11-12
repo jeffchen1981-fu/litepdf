@@ -125,6 +125,24 @@ struct PdfCanvasTestAccess {
         return s && v && s->kind == PageStateKind::Ready &&
                !is_stale(*s, v->render_scale(), v->invert_colors());
     }
+    // (#53) The rect a strip page is drawn into, in the view frame (spec R3).
+    static Placement strip_drawn_rect(const PdfCanvas& c, int page) {
+        return c.strip_drawn_rect(page);
+    }
+    // Where a press at client pixel (x, y) falls on strip page `page`, mapped
+    // through that page's drawn rect.
+    static litepdf::core::SelPoint strip_page_point_at(PdfCanvas& c, int page, int x, int y) {
+        return c.page_point_at(x, y, c.strip_drawn_rect(page));
+    }
+    // The live selection's two raw points. REQUIREs a live selection.
+    static litepdf::core::SelPoint live_anchor(const PdfCanvas& c) {
+        REQUIRE(c.impl_->live_selection.has_value());
+        return c.impl_->live_selection->anchor;
+    }
+    static litepdf::core::SelPoint live_extent(const PdfCanvas& c) {
+        REQUIRE(c.impl_->live_selection.has_value());
+        return c.impl_->live_selection->extent;
+    }
 
     // The tallest bitmap this canvas's target takes. A GPU's limit is 16384; the
     // software target of a runner with no GPU takes 512 times that.

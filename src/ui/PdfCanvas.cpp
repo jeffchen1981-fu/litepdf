@@ -936,8 +936,10 @@ void PdfCanvas::on_left_button_down(bool is_double_click_message, int x_px, int 
         // ready, else a synchronous build (text_for's contract).
         litepdf::core::Document::TextPage text = impl_->view->text_for(*page);
         if (!text.valid()) return;
-        begin_selection(*page, strip_page_placement(impl_->strip_view.page_rect(*page)),
-                        mode, x_px, y_px, std::move(text));
+        // (#53, spec 3.5) Mapped through the page's drawn rect, the one
+        // strip_paint turns the page onto; page_at above still decides the page
+        // from the layout rect.
+        begin_selection(*page, strip_drawn_rect(*page), mode, x_px, y_px, std::move(text));
         return;
     }
     // Refuse spread mode HERE, not only in paint: current_bitmap holds the LEFT
@@ -1011,7 +1013,8 @@ void PdfCanvas::on_mouse_move(int x_px, int y_px) {
         // page is now, and canvas_dip_to_page_point clamps it to that page
         // whatever page is under the pointer.
         if (!strip_active()) return;
-        pl = strip_page_placement(impl_->strip_view.page_rect(impl_->live_selection->page));
+        // (#53) Through that page's drawn rect, as the press was.
+        pl = strip_drawn_rect(impl_->live_selection->page);
     } else if (!own_bitmap() || !single_page_placement(pl)) {
         return;
     }

@@ -466,3 +466,146 @@ TEST_CASE("PdfCanvas rotation: rotation belongs to the view", "[canvas][rotation
     pl = Access::placement(rig.canvas());
     CHECK(is_dark(pixel_at(rig.canvas(), turned(pl, 1, kSquareCentre, kSquareCentre))));
 }
+// --- Task 6: the strip draws turned (spec 3.4, 3.5, 5.4) ---
+
+namespace {
+
+// kMarker's page 0 in the strip at custom zoom 1.0, landed.
+void land_marker_strip(Rig& rig) {
+    rig.view().set_zoom_pct(1.0f);
+    rig.enter_strip();
+    rig.land_strip(0);
+}
+
+// One hit on page 0, over kMarker's square ([36, 108] pt on both axes).
+PdfCanvas::HitsFn square_hit_source() {
+    return [](std::size_t page) {
+        std::vector<SearchSession::Hit> hits;
+        if (page == 0) {
+            SearchSession::Hit h{};
+            h.page = 0;
+            h.geom.ul_x = h.geom.ll_x = 36.0f;
+            h.geom.ur_x = h.geom.lr_x = 108.0f;
+            h.geom.ul_y = h.geom.ur_y = 36.0f;
+            h.geom.ll_y = h.geom.lr_y = 108.0f;
+            hits.push_back(h);
+        }
+        return hits;
+    };
+}
+
+// A strip page's layout rect, as the Placement the drawn rect is compared with.
+void check_is_layout_rect(const litepdf::ui::Placement& d, const litepdf::ui::StripPageRect& r) {
+    CHECK(d.x == static_cast<float>(r.x));
+    CHECK(d.y == static_cast<float>(r.y));
+    CHECK(d.w == static_cast<float>(r.w));
+    CHECK(d.h == static_cast<float>(r.h));
+}
+
+}  // namespace
+
+TEST_CASE("PdfCanvas rotation: a fresh strip page is drawn and pressed at its natural size",
+          "[canvas][rotation]") {
+    Rig rig(kWidth, kHeight, Layout::Single, kMarker);
+    land_marker_strip(rig);
+
+    // The bitmap's natural extent, not the layout's 595.276 x 841.89.
+    auto d = Access::strip_drawn_rect(rig.canvas(), 0);
+    CHECK(d.w == 596.0f);
+    CHECK(d.h == 842.0f);
+
+    // 270 degrees: the width's slack is now on the vertical axis, which the
+    // turn flips.
+    rig.rotate(false);
+    rig.land_strip(0);
+    d = Access::strip_drawn_rect(rig.canvas(), 0);
+    CHECK(d.w == 842.0f);
+    CHECK(d.h == 596.0f);
+
+    const auto r = Access::strip_page_rect(rig.canvas(), 0);
+    CHECK(d.x == static_cast<float>(r.x));
+    CHECK(d.y == static_cast<float>(r.y));
+    // At 270 the local x is the distance up from the drawn rect's bottom: a
+    // transform from the layout rect would be 0.72 DIP off.
+    const int x = static_cast<int>(r.x) + 200;
+    const int y = static_cast<int>(r.y + 596.0) - 100;
+    const auto pt = Access::strip_page_point_at(rig.canvas(), 0, x, y);
+    CHECK(pt.x == Approx(r.y + 596.0 - y).margin(0.05));
+
+    // The square's turned centre: bottom-left.
+    const Px centre{static_cast<int>(r.x + 72.0), static_cast<int>(r.y + 596.0 - 72.0)};
+    CHECK(is_dark(pixel_at(rig.canvas(), centre)));
+
+    // The hit over the square is drawn under the page's turn: its 0.40-alpha
+    // yellow over the black ink.
+    rig.canvas().set_hits_source(square_hit_source());
+    CHECK_FALSE(is_dark(pixel_at(rig.canvas(), centre)));
+    rig.canvas().set_hits_source(nullptr);
+}
+
+TEST_CASE("PdfCanvas rotation: a real press and drag in the turned strip map through the drawn rect",
+          "[canvas][rotation]") {
+    Rig rig(kWidth, kHeight, Layout::Single, kMarker);
+    land_marker_strip(rig);
+    rig.rotate(false);
+    rig.land_strip(0);
+
+    const auto r = Access::strip_page_rect(rig.canvas(), 0);
+    const int x0 = static_cast<int>(r.x) + 200;
+    const int y0 = static_cast<int>(r.y + 596.0) - 100;
+    Access::left_down(rig.canvas(), x0, y0);
+    CHECK(Access::live_anchor(rig.canvas()).x == Approx(r.y + 596.0 - y0).margin(0.05));
+
+    Access::mouse_move(rig.canvas(), x0 + 30, y0 - 150);
+    CHECK(Access::live_extent(rig.canvas()).x ==
+          Approx(r.y + 596.0 - (y0 - 150)).margin(0.05));
+    Access::left_up(rig.canvas(), x0 + 30, y0 - 150);
+}
+
+TEST_CASE("PdfCanvas rotation: a stale strip page is pressed through its layout rect",
+          "[canvas][rotation]") {
+    Rig rig(kWidth, kHeight, Layout::Single, kMarker);
+    land_marker_strip(rig);
+    rig.view().set_zoom_pct(2.0f);
+    rig.strip_kick(KickReason::Zoom);   // not landed: the zoom-1.0 bitmap stays
+    rig.rotate(true);                   // not landed either
+    REQUIRE_FALSE(Access::strip_slot_fresh(rig.canvas(), 0));
+
+    const auto r = Access::strip_page_rect(rig.canvas(), 0);
+    // The layout at 2.0, turned: the natural rect would be 842 x 596.
+    REQUIRE(r.w == Approx(1683.8).margin(0.1));
+    REQUIRE(r.h == Approx(1190.6).margin(0.1));
+    check_is_layout_rect(Access::strip_drawn_rect(rig.canvas(), 0), r);
+
+    // Quarter 1's inverse at the layout's zoom.
+    const int vx = static_cast<int>(r.x) + 300;
+    const int vy = static_cast<int>(r.y) + 200;
+    const auto pt = Access::strip_page_point_at(rig.canvas(), 0, vx, vy);
+    CHECK(pt.x == Approx((vy - r.y) / 2.0).margin(0.01));
+    CHECK(pt.y == Approx((r.x + r.w - vx) / 2.0).margin(0.01));
+}
+
+TEST_CASE("PdfCanvas rotation: a failed strip page keeps its placeholder in the turned rect",
+          "[canvas][rotation]") {
+    // Custom zoom: at a fit mode the turn refits, the render scale changes, and
+    // every Failed slot is reset, so no border would be drawn.
+    Rig rig(kWidth, kHeight, Layout::Single, kDamaged);
+    rig.view().set_zoom_pct(1.0f);
+    rig.enter_strip();
+    rig.canvas().strip_navigate(2);
+    rig.land_strip_failed(2);
+
+    rig.rotate(true);
+    REQUIRE(Access::strip_slot_kind(rig.canvas(), 2) == PageStateKind::Failed);
+
+    // Page 2 is damaged; its stand-in is page 0's size, turned.
+    const auto r = Access::strip_page_rect(rig.canvas(), 2);
+    check_is_layout_rect(Access::strip_drawn_rect(rig.canvas(), 2), r);
+    CHECK(r.w == Approx(rig.view().document().page_size(0).height_pt));
+
+    // The border's left column, mid-height: neither the page nor the chrome.
+    const std::uint32_t px = Access::painted_pixel(
+        rig.canvas(), static_cast<int>(r.x), static_cast<int>(r.y + r.h * 0.5));
+    CHECK(px != kWhite);
+    CHECK(px != kChrome);
+}

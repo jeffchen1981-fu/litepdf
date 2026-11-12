@@ -645,6 +645,14 @@ private:
     // WM_PAINT in the strip (spec 4.2, 5.1).
     void strip_paint();
 
+    // (#53, spec 3.4 R3) The rect strip page `page` is drawn into, in the view
+    // frame: a fresh Ready bitmap's natural extent (view_px, unresampled) at the
+    // layout rect's top-left; otherwise -- a stale bitmap stretched, Pending over
+    // a bitmap, no bitmap, Failed -- the layout rect itself. strip_paint and both
+    // strip press sites ask this, so the drawn page, its overlays and a press
+    // cannot disagree. Which page a press lands on stays StripViewport::page_at.
+    Placement strip_drawn_rect(int page) const;
+
     // WM_USER_STRIP_DONE (spec 5.3).
     void strip_on_done(WPARAM w, LPARAM l);
 
