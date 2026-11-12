@@ -108,6 +108,13 @@ struct DocumentView::Impl {
     std::vector<PageSize>  strip_sizes;
     bool                   strip_sized   = false;
     bool                   continuous    = false;  // #55, spec §4.3
+    // (#53) Both size caches above stay unrotated; only the public readers turn
+    // them. `turned_sizes` is strip_sizes with width and height swapped, built
+    // lazily by page_sizes() while the axes are swapped. rotate_* clears
+    // `turned_valid` and builds nothing.
+    Rotation               rotation;
+    std::vector<PageSize>  turned_sizes;
+    bool                   turned_valid  = false;
 
     // `page`'s size, or nothing when it has none to use: out of range, not
     // usable, or Document::page_size threw, which it does on a page it cannot
@@ -320,26 +327,58 @@ bool DocumentView::continuous() const noexcept {
 }
 
 const std::vector<PageSize>& DocumentView::page_sizes() {
-    if (impl_->strip_sized) return impl_->strip_sizes;
-    // Every page is about to be sized: a CBZ reads its pages' headers ahead
-    // at once instead of one page at a time (#176).
-    (void)impl_->doc.read_ahead_page_sizes();
-    const std::size_t n = impl_->doc.page_count();
-    auto& cache = impl_->page_sizes;
-    if (cache.size() < n) cache.resize(n);
-    // Reads through the #49 size cache and fills it with every size that
-    // reads; a page that throws is left unknown there, and fill_page_sizes
-    // gives it its stand-in in strip_sizes only.
-    impl_->strip_sizes = detail::fill_page_sizes(n, [&](std::size_t i) {
-        if (!cache[i]) cache[i] = impl_->doc.page_size(i);
-        return *cache[i];
-    });
-    impl_->strip_sized = true;
-    return impl_->strip_sizes;
+    if (!impl_->strip_sized) {
+        // Every page is about to be sized: a CBZ reads its pages' headers ahead
+        // at once instead of one page at a time (#176).
+        (void)impl_->doc.read_ahead_page_sizes();
+        const std::size_t n = impl_->doc.page_count();
+        auto& cache = impl_->page_sizes;
+        if (cache.size() < n) cache.resize(n);
+        // Reads through the #49 size cache and fills it with every size that
+        // reads; a page that throws is left unknown there, and fill_page_sizes
+        // gives it its stand-in in strip_sizes only.
+        impl_->strip_sizes = detail::fill_page_sizes(n, [&](std::size_t i) {
+            if (!cache[i]) cache[i] = impl_->doc.page_size(i);
+            return *cache[i];
+        });
+        impl_->strip_sized = true;
+    }
+    // (#53) The unrotated list itself while the axes are not swapped; else the
+    // swapped copy, rebuilt here on the first call after a turn, never in
+    // rotate_*.
+    if (!impl_->rotation.swaps_axes()) return impl_->strip_sizes;
+    if (!impl_->turned_valid) {
+        auto& turned = impl_->turned_sizes;
+        turned.clear();
+        turned.reserve(impl_->strip_sizes.size());
+        for (const PageSize& s : impl_->strip_sizes) {
+            const ViewSize v = view_size(s.width_pt, s.height_pt, impl_->rotation);
+            turned.push_back(PageSize{v.w, v.h});
+        }
+        impl_->turned_valid = true;
+    }
+    return impl_->turned_sizes;
 }
 
+Rotation DocumentView::rotation() const noexcept { return impl_->rotation; }
+
+void DocumentView::rotate_cw() noexcept {
+    impl_->rotation     = impl_->rotation.cw();
+    impl_->turned_valid = false;
+}
+
+void DocumentView::rotate_ccw() noexcept {
+    impl_->rotation     = impl_->rotation.ccw();
+    impl_->turned_valid = false;
+}
+
+bool DocumentView::strip_sized() const noexcept { return impl_->strip_sized; }
+
 std::optional<PageSize> DocumentView::known_page_size(int page) noexcept {
-    return impl_->known_size(page);
+    const auto size = impl_->known_size(page);
+    if (!size) return std::nullopt;
+    const ViewSize v = view_size(size->width_pt, size->height_pt, impl_->rotation);
+    return PageSize{v.w, v.h};
 }
 
 DocumentView::ZoomMode DocumentView::zoom_mode() const noexcept {
@@ -379,9 +418,12 @@ void DocumentView::set_viewport(float viewport_w_px, float viewport_h_px,
                                  : impl_->known_size(0).value_or(detail::kFallbackPageSize);
     const PageSize two = pair.value_or(one);
 
+    // (#53) The fit is of the turned pages: the view frame's extents.
+    const ViewSize v1 = view_size(one.width_pt, one.height_pt, impl_->rotation);
+    const ViewSize v2 = view_size(two.width_pt, two.height_pt, impl_->rotation);
     impl_->pct = fit_percentage(viewport_w_px, viewport_h_px, dpi,
-                                std::max(one.width_pt, two.width_pt),
-                                std::max(one.height_pt, two.height_pt),
+                                std::max(v1.w, v2.w),
+                                std::max(v1.h, v2.h),
                                 impl_->zm == ZoomMode::FitPage);
 }
 

@@ -47,6 +47,7 @@
 #include "core/RenderEngine.hpp"
 #include "core/TextSelection.hpp"
 #include "core/detail/PrefetchPlan.hpp"  // TravelDirection (standard library only)
+#include "core/detail/ViewRotation.hpp"  // Rotation (#53)
 
 // Forward decls — keep this header MuPDF-free. Callers that need to
 // fz_drop_pixmap the ref delivered to a RenderCb will include
@@ -115,15 +116,31 @@ public:
     // (spec §4.4). A page whose size cannot be read takes page 0's size, and
     // page 0 unreadable gives US Letter (612 x 792 pt); a size failure never
     // throws. Those stand-ins are this list's own: the prefetch plan's size
-    // cache (#49) still sees such a page as unknown. UI thread only.
+    // cache (#49) still sees such a page as unknown. The sizing is still once;
+    // the reported frame follows rotation() (#53 spec §3.3): width and height
+    // swap at a quarter or three-quarter turn, stand-ins included. The
+    // returned list stays valid until the next rotate_*() or page_sizes()
+    // call. UI thread only.
     const std::vector<PageSize>& page_sizes();
 
     // (#194) One page's size, or nothing when it has none to use: out of range,
     // not usable, or unreadable. Sizes only that page, through the cache the fit
     // already reads, so a spread's pair is sized by the time it renders. Never
     // throws, so the paint path can ask. A failure is not cached: a later call
-    // tries again. Unlike page_sizes() there is no stand-in. UI thread only.
+    // tries again. Unlike page_sizes() there is no stand-in. The size is in
+    // the view frame: it follows rotation() as page_sizes() does. UI thread only.
     std::optional<PageSize> known_page_size(int page) noexcept;
+
+    // (#53) The view rotation, clockwise in quarter turns. Per tab; default
+    // {0}. A turn only records the new value: it cancels no render and touches
+    // no size cache. The turned page_sizes() list is rebuilt lazily by the
+    // next page_sizes() call. UI thread only.
+    [[nodiscard]] Rotation rotation() const noexcept;
+    void rotate_cw() noexcept;
+    void rotate_ccw() noexcept;
+
+    // Test seam: the full sizing pass of page_sizes() has run.
+    [[nodiscard]] bool strip_sized() const noexcept;
 
     ZoomMode zoom_mode() const noexcept;
 

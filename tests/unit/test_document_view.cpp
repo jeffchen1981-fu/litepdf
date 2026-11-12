@@ -829,3 +829,139 @@ TEST_CASE("DocumentView background trim keeps the shown pages at the current sca
         REQUIRE(view->l1_holds(1));
     }
 }
+
+// ---- #53 view rotation ------------------------------------------------------
+// The size caches stay unrotated; the readers report the view frame.
+
+TEST_CASE("DocumentView rotation: known_page_size swaps at 90 and 270, not 180",
+          "[core][view][rotation]") {
+    InlineDispatcher disp;
+    DocumentView view(open_simple(), disp);
+    const auto real = view.document().page_size(0);
+    // Cross-check against the fixture's literal size.
+    REQUIRE(real.width_pt == Catch::Approx(595.22f));
+    REQUIRE(real.height_pt == Catch::Approx(842.0f));
+
+    const auto check_frame = [&](bool want_swapped) {
+        const auto s = view.known_page_size(0);
+        REQUIRE(s.has_value());
+        if (want_swapped) {
+            CHECK(s->width_pt == real.height_pt);
+            CHECK(s->height_pt == real.width_pt);
+        } else {
+            CHECK(s->width_pt == real.width_pt);
+            CHECK(s->height_pt == real.height_pt);
+        }
+    };
+
+    check_frame(false);
+    view.rotate_cw();
+    REQUIRE(view.rotation().quarters == 1);
+    check_frame(true);
+    view.rotate_cw();
+    check_frame(false);
+    view.rotate_cw();
+    check_frame(true);
+    view.rotate_cw();
+    REQUIRE(view.rotation() == litepdf::core::Rotation{0});
+    check_frame(false);
+
+    view.rotate_ccw();
+    REQUIRE(view.rotation().quarters == 3);
+    check_frame(true);
+}
+
+TEST_CASE("DocumentView rotation: fit width refits from the turned size",
+          "[core][view][rotation]") {
+    InlineDispatcher disp;
+    DocumentView view(open_simple(), disp);
+    const auto real = view.document().page_size(0);
+
+    view.set_viewport(1000.0f, 800.0f, 96.0f);
+    REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::FitWidth);
+    CHECK(view.zoom_pct() == Catch::Approx(1000.0f / real.width_pt));
+    CHECK(view.zoom_pct() == Catch::Approx(1000.0f / 595.22f));
+
+    SECTION("fit width follows the turned width") {
+        view.rotate_cw();
+        view.set_viewport(1000.0f, 800.0f, 96.0f);
+        CHECK(view.zoom_pct() == Catch::Approx(1000.0f / real.height_pt));
+        CHECK(view.zoom_pct() == Catch::Approx(1000.0f / 842.0f));
+    }
+
+    SECTION("custom zoom is unchanged by the turn and the set_viewport") {
+        view.set_zoom_pct(1.5f);
+        view.rotate_cw();
+        CHECK(view.zoom_pct() == 1.5f);
+        view.set_viewport(1000.0f, 800.0f, 96.0f);
+        CHECK(view.zoom_pct() == 1.5f);
+    }
+}
+
+TEST_CASE("DocumentView rotation: a resize after the turn fits the turned page",
+          "[core][view][rotation]") {
+    InlineDispatcher disp;
+    DocumentView view(open_simple(), disp);
+    const auto real = view.document().page_size(0);
+
+    view.rotate_cw();
+    view.set_viewport(1000.0f, 800.0f, 96.0f);
+    view.set_viewport(1200.0f, 800.0f, 96.0f);
+    CHECK(view.zoom_pct() == Catch::Approx(1200.0f / real.height_pt));
+    CHECK(view.zoom_pct() == Catch::Approx(1200.0f / 842.0f));
+}
+
+// R1 guard: a turn only records the rotation. At a custom zoom the render
+// scale does not change, so the repeat request is a cache hit and starts no
+// render. A turn that dropped or cancelled the cache would start one.
+TEST_CASE("DocumentView rotation: a turn at custom zoom starts no render",
+          "[core][view][rotation]") {
+    using namespace std::chrono;
+    InlineDispatcher disp;
+    Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/selection.pdf").has_value());
+    REQUIRE(doc.page_count() == 8);
+    DocumentView view(std::move(doc), disp);   // default capacities
+    view.set_viewport(800.0f, 600.0f, 96.0f);
+    view.set_zoom_pct(1.0f);
+    REQUIRE(view.zoom_mode() == DocumentView::ZoomMode::Custom);
+
+    // Settled: nothing queued and no render started for 300 ms.
+    const auto wait_settled = [&] {
+        const auto deadline = steady_clock::now() + seconds(10);
+        auto quiet_since    = steady_clock::now();
+        auto started        = view.renders_started();
+        while (steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(milliseconds(10));
+            const auto now_started = view.renders_started();
+            if (view.queued_render_count() != 0 || now_started != started) {
+                started     = now_started;
+                quiet_since = steady_clock::now();
+            } else if (steady_clock::now() - quiet_since >= milliseconds(300)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const auto request_and_wait = [&] {
+        auto done = std::make_shared<std::promise<void>>();
+        auto fut  = done->get_future();
+        (void)view.set_current_page(1);
+        view.request_render_with_prefetch(1,
+            [done](fz_pixmap* p, fz_context* ctx) {
+                if (p) fz_drop_pixmap(ctx, p);
+                done->set_value();
+            }, {});
+        REQUIRE(fut.wait_for(seconds(10)) == std::future_status::ready);
+    };
+
+    request_and_wait();
+    REQUIRE(wait_settled());
+    const std::size_t baseline = view.renders_started();
+    REQUIRE(baseline > 0);
+
+    view.rotate_cw();
+    request_and_wait();
+    REQUIRE(wait_settled());
+    CHECK(view.renders_started() == baseline);
+}
