@@ -333,6 +333,16 @@ public:
     // goes on to submit.
     void set_pending_anchor(PageAnchor anchor);
 
+    // (#53) Turn the active view a quarter turn, clockwise when `cw`, and land
+    // the turned page (spec 3.5): any live gesture ends without committing; in a
+    // paged layout the pan returns to the page's top-left and a Top anchor is
+    // installed for the next batch; in the strip the layout is dropped, so the
+    // Rotate kick builds it again from the turned sizes. The caller (MainWindow's
+    // command handler) follows with kick_render(..., KickReason::Rotate), in
+    // that order: a kick before this call would lay out the old sizes. No-op
+    // without a view.
+    void rotate(bool cw);
+
     // Scroll / page-change such that `h`'s quad is visible with a 24 DIP
     // margin. If already visible, no scroll — only the invalidate. If
     // target page differs from current, page is switched via

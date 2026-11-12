@@ -58,6 +58,12 @@ TEST_CASE("EffectiveLayout: kick reasons map to the spec table",
     CHECK(matches({KickReason::Spread,    true,  true,  false, true,  false, true}));
 }
 
+TEST_CASE("EffectiveLayout: a rotation refits, refreshes the readout and relays out",
+          "[effective_layout][rotation]") {
+    //                    reason                refit  readout restore relayout restyle resched
+    CHECK(matches({KickReason::Rotate,    true,  true,  false, true,  false, true}));
+}
+
 TEST_CASE("EffectiveLayout: a same-index tab switch only reschedules",
           "[effective_layout]") {
     CHECK(tab_switch_reason(2, 2) == KickReason::Navigate);

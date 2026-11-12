@@ -72,6 +72,53 @@ struct PdfCanvasTestAccess {
     // What a wheel flip leaves behind, for a batch the test submitted itself.
     static void mark_wheel_flip(PdfCanvas& c) { c.impl_->wheel_flip_seq = c.impl_->next_seq; }
 
+    // (#53) The pending-anchor slot: its kind (None when empty; an applied anchor
+    // keeps its kind until the next stamp()) and its applied mark.
+    static PageAnchor::Kind anchor_kind(const PdfCanvas& c) { return c.impl_->anchor.kind(); }
+    static bool anchor_applied(const PdfCanvas& c) { return c.impl_->anchor.applied(); }
+    static bool held_place(const PdfCanvas& c) { return c.impl_->held_place.has_value(); }
+    static bool gesture_live(const PdfCanvas& c) {
+        return c.impl_->gesture.gesture() != Gesture::None;
+    }
+
+    // A plain left press at client pixel (x, y). Without the capture,
+    // cancel_stale_gesture ends the drag on the first move, so a press that began
+    // a gesture must have taken it.
+    static void left_down(PdfCanvas& c, int x, int y) {
+        c.on_left_button_down(false, x, y);
+        if (gesture_live(c)) REQUIRE(GetCapture() == c.hwnd());
+    }
+    static void mouse_move(PdfCanvas& c, int x, int y) { c.on_mouse_move(x, y); }
+    static void left_up(PdfCanvas& c, int x, int y) { c.on_left_button_up(x, y); }
+
+    // The painted extent and its origin, in canvas DIPs. REQUIREs there is one.
+    static PdfCanvas::ContentBox content_extent(const PdfCanvas& c) {
+        PdfCanvas::ContentBox box{};
+        REQUIRE(c.content_extent(box));
+        return box;
+    }
+
+    // The continuous strip's layout, scroll and page rectangles.
+    static const StripLayout& strip_layout(const PdfCanvas& c) {
+        return c.impl_->strip_view.layout();
+    }
+    static double strip_scroll_y(const PdfCanvas& c) { return c.impl_->strip_view.scroll_y(); }
+    static StripPageRect strip_page_rect(const PdfCanvas& c, int page) {
+        return c.impl_->strip_view.page_rect(page);
+    }
+    // A strip page's render state: None when the page has no slot.
+    static PageStateKind strip_slot_kind(const PdfCanvas& c, int page) {
+        const PageSlot* s = c.impl_->strip_set.state.slot(page);
+        return s ? s->kind : PageStateKind::None;
+    }
+    // Ready at the view's current render scale and polarity.
+    static bool strip_slot_fresh(const PdfCanvas& c, int page) {
+        const PageSlot* s = c.impl_->strip_set.state.slot(page);
+        const litepdf::core::DocumentView* v = c.impl_->view;
+        return s && v && s->kind == PageStateKind::Ready &&
+               !is_stale(*s, v->render_scale(), v->invert_colors());
+    }
+
     // The tallest bitmap this canvas's target takes. A GPU's limit is 16384; the
     // software target of a runner with no GPU takes 512 times that.
     static int max_bitmap_px(PdfCanvas& c) {
@@ -115,9 +162,12 @@ using litepdf::core::Document;
 using litepdf::core::DocumentView;
 using litepdf::core::SearchSession;
 using litepdf::ui::CarriedPosition;
+using litepdf::ui::KickReason;
 using litepdf::ui::LayoutKind;
 using litepdf::ui::PageAnchor;
+using litepdf::ui::PageStateKind;
 using litepdf::ui::PdfCanvas;
+using litepdf::ui::StripKickActions;
 using litepdf::ui::WM_USER_RENDER_DONE;
 using litepdf::ui::WM_USER_RENDER_DONE_RIGHT;
 using litepdf::ui::WM_USER_STRIP_DONE;
@@ -130,6 +180,18 @@ inline constexpr int kHeight = 850;
 inline constexpr const char* kPairs   = "tests/fixtures/spread-pairs.pdf";
 inline constexpr const char* kDamaged = "tests/fixtures/damaged-pages.pdf";
 inline constexpr const char* kLarge   = "tests/fixtures/large.pdf";
+// Pages of unequal widths, unlike kPairs, whose pages are all 420 pt wide.
+inline constexpr const char* kUnequal = "tests/fixtures/spread-unequal.pdf";
+
+// (#53) scripts/generate-rotation-fixture.py: four A4 portrait pages. Page 0 has
+// a black square at page space [36, 108] x [36, 108] and the line "Rotation
+// marker text" (Helvetica 12, baseline 60 pt from the top, from x = 150); page 2
+// the single word "ZENITH" near the top-right corner; pages 1 and 3 are blank.
+inline constexpr const char* kMarker = "tests/fixtures/rotation-marker.pdf";
+inline constexpr int kMarkWordPage = 2;
+// The centre x of ZENITH's hit quad, in points, measured to 0.1 pt. The smoke
+// direction row in scripts/smoke-test.ps1 must carry the same value.
+inline constexpr float kMarkWordCentreXPt = 491.7f;
 
 inline Document open_fixture(const char* path) {
     Document doc;
@@ -240,6 +302,44 @@ public:
     void land_left_completion() { land_completion(WM_USER_RENDER_DONE); }
     void land_right_completion() { land_completion(WM_USER_RENDER_DONE_RIGHT); }
 
+    // (#53) MainWindow's two-page and continuous toggles into the strip, then the
+    // kick that follows them.
+    void enter_strip() {
+        view_.set_dual_page(false);
+        view_.set_continuous(true);
+        canvas_->switch_layout(LayoutKind::Strip, true);
+        strip_kick(KickReason::Layout);
+    }
+
+    // MainWindow::kick_render's strip branch.
+    void strip_kick(KickReason r) {
+        const StripKickActions a = strip_kick_actions(r);
+        if (a.refit) canvas_->apply_viewport();
+        canvas_->strip_kick(a, nullptr);
+    }
+
+    // Hand the canvas strip completions until `page`'s slot is Ready at the
+    // view's render scale and polarity.
+    void land_strip(int page) {
+        land_strip_until([this, page] { return Access::strip_slot_fresh(*canvas_, page); });
+    }
+    // The same, until `page`'s slot is Failed.
+    void land_strip_failed(int page) {
+        land_strip_until([this, page] {
+            return Access::strip_slot_kind(*canvas_, page) == PageStateKind::Failed;
+        });
+    }
+
+    // MainWindow's rotate command: the canvas turns, then the kick, by layout.
+    void rotate(bool cw) {
+        canvas_->rotate(cw);
+        if (canvas_->layout() == LayoutKind::Strip) {
+            strip_kick(KickReason::Rotate);
+        } else {
+            kick(view_.current_page());
+        }
+    }
+
     float pan_x() { return canvas_->pan().x; }
     float pan_y() { return canvas_->pan().y; }
 
@@ -259,6 +359,21 @@ private:
             REQUIRE(std::chrono::steady_clock::now() < deadline);
             MSG m;
             if (PeekMessageW(&m, canvas_->hwnd(), msg, msg, PM_REMOVE)) {
+                DispatchMessageW(&m);
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+    }
+
+    template <class Done>
+    void land_strip_until(Done done) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        while (!done()) {
+            REQUIRE(std::chrono::steady_clock::now() < deadline);
+            MSG m;
+            if (PeekMessageW(&m, canvas_->hwnd(), WM_USER_STRIP_DONE, WM_USER_STRIP_DONE,
+                             PM_REMOVE)) {
                 DispatchMessageW(&m);
             } else {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -358,5 +473,19 @@ inline PdfCanvas::HitsFn hits_on_every_page() {
 
 inline constexpr std::uint32_t kWhite  = 0x00FFFFFFu;
 inline constexpr std::uint32_t kChrome = 0x00F0F0F0u;
+inline constexpr std::uint32_t kBlack  = 0x00000000u;
+
+// A painted pixel is dark when every channel is below 0x40: the fixture's ink,
+// not the page, the chrome or the antialiased edge of either.
+inline bool is_dark(std::uint32_t px) {
+    return ((px >> 16) & 0xFFu) < 0x40u && ((px >> 8) & 0xFFu) < 0x40u && (px & 0xFFu) < 0x40u;
+}
+
+// The search hit on kMarker's word.
+inline SearchSession::Hit marker_hit(DocumentView& view) {
+    const auto hits = view.document().page_hits(kMarkWordPage, "ZENITH", {});
+    REQUIRE_FALSE(hits.empty());
+    return SearchSession::Hit{static_cast<std::size_t>(kMarkWordPage), hits[0]};
+}
 
 }  // namespace canvas_rig

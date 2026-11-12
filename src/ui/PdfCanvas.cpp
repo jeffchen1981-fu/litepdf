@@ -396,6 +396,33 @@ void PdfCanvas::set_pending_anchor(PageAnchor anchor) {
     impl_->anchor.install(std::move(anchor));
 }
 
+void PdfCanvas::rotate(bool cw) {
+    if (!impl_ || !impl_->view) return;
+    if (cw) {
+        impl_->view->rotate_cw();
+    } else {
+        impl_->view->rotate_ccw();
+    }
+    // A drag's placement belongs to the unturned page.
+    cancel_gesture();
+    if (impl_->strip) {
+        // The Rotate kick that follows builds the layout from the turned sizes
+        // and navigates to the current page. No held page to clear: its writers
+        // are spread-only, and entering the strip resets it through
+        // set_dual_page(false), so it is never set while the strip is shown.
+        impl_->strip_view.reset();
+    } else {
+        // The Top anchor resets pan_y only and apply_anchor keeps a clamped
+        // pan_x, so pan_x = 0 is what returns a horizontally panned reader to
+        // the page's left edge. The anchor clears held_place and held_page, and
+        // re-places the page after a fit-mode re-render at the new scale.
+        impl_->pan_x = 0.0f;
+        impl_->pan_y = 0.0f;
+        set_pending_anchor(PageAnchor::top());
+    }
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
 PdfCanvas::Pan PdfCanvas::pan() const {
     if (!impl_) return { 0.0f, 0.0f };
     return { impl_->pan_x, impl_->pan_y };
