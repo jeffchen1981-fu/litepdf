@@ -374,7 +374,7 @@ public:
     bool has_live_selection() const noexcept;
 
 private:
-    friend struct PdfCanvasTestAccess;   // tests/unit/test_canvas_spread_wiring.cpp
+    friend struct PdfCanvasTestAccess;   // tests/unit/CanvasRig.hpp
 
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
     static void register_class_once(HINSTANCE hInstance);

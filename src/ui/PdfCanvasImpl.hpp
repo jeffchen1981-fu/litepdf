@@ -2,7 +2,7 @@
 // LitePDF -- ui::PdfCanvas's private state, shared by the canvas's translation
 // units (PdfCanvas.cpp and, for the continuous strip (#55), PdfCanvasStrip.cpp).
 // Not part of the canvas's interface: include it from those files only, and
-// from tests/unit/test_canvas_spread_wiring.cpp, whose PdfCanvasTestAccess
+// from tests/unit/CanvasRig.hpp, whose PdfCanvasTestAccess
 // reads it.
 
 #include "ui/PdfCanvas.hpp"
