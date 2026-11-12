@@ -191,9 +191,10 @@ opened with `fz_open_document_with_stream(ctx, "application/x-fictionbook", stre
 
 One generated FB2 covering:
 
-- nested `section`s with `title`s and `subtitle`s, plus one `<h1>` (FB2 markup uses `title` and `subtitle`, which
-  MuPDF makes headings for FB2, `html-parse.c:1328-1331`; `h1`-`h6` are headings in every document, `:1314-1326`;
-  only headings become outline nodes, `html-outline.c:409-411`);
+- nested `section`s with `title`s and `subtitle`s, each inside a `section` (only these two become headings in an
+  FB2, `html-parse.c:1328-1331`, at level `section_depth`, so not directly under `body`; `h1`-`h6` would be headings
+  too, `:1314-1326`, but heading levels are set only for block boxes, `:1384-1386`, and FB2's default CSS makes no
+  `h1`-`h6` a block, `:108`; only headings become outline nodes, `html-outline.c:409-411`);
 - titles without ids (generated `'N` ids);
 - an id longer than 48 characters on a title;
 - an empty heading, `<title id="…"/>`, whose box has no flow content, so its value is `box->s.layout.y` (the
@@ -216,9 +217,11 @@ with the title's page known from a second, unique id on the title's following pa
 
 MuPDF collapses a first child's top margin into its parent with `fz_max` unless that child itself has a top border
 or padding (`html-layout.c:3055`); a later sibling's top margin collapses with the previous sibling's bottom margin
-the same way (`:3086-3090`). The parent's padding plays no part. So the test's user CSS gives the title itself a top
-padding and a large negative top margin, for example `section>title{padding-top:1px;margin-top:-2000px}`, on the
-first title of the book, and gives that title an id which a paragraph several pages later repeats.
+the same way (`:3086-3090`). The parent's padding plays no part. So the test's user CSS gives the heading itself a top
+padding and a negative top margin. A selector such as `section>title` would hit every title, so the test's book has
+exactly one `subtitle`, the first child of the first section, and the CSS is `subtitle{padding-top:1px;
+margin-top:-200px}`. That subtitle carries an id which a paragraph at least 4 pages later repeats. Everything after
+the subtitle moves up by the same 200 pt, so that paragraph stays at y > 0.
 
 - Precondition, asserted from the public API: `fz_resolve_link_dest` for that id lands on the later paragraph's page
   (the root walk skipped the negative first match). If the CSS does not reach y < 0, the id resolves to page 0 and
@@ -272,8 +275,11 @@ key copy, `tree.c:36-41`). The fixture's distinct ids D are known from its const
 `'N` id per heading without an id), so calls N - 2D + 1 .. N are the index's.
 
 - Every K in N - 2D + 1 .. N (any index allocation fails, and so does everything after it): `fz_count_pages`
-  succeeds, every outline node equals the reference of 6.1, and `fz_caught(ctx)` is 0 afterwards (the catch
-  cleared the error). The fallback itself allocates nothing, so it runs under the armed allocator.
+  succeeds, every outline node equals the reference of 6.1, and `fz_caught(ctx)` is 0 when read inside the test's
+  own `fz_try` body, right after the call (the patch's catch cleared the error). It must be read there: the test's
+  own `fz_catch` runs `fz_do_catch` even when nothing was thrown, which resets `errcode` (`context.h:65`,
+  `error.c:278-281`), so a read after the try proves nothing. The fallback itself allocates nothing, so it runs
+  under the armed allocator.
 - Every K in 1 .. N - 2D on a fresh document: no crash. Those are layout allocations, and `fz_count_pages` throws,
   as it does today.
 - Fixture-proving: in the non-failing run, N - 2D is greater than 0 and the count is the same on a second run.
@@ -281,11 +287,12 @@ key copy, `tree.c:36-41`). The fixture's distinct ids D are known from its const
 ## 7. Development and measurement
 
 - The shared checkout `C:\Users\User\projects\litepdf\third_party\mupdf` is not modified before merge. This worktree's
-  `third_party/mupdf` (empty today) becomes a `git worktree` of the shared submodule repo, detached at 73d3100, plus a copy of the
+  `third_party/mupdf` (empty today) becomes a `git clone --shared` of the shared submodule repo (objects borrowed
+  through alternates, nothing written to the shared repo), detached at 73d3100, plus a copy of the
   shared `thirdparty/` made with `robocopy /E /XF .git`: the nested submodules' `.git` files hold relative gitdir
   paths that would point nowhere from the new location and break git there. Copy, not junctions, so removing the
-  worktree later cannot delete through a junction. `git worktree add` writes only metadata under the shared
-  `.git/modules/third_party/mupdf/worktrees/`; it is removed with the worktree.
+  worktree later cannot delete through a junction. (A `git worktree add` from the shared submodule gitdir was the
+  first idea; it is avoided because that gitdir sets a relative `core.worktree`.)
 - Order: configure and build this tree at 80d4f4a (unpatched; the configure rewrites the vcxproj and config.h in the
   private tree only), copy the unpatched `litepdf-cli.exe` and `litepdf.exe` aside (both link MuPDF statically, so a
   copy is self-contained), run 6.4's unpatched half, then add the CMake block and the patch and rebuild. Before and
