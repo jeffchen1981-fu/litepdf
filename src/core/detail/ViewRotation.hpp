@@ -3,8 +3,8 @@
 // #53: pure page <-> view rotation transform. No Win32, no Direct2D, no MuPDF
 // -- the same "no Win32" convention as ui/detail/ViewportMath.hpp:3-5, so it
 // is unit-testable headless. It lives in core/detail rather than ui/detail
-// because DocumentView (core) and PdfCanvas (ui) both consume it, and core must
-// not include a ui/ header.
+// because DocumentView (core) and PdfCanvas (ui) both consume it, and core
+// headers stay free of ui headers that pull in Win32 or Direct2D.
 //
 // FRAMES. The "local" frame is the unrotated page frame of one drawn page:
 // [0, u.w] x [0, u.h] with u = view_size(view.w, view.h, r). The "view" frame is
