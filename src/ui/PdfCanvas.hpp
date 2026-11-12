@@ -13,6 +13,7 @@
 #include "ui/detail/PageAnchor.hpp"
 #include "ui/detail/ScrollMath.hpp"
 #include "core/TextSelection.hpp"
+#include "core/detail/ViewRotation.hpp"
 #include "ui/detail/ViewportMath.hpp"
 #include "ui/detail/SelectionDrag.hpp"
 #include "ui/detail/StripCarry.hpp"
@@ -333,6 +334,16 @@ public:
     // goes on to submit.
     void set_pending_anchor(PageAnchor anchor);
 
+    // (#53) Turn the active view a quarter turn, clockwise when `cw`, and land
+    // the turned page (spec 3.5): any live gesture ends without committing; in a
+    // paged layout the pan returns to the page's top-left and a Top anchor is
+    // installed for the next batch; in the strip the layout is dropped, so the
+    // Rotate kick builds it again from the turned sizes. The caller (MainWindow's
+    // command handler) follows with kick_render(..., KickReason::Rotate), in
+    // that order: a kick before this call would lay out the old sizes. No-op
+    // without a view.
+    void rotate(bool cw);
+
     // Scroll / page-change such that `h`'s quad is visible with a 24 DIP
     // margin. If already visible, no scroll — only the invalidate. If
     // target page differs from current, page is switched via
@@ -374,7 +385,7 @@ public:
     bool has_live_selection() const noexcept;
 
 private:
-    friend struct PdfCanvasTestAccess;   // tests/unit/test_canvas_spread_wiring.cpp
+    friend struct PdfCanvasTestAccess;   // tests/unit/CanvasRig.hpp
 
     static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
     static void register_class_once(HINSTANCE hInstance);
@@ -524,9 +535,14 @@ private:
     // The own bitmap of the slot showing `page`, or null when none shows it.
     ID2D1Bitmap* shown_bitmap(int page) const;
 
-    // Where on_paint draws the single-page bitmap, in canvas DIPs. False when
+    // Where on_paint draws the single-page bitmap, in canvas DIPs: the drawn
+    // rect in the view frame, the bitmap's turned extent (#53). False when
     // there is no bitmap or render target yet.
     bool single_page_placement(Placement& out) const;
+
+    // (#53) The view's rotation, read at paint and press time; 0 without a
+    // view. The canvas keeps no copy of it (spec 3.4).
+    litepdf::core::Rotation view_rotation() const noexcept;
 
     // The search hits on_paint draws over the page right now: empty over another
     // view's or page's bitmap, before the render target exists, or with no hits
@@ -539,7 +555,8 @@ private:
 
     // Draws one search hit: the current-hit fill and stroke when it is the
     // current hit, else the other-hit fill. (ox, oy) is the page's top-left in
-    // canvas DIPs and `pct` the DIPs per PDF point; the caller has checked
+    // the target's current frame in DIPs -- (0, 0) under a page's turn (#53) --
+    // and `pct` the DIPs per PDF point; the caller has checked
     // that the render target and both fill brushes exist (overlay_hits does).
     void paint_hit(const litepdf::core::SearchSession::Hit& hit,
                    float ox, float oy, float pct);
@@ -548,7 +565,8 @@ private:
     const litepdf::core::TextSelection* painted_selection() const noexcept;
 
     // Fills `sel`'s quads with the selection brush. (ox, oy) is the page's
-    // top-left in canvas DIPs and `pct` the DIPs per PDF point; draws nothing
+    // top-left in the target's current frame in DIPs -- (0, 0) under a page's
+    // turn (#53) -- and `pct` the DIPs per PDF point; draws nothing
     // without the brush. Paged on_paint and the strip (#55) both call it.
     void paint_selection_quads(const litepdf::core::TextSelection& sel,
                                float ox, float oy, float pct);
@@ -593,7 +611,9 @@ private:
     // Materialise the live selection -- quads and text -- into the active view.
     void commit_live_selection();
 
-    // Client pixels -> a clamped point on the page drawn at `page`.
+    // Client pixels -> a clamped point on the page drawn at `page`, the page's
+    // drawn rect in the view frame: the point is turned back into the page's
+    // local frame first (#53, spec 3.5).
     litepdf::core::SelPoint page_point_at(int x_px, int y_px, const Placement& page) const;
 
     // True when the painted content overflows the viewport on either axis --
@@ -624,6 +644,14 @@ private:
 
     // WM_PAINT in the strip (spec 4.2, 5.1).
     void strip_paint();
+
+    // (#53, spec 3.4 R3) The rect strip page `page` is drawn into, in the view
+    // frame: a fresh Ready bitmap's natural extent (view_px, unresampled) at the
+    // layout rect's top-left; otherwise -- a stale bitmap stretched, Pending over
+    // a bitmap, no bitmap, Failed -- the layout rect itself. strip_paint and both
+    // strip press sites ask this, so the drawn page, its overlays and a press
+    // cannot disagree. Which page a press lands on stays StripViewport::page_at.
+    Placement strip_drawn_rect(int page) const;
 
     // WM_USER_STRIP_DONE (spec 5.3).
     void strip_on_done(WPARAM w, LPARAM l);

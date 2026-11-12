@@ -9,6 +9,10 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+### Added
+
+- Rotate the view in 90° steps: View > Rotate Clockwise / Counterclockwise (#53).
+
 ### Changed
 
 - FB2 books now open in continuous scroll, like ePub. An FB2 book is laid out

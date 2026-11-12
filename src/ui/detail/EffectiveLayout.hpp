@@ -82,6 +82,7 @@ enum class KickReason {
     Restore,
     Restyle,
     Spread,
+    Rotate,
 };
 
 // What a kick does when the tab's layout is the strip. Callers in a paged layout
@@ -130,6 +131,14 @@ inline StripKickActions strip_kick_actions(KickReason r) noexcept {
             // strip, which is the paged branch). apply_effective_layout has
             // already applied the 7.3 carry; restoring the tab's stored position
             // would overwrite it.
+            a.refit = true;
+            a.refresh_readout = true;
+            a.relayout = true;
+            break;
+        case KickReason::Rotate:
+            // (#53) PdfCanvas::rotate has already reset the strip's layout, so
+            // strip_kick's built_here branch builds it from the turned page sizes
+            // at the refitted zoom and navigates to the view's current page.
             a.refit = true;
             a.refresh_readout = true;
             a.relayout = true;

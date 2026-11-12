@@ -383,3 +383,72 @@ TEST_CASE("usable_page_size has nothing for a page with no usable size",
         CHECK(usable_page_size(doc, 0).has_value());
     }
 }
+
+// ---- #53 view rotation ------------------------------------------------------
+
+TEST_CASE("DocumentView rotation: page_sizes swaps every page",
+          "[core][view][rotation]") {
+    InlineDispatcher disp;
+    Document doc;
+    REQUIRE_FALSE(doc.open(kEightPages).has_value());
+    DocumentView view(std::move(doc), disp);
+
+    const std::vector<PageSize>& upright = view.page_sizes();
+    REQUIRE(upright.size() == 8);
+
+    view.rotate_cw();
+    const std::vector<PageSize>& turned = view.page_sizes();
+    REQUIRE(turned.size() == 8);
+    for (std::size_t i = 0; i < turned.size(); ++i) {
+        const PageSize real = view.document().page_size(i);
+        INFO("page " << i);
+        CHECK(turned[i].width_pt == real.height_pt);
+        CHECK(turned[i].height_pt == real.width_pt);
+    }
+
+    view.rotate_cw();   // 180: the axes are back
+    CHECK(&view.page_sizes() == &upright);
+    for (std::size_t i = 0; i < upright.size(); ++i) {
+        const PageSize real = view.document().page_size(i);
+        CHECK(upright[i].width_pt == real.width_pt);
+        CHECK(upright[i].height_pt == real.height_pt);
+    }
+
+    view.rotate_cw();   // 270
+    for (std::size_t i = 0; i < 8; ++i) {
+        const PageSize real = view.document().page_size(i);
+        CHECK(view.page_sizes()[i].width_pt == real.height_pt);
+    }
+    view.rotate_cw();   // 360
+    CHECK(&view.page_sizes() == &upright);
+}
+
+TEST_CASE("DocumentView rotation: a stand-in size turns with the rest",
+          "[core][view][rotation]") {
+    Document doc;
+    REQUIRE_FALSE(doc.open("tests/fixtures/damaged-pages.pdf").has_value());
+    REQUIRE_THROWS(doc.page_size(2));   // Control: the page is unreadable.
+    InlineDispatcher disp;
+    DocumentView view(std::move(doc), disp);
+
+    const PageSize s = view.page_sizes()[2];   // the stand-in at rotation 0
+    REQUIRE(s.width_pt != s.height_pt);        // a swap must be visible
+    view.rotate_cw();
+    const PageSize t = view.page_sizes()[2];
+    CHECK(t.width_pt == s.height_pt);
+    CHECK(t.height_pt == s.width_pt);
+}
+
+TEST_CASE("DocumentView rotation: a turn does not run the full sizing pass",
+          "[core][view][rotation]") {
+    InlineDispatcher disp;
+    Document doc;
+    REQUIRE_FALSE(doc.open(kEightPages).has_value());
+    DocumentView view(std::move(doc), disp);
+
+    REQUIRE_FALSE(view.strip_sized());
+    view.rotate_cw();
+    CHECK_FALSE(view.strip_sized());
+    (void)view.page_sizes();
+    CHECK(view.strip_sized());
+}

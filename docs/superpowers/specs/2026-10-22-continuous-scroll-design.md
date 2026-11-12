@@ -195,7 +195,8 @@ for D2D.
 
 - `DocumentView::page_sizes()` sizes every page once per document and caches the result. PDF
   uses the #165 path (`pdf_lookup_page_obj`, no page load); other formats use `fz_load_page` +
-  `fz_bound_page`. It runs on the UI thread when a tab first needs the strip.
+  `fz_bound_page`. It runs on the UI thread when a tab first needs the strip. The sizing is
+  once; the reported frame follows the view rotation (#53 spec §3.3).
 - **Gate (PR 1).** Measured on the UI thread, on the fixtures of §9.4:
   - a 1000-page PDF: ≤ 16 ms;
   - a multi-chapter EPUB and a 300-image CBZ: ≤ 100 ms each.

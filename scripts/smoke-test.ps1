@@ -1811,6 +1811,159 @@ try {
     if ($procStrip.HasExited) { throw "litepdf.exe exited during the background-tab row (exit code $($procStrip.ExitCode))" }
     Write-Host "[OK] continuous strip: preference off, then tab 2 (last shown in the strip): paged, page box 1, process alive"
     Stop-LitePDF -Process $procStrip -Step "continuous menu item, background tab"
+    Start-Sleep -Milliseconds 500
+
+    # Rows 25-28: View > Rotate Clockwise / Counterclockwise (#53, spec 5.5).
+    # MainWindow is not in the unit-test binary, so these rows are what proves the
+    # command binding. rotation-marker.pdf is four A4 portrait pages (595.276 x
+    # 841.89 pt). In the strip at FitWidth the range is 8 + 4 x (h z + 8) DIPs, where
+    # h is the page height in the view frame and z = the viewport width in DIPs / the
+    # page width in the view frame; a quarter turn swaps the two, so each reading
+    # predicts its own range.
+    $rotFixture = Join-Path $repoRoot "tests/fixtures/rotation-marker.pdf"
+    if (-not (Test-Path $rotFixture)) { throw "fixture not found at $rotFixture" }
+    $rotW = 595.276
+    $rotH = 841.89
+    $rotUnturned = { param($s)
+        $z = ($s.client_w * 96.0 / $s.dpi) / $rotW
+        8.0 + 4.0 * ($rotH * $z + 8.0)
+    }
+    $rotTurned = { param($s)
+        $z = ($s.client_w * 96.0 / $s.dpi) / $rotH
+        8.0 + 4.0 * ($rotW * $z + 8.0)
+    }
+    # Waits until canvas-scroll's range matches $Expected (one of the two blocks
+    # above) and returns the parsed reading; throws "$What" with the last reading.
+    function Wait-RotationRange {
+        param([scriptblock]$Expected, [string]$What)
+        $raw = Wait-UxProbeState -Probe canvas-scroll -Until {
+            param($s)
+            if (-not ($s.present -and $s.vscroll -and $s.dpi -gt 0)) { return $false }
+            return [Math]::Abs(($s.max + 1) - (& $Expected $s)) -le 2
+        }
+        $s = $null
+        try { $s = $raw | ConvertFrom-Json -ErrorAction Stop } catch { }
+        if ($null -eq $s -or $s.dpi -le 0) { throw "${What}: canvas-scroll probe failed: $raw" }
+        $want = & $Expected $s
+        if (-not $s.vscroll -or [Math]::Abs(($s.max + 1) - $want) -gt 2) {
+            throw "${What}: the strip range is max + 1 = $($s.max + 1), expected $want (+/- 2): $raw"
+        }
+        return $s
+    }
+    Set-ItemProperty -Path $stripKey -Name ContinuousScroll -Value 1 -Type DWord
+    $procStrip = Start-StripLaunch -Fixture $rotFixture -Step "view rotation"
+
+    # Row 25: Rotate Clockwise turns every page, so the strip's range becomes the
+    # turned one; three more turns restore the unturned range. Each turn waits for its
+    # own range, so no turn is still queued when the next row starts.
+    $null = Wait-RotationRange -Expected $rotUnturned -What "precondition: rotation-marker.pdf unturned"
+    & $uxProbe send-cmd 40067 | Out-Null   # IDM_VIEW_ROTATE_CW
+    $cs = Wait-RotationRange -Expected $rotTurned -What "Rotate Clockwise (a turned A4 page at FitWidth)"
+    $rotRangeTurned = $cs.max + 1
+    & $uxProbe send-cmd 40067 | Out-Null
+    $null = Wait-RotationRange -Expected $rotUnturned -What "Rotate Clockwise, second turn"
+    & $uxProbe send-cmd 40067 | Out-Null
+    $null = Wait-RotationRange -Expected $rotTurned -What "Rotate Clockwise, third turn"
+    & $uxProbe send-cmd 40067 | Out-Null
+    $cs = Wait-RotationRange -Expected $rotUnturned -What "Rotate Clockwise, fourth turn (back upright)"
+    Write-Host "[OK] view rotation: Rotate Clockwise turns the strip's range to $rotRangeTurned DIPs; four turns restore $($cs.max + 1)"
+
+    # Row 26: the command turns clockwise, not counter-clockwise. Page index 2 holds
+    # the document's one ZENITH, right of the page's centre line. Turned clockwise, a
+    # page's x runs down the view, so the hit's centre sits x z below the page's top;
+    # counter-clockwise, (W - x) z. Find Next scrolls the strip to centre the hit, so
+    # the two directions predict positions a few hundred DIPs apart.
+    # Equal to kMarkWordCentreXPt, measured by the unit test "PdfCanvas rotation: the
+    # fixture's word sits where the smoke row expects" (tests/unit/test_canvas_rotation.cpp).
+    $markCentreXPt = 491.7
+    & $uxProbe send-cmd 40067 | Out-Null   # IDM_VIEW_ROTATE_CW
+    $cs = Wait-RotationRange -Expected $rotTurned -What "direction row: Rotate Clockwise"
+    $csJson = $cs | ConvertTo-Json -Compress
+    $rotZ = ($cs.client_w * 96.0 / $cs.dpi) / $rotH
+    $rotVp = $cs.client_h * 96.0 / $cs.dpi
+    $rotTop2 = 8.0 + 2.0 * ($rotW * $rotZ + 8.0)
+    $rotPosMax = ($cs.max + 1) - $cs.page
+    $rotPredCw = $rotTop2 + $markCentreXPt * $rotZ - $rotVp / 2.0
+    $rotPredCcw = $rotTop2 + ($rotW - $markCentreXPt) * $rotZ - $rotVp / 2.0
+    $rotGap = [Math]::Abs(2.0 * $markCentreXPt - $rotW) * $rotZ
+    if ($cs.pos -ne 0) { throw "precondition: the turned strip is not at the top (pos $($cs.pos)): $csJson" }
+    if ($rotTop2 -le $rotVp) {
+        throw "precondition: page 3 starts at $rotTop2 DIPs, inside the $rotVp DIP viewport, so Find Next may not scroll: $csJson"
+    }
+    foreach ($pred in @($rotPredCw, $rotPredCcw)) {
+        if ($pred -lt 0 -or $pred -gt $rotPosMax) {
+            throw "precondition: a prediction ($pred) is clamped, outside [0, $rotPosMax] (clockwise $rotPredCw, counter-clockwise $rotPredCcw): $csJson"
+        }
+    }
+    if ($rotGap -le 32) { throw "the two directions' positions are only $rotGap DIPs apart (needs > 32): $csJson" }
+    & $uxProbe send-cmd 40042 | Out-Null   # IDM_FIND
+    # The find bar must be shown first: show_or_focus sets the edit's text, and a
+    # sent WM_SETTEXT runs before a posted command.
+    $fbRaw = Wait-UxProbeState -Probe find-bar-state -Until { param($s) $s.present -and $s.visible }
+    $fb = $null
+    try { $fb = $fbRaw | ConvertFrom-Json -ErrorAction Stop } catch { }
+    if ($null -eq $fb -or -not $fb.visible) { throw "direction row: the find bar is not shown after IDM_FIND: $fbRaw" }
+    & $uxProbe find-text ZENITH | Out-Null
+    # WM_SETTEXT only arms the find bar's 120 ms debounce, the scan then has to reach
+    # page index 2, and Find Next with no hit yet returns and is never re-fired. So
+    # Find Next (40043) is posted again on every poll until the position moves; with
+    # one hit in the document, next wraps to it.
+    $csRaw = Wait-UxProbeState -Probe canvas-scroll -TimeoutSeconds 10 -Until {
+        param($s)
+        if ($s.pos -ne 0) { return $true }
+        & $uxProbe send-cmd 40043 6>$null | Out-Null   # IDM_FIND_NEXT
+        return $false
+    }
+    $cs = $null
+    try { $cs = $csRaw | ConvertFrom-Json -ErrorAction Stop } catch { }
+    if ($null -eq $cs) { throw "direction row: canvas-scroll probe failed after Find Next: $csRaw" }
+    if ($cs.pos -eq 0) { throw "direction row: Find Next did not move the strip within 10 s (clockwise predicts $rotPredCw): $csRaw" }
+    if ([Math]::Abs($cs.pos - $rotPredCw) -gt $rotGap / 4.0) {
+        throw "direction row: Find Next put the strip at pos $($cs.pos), expected the clockwise $rotPredCw (+/- $($rotGap / 4.0)); counter-clockwise would be $rotPredCcw : $csRaw"
+    }
+    Write-Host "[OK] view rotation: Rotate Clockwise turns clockwise: Find Next ZENITH -> pos $($cs.pos) (clockwise $rotPredCw, counter-clockwise $rotPredCcw)"
+
+    # Row 27: both items are enabled with a document and grayed without one (the
+    # handler returns early then too).
+    $ms = Read-MenuState -Ids @("40067", "40068")
+    if ($null -eq $ms -or -not $ms.items.'40067'.found -or -not $ms.items.'40068'.found -or
+        $ms.items.'40067'.grayed -or $ms.items.'40068'.grayed) {
+        throw "with a document: expected Rotate Clockwise and Rotate Counterclockwise present and enabled: $($ms | ConvertTo-Json -Compress -Depth 5)"
+    }
+    & $uxProbe send-cmd 40030 | Out-Null   # IDM_TAB_CLOSE
+    $pbRaw = Wait-UxProbeState -Probe page-box -Until { param($s) $s.present -and $s.text -eq "" }
+    $pb = $null
+    try { $pb = $pbRaw | ConvertFrom-Json -ErrorAction Stop } catch { }
+    if ($null -eq $pb -or -not $pb.present -or $pb.text -ne "") { throw "closing the last tab: the page box did not empty: $pbRaw" }
+    $ms = Read-MenuState -Ids @("40067", "40068")
+    if ($null -eq $ms -or -not $ms.items.'40067'.found -or -not $ms.items.'40068'.found -or
+        -not $ms.items.'40067'.grayed -or -not $ms.items.'40068'.grayed) {
+        throw "no document: expected Rotate Clockwise and Rotate Counterclockwise present and grayed: $($ms | ConvertTo-Json -Compress -Depth 5)"
+    }
+    $procStrip.Refresh()
+    if ($procStrip.HasExited) { throw "litepdf.exe exited during the view rotation rows (exit code $($procStrip.ExitCode))" }
+    Write-Host "[OK] view rotation: both items enabled with a document, grayed with none"
+    Stop-LitePDF -Process $procStrip -Step "view rotation"
+    Start-Sleep -Milliseconds 500
+
+    # Row 28: Ctrl+Shift+= reaches Rotate Clockwise. Only real input goes through
+    # TranslateAccelerator, and SendInput types into the foreground window, so
+    # send-chord refuses (exit 2) when litepdf is not in front; the row is then skipped.
+    $procStrip = Start-StripLaunch -Fixture $rotFixture -Step "rotate accelerator"
+    $null = Wait-RotationRange -Expected $rotUnturned -What "precondition: rotation-marker.pdf unturned (accelerator row)"
+    # The probe runs in this process, so its exit code is the global one; clear it first.
+    $global:LASTEXITCODE = 0
+    $chordOut = & $uxProbe send-chord 0x11 0x10 0xBB 2>&1 | Out-String   # Ctrl, Shift, VK_OEM_PLUS
+    $chordExit = $global:LASTEXITCODE
+    if ($chordExit -eq 2) {
+        Write-Host "[SKIP] accelerator row: litepdf is not the foreground window"
+    } elseif ($chordExit -ne 0) {
+        throw "send-chord failed (exit $chordExit): $chordOut"
+    } else {
+        $cs = Wait-RotationRange -Expected $rotTurned -What "Ctrl+Shift+= (Rotate Clockwise)"
+        Write-Host "[OK] view rotation: Ctrl+Shift+= turns the strip's range to $($cs.max + 1) DIPs"
+    }
+    Stop-LitePDF -Process $procStrip -Step "rotate accelerator"
 } finally {
     if ($null -ne $procStrip -and -not $procStrip.HasExited) {
         Stop-Process -Id $procStrip.Id -Force -ErrorAction SilentlyContinue

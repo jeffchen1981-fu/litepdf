@@ -15,6 +15,7 @@
 #include "ui/PdfCanvasLayout.hpp"
 #include "ui/detail/ScrollMath.hpp"
 #include "ui/detail/StripCompletion.hpp"
+#include "ui/detail/StripOverlay.hpp"
 #include "ui/detail/StripScrollbar.hpp"
 #include "ui/detail/ViewportMath.hpp"
 
@@ -271,9 +272,15 @@ void PdfCanvas::switch_layout(LayoutKind next, bool carry_position) {
     if (carry) apply_layout_carry(next, carried, pan_before, zoom_before);
     // spec 6.3, as the strip's own Find: left alone when on screen, else centred.
     if (landing_hit) {
-        impl_->strip_view.scroll_hit_into_view(static_cast<int>(landing_hit->page),
-                                               hit_top_pt(*landing_hit),
-                                               hit_bottom_pt(*landing_hit));
+        // In the view frame (#53), from the turned size the strip laid out.
+        const auto& sizes = impl_->view->page_sizes();
+        const litepdf::core::PageSize size = landing_hit->page < sizes.size()
+            ? sizes[landing_hit->page] : litepdf::core::PageSize{0, 0};
+        const litepdf::core::Rotation rot = view_rotation();
+        impl_->strip_view.scroll_hit_into_view(
+            static_cast<int>(landing_hit->page),
+            hit_top_pt(*landing_hit, rot, size.width_pt, size.height_pt),
+            hit_bottom_pt(*landing_hit, rot, size.width_pt, size.height_pt));
     }
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -322,9 +329,12 @@ SpreadVertical spread_vertical_for(const std::vector<litepdf::core::PageSize>& s
 // The pan `a`'s landing sets (PdfCanvas::apply_anchor), from the page sizes at
 // `zoom`. `content_h` is what the pan is clamped against: the page in paged single,
 // the union in a spread. `hit_page_top` is where a Hit's page sits at pan 0; only a
-// Hit reads it.
+// Hit reads it, with the view's page sizes and rotation `r` (#53: the quad is
+// measured as drawn).
 double landing_pan_y(const AnchorSlot& a, double hit_page_top, double content_h,
-                     double vp_h, double zoom) {
+                     double vp_h, double zoom,
+                     const std::vector<litepdf::core::PageSize>& sizes,
+                     litepdf::core::Rotation r) {
     const auto content = static_cast<float>(content_h);
     const auto vp      = static_cast<float>(vp_h);
     switch (a.kind()) {
@@ -332,7 +342,11 @@ double landing_pan_y(const AnchorSlot& a, double hit_page_top, double content_h,
             return clamp_pan(vp - content, content, vp);
         case PageAnchor::Kind::Hit: {
             const auto& h = a.hit();
-            const float centre = pdf_point_to_dip((hit_top_pt(h) + hit_bottom_pt(h)) * 0.5f,
+            const litepdf::core::PageSize size =
+                h.page < sizes.size() ? sizes[h.page] : litepdf::core::PageSize{0, 0};
+            const float top    = hit_top_pt(h, r, size.width_pt, size.height_pt);
+            const float bottom = hit_bottom_pt(h, r, size.width_pt, size.height_pt);
+            const float centre = pdf_point_to_dip((top + bottom) * 0.5f,
                                                   static_cast<float>(zoom));
             return pan_y_centring_quad(centre, static_cast<float>(hit_page_top), content, vp);
         }
@@ -385,7 +399,7 @@ CarriedPosition PdfCanvas::capture_layout_carry(double& pan_before) {
             ? landing_pan_y(impl_->anchor,
                             spread_page_top(at_landing, static_cast<int>(impl_->anchor.hit_page()),
                                             left),
-                            at_landing.union_h, vp_h, zoom)
+                            at_landing.union_h, vp_h, zoom, sizes, view_rotation())
             : impl_->pan_y;
         // Where the strip carried the reader in, or a search hit sent them: the
         // pan alone cannot say which page of the pair that was. It answers until
@@ -407,7 +421,8 @@ CarriedPosition PdfCanvas::capture_layout_carry(double& pan_before) {
     const int    cur    = v->current_page();
     const double h      = page_h_dip(sizes, cur, zoom);
     const double origin = h <= vp_h ? (vp_h - h) / 2.0 : 0.0;
-    const double pan_y  = landing ? landing_pan_y(impl_->anchor, origin, h, vp_h, zoom)
+    const double pan_y  = landing ? landing_pan_y(impl_->anchor, origin, h, vp_h, zoom, sizes,
+                                                  view_rotation())
                                   : impl_->pan_y;
     pan_before = impl_->pan_x;
     return carry_from_paged_single(cur, pan_y, origin, h);
@@ -899,6 +914,31 @@ void PdfCanvas::strip_on_done(WPARAM w, LPARAM l) {
 // ---------------------------------------------------------------------------
 // Paint (spec 4.2, 5.1)
 
+Placement PdfCanvas::strip_drawn_rect(int page) const {
+    // Viewport-relative, so narrowing to float is exact enough (spec 4.1).
+    const Placement layout_rect = strip_page_placement(impl_->strip_view.page_rect(page));
+    if (!hwnd_ || !impl_->view) return layout_rect;
+    const auto& set = impl_->strip_set;
+    const PageSlot* slot = set.state.slot(page);
+    const auto it = set.bitmaps.find(page);
+    ID2D1Bitmap* const bm = it != set.bitmaps.end() ? it->second.Get() : nullptr;
+    if (!slot || !bm || slot->kind != PageStateKind::Ready ||
+        is_stale(*slot, impl_->view->render_scale(), impl_->view->invert_colors())) {
+        // Stretched to the layout rect, so a zoom never flashes white (5.1), or
+        // nothing to stretch: a blank page, or a Failed one's placeholder.
+        return layout_rect;
+    }
+    // Natural size at the layout rect's top-left, so MuPDF's 1-px rounding is
+    // not resampled (spec 4.2 "Pixel rounding"). Turned, that slack (< 1 DIP)
+    // sits on the flipped axis; the 8 DIP gap absorbs it (spec 3.4).
+    const float rt_dpi = static_cast<float>(GetDpiForWindow(hwnd_));
+    const D2D1_SIZE_F px = view_px(*bm, view_rotation());   // PIXELS
+    Placement natural = layout_rect;
+    natural.w = bitmap_px_to_dip(px.width, rt_dpi);
+    natural.h = bitmap_px_to_dip(px.height, rt_dpi);
+    return natural;
+}
+
 void PdfCanvas::strip_paint() {
     create_render_target();
     if (!impl_->rt) {
@@ -918,9 +958,6 @@ void PdfCanvas::strip_paint() {
     if (strip_active()) {
         auto& set = impl_->strip_set;
         const auto& sv = impl_->strip_view;
-        const float rt_dpi = static_cast<float>(GetDpiForWindow(hwnd_));
-        const float scale  = impl_->view->render_scale();
-        const bool  invert = impl_->view->invert_colors();
 
         // A page with nothing to show is a blank page of the page colour; a
         // failed one also gets the spread placeholder's 1-DIP border.
@@ -931,64 +968,57 @@ void PdfCanvas::strip_paint() {
         impl_->rt->CreateSolidColorBrush(
             D2D1::ColorF(impl_->invert_chrome ? 0x404040u : 0xC0C0C0u), &border_brush);
 
+        // Search hits over every visible page (spec 7.1), whatever its bitmap
+        // state: a hit is placed from its page's drawn rect. One PDF point is
+        // zoom_pct DIPs, as in paged mode; the layout's zoom is the one
+        // page_rect uses. overlay_hits() already checked the source and both
+        // fill brushes. The selection is drawn on its own page whenever that
+        // page is visible, after the page's hits so it reads as the active
+        // thing.
+        const float pct = static_cast<float>(sv.layout().zoom_pct());
+        const litepdf::core::TextSelection* sel = painted_selection();
+        const litepdf::core::Rotation rot = view_rotation();
+
         const StripRange visible = sv.visible();
         for (int page = visible.first; page <= visible.last; ++page) {
-            // Viewport-relative, so narrowing to float is exact enough (spec 4.1).
-            const StripPageRect r = sv.page_rect(page);
-            const float x = static_cast<float>(r.x);
-            const float y = static_cast<float>(r.y);
-            const D2D1_RECT_F dst = D2D1::RectF(x, y, static_cast<float>(r.x + r.w),
-                                                static_cast<float>(r.y + r.h));
             const PageSlot* slot = set.state.slot(page);
             const auto it = set.bitmaps.find(page);
             ID2D1Bitmap* bm = it != set.bitmaps.end() ? it->second.Get() : nullptr;
 
-            if (slot && bm && slot->kind == PageStateKind::Ready &&
-                !is_stale(*slot, scale, invert)) {
-                // Natural size at the rect's top-left, so MuPDF's 1-px rounding
-                // is not resampled (spec 4.2 "Pixel rounding").
-                const D2D1_SIZE_F px = bm->GetSize();
-                const D2D1_RECT_F natural = D2D1::RectF(
-                    x, y, x + bitmap_px_to_dip(px.width, rt_dpi),
-                    y + bitmap_px_to_dip(px.height, rt_dpi));
-                impl_->rt->DrawBitmap(bm, natural, 1.0f,
-                                      D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-                drew_bitmap = true;
-            } else if (slot && bm && slot_holds_bitmap(*slot)) {
-                // Ready-stale, or Pending over its previous bitmap: stretched to
-                // the page's current rect, so a zoom never flashes white (5.1).
-                impl_->rt->DrawBitmap(bm, dst, 1.0f,
+            // (#53, spec 3.4) The page and its overlays in the page's local
+            // frame, [0, u.w] x [0, u.h], turned onto its drawn rect (R3) -- a
+            // pure translation at rotation 0. The target goes back to identity
+            // after the overlays.
+            const Placement pl = strip_drawn_rect(page);
+            const litepdf::core::ViewSize u = litepdf::core::view_size(pl.w, pl.h, rot);
+            const D2D1_RECT_F local = D2D1::RectF(0.0f, 0.0f, u.w, u.h);
+            impl_->rt->SetTransform(to_d2d(litepdf::core::draw_affine(
+                rot, litepdf::core::ViewRect{pl.x, pl.y, pl.w, pl.h})));
+
+            if (slot && bm && slot_holds_bitmap(*slot)) {
+                // A fresh Ready bitmap at its natural size, unresampled (the
+                // drawn rect is its natural extent); a Ready-stale one, or
+                // Pending over its previous bitmap, stretched to the page's
+                // current rect, so a zoom never flashes white (5.1).
+                impl_->rt->DrawBitmap(bm, local, 1.0f,
                                       D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
                 drew_bitmap = true;
             } else {
-                if (page_brush) impl_->rt->FillRectangle(dst, page_brush.Get());
+                if (page_brush) impl_->rt->FillRectangle(local, page_brush.Get());
                 if (slot && slot->kind == PageStateKind::Failed && border_brush) {
                     // Inset by half the stroke so the 1-DIP border lies inside.
                     impl_->rt->DrawRectangle(
-                        D2D1::RectF(dst.left + 0.5f, dst.top + 0.5f,
-                                    dst.right - 0.5f, dst.bottom - 0.5f),
+                        D2D1::RectF(0.5f, 0.5f, u.w - 0.5f, u.h - 0.5f),
                         border_brush.Get(), 1.0f);
                 }
             }
-        }
 
-        // Search hits over every visible page (spec 7.1), whatever its bitmap
-        // state: a hit is placed from its page's rect. One PDF point is
-        // zoom_pct DIPs, as in paged mode; the layout's zoom is the one
-        // page_rect uses. overlay_hits() already checked the source and both
-        // fill brushes.
-        const float pct = static_cast<float>(sv.layout().zoom_pct());
-        for (const auto& hit : impl_->painted_hits) {
-            const StripPageRect r = sv.page_rect(static_cast<int>(hit.page));
-            paint_hit(hit, static_cast<float>(r.x), static_cast<float>(r.y), pct);
-        }
+            for (const auto& hit : impl_->painted_hits) {
+                if (static_cast<int>(hit.page) == page) paint_hit(hit, 0.0f, 0.0f, pct);
+            }
+            if (sel && sel->page == page) paint_selection_quads(*sel, 0.0f, 0.0f, pct);
 
-        // The selection, after the hits so it reads as the active thing, on its
-        // own page whenever that page is visible (spec 7.1), placed the same way.
-        const litepdf::core::TextSelection* sel = painted_selection();
-        if (sel && sel->page >= visible.first && sel->page <= visible.last) {
-            const StripPageRect r = sv.page_rect(sel->page);
-            paint_selection_quads(*sel, static_cast<float>(r.x), static_cast<float>(r.y), pct);
+            impl_->rt->SetTransform(D2D1::Matrix3x2F::Identity());
         }
     }
 
