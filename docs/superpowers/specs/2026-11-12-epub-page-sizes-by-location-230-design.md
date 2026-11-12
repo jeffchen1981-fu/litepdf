@@ -172,12 +172,29 @@ The table is written only by `open`, `authenticate` and `close`, which run befor
 is shared or after it is dropped, as `page_count` already is. `page_size` reads it under
 `doc_mutex`, as it reads everything else.
 
-## 5. Results (to be filled at implementation)
+## 5. Results
 
-Before/after `litepdf-cli <file> --bench-page-sizes --iterations 3` at 200 / 400 / 800 / 1,500
-chapters, plus the single-chapter control and `strip-chapters.epub`, on a Release build of this
-branch and of main, P-cores, interleaved. Also `--benchmark` `open_ms` at 1,500 chapters before
-and after, to show the table's cost at open is within noise.
+`litepdf-cli <file> --bench-page-sizes --iterations 3`, Release builds of main (75ef154) and of
+this branch (7efa383), pinned to the P-cores (`start /affinity FFFF`), file read once first,
+before and after interleaved, three runs each; the median of the three medians:
+
+| book | pages | before | after |
+|---|---|---|---|
+| 200 chapters | 600 | 3.4 ms | 0.43 ms |
+| 400 chapters | 1,200 | 28.4 ms | 1.0 ms |
+| 800 chapters | 2,400 | 257 ms | 2.7 ms |
+| 1,500 chapters | 4,500 | 2,481 ms | 10.2 ms |
+| the same 1,500 sections in 1 chapter | 3,396 | 1.8 ms | 1.8 ms |
+| `strip-chapters.epub` (200 chapters) | 400 | 2.3 ms | 0.31 ms |
+
+`--benchmark --iterations 3` `open_ms` at 1,500 chapters (median of three runs): 938 ms before,
+942 ms after, within the runs' spread (929-952 and 940-953 ms): the table's 2 ms at open does
+not show.
+
+The unit test of §8.2 on its 1,500-chapter book (one page per chapter), with the fix:
+`page_size` 3.3 ms against the test's own chapter-order loop 4.9 ms; `with_rendered_page` at
+0.05 61 ms against 40 ms. With either call site forced back to `fz_load_page`: 784 ms against a
+bound of 44 ms, and 846 ms against a bound of 194 ms.
 
 ## 6. The other per-page paths
 
