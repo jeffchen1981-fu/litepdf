@@ -652,7 +652,7 @@ bool PdfCanvas::shown_page_height(int page, float& out) const {
     if (!hwnd_) return false;
     ID2D1Bitmap* const bm = shown_bitmap(page);
     if (!bm) return false;
-    out = bitmap_px_to_dip(bm->GetSize().height,
+    out = bitmap_px_to_dip(view_px(*bm, view_rotation()).height,
                            static_cast<float>(GetDpiForWindow(hwnd_)));
     return true;
 }
@@ -668,7 +668,8 @@ float PdfCanvas::shown_page_pct(int page) const {
     // The fit's own cache, so a paint asks no more of MuPDF than content_extent.
     const auto size = impl_->view->known_page_size(page);
     if (!size) return pct;
-    const D2D1_SIZE_F px = bm->GetSize();   // PIXELS
+    // Both in the view frame: known_page_size reports the turned size (#53).
+    const D2D1_SIZE_F px = view_px(*bm, view_rotation());   // PIXELS
     return drawn_zoom_pct(px.width, px.height, size->width_pt, size->height_pt,
                           impl_->view->render_scale(), pct,
                           static_cast<float>(GetDpiForWindow(hwnd_)));
@@ -676,13 +677,18 @@ float PdfCanvas::shown_page_pct(int page) const {
 
 bool PdfCanvas::single_page_placement(Placement& out) const {
     if (!impl_ || !impl_->rt || !impl_->current_bitmap || !hwnd_) return false;
-    const D2D1_SIZE_F src_px = impl_->current_bitmap->GetSize();  // PIXELS
+    const D2D1_SIZE_F src_px =
+        view_px(*impl_->current_bitmap.Get(), view_rotation());   // PIXELS
     const D2D1_SIZE_F vp     = impl_->rt->GetSize();              // DIPs
     const float rt_dpi = static_cast<float>(GetDpiForWindow(hwnd_));
     out = place_bitmap(bitmap_px_to_dip(src_px.width,  rt_dpi),
                        bitmap_px_to_dip(src_px.height, rt_dpi),
                        vp.width, vp.height, impl_->pan_x, impl_->pan_y);
     return true;
+}
+
+litepdf::core::Rotation PdfCanvas::view_rotation() const noexcept {
+    return impl_ && impl_->view ? impl_->view->rotation() : litepdf::core::Rotation{0};
 }
 
 std::vector<litepdf::core::SearchSession::Hit> PdfCanvas::overlay_hits() const {
@@ -817,10 +823,18 @@ bool PdfCanvas::has_live_selection() const noexcept {
 
 litepdf::core::SelPoint PdfCanvas::page_point_at(int x_px, int y_px,
                                                  const Placement& page) const {
+    using litepdf::core::ViewPoint;
+    using litepdf::core::ViewRect;
     const float dpi = static_cast<float>(GetDpiForWindow(hwnd_));
-    return canvas_dip_to_page_point(client_px_to_dip(static_cast<float>(x_px), dpi),
-                                    client_px_to_dip(static_cast<float>(y_px), dpi),
-                                    page,
+    // (#53, spec 3.5) Back through the page's turn into its local frame, where
+    // the page's top-left is (0, 0) and the clamp runs on the unturned extent.
+    const litepdf::core::Rotation rot = view_rotation();
+    const ViewPoint local = litepdf::core::view_to_local(
+        ViewPoint{client_px_to_dip(static_cast<float>(x_px), dpi),
+                  client_px_to_dip(static_cast<float>(y_px), dpi)},
+        rot, ViewRect{page.x, page.y, page.w, page.h});
+    const litepdf::core::ViewSize u = litepdf::core::view_size(page.w, page.h, rot);
+    return canvas_dip_to_page_point(local.x, local.y, Placement{0.0f, 0.0f, u.w, u.h},
                                     impl_->view ? shown_page_pct(impl_->view->current_page())
                                                 : 1.0f);
 }
@@ -1694,7 +1708,7 @@ bool PdfCanvas::content_extent(ContentBox& out) const {
     const D2D1_SIZE_F vp = impl_->rt->GetSize();
 
     auto dip_size = [&](ID2D1Bitmap* bm, float& w, float& h) {
-        const D2D1_SIZE_F px = bm->GetSize();
+        const D2D1_SIZE_F px = view_px(*bm, view_rotation());
         w = bitmap_px_to_dip(px.width,  rt_dpi);
         h = bitmap_px_to_dip(px.height, rt_dpi);
     };
@@ -2325,6 +2339,7 @@ void PdfCanvas::on_paint() {
         const float right_x0 = slot_w + gutter;
 
         const float rt_dpi = static_cast<float>(GetDpiForWindow(hwnd_));
+        const litepdf::core::Rotation rot = view_rotation();
 
         // Unpanned placement of each slot; the pan is clamped once against the
         // painted union of both (content_extent), never per slot -- with
@@ -2332,7 +2347,7 @@ void PdfCanvas::on_paint() {
         // nor what the arrow keys move.
         auto slot_placement = [&](ID2D1Bitmap* bm) -> Placement {
             if (!bm) return Placement{};
-            const D2D1_SIZE_F src_px = bm->GetSize();
+            const D2D1_SIZE_F src_px = view_px(*bm, rot);
             return place_bitmap(bitmap_px_to_dip(src_px.width,  rt_dpi),
                                 bitmap_px_to_dip(src_px.height, rt_dpi),
                                 slot_w, slot_h, 0.0f, 0.0f);
@@ -2360,10 +2375,10 @@ void PdfCanvas::on_paint() {
 
         auto draw_slot = [&](ID2D1Bitmap* bm, float x0, const Placement& pl, int page) {
             if (!bm) return;
-            const D2D1_RECT_F dst = D2D1::RectF(x0 + pl.x + base_x + pan_x,
-                                                pl.y + base_y + pan_y,
-                                                x0 + pl.x + pl.w + base_x + pan_x,
-                                                pl.y + pl.h + base_y + pan_y);
+            // The drawn rect, in the view frame (#53): the placement's turned
+            // extent at the slot's panned origin.
+            const litepdf::core::ViewRect dst{x0 + pl.x + base_x + pan_x,
+                                              pl.y + base_y + pan_y, pl.w, pl.h};
             // Confine each page to its own band. `place_bitmap` returns the
             // bitmap's FULL width (p.w == src_w) whatever the slot measures, so
             // once the user zooms past the spread fit -- Zoom In and Ctrl+wheel
@@ -2384,10 +2399,18 @@ void PdfCanvas::on_paint() {
             // of the right page that was visible before. This is an accepted cost
             // of the fixed-band layout—hiding content is strictly better than one
             // page painting over another. Per-slot scrolling in PR-A2 resolves it.
+            //
+            // (#53, spec 3.4) The clip is pushed under identity, before the
+            // page's turn: pushed under the turn, D2D would clip to the turned
+            // band's bounding box instead, off the slot.
             impl_->rt->PushAxisAlignedClip(
                 D2D1::RectF(x0, 0.0f, x0 + slot_w, slot_h),
                 D2D1_ANTIALIAS_MODE_ALIASED);
-            impl_->rt->DrawBitmap(bm, dst, 1.0f,
+            // The page and its overlays in the page's local frame, turned onto
+            // the drawn rect `dst` (a pure translation at rotation 0).
+            const litepdf::core::ViewSize u = litepdf::core::view_size(dst.w, dst.h, rot);
+            impl_->rt->SetTransform(to_d2d(litepdf::core::draw_affine(rot, dst)));
+            impl_->rt->DrawBitmap(bm, D2D1::RectF(0.0f, 0.0f, u.w, u.h), 1.0f,
                                   D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
             // #191: the hits of this slot's page, inside its clip so a hit on a
             // part of the page the band hides is hidden with it. overlay_hits()
@@ -2397,9 +2420,10 @@ void PdfCanvas::on_paint() {
             const float pct = shown_page_pct(page);
             for (const auto& hit : impl_->painted_hits) {
                 if (static_cast<int>(hit.page) == page) {
-                    paint_hit(hit, dst.left, dst.top, pct);
+                    paint_hit(hit, 0.0f, 0.0f, pct);
                 }
             }
+            impl_->rt->SetTransform(D2D1::Matrix3x2F::Identity());
             impl_->rt->PopAxisAlignedClip();
         };
         draw_slot(impl_->current_bitmap.Get(), left_x0,  le, left_page);
@@ -2439,16 +2463,26 @@ void PdfCanvas::on_paint() {
         // Natural size: no shrink-to-fit. The shipped code scaled the
         // destination to fit the viewport unconditionally, which is why a
         // changed render scale never changed the displayed size.
-        const D2D1_RECT_F dst = D2D1::RectF(pl.x, pl.y, pl.x + pl.w, pl.y + pl.h);
-        impl_->rt->DrawBitmap(impl_->current_bitmap.Get(), dst, 1.0f,
+        //
+        // (#53, spec 3.4) `pl` is the drawn rect in the view frame. The page and
+        // its overlays are drawn in the page's local frame, [0, u.w] x [0, u.h],
+        // under the page's turn onto that rect (a pure translation at rotation
+        // 0); the target goes back to identity after the overlays.
+        const litepdf::core::Rotation rot = view_rotation();
+        const litepdf::core::ViewSize u   = litepdf::core::view_size(pl.w, pl.h, rot);
+        impl_->rt->SetTransform(to_d2d(litepdf::core::draw_affine(
+            rot, litepdf::core::ViewRect{pl.x, pl.y, pl.w, pl.h})));
+        impl_->rt->DrawBitmap(impl_->current_bitmap.Get(),
+                              D2D1::RectF(0.0f, 0.0f, u.w, u.h), 1.0f,
                               D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
 
         // --- Overlays: search hits (Phase 6 Task 9), then the selection (#52) ---
-        // PDF-point -> canvas-DIP mapping:
-        //   canvas_DIP = pdf_point_to_dip(pdf_pt, zoom_pct) + (dst.left, dst.top)
+        // PDF-point -> local-DIP mapping, in the page's local frame under the
+        // page's turn:
+        //   local_DIP = pdf_point_to_dip(pdf_pt, zoom_pct)
         // MuPDF page coords are top-left origin, Y-down -- matching D2D -- so no
-        // Y-flip. Quads are drawn as axis-aligned bounding boxes (v1); rotated
-        // text would need transformed geometry.
+        // Y-flip. Quads are drawn as axis-aligned bounding boxes of the local
+        // frame (v1), which the turn keeps axis-aligned on screen.
         //
         // Only over THIS view's bitmap of THIS page. After a tab switch or a
         // page turn the canvas keeps painting the outgoing bitmap until the new
@@ -2464,20 +2498,19 @@ void PdfCanvas::on_paint() {
             // (#195).
             const int   pg  = impl_->view->current_page();
             const float pct = shown_page_pct(pg);
-            const float ox  = dst.left;
-            const float oy  = dst.top;
 
             // overlay_hits() already checked the source and both fill brushes.
             for (const auto& hit : impl_->painted_hits) {
-                paint_hit(hit, ox, oy, pct);
+                paint_hit(hit, 0.0f, 0.0f, pct);
             }
 
             // The selection, after the hits so it reads as the active thing.
             // Painted only on its own page and only in single-page mode (this
             // branch is unreachable in spread mode -- spec §1).
             const litepdf::core::TextSelection* sel = painted_selection();
-            if (sel && sel->page == pg) paint_selection_quads(*sel, ox, oy, pct);
+            if (sel && sel->page == pg) paint_selection_quads(*sel, 0.0f, 0.0f, pct);
         }
+        impl_->rt->SetTransform(D2D1::Matrix3x2F::Identity());
     }
 
     HRESULT hr = impl_->rt->EndDraw();

@@ -66,6 +66,13 @@ struct PdfCanvasTestAccess {
         REQUIRE(c.single_page_placement(pl));
         return c.page_point_at(x, y, pl);
     }
+    // (#53) Where on_paint draws the single page, in the view frame: the
+    // bitmap's turned extent. REQUIREs a bitmap and a render target.
+    static Placement placement(PdfCanvas& c) {
+        Placement pl;
+        REQUIRE(c.single_page_placement(pl));
+        return pl;
+    }
     static float pan_y_for_hit(const PdfCanvas& c, const core::SearchSession::Hit& h) {
         return c.pan_y_for_hit(h);
     }
@@ -228,34 +235,40 @@ public:
     ~Rig() {
         canvas_->set_view(nullptr);
         view_.cancel_stale_renders(0);
+        if (second_) second_->cancel_stale_renders(0);
         MSG m;
         while (PeekMessageW(&m, canvas_->hwnd(), WM_USER_RENDER_DONE, WM_USER_STRIP_DONE,
                             PM_REMOVE)) {
             DispatchMessageW(&m);
         }
         DestroyWindow(parent_);
+        second_.reset();
         canvas_.reset();
     }
 
     PdfCanvas&    canvas() { return *canvas_; }
     DocumentView& view() { return view_; }
 
+    // (#53) A second view, as a second tab on the same document: on the rig's
+    // dispatcher, and gone before the canvas. One per rig.
+    DocumentView& second_view(const char* path) {
+        REQUIRE_FALSE(second_.has_value());
+        second_.emplace(open_fixture(path), dispatcher_);
+        return *second_;
+    }
+
     // MainWindow::kick_render's paged branches: in a spread, one batch for both
     // halves. A failing half asks the worker for a page past the end, so
     // fz_load_page throws there as it does for a damaged page, and the null result
     // is reported as the pair's own page.
     void kick(int page, Fail fail = Fail::None) {
+        if (!view_.dual_page()) {
+            kick_single(view_, fail == Fail::Left ? view_.page_count() + 100 : page, page);
+            return;
+        }
         const HWND target = canvas_->hwnd();
         const std::uint64_t epoch = canvas_->render_epoch();
         const std::uint64_t seq   = canvas_->next_render_seq();
-        if (!view_.dual_page()) {
-            canvas_->apply_viewport();
-            const int asked = fail == Fail::Left ? view_.page_count() + 100 : page;
-            view_.request_render(asked, [target, epoch, page, seq](fz_pixmap* p, fz_context* ctx) {
-                PdfCanvas::post_render_done(target, p, ctx, epoch, page, seq);
-            });
-            return;
-        }
         const int total = view_.page_count();
         const int left  = litepdf::ui::dual_page_compute_left(page, total);
         const int right = litepdf::ui::dual_page_compute_right(left, total);
@@ -280,6 +293,11 @@ public:
                 });
         }
     }
+
+    // (#53) kick's single-page branch, rendering from `v`: kick itself renders
+    // from the rig's own view, so after set_view(&second) it would post the first
+    // view's pixmap.
+    void kick_view(DocumentView& v, int page) { kick_single(v, page, page); }
 
     // Hand the canvas one slot's completions until that slot holds a new bitmap.
     // The canvas drops a superseded batch's completions on the way.
@@ -351,6 +369,18 @@ public:
     }
 
 private:
+    // The single-page batch: `asked` is the page the worker renders, `page` the
+    // one the completion reports.
+    void kick_single(DocumentView& v, int asked, int page) {
+        const HWND target = canvas_->hwnd();
+        const std::uint64_t epoch = canvas_->render_epoch();
+        const std::uint64_t seq   = canvas_->next_render_seq();
+        canvas_->apply_viewport();
+        v.request_render(asked, [target, epoch, page, seq](fz_pixmap* p, fz_context* ctx) {
+            PdfCanvas::post_render_done(target, p, ctx, epoch, page, seq);
+        });
+    }
+
     template <class Current>
     void land(UINT msg, Current current) {
         ID2D1Bitmap* const before = current();
@@ -406,10 +436,11 @@ private:
         }
     }
 
-    InlineDispatcher         dispatcher_;
-    DocumentView             view_;
-    HWND                     parent_ = nullptr;
-    std::optional<PdfCanvas> canvas_;
+    InlineDispatcher            dispatcher_;
+    DocumentView                view_;
+    HWND                        parent_ = nullptr;
+    std::optional<PdfCanvas>    canvas_;
+    std::optional<DocumentView> second_;
 };
 
 // An 18 pt high quad, 100 pt in from the page's left edge.

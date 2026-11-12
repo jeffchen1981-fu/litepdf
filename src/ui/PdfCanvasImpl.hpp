@@ -10,6 +10,7 @@
 #include "core/Document.hpp"
 #include "core/SearchSession.hpp"
 #include "core/TextSelection.hpp"
+#include "core/detail/ViewRotation.hpp"
 #include "ui/detail/PageAnchor.hpp"
 #include "ui/detail/SelectionDrag.hpp"
 #include "ui/detail/StripLayout.hpp"
@@ -258,5 +259,20 @@ struct PdfCanvas::Impl {
     bool                          thumb_drag_live = false;
     bool                          thumb_drag_dead = false;
 };
+
+// (#53, spec 3.4) A page bitmap's extent in the view frame, in its own pixels:
+// GetSize() swapped at 90 and 270. Every reader that places, measures or scales
+// against a drawn page asks this, never GetSize() itself.
+inline D2D1_SIZE_F view_px(ID2D1Bitmap& bm, litepdf::core::Rotation r) noexcept {
+    const D2D1_SIZE_F px = bm.GetSize();
+    const litepdf::core::ViewSize v = litepdf::core::view_size(px.width, px.height, r);
+    return D2D1::SizeF(v.w, v.h);
+}
+
+// The pure transform's affine as a Direct2D matrix: the two share the layout and
+// the row-vector convention.
+inline D2D1_MATRIX_3X2_F to_d2d(const litepdf::core::Affine& a) noexcept {
+    return D2D1::Matrix3x2F(a.m11, a.m12, a.m21, a.m22, a.dx, a.dy);
+}
 
 }  // namespace litepdf::ui
