@@ -1,0 +1,195 @@
+litepdf local patch to MuPDF 1.27.2: one-pass outline resolve for HTML-engine documents
+=======================================================================================
+
+Marker:   LITEPDF_PATCH_HTDOC_OUTLINE_V1
+Date:     2026-11-12
+Issue:    https://github.com/jeffchen1981-fu/litepdf/issues/229
+Applied:  by cmake/ImportMuPDF.cmake at configure time (git apply), when
+          source/html/html-doc.c does not carry the marker.
+
+What it changes
+---------------
+source/html/html-doc.c only. htdoc_update_outline, which htdoc_layout runs
+after every layout, resolved each outline entry with htdoc_resolve_link,
+one fz_find_html_target walk of the whole box tree per entry. An FB2 book
+has one entry per section title, so N titles cost O(N^2): 7.2 s of a 7.6 s
+page count for a 1,500-section book (#229). The patch walks the box tree
+once in find_box_target's order, records the first y for each id in an
+fz_tree, and resolves each entry from it. An entry whose first match is not
+at y >= 0, or every entry when building the index fails, goes through
+htdoc_resolve_link as before, so every entry gets exactly the position it
+got before. htdoc_resolve_link itself (link following) is unchanged.
+
+It also defines litepdf_mupdf_patch_notice_v1, the modification notice
+(AGPL-3.0 section 5(a)) that litepdf shows in its About box. Referencing it
+makes a library built without this patch version fail litepdf's link.
+
+The patch copies find_first_content and the value rules of
+find_box_target / find_flow_target from source/html/html-outline.c, which
+it does not touch; ImportMuPDF.cmake checks that file's hash so a MuPDF
+bump that changes those rules stops the configure.
+
+Changing this patch: regenerate it with `git diff --output=<file> --
+source/html/html-doc.c` from the MuPDF root, bump the marker (V2, ...) and
+rename the symbol with it (_v2, ...) in the patch, ImportMuPDF.cmake and
+src/core/MuPdfPatchNotice.cpp.
+
+Dropping it: once upstream MuPDF resolves the outline in one pass, delete
+this file and the patch block and html-outline.c hash check in
+ImportMuPDF.cmake, src/core/MuPdfPatchNotice.*, its test case, the About
+line, and the licence-text note.
+
+diff --git a/source/html/html-doc.c b/source/html/html-doc.c
+index 4bfa1f325..fdfdf45d3 100644
+--- a/source/html/html-doc.c
++++ b/source/html/html-doc.c
+@@ -82,8 +82,107 @@ htdoc_count_pages(fz_context *ctx, fz_document *doc_, int chapter)
+ 	return 1;
+ }
+ 
++/* LITEPDF_PATCH_HTDOC_OUTLINE_V1 - applied by litepdf's cmake/ImportMuPDF.cmake;
++ * see third_party/mupdf-patches/ in the litepdf source. One-pass outline
++ * resolve, litepdf issue #229.
++ *
++ * Resolving each outline entry with htdoc_resolve_link walks the box tree
++ * from the root once per entry, so a book with N titles costs O(N^2) after
++ * every layout. This walks the tree once, in the order of find_box_target
++ * (html-outline.c), and records the first match for each id. An entry whose
++ * first match is at y >= 0 gets exactly what the root walk returns for it;
++ * any other value, or a failure while building the index, falls back to
++ * htdoc_resolve_link, the original code. */
++
++const char litepdf_mupdf_patch_notice_v1[] = "Modified by litepdf on 2026-11-12: one-pass outline resolve (#229)";
++
++/* A copy of html-outline.c's static find_first_content. */
++static fz_html_flow *
++lp_find_first_content(fz_html_box *box)
++{
++	while (box)
++	{
++		if (box->type == BOX_FLOW)
++			return box->u.flow.head;
++		box = box->down;
++	}
++	return NULL;
++}
++
++/* Keeps the first value for each id: fz_tree_insert sends an equal key to
++ * the right, where a lookup could find it before the earlier one. The root
++ * is updated in place after every insert; fz_tree_new_node throws before it
++ * links anything, so after a throw *index is still the whole tree. */
+ static void
+-htdoc_update_outline(fz_context *ctx, fz_document *doc, fz_outline *node)
++lp_put_first(fz_context *ctx, fz_tree **index, const char *id, float *y)
++{
++	if (!fz_tree_lookup(ctx, *index, id))
++		*index = fz_tree_insert(ctx, *index, id, y);
++}
++
++/* The walk of find_box_target: a box's own id first, then a flow box's
++ * flows in order, otherwise the box's children; then the next box. */
++static void
++lp_index_boxes(fz_context *ctx, fz_tree **index, fz_html_box *box)
++{
++	while (box)
++	{
++		if (box->id)
++		{
++			fz_html_flow *flow = lp_find_first_content(box);
++			lp_put_first(ctx, index, box->id, flow ? &flow->y : &box->s.layout.y);
++		}
++		if (box->type == BOX_FLOW)
++		{
++			fz_html_flow *flow;
++			for (flow = box->u.flow.head; flow; flow = flow->next)
++				if (flow->box->id)
++					lp_put_first(ctx, index, flow->box->id, &flow->y);
++		}
++		else
++			lp_index_boxes(ctx, index, box->down);
++		box = box->next;
++	}
++}
++
++static void
++lp_update_outline_from_index(fz_context *ctx, fz_document *doc_, fz_tree *index, fz_outline *node)
++{
++	html_document *doc = (html_document*)doc_;
++	while (node)
++	{
++		fz_link_dest dest = fz_make_link_dest_none();
++		const char *s = strchr(node->uri, '#');
++		if (s && s[1] != 0)
++		{
++			float *yp = fz_tree_lookup(ctx, index, s+1);
++			if (yp)
++			{
++				float y = *yp;
++				if (y >= 0)
++				{
++					int page = y / doc->html->page_h;
++					dest = fz_make_link_dest_xyz(0, page, 0, y - page * doc->html->page_h, 0);
++				}
++				else
++				{
++					/* Negative or NaN: the root walk may go on to a
++					 * later match, so ask it. */
++					dest = htdoc_resolve_link(ctx, doc_, node->uri);
++				}
++			}
++		}
++		node->page = dest.loc;
++		node->x = dest.x;
++		node->y = dest.y;
++		lp_update_outline_from_index(ctx, doc_, index, node->down);
++		node = node->next;
++	}
++}
++
++/* The original update, used when the index could not be built. */
++static void
++lp_update_outline_root_walk(fz_context *ctx, fz_document *doc, fz_outline *node)
+ {
+ 	while (node)
+ 	{
+@@ -91,11 +190,39 @@ htdoc_update_outline(fz_context *ctx, fz_document *doc, fz_outline *node)
+ 		node->page = dest.loc;
+ 		node->x = dest.x;
+ 		node->y = dest.y;
+-		htdoc_update_outline(ctx, doc, node->down);
++		lp_update_outline_root_walk(ctx, doc, node->down);
+ 		node = node->next;
+ 	}
+ }
+ 
++static void
++htdoc_update_outline(fz_context *ctx, fz_document *doc, fz_outline *node)
++{
++	fz_tree *index = NULL;
++
++	if (!node)
++		return;
++
++	fz_var(index);
++	fz_try(ctx)
++		lp_index_boxes(ctx, &index, ((html_document*)doc)->html->tree.root);
++	fz_catch(ctx)
++	{
++		/* Today the update cannot fail, so it must not start failing the
++		 * page count: drop what was built and use the root walk. The error
++		 * is reported, which also clears it from the context. */
++		fz_drop_tree(ctx, index, NULL);
++		index = NULL;
++		fz_report_error(ctx);
++	}
++
++	if (index)
++		lp_update_outline_from_index(ctx, doc, index, node);
++	else
++		lp_update_outline_root_walk(ctx, doc, node);
++	fz_drop_tree(ctx, index, NULL);
++}
++
+ static void
+ htdoc_layout(fz_context *ctx, fz_document *doc_, float w, float h, float em)
+ {
