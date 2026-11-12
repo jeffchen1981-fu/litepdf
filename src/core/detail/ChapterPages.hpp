@@ -59,7 +59,8 @@ public:
 private:
     explicit ChapterPages(std::vector<std::size_t> starts) : starts_(std::move(starts)) {}
 
-    // The first flat page of each chapter, then the page count. Never empty.
+    // The first flat page of each chapter, then the page count. Never empty,
+    // except in a moved-from object, which must not be used.
     std::vector<std::size_t> starts_;
 };
 

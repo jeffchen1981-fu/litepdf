@@ -82,7 +82,7 @@ public:
     // counts[c] = pages in chapter c. Empty optional when the counts cannot
     // describe `page_count` pages: a negative count, or a sum other than
     // page_count.
-    static std::optional<ChapterPages> from_counts(std::vector<int> counts,
+    static std::optional<ChapterPages> from_counts(const std::vector<int>& counts,
                                                    std::size_t page_count);
     // The location of flat page `index`, or nullopt when index >= page_count.
     std::optional<ChapterLocation> locate(std::size_t index) const noexcept;
