@@ -1,7 +1,9 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include "core/SearchSession.hpp"
 #include "core/detail/ViewRotation.hpp"
+#include "ui/detail/PageAnchor.hpp"
 
 using Catch::Approx;
 using namespace litepdf::core;
@@ -128,5 +130,25 @@ TEST_CASE("ViewRotation: a hit vertical extent in the view frame",
         const ViewRect hit = local_rect_to_view(ViewRect{x0, y0, qw, qh}, r,
                                                 ViewRect{0, 0, s.w, s.h});
         CHECK(hit.y == top[q]);
+    }
+}
+
+TEST_CASE("ViewRotation: hit edges in the view frame", "[rotation][view_rotation]") {
+    // A quad 100..200 x 100..118 pt on a 420 x 600 pt page (unturned).
+    SearchSession::Hit h{};
+    h.page = 0;
+    h.geom.ul_x = h.geom.ll_x = 100.0f;
+    h.geom.ur_x = h.geom.lr_x = 200.0f;
+    h.geom.ul_y = h.geom.ur_y = 100.0f;
+    h.geom.ll_y = h.geom.lr_y = 118.0f;
+    const float W = 420, H = 600;
+    const float top[]    = {100, 100, H - 118, W - 200};
+    const float bottom[] = {118, 200, H - 100, W - 100};
+    for (int q = 0; q < 4; ++q) {
+        CAPTURE(q);
+        const Rotation r{q};
+        const ViewSize s = view_size(W, H, r);
+        CHECK(litepdf::ui::hit_top_pt(h, r, s.w, s.h) == top[q]);
+        CHECK(litepdf::ui::hit_bottom_pt(h, r, s.w, s.h) == bottom[q]);
     }
 }

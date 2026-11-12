@@ -272,9 +272,15 @@ void PdfCanvas::switch_layout(LayoutKind next, bool carry_position) {
     if (carry) apply_layout_carry(next, carried, pan_before, zoom_before);
     // spec 6.3, as the strip's own Find: left alone when on screen, else centred.
     if (landing_hit) {
-        impl_->strip_view.scroll_hit_into_view(static_cast<int>(landing_hit->page),
-                                               hit_top_pt(*landing_hit),
-                                               hit_bottom_pt(*landing_hit));
+        // In the view frame (#53), from the turned size the strip laid out.
+        const auto& sizes = impl_->view->page_sizes();
+        const litepdf::core::PageSize size = landing_hit->page < sizes.size()
+            ? sizes[landing_hit->page] : litepdf::core::PageSize{0, 0};
+        const litepdf::core::Rotation rot = view_rotation();
+        impl_->strip_view.scroll_hit_into_view(
+            static_cast<int>(landing_hit->page),
+            hit_top_pt(*landing_hit, rot, size.width_pt, size.height_pt),
+            hit_bottom_pt(*landing_hit, rot, size.width_pt, size.height_pt));
     }
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -323,9 +329,12 @@ SpreadVertical spread_vertical_for(const std::vector<litepdf::core::PageSize>& s
 // The pan `a`'s landing sets (PdfCanvas::apply_anchor), from the page sizes at
 // `zoom`. `content_h` is what the pan is clamped against: the page in paged single,
 // the union in a spread. `hit_page_top` is where a Hit's page sits at pan 0; only a
-// Hit reads it.
+// Hit reads it, with the view's page sizes and rotation `r` (#53: the quad is
+// measured as drawn).
 double landing_pan_y(const AnchorSlot& a, double hit_page_top, double content_h,
-                     double vp_h, double zoom) {
+                     double vp_h, double zoom,
+                     const std::vector<litepdf::core::PageSize>& sizes,
+                     litepdf::core::Rotation r) {
     const auto content = static_cast<float>(content_h);
     const auto vp      = static_cast<float>(vp_h);
     switch (a.kind()) {
@@ -333,7 +342,11 @@ double landing_pan_y(const AnchorSlot& a, double hit_page_top, double content_h,
             return clamp_pan(vp - content, content, vp);
         case PageAnchor::Kind::Hit: {
             const auto& h = a.hit();
-            const float centre = pdf_point_to_dip((hit_top_pt(h) + hit_bottom_pt(h)) * 0.5f,
+            const litepdf::core::PageSize size =
+                h.page < sizes.size() ? sizes[h.page] : litepdf::core::PageSize{0, 0};
+            const float top    = hit_top_pt(h, r, size.width_pt, size.height_pt);
+            const float bottom = hit_bottom_pt(h, r, size.width_pt, size.height_pt);
+            const float centre = pdf_point_to_dip((top + bottom) * 0.5f,
                                                   static_cast<float>(zoom));
             return pan_y_centring_quad(centre, static_cast<float>(hit_page_top), content, vp);
         }
@@ -386,7 +399,7 @@ CarriedPosition PdfCanvas::capture_layout_carry(double& pan_before) {
             ? landing_pan_y(impl_->anchor,
                             spread_page_top(at_landing, static_cast<int>(impl_->anchor.hit_page()),
                                             left),
-                            at_landing.union_h, vp_h, zoom)
+                            at_landing.union_h, vp_h, zoom, sizes, view_rotation())
             : impl_->pan_y;
         // Where the strip carried the reader in, or a search hit sent them: the
         // pan alone cannot say which page of the pair that was. It answers until
@@ -408,7 +421,8 @@ CarriedPosition PdfCanvas::capture_layout_carry(double& pan_before) {
     const int    cur    = v->current_page();
     const double h      = page_h_dip(sizes, cur, zoom);
     const double origin = h <= vp_h ? (vp_h - h) / 2.0 : 0.0;
-    const double pan_y  = landing ? landing_pan_y(impl_->anchor, origin, h, vp_h, zoom)
+    const double pan_y  = landing ? landing_pan_y(impl_->anchor, origin, h, vp_h, zoom, sizes,
+                                                  view_rotation())
                                   : impl_->pan_y;
     pan_before = impl_->pan_x;
     return carry_from_paged_single(cur, pan_y, origin, h);

@@ -505,10 +505,13 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     // so there is nothing for a completion to correct and no PageAnchor. The
     // caller's Navigate kick only reschedules.
     if (layout() == LayoutKind::Strip) {
-        const float q_min_y_pt = std::min({ h.geom.ul_y, h.geom.ur_y,
-                                            h.geom.ll_y, h.geom.lr_y });
-        const float q_max_y_pt = std::max({ h.geom.ul_y, h.geom.ur_y,
-                                            h.geom.ll_y, h.geom.lr_y });
+        // In the view frame (#53): the strip lays out the turned sizes.
+        const auto& sizes = impl_->view->page_sizes();
+        const litepdf::core::PageSize size =
+            h.page < sizes.size() ? sizes[h.page] : litepdf::core::PageSize{0, 0};
+        const litepdf::core::Rotation rot = view_rotation();
+        const float q_min_y_pt = hit_top_pt(h, rot, size.width_pt, size.height_pt);
+        const float q_max_y_pt = hit_bottom_pt(h, rot, size.width_pt, size.height_pt);
         impl_->strip_view.scroll_hit_into_view(static_cast<int>(h.page),
                                                static_cast<double>(q_min_y_pt),
                                                static_cast<double>(q_max_y_pt));
@@ -553,10 +556,14 @@ void PdfCanvas::scroll_into_view(const litepdf::core::SearchSession::Hit& h) {
     // drawn_zoom_pct returns zoom_pct() itself for a bitmap at the current scale.
     const bool        drawn_at_zoom = pct == impl_->view->zoom_pct();
 
-    const float q_min_y_pt = std::min({ h.geom.ul_y, h.geom.ur_y,
-                                        h.geom.ll_y, h.geom.lr_y });
-    const float q_max_y_pt = std::max({ h.geom.ul_y, h.geom.ur_y,
-                                        h.geom.ll_y, h.geom.lr_y });
+    // The quad as drawn, turned with its page (#53). A page with no size most
+    // likely failed to render; if it did render, its hit is misplaced at 180 and
+    // 270 degrees only, which is accepted.
+    const litepdf::core::PageSize size =
+        impl_->view->known_page_size(target_pg).value_or(litepdf::core::PageSize{0, 0});
+    const litepdf::core::Rotation rot = view_rotation();
+    const float q_min_y_pt = hit_top_pt(h, rot, size.width_pt, size.height_pt);
+    const float q_max_y_pt = hit_bottom_pt(h, rot, size.width_pt, size.height_pt);
 
     // Already visible? Measure against the SAME origin the paint path uses.
     const float origin_y  = page_origin_y(page_h, vp.height) + impl_->pan_y;
@@ -2008,11 +2015,14 @@ float PdfCanvas::pan_y_for_hit(const litepdf::core::SearchSession::Hit& h) const
     const D2D1_SIZE_F vp  = impl_->rt->GetSize();
     const float       pct = shown_page_pct(static_cast<int>(h.page));   // #195
 
-    // Quad centre in PDF points -> DIPs, measured from the page's own top.
-    const float q_min_y_pt = std::min({ h.geom.ul_y, h.geom.ur_y,
-                                        h.geom.ll_y, h.geom.lr_y });
-    const float q_max_y_pt = std::max({ h.geom.ul_y, h.geom.ur_y,
-                                        h.geom.ll_y, h.geom.lr_y });
+    // Quad centre in PDF points -> DIPs, measured from the top of the page as
+    // drawn (#53: turned with it, so 90 and 270 degrees read the quad's x extent).
+    const litepdf::core::PageSize size =
+        impl_->view->known_page_size(static_cast<int>(h.page))
+            .value_or(litepdf::core::PageSize{0, 0});
+    const litepdf::core::Rotation rot = view_rotation();
+    const float q_min_y_pt = hit_top_pt(h, rot, size.width_pt, size.height_pt);
+    const float q_max_y_pt = hit_bottom_pt(h, rot, size.width_pt, size.height_pt);
     const float q_center = pdf_point_to_dip((q_min_y_pt + q_max_y_pt) * 0.5f, pct);
 
     // Centre the quad in the viewport. page_origin_y is the page's unpanned

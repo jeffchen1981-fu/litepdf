@@ -615,3 +615,46 @@ TEST_CASE("PdfCanvas rotation: a failed strip page keeps its placeholder in the 
     CHECK(px != kChrome);
     CHECK(px == 0x00C0C0C0u);
 }
+
+TEST_CASE("PdfCanvas rotation: a hit is scrolled into view by its turned extent",
+          "[canvas][rotation]") {
+    // At 90 degrees the word's view-frame y is its page x: centred at
+    // 2 * kMarkWordCentreXPt DIPs below the turned page's top, which no
+    // raw-y measurement (about 75 pt) would scroll to.
+    const float centre = 2.0f * kMarkWordCentreXPt;
+
+    SECTION("single page") {
+        Rig rig(kWidth, kHeight, Layout::Single, kMarker);
+        rig.view().set_zoom_pct(2.0f);
+        Access::navigate(rig.canvas(), kMarkWordPage);
+        rig.land_left();
+        turn(rig, true);
+
+        const SearchSession::Hit h = marker_hit(rig.view());
+        rig.canvas().scroll_into_view(h);
+
+        // The turned A4 page is ceil(595.276 * 2) = 1191 px tall, so the centring
+        // pan (425 - centre) is clamped at the page's bottom.
+        CHECK(rig.pan_y() == Approx(static_cast<float>(kHeight) - 1191.0f));
+        const float on_screen = centre + rig.pan_y();
+        CHECK(on_screen >= 0.0f);
+        CHECK(on_screen <= static_cast<float>(kHeight));
+    }
+
+    SECTION("strip") {
+        Rig rig(kWidth, kHeight, Layout::Single, kMarker);
+        rig.view().set_zoom_pct(2.0f);
+        rig.enter_strip();
+        rig.canvas().strip_navigate(0);
+        rig.land_strip(0);
+        rig.rotate(true);
+
+        const SearchSession::Hit h = marker_hit(rig.view());
+        rig.canvas().scroll_into_view(h);
+
+        // Not clamped: page 3 follows the word's page.
+        const auto& layout = Access::strip_layout(rig.canvas());
+        CHECK(Access::strip_scroll_y(rig.canvas())
+              == Approx(layout.top(kMarkWordPage) + centre - kHeight / 2.0).margin(2.0));
+    }
+}

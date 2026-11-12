@@ -56,6 +56,7 @@
 #include <utility>
 
 #include "core/SearchSession.hpp"
+#include "core/detail/ViewRotation.hpp"
 
 namespace litepdf::ui {
 
@@ -89,12 +90,30 @@ struct PageAnchor {
     }
 };
 
-// A hit quad's top and bottom edge, in points from the top of its page.
-inline float hit_top_pt(const litepdf::core::SearchSession::Hit& h) noexcept {
-    return std::min({h.geom.ul_y, h.geom.ur_y, h.geom.ll_y, h.geom.lr_y});
+// A hit quad's view-frame box, in points from the top-left of its page AS DRAWN
+// (#53): turned by `r` on a page whose view-frame size is view_w_pt x view_h_pt
+// (DocumentView::known_page_size / page_sizes()). At 90 and 270 degrees the
+// vertical extent comes from the quad's x extent.
+inline litepdf::core::ViewRect hit_view_rect(const litepdf::core::SearchSession::Hit& h,
+                                             litepdf::core::Rotation r, float view_w_pt,
+                                             float view_h_pt) noexcept {
+    const float x0 = std::min({h.geom.ul_x, h.geom.ur_x, h.geom.ll_x, h.geom.lr_x});
+    const float x1 = std::max({h.geom.ul_x, h.geom.ur_x, h.geom.ll_x, h.geom.lr_x});
+    const float y0 = std::min({h.geom.ul_y, h.geom.ur_y, h.geom.ll_y, h.geom.lr_y});
+    const float y1 = std::max({h.geom.ul_y, h.geom.ur_y, h.geom.ll_y, h.geom.lr_y});
+    return litepdf::core::local_rect_to_view(litepdf::core::ViewRect{x0, y0, x1 - x0, y1 - y0},
+                                             r, litepdf::core::ViewRect{0, 0, view_w_pt, view_h_pt});
 }
-inline float hit_bottom_pt(const litepdf::core::SearchSession::Hit& h) noexcept {
-    return std::max({h.geom.ul_y, h.geom.ur_y, h.geom.ll_y, h.geom.lr_y});
+
+// A hit quad's top and bottom edge, in points from the top of its page as drawn.
+inline float hit_top_pt(const litepdf::core::SearchSession::Hit& h, litepdf::core::Rotation r,
+                        float view_w_pt, float view_h_pt) noexcept {
+    return hit_view_rect(h, r, view_w_pt, view_h_pt).y;
+}
+inline float hit_bottom_pt(const litepdf::core::SearchSession::Hit& h, litepdf::core::Rotation r,
+                           float view_w_pt, float view_h_pt) noexcept {
+    const litepdf::core::ViewRect v = hit_view_rect(h, r, view_w_pt, view_h_pt);
+    return v.y + v.h;
 }
 
 // The canvas's single pending-anchor slot. Nothing outside PdfCanvas owns one.
