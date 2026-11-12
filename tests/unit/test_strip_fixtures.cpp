@@ -6,10 +6,15 @@
 // under 1 KB); the CBZ gate is measured on local archives (#176).
 // strip-chapters.fb2 was added by #169; there is no XPS fixture (XPS missed the
 // gate on a local WPF-written document, spec section 4.4).
+// chapter-sizes.epub (#230) is not a gate fixture: it is the oracle for
+// loading an ePub page by its chapter location.
 
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/Document.hpp"
+
+#include <cstddef>
+#include <set>
 
 using litepdf::core::Document;
 
@@ -48,5 +53,19 @@ TEST_CASE("StripFixtures: the strip fixtures open with the expected page counts"
         const auto last = doc.page_size(doc.page_count() - 1);
         CHECK(last.width_pt == first.width_pt);
         CHECK(last.height_pt == first.height_pt);
+    }
+    SECTION("chapter-sizes.epub: 68 pages, 12 page widths, all 600 pt high") {
+        // #230: each of the 12 chapters has its own @page side margins, so a
+        // page loaded from the wrong chapter shows in its width.
+        Document doc;
+        REQUIRE_FALSE(doc.open("tests/fixtures/chapter-sizes.epub").has_value());
+        REQUIRE(doc.page_count() == 68);
+        std::set<float> widths;
+        for (std::size_t i = 0; i < doc.page_count(); ++i) {
+            const auto size = doc.page_size(i);
+            widths.insert(size.width_pt);
+            CHECK(size.height_pt == 600.0f);
+        }
+        CHECK(widths.size() == 12);
     }
 }

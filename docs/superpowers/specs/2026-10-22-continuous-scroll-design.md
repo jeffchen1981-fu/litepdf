@@ -213,6 +213,14 @@ for D2D.
   XPS and FB2, and #176 was the follow-up. A 1,027-page EPUB of 60 chapters (2.4 MB of text)
   took 0.98 ms, so EPUB keeps its pass.
 
+  **EPUB with many chapters (#230).** Sizing a page by its flat number made MuPDF walk the
+  chapters from the first, and each chapter's page count walk the spine from its head: O(N³)
+  for N chapters (spine items). An EPUB of 800 chapters took 257 ms and one of 1,500 chapters
+  2,481 ms. Since #230, `Document` reads every chapter's page count once at open and loads a
+  page by its chapter location: 2.7 ms and 10.2 ms (spec
+  `2026-11-12-epub-page-sizes-by-location-230-design.md` §5). What remains grows with N², from
+  MuPDF's own spine walks.
+
   **CBZ passes since #176** (spec `2026-10-25-cbz-header-sizing-176-design.md`). A CBZ page is
   sized from its image header through MuPDF's own image-info code, bit for bit the loaded page's
   bounds for every entry MuPDF can read in full; its §3.4 lists two accepted deviations (PNG
