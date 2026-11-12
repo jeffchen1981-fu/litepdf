@@ -34,7 +34,9 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   entry points, so the cost grew with the square of the number of titles, and
   each render worker paid it again before the first page. litepdf now carries
   one change to MuPDF that finds them all in a single pass; every entry points
-  where it did before. The About box says MuPDF is modified (#229).
+  where it did before. A 1,500-section book (6.5 MB) now opens in 0.9 s instead
+  of 7.7 s, and its first page shows in 4.5 s instead of 25 s. The About box
+  says MuPDF is modified (#229).
 
 ## [1.8.3] — 2026-11-10 — Switching to continuous scroll keeps your place
 
