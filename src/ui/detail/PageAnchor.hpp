@@ -29,7 +29,8 @@
 // TAKING IS NOT RETIRING. A spread submits two renders under ONE seq and both
 // must apply the anchor: Bottom measures against the UNION of the two slots,
 // which is not final until the second half lands, and either half can arrive
-// first (two workers, and an L1 cache hit returns before any MuPDF work). So
+// first (two workers in every format but FB2, and an L1 cache hit returns
+// before any MuPDF work). So
 // take() does not mutate; the canvas calls mark_applied() when it actually
 // applied one; and the anchor is retired by the NEXT stamp(). That yields:
 //   - a failed render (null completion) marks nothing by itself, so the retry's
