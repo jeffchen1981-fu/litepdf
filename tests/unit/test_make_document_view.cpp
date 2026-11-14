@@ -69,9 +69,10 @@ TEST_CASE("MakeDocumentView: other formats keep the default worker count", "[ui]
 
 // The password-prompt site passes the password through. A PDF named .fb2 opens
 // as a PDF (MuPDF scores content above extension) and gets one worker by name:
-// slower, never wrong. Its worker must still authenticate (#126).
-TEST_CASE("MakeDocumentView: the password reaches the workers of a one-worker view",
-          "[ui][make_view]") {
+// slower, never wrong. Without the password the view's SearchSession throws
+// "document needs a password", so a view that builds proves it arrived; the
+// render workers take the same argument from DocumentView (#126, #130).
+TEST_CASE("MakeDocumentView: the password reaches a one-worker view", "[ui][make_view]") {
     const TempCopy file{"tests/fixtures/encrypted.pdf", L"encrypted.fb2"};
     Document doc;
     const auto err = doc.open(file.path);
