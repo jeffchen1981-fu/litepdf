@@ -64,6 +64,7 @@ add_library(litepdf_core STATIC
     src/core/Version.cpp           # #60 build identity
     src/core/EscrowContext.cpp     # #61
     src/core/MuPDFRoot.cpp         # #61
+    src/core/MuPdfPatchNotice.cpp  # #229
     src/core/DocumentView.cpp
     src/core/MruList.cpp
     src/core/ViewPrefs.cpp

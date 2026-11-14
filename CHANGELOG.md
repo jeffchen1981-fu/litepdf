@@ -29,6 +29,14 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   longer the more chapters the book had, growing much faster than the book:
   0.26 s for 800 chapters and 2.5 s for 1,500. It now takes 3 ms and 10 ms.
   Printing finds each page the same way (#230).
+- A large FB2 book opens much faster. After laying the book out, MuPDF searched
+  the whole book again for each section title to find where its table-of-contents
+  entry points, so the cost grew with the square of the number of titles, and
+  each render worker paid it again before the first page. litepdf now carries
+  one change to MuPDF that finds them all in a single pass; every entry points
+  where it did before. A 1,500-section book (6.5 MB) now opens in 0.85 to 0.89 s
+  instead of 7.3 to 8.4 s, and its first page shows in 5.8 to 8.5 s instead of
+  20 to 23 s (three runs each). The About box says MuPDF is modified (#229).
 
 ## [1.8.3] — 2026-11-10 — Switching to continuous scroll keeps your place
 

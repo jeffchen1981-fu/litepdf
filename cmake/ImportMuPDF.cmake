@@ -180,6 +180,114 @@ foreach(_t TOFU_SYMBOL TOFU_NOTO TOFU_CJK_LANG TOFU_CJK)
 endforeach()
 message(STATUS "MuPDF prune-effective assertion passed (12 FZ_ENABLE_* + 4 TOFU_*; TOFU_EMOJI exempt).")
 
+# --- #229: local source patch, one-pass outline resolve ---------------------
+# MuPDF 1.27.2 resolves an HTML-engine document's outline (FB2: one entry per
+# section title) with one walk of the whole box tree per entry, after every
+# layout: O(N^2) in the titles. third_party/mupdf-patches/ carries the fix
+# until upstream has one; its header says what it changes and how to drop it.
+#
+# Same shape as the prune block: the patched file carries a versioned marker.
+# Without the current marker (fresh checkout, or the patch changed and the
+# marker was bumped), restore the tracked file to pristine, apply the patch,
+# check the marker landed, and delete the stamp so MSBuild rebuilds. A tree
+# with no .git (the release source tarball) already carries the marker, so it
+# never reaches the git calls. The marker version and the symbol suffix move
+# together (src/core/MuPdfPatchNotice.cpp): a library built from another patch
+# version then fails litepdf's link instead of linking silently.
+set(_LITEPDF_PATCH_VER "LITEPDF_PATCH_HTDOC_OUTLINE_V1")
+set(_LITEPDF_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mupdf-patches/0001-htdoc-one-pass-outline.patch")
+set(_HTML_DOC_C "${_MUPDF_ROOT}/source/html/html-doc.c")
+set(_HTML_OUTLINE_C "${_MUPDF_ROOT}/source/html/html-outline.c")
+file(READ "${_HTML_DOC_C}" _html_doc)
+if(NOT _html_doc MATCHES "${_LITEPDF_PATCH_VER}")
+    # Restoring the file discards its working-tree changes. Those are only
+    # ours to discard when they are an earlier version of this patch; anything
+    # else (someone's own experiment in the shared checkout) stops here.
+    if(NOT _html_doc MATCHES "LITEPDF_PATCH_HTDOC_OUTLINE_V")
+        execute_process(
+            COMMAND git -C "${_MUPDF_ROOT}" diff --quiet -- source/html/html-doc.c
+            RESULT_VARIABLE _dirty)
+        if(_dirty EQUAL 1)
+            message(FATAL_ERROR
+                "#229 patch: MuPDF source/html/html-doc.c has local changes that are "
+                "not litepdf's patch, and applying the patch would discard them. "
+                "Save or revert them (git -C \"${_MUPDF_ROOT}\" diff -- "
+                "source/html/html-doc.c), then configure again.")
+        endif()
+    endif()
+    execute_process(
+        COMMAND git -C "${_MUPDF_ROOT}" checkout -- source/html/html-doc.c
+        RESULT_VARIABLE _gitrc)
+    if(NOT _gitrc EQUAL 0)
+        message(FATAL_ERROR
+            "#229 patch: MuPDF source/html/html-doc.c lacks the ${_LITEPDF_PATCH_VER} "
+            "marker and could not be restored to pristine (git rc=${_gitrc}). "
+            "A tree without .git (an extracted source tarball) must already carry "
+            "the patched file; otherwise run 'git submodule update --init "
+            "third_party/mupdf' and configure again.")
+    endif()
+    execute_process(
+        COMMAND git -C "${_MUPDF_ROOT}" apply --whitespace=nowarn "${_LITEPDF_PATCH}"
+        RESULT_VARIABLE _gitrc)
+    if(NOT _gitrc EQUAL 0)
+        message(FATAL_ERROR
+            "#229 patch: ${_LITEPDF_PATCH} no longer applies to MuPDF's "
+            "source/html/html-doc.c (git rc=${_gitrc}). Most likely MuPDF was "
+            "bumped: re-base the patch on the new html-doc.c, or drop it if "
+            "upstream now resolves the outline in one pass (see the patch header).")
+    endif()
+    file(READ "${_HTML_DOC_C}" _html_doc)
+    if(NOT _html_doc MATCHES "${_LITEPDF_PATCH_VER}")
+        message(FATAL_ERROR
+            "#229 patch: git apply succeeded but ${_HTML_DOC_C} still lacks the "
+            "${_LITEPDF_PATCH_VER} marker. The patch file and the marker version "
+            "in ImportMuPDF.cmake disagree.")
+    endif()
+    message(STATUS "MuPDF html-doc.c patched (${_LITEPDF_PATCH_VER}).")
+    file(REMOVE
+        "${CMAKE_BINARY_DIR}/mupdf_ext-prefix/src/mupdf_ext-stamp/Release/mupdf_ext-build")
+endif()
+
+# The block above deletes the stamp only in the build directory whose
+# configure applied the patch. Worktrees share one MuPDF tree through a
+# junction, so another build directory can find the marker already in place
+# while its stamp still stands for a library built before the patch. Each
+# build directory therefore records the patch version its MuPDF was last
+# built for, and a different one deletes its own stamp.
+set(_LITEPDF_PATCH_LEVEL_FILE "${CMAKE_BINARY_DIR}/mupdf-patch-level.txt")
+set(_litepdf_patch_level "")
+if(EXISTS "${_LITEPDF_PATCH_LEVEL_FILE}")
+    file(READ "${_LITEPDF_PATCH_LEVEL_FILE}" _litepdf_patch_level)
+endif()
+if(NOT _litepdf_patch_level STREQUAL _LITEPDF_PATCH_VER)
+    file(REMOVE
+        "${CMAKE_BINARY_DIR}/mupdf_ext-prefix/src/mupdf_ext-stamp/Release/mupdf_ext-build")
+    file(WRITE "${_LITEPDF_PATCH_LEVEL_FILE}" "${_LITEPDF_PATCH_VER}")
+endif()
+
+# Every configure: the patch copies find_first_content and the value rules of
+# find_box_target / find_flow_target from html-outline.c, a file it does not
+# touch. If a MuPDF bump changes that file, html-doc.c may still patch cleanly
+# while the copied rules go stale (upstream master already changed
+# find_flow_target). Line endings are normalised so CRLF and LF checkouts agree.
+set(_HTML_OUTLINE_SHA256_1272 "25a76099a70f4daefc9ad2f94d8141d8705c5b764fd04950ca12ed9a12c38dc4")
+file(READ "${_HTML_OUTLINE_C}" _html_outline)
+string(REPLACE "\r\n" "\n" _html_outline "${_html_outline}")
+string(SHA256 _html_outline_sha "${_html_outline}")
+if(NOT _html_outline_sha STREQUAL _HTML_OUTLINE_SHA256_1272)
+    message(FATAL_ERROR
+        "#229 patch: MuPDF source/html/html-outline.c changed (SHA-256 "
+        "${_html_outline_sha}, recorded ${_HTML_OUTLINE_SHA256_1272}). The patch "
+        "in third_party/mupdf-patches/ copies find_first_content and the value "
+        "rules of find_box_target / find_flow_target from it: re-check those "
+        "copies against the new file, then update _HTML_OUTLINE_SHA256_1272 here.")
+endif()
+
+# A changed patch, a reverted html-doc.c or a changed html-outline.c re-runs
+# configure, and with it the apply and the hash check, on the next build.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${_LITEPDF_PATCH}" "${_HTML_DOC_C}" "${_HTML_OUTLINE_C}")
+
 # ExternalProject builds MuPDF's sln. We target libmupdf; MSBuild
 # automatically chases its ProjectReferences (libthirdparty, libresources,
 # libmuthreads) and the sln-level config maps bin2coff → Release|Win32.
