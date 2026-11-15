@@ -45,6 +45,18 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   415 MiB; an 800-section book (3.5 MB), 1.5 to 1.7 s instead of 2.0 to 2.9 s and
   207 MiB instead of 252 MiB (five runs each). Turning pages, thumbnails and
   jumping to the last page take a few milliseconds either way (#229).
+- An FB2 book that is never searched no longer pays for search when it opens.
+  Search keeps its own copy of the book, which for an FB2 means reading and
+  parsing the whole file again, at about 14 times the file's size in memory. An
+  FB2 tab now makes that copy at its first search instead of while it opens. A
+  1,500-section book (6.5 MB) holds 244 MiB instead of 330 MiB and shows its
+  first page in 1.96 s instead of 2.19 s; an 800-section book (3.5 MB), 161 MiB
+  instead of 207 MiB and 1.16 s instead of 1.33 s (medians of five runs). The
+  first search in the tab does that reading and parsing before it finds
+  anything, off the window's thread. If the file was
+  moved, deleted or changed since the tab opened it, the search finds nothing
+  and the find bar says "Reopen file", rather than search a different file
+  from the one on screen (#229).
 
 ## [1.8.3] — 2026-11-10 — Switching to continuous scroll keeps your place
 

@@ -208,7 +208,8 @@ DocumentView::DocumentView(Document doc,
                            std::size_t num_workers,
                            std::size_t l1_capacity,
                            std::size_t l2_capacity,
-                           std::size_t l1_budget_bytes)
+                           std::size_t l1_budget_bytes,
+                           SearchOpen search_open)
     : impl_(std::make_unique<Impl>()) {
     impl_->doc = std::move(doc);
     impl_->l1_budget = l1_budget_bytes;
@@ -241,9 +242,11 @@ DocumentView::DocumentView(Document doc,
     // Construct SearchSession LAST — it references impl_->doc (already
     // moved into place) and the caller-owned dispatcher, and opens its own
     // document on a cloned context, authenticated with the same password
-    // as the render workers (#130). If it throws (clone, open or password
+    // as the render workers (#130), here or, with SearchOpen::AtFirstScan, at
+    // the first search (#229). If it throws (clone, open or password
     // failure), earlier members RAII-unwind via Impl's declaration order.
-    impl_->session = std::make_unique<SearchSession>(impl_->doc, dispatcher, password);
+    impl_->session =
+        std::make_unique<SearchSession>(impl_->doc, dispatcher, password, search_open);
 }
 
 DocumentView::~DocumentView() {
