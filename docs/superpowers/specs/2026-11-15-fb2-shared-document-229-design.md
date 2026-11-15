@@ -3,6 +3,9 @@
 Status: design agreed in chat 2026-11-15, after a probe and a Fable review of the draft. The six findings of
 that review are folded in (§3.2 page lifetime, §3.3 priority gate, §3.1 format predicate, §6.2 and §6.3 oracles).
 This spec is written for the user's review before any plan or code.
+Spec gate (Full tier, routine): round 1 (Opus) fixed in place: the page-lifetime oracle's parking hook, the gate's
+re-entry check before `waiting[cls]++`, the unencrypted PDF-as-`.fb2` test, FB2 content under `.svg`, shared fonts,
+and the comment list.
 Issue: #229 (body + 3 comments; item 3 of the third comment: "Sharing the Document's laid-out copy"). Base: main at
 dde66b6.
 Earlier #229 work, all merged, none released: #234 one-pass outline resolve (MuPDF patch), #235 one render worker for
@@ -69,8 +72,11 @@ page's interpretation is a long hold. The same holds for any other content named
 
 `ui::make_document_view` (`src/ui/detail/MakeDocumentView.hpp`) decides: `share = doc.is_fb2() && !password`. It
 passes `DocumentShare::Shared` or `DocumentShare::Own` (new enum, `src/core/DocumentShare.hpp`, replacing
-`SearchOpen`) through `DocumentView` to `RenderEngine` and `SearchSession`. The worker count stays as today (one for
-`.fb2` by extension).
+`SearchOpen`) through `DocumentView` to `RenderEngine` and `SearchSession`. Worker count:
+`share || one_render_worker(path) ? 1 : RenderEngine::kDefaultWorkers`. A shared view always gets one worker. That
+covers FB2 content under another allowed name: `.svg` has no magic check (`looks_like_supported_document` in
+`Document.cpp`), MuPDF scores content above extension, so such a file opens as FB2 and is shared. A `.fb2`-named
+file that is not FB2 keeps one worker by name, as #235 decided.
 
 ### 3.2 The borrow seam and page lifetime
 
@@ -100,6 +106,12 @@ Rules, each one stated in the seam's header:
 - **What may leave `fn`:** a display list, an stext page (inside a `Document::TextPage` handle) and copied hits.
   Display lists and stext pages keep fonts and images, not the document or the page, and their refcounts go
   through `FZ_LOCK_ALLOC`; they are dropped later on any context of the family, as today.
+- **Fonts are now shared too.** Before, each copy had its own FB2 font set (`html-font.c`, one set per document).
+  Now the worker rasterises a display list outside the gate while a search or the UI builds stext inside it, on the
+  same `fz_font` objects. The font fields MuPDF fills lazily without a lock (`get_gid_bbox`, `encoding_cache` in
+  `source/fitz/font.c`) are reached from rasterising only through clip text and Type 3 glyphs, which the HTML engine
+  does not produce. Base-14 and fallback fonts are already shared across threads in the same family today, so this
+  is no new class of exposure; it is a re-check item on a MuPDF upgrade (§8).
 - **No exception or longjmp crosses `fn`'s boundary.** `fn` wraps its MuPDF calls in its own `fz_try` on its own
   context and is `noexcept` in effect (#179 hygiene: no C++ object with a destructor inside the `fz_try`).
 - **The document is dropped on the Document's own context, last**, exactly as today: `~DocumentView` resets the
@@ -116,11 +128,17 @@ the only way to reach the document: skipping the gate does not compile.
 lends nothing has only Foreground users, so its behaviour does not change.
 
 ```
-acquire(cls):  lock m; waiting[cls]++;
+acquire(cls):  lock m;
+               if (held && owner == this thread) throw std::system_error(resource_deadlock_would_occur);
+               waiting[cls]++;
                cv.wait(m, [&]{ return !held && no class above cls is waiting; });
                waiting[cls]--; held = true; owner = this thread;
 release():     lock m; held = false; owner = none; cv.notify_all();
 ```
+
+The re-entry check comes BEFORE `waiting[cls]++`. Placed after it, a throw would leave `waiting[Foreground]` at 1
+forever, and no Render or Scan would ever be admitted again: the worker stops, and closing the tab hangs in
+`~SearchSession`'s spin-wait and `~RenderEngine`'s join (§6.2 pins this).
 
 - Order: Foreground > Render > Scan. The decision is made under the gate's own mutex, so a borrower that started
   waiting before the UI cannot slip in after it (the check-then-lock gap of the first draft).
@@ -138,15 +156,20 @@ release():     lock m; held = false; owner = none; cv.notify_all();
 - Invariant: **the UI thread never waits for a borrower while it holds the gate.** The one place that runs other UI
   code under the gate is print's message pump; it relies on the parent window being disabled for the print, so no
   tab can close there. Stated in `with_rendered_page`'s header comment.
-- Lock order: `scan_mtx` (SearchSession) may be held while acquiring the gate; the gate's holder never takes
-  `scan_mtx`, the engine's queue mutex, the dispatcher's mutex or the page cache's mutex. Nothing takes the gate
-  under those.
+- Lock order: `scan_mtx` (SearchSession) may be held while acquiring the gate. No thread acquires the gate while
+  holding the engine's queue mutex, the dispatcher's mutex, the page cache's mutex or `SearchSession::State::m`.
+  The reverse can happen: during print, the UI thread holds the gate while `abort_proc` dispatches messages, and a
+  handler there may submit a render or set a query, taking those mutexes. That is no cycle, because nothing waits
+  for the gate under them. A borrower never takes `scan_mtx` under the gate.
 
 ### 3.4 RenderEngine in shared mode
 
 `RenderEngine(Document&, num_workers, PageCache*, password, DocumentShare)`. With `Shared`:
 
-- The constructor clones the worker contexts as today and opens no document. `worker_docs` stays empty.
+- The constructor clones the worker contexts as today and opens no document. `worker_docs` stays empty, and no
+  shared-mode path reads it: `worker_loop` today loads `wdoc = worker_docs[idx]` up front and passes it to both
+  `maybe_deliver_text` calls. In shared mode both build sites reach the document only through `with_document`; the
+  plan restructures `worker_loop` so that no `fz_document*` variable exists on that path.
 - `worker_loop`, display-list miss: one `with_document(doc, Render, ...)` around load, display list, drop page. A
   failure inside leaves `dlist` null, as today's `fz_catch` does.
 - `maybe_deliver_text`: one `with_document(doc, Render, ...)` around `TextPageAccess::build`. The skip rules and the
@@ -178,8 +201,9 @@ With the document shared, nothing reads an FB2 by name after open, so these go:
 
 - `SearchOpen` (`src/core/SearchOpen.hpp`), replaced by `DocumentShare`.
 - The deferred open: `Impl::open_deferred`, its fields (`path`, `path_utf8`, `stamp`), `failed_epoch`,
-  `SearchSession::open_failed()`, epoch check #1c, the `after_open` and `after_read` scan hooks. `before_scan` stays
-  (used by the scan-order tests).
+  `SearchSession::open_failed()`, epoch check #1c, and `set_scan_hooks` with all three hooks. Every caller of
+  `set_scan_hooks` is a `[lazy]` test (`tests/unit/test_search_session.cpp`), so none is left; §6.3's scan test
+  uses the gate's own hook instead.
 - `FileStamp` (`src/core/FileStamp.{hpp,cpp}`, its CMakeLists line) and `Document::source_stamp()`.
 - The find bar's `Reopen file` counter (`MainWindow::update_find_counter`).
 - The `[lazy]` tests in `tests/unit/test_search_session.cpp` and the two `make_document_view` tests that pin the
@@ -198,6 +222,12 @@ simultaneous" (`docs/reference/c/overview.md`, rule 2). Corrected wherever this 
 `RenderEngine.cpp` (the `worker_docs` member, the constructor's open loop, the rollback comment, `maybe_deliver_text`),
 `Document.hpp` (`source_path`, `page_hits`, `with_rendered_page`), `Document.cpp` (`Impl::doc_mutex`),
 `SearchSession.cpp` (the session's pair), `DocumentView.cpp` (teardown).
+
+Comments that this change makes false in shared mode, rewritten to say what holds in each mode:
+`SearchSession.hpp` (the thread-safety block: "A scan never touches the tab Document (#130)", "a search never waits
+on a print or a text-selection build"), `detail/TextPageAccess.hpp` ("the render worker (on its own document,
+lock-free)"), `detail/PageHitsAccess.hpp` (who serialises `ctx` and `doc`), `EscrowContext.hpp` ("under
+doc_mutex"), `RenderEngine.cpp` (`maybe_deliver_text`: "no doc_mutex: nothing else touches them").
 
 ## 4. Data flow, one FB2 tab
 
@@ -222,10 +252,15 @@ UI thread:     Document::text_page / page_size / outline / print  [gate Foregrou
 ### 6.1 Sharing is in place
 
 - `test_make_document_view.cpp`: an FB2 view's engine and session report `documents_opened() == 0`; a PDF view's
-  report one per worker and 1. A PDF copied as `.fb2` reports 1 and 1 (own documents, one worker by name).
+  report one per worker and 1.
+- An UNENCRYPTED PDF (`simple.pdf`) copied as `.fb2`, no password: engine 1, session 1, one worker by name. This is
+  the case that tells the format predicate from the extension predicate. The existing encrypted `.fb2` test cannot:
+  its password alone makes it `Own`.
+- FB2 content copied as `.svg`: shared (both counters 0) and one worker (§3.1).
 - `test_render_engine.cpp`, `test_search_session.cpp`: the same counters on the classes directly, for both modes.
-- An FB2 view finds every hit of a search after its file was moved away (the #236 rename oracle, now passing because
-  nothing reads the file).
+- Behaviour, not a sharing oracle: an FB2 view finds every hit of a search after its file was moved away. An FB2
+  lets go of its file at open, so a session that opened its own copy at construction passes this too; only the
+  counters above prove sharing.
 
 ### 6.2 The gate
 
@@ -238,6 +273,8 @@ New `test_priority_gate.cpp`, deterministic, with no sleeps as oracles (latches 
 - Render goes before Scan when both wait.
 - Re-entry on the owning thread throws `std::system_error`; `Document::text_page` under a held Foreground gate on the
   same thread returns an empty handle (the #70 contract, re-pinned).
+- A failed re-entry leaves the gate usable: after the throw and the release, a Render and then a Scan acquire on
+  another thread succeed within a deadline (the case where the check sits after `waiting[cls]++`).
 - A throw under a hold releases it (RAII).
 
 ### 6.3 Borrowers go through the gate
@@ -245,11 +282,13 @@ New `test_priority_gate.cpp`, deterministic, with no sleeps as oracles (latches 
 - Render: the test holds the gate in class Foreground (seam hook) and submits an uncached render to a shared engine;
   the worker reaches "waiting in class Render" and no display list is built until the test releases.
 - Scan: the same with a search task; it reaches "waiting in class Scan" and no hit is published until release.
-- Page lifetime: after each borrower call returns, the document's open-page list holds no live page: every entry has
-  `page->doc == NULL`. A dropped page stays on the list, marked dead, until the next load reaps it
-  (`fz_reap_dead_pages`), so "the list is empty" would be the wrong check. A borrower that dropped its page after
-  leaving the gate would still hold a live entry at that point. Read under the gate through a test-only helper on
-  the seam.
+- Page lifetime: the seam has a test hook `after_release`, run on the borrower's thread inside `with_document` after
+  the gate is released and before `with_document` returns. The test parks the borrower there and, from the test
+  thread, reads the document's open-page list under a Foreground hold: no entry is live (every entry has
+  `page->doc == NULL`). A dropped page stays on the list, marked dead, until the next load reaps it
+  (`fz_reap_dead_pages`), so "the list is empty" would be the wrong check. A borrower that keeps its page past the
+  gate and drops it after `with_document` returns is parked with that page still live, so the check sees it. Done
+  for the render build, the text build and the scan.
 
 ### 6.4 Results under contention
 
@@ -257,7 +296,8 @@ New `test_priority_gate.cpp`, deterministic, with no sleeps as oracles (latches 
 `tests/fixtures/strip-chapters.fb2`:
 
 - the search's hits equal a single-threaded scan of the same book (page and quad);
-- every pixmap equals, byte for byte, the same page rendered by an `Own` engine;
+- every pixmap equals, byte for byte, the same page rendered by the same view with nothing else running (a baseline
+  taken first, on the same shared document, so a second parse cannot differ);
 - every text handle's `copy()` of the whole page equals the single-threaded text.
 
 ### 6.5 Proving the tests can fail (mutation checks, from a committed tree)
@@ -270,6 +310,9 @@ New `test_priority_gate.cpp`, deterministic, with no sleeps as oracles (latches 
 5. The session opens its own document in `Shared` mode: §6.1 session counter fails.
 6. The gate's re-entry check removed: §6.2 re-entry test fails (deadlock bounded by the test's timeout, reported as
    a failure).
+7. The re-entry check moved after `waiting[cls]++`: §6.2's "failed re-entry leaves the gate usable" fails.
+8. `make_document_view` shares by extension (`one_render_worker(path) && !password`): §6.1's unencrypted
+   PDF-as-`.fb2` test fails.
 
 ## 7. Development and measurement
 
@@ -291,9 +334,14 @@ New `test_priority_gate.cpp`, deterministic, with no sleeps as oracles (latches 
 - **A MuPDF upgrade adds per-document state touched outside a page.** The safety reading of §3.2 is for 1.27.2's HTML
   handler. Re-read `html-doc.c` and `fitz/document.c`'s page list on any MuPDF bump; the #234 patch-level check already
   forces attention there.
-- **A future Document method forgets the gate.** Every method that touches `impl_->doc` already takes `doc_mutex`
-  today; the rename to `gate` keeps that one place to look. A shared borrower cannot skip it (§3.2, no stored
-  `fz_document*`).
+- **A future Document method forgets the gate.** Every const method that touches `impl_->doc` takes `doc_mutex`
+  today (`with_rendered_page`, `page_size`, `read_ahead_page_sizes`, `page_text`, `page_hits`, `query_compiles`,
+  `outline`, `text_page`); those become Foreground holds. `open`, `close`, `authenticate`, `is_open` and the context
+  clones touch it without the lock. They stay safe because a view's Document is reached only as `const Document&`
+  once the view exists, and `open`/`close`/`authenticate` are non-const; the spec keeps that rule and the seam's
+  header states it. A shared borrower cannot skip the gate (§3.2, no stored `fz_document*`).
+- **Fonts shared across threads (§3.2).** Re-check MuPDF's lazily filled font fields on any MuPDF bump, with the
+  HTML engine's output (no clip text, no Type 3).
 - **Search finishes later while the reader turns pages.** By design (Scan is the lowest class); measured in §7 (2).
 - **#232.** If ePub later shares, the gate and seam are reusable, but ePub's chapter walk makes a hold longer; it
   needs its own measurement first.
