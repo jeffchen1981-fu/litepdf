@@ -45,6 +45,7 @@
 // (#55) RenderEngine::RenderToken is a nested type and cannot be
 // forward-declared. RenderEngine.hpp is MuPDF-free.
 #include "core/RenderEngine.hpp"
+#include "core/SearchOpen.hpp"
 #include "core/TextSelection.hpp"
 #include "core/detail/PrefetchPlan.hpp"  // TravelDirection (standard library only)
 #include "core/detail/ViewRotation.hpp"  // Rotation (#53)
@@ -85,13 +86,22 @@ public:
     // literal 0 converting to string_view(nullptr) (see RenderEngine.hpp).
     // `l1_budget_bytes` bounds the cache's L1 pixmaps by bytes as well as
     // by count, and decides which neighbours are prefetched (#49).
+    // `search_open` is when the SearchSession opens its own document
+    // (#229): SearchOpen::AtFirstScan moves that open, and the memory it
+    // takes, from here to the tab's first search; the session ignores it
+    // when there is a password (see SearchSession's constructor).
     explicit DocumentView(Document doc,
                           litepdf::app::ISearchDispatcher& dispatcher,
                           std::optional<std::string_view> password = std::nullopt,
                           std::size_t num_workers = RenderEngine::kDefaultWorkers,
-                          std::size_t l1_capacity = 5,
-                          std::size_t l2_capacity = 10,
-                          std::size_t l1_budget_bytes = kDefaultL1BudgetBytes);
+                          std::size_t l1_capacity = kDefaultL1Capacity,
+                          std::size_t l2_capacity = kDefaultL2Capacity,
+                          std::size_t l1_budget_bytes = kDefaultL1BudgetBytes,
+                          SearchOpen search_open = SearchOpen::AtConstruction);
+
+    // The cache's entry counts when the caller names none.
+    static constexpr std::size_t kDefaultL1Capacity = 5;
+    static constexpr std::size_t kDefaultL2Capacity = 10;
     ~DocumentView();
 
     DocumentView(const DocumentView&)            = delete;

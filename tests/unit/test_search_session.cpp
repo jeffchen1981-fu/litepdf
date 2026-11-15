@@ -38,6 +38,7 @@
 #include <fstream>
 #include <functional>
 #include <future>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -59,6 +60,13 @@ namespace litepdf::core {
 struct SearchSessionTestAccess {
     static void set_after_reset_hook(SearchSession& s, std::function<void()> hook) {
         s.set_after_reset_hook(std::move(hook));
+    }
+    // #229: `after_open` runs after a deferred open of the session's own
+    // document (whether it worked or not), `before_scan` right before a page
+    // is scanned; both on the task's thread, under the scan lock.
+    static void set_scan_hooks(SearchSession& s, std::function<void()> after_open,
+                               std::function<void()> before_scan) {
+        s.set_scan_hooks(std::move(after_open), std::move(before_scan));
     }
 };
 
@@ -937,4 +945,272 @@ TEST_CASE("SearchSession: the start page completes first on the pool",
         CHECK(order == std::vector<std::size_t>{5, 6, 0, 1, 2, 3, 4});
         if (!all || order != std::vector<std::size_t>{5, 6, 0, 1, 2, 3, 4}) break;
     }
+}
+
+// ---------------------------------------------------------------------------
+// #229: an FB2 session opens its own document at the first scan, not at
+// construction. FB2 reads the whole file at open and lets go of it, so a copy
+// can be renamed, rewritten or restored under a live tab Document. That makes
+// the deferred open observable without a seam: an eager session would already
+// hold its parsed copy and scan it.
+// ---------------------------------------------------------------------------
+namespace {
+
+constexpr const char* kFb2Fixture = "tests/fixtures/strip-chapters.fb2";
+
+// A temp copy of `fixture`, plus the name it is moved to; both are removed
+// (best effort) when the scope ends.
+struct MovableCopy {
+    std::filesystem::path path;
+    std::filesystem::path moved;
+    MovableCopy(const char* fixture, const char* name)
+        : path(std::filesystem::temp_directory_path() / name),
+          moved(std::filesystem::temp_directory_path() / (std::string(name) + ".moved")) {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        std::filesystem::remove(moved, ec);
+        std::filesystem::copy_file(fixture, path);
+    }
+    ~MovableCopy() {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        std::filesystem::remove(moved, ec);
+    }
+    MovableCopy(const MovableCopy&)            = delete;
+    MovableCopy& operator=(const MovableCopy&) = delete;
+    void move_away() { std::filesystem::rename(path, moved); }
+    void move_back() { std::filesystem::rename(moved, path); }
+};
+
+std::size_t total_hits(const Document& doc, std::string_view needle) {
+    std::size_t n = 0;
+    for (std::size_t p = 0; p < doc.page_count(); ++p) {
+        n += doc.page_hits(p, needle, Document::SearchFlags{}).size();
+    }
+    return n;
+}
+
+// Moves the write time of `path` well clear of the one it has, so a stamp
+// comparison cannot miss it on the file system's clock granularity.
+void bump_write_time(const std::filesystem::path& path) {
+    std::filesystem::last_write_time(
+        path, std::filesystem::last_write_time(path) + std::chrono::seconds(10));
+}
+
+}  // namespace
+
+TEST_CASE("SearchSession: an FB2 session reads its file at the first scan, not before",
+          "[search][session][lazy]") {
+    MovableCopy copy(kFb2Fixture, "litepdf-229-lazy-first-scan.fb2");
+    Document doc;
+    REQUIRE_FALSE(doc.open(copy.path).has_value());
+    const std::size_t expected = total_hits(doc, "Lorem");
+    REQUIRE(expected > 0);
+
+    InlineDispatcher d;
+    SearchSession s(doc, d, std::nullopt, SearchOpen::AtFirstScan);
+    CHECK_FALSE(s.open_failed());
+
+    // Gone before the first scan: the deferred open fails, the scan still
+    // ends, and the session says why it found nothing.
+    copy.move_away();
+    s.set_query(L"Lorem", SearchSession::Flags{});
+    CHECK(s.open_failed());
+    CHECK(s.scan_complete());
+    CHECK(s.hit_count() == 0);
+
+    // Back: the next query tries again, and scans.
+    copy.move_back();
+    s.set_query(L"Lorem", SearchSession::Flags{});
+    CHECK_FALSE(s.open_failed());
+    CHECK(s.scan_complete());
+    CHECK(s.hit_count() == expected);
+
+    // Opened once, kept: moving the file again changes nothing.
+    copy.move_away();
+    s.set_query(L"Lorem", SearchSession::Flags{});
+    CHECK_FALSE(s.open_failed());
+    CHECK(s.hit_count() == expected);
+}
+
+// The tab Document recorded the file it read; a deferred open of anything else
+// would put hits where the tab's pages do not have them.
+TEST_CASE("SearchSession: an FB2 rewritten after the tab opened it is not scanned",
+          "[search][session][lazy]") {
+    MovableCopy copy(kFb2Fixture, "litepdf-229-lazy-rewritten.fb2");
+    Document doc;
+    REQUIRE_FALSE(doc.open(copy.path).has_value());
+
+    // The same book plus one paragraph.
+    {
+        std::ifstream in(kFb2Fixture, std::ios::binary);
+        std::string text((std::istreambuf_iterator<char>(in)),
+                         std::istreambuf_iterator<char>());
+        const auto at = text.rfind("</section>");
+        REQUIRE(at != std::string::npos);
+        text.insert(at, "<p>Lorem added after the open.</p>");
+        std::ofstream out(copy.path, std::ios::binary | std::ios::trunc);
+        out << text;
+    }
+    bump_write_time(copy.path);
+
+    InlineDispatcher d;
+    SearchSession s(doc, d, std::nullopt, SearchOpen::AtFirstScan);
+    s.set_query(L"Lorem", SearchSession::Flags{});
+    CHECK(s.open_failed());
+    CHECK(s.scan_complete());
+    CHECK(s.hit_count() == 0);
+
+    // The file stays changed, so every later query fails the same way.
+    s.set_query(L"dolor", SearchSession::Flags{});
+    CHECK(s.open_failed());
+    CHECK(s.hit_count() == 0);
+}
+
+// A same-size rewrite is caught by the write time alone.
+TEST_CASE("SearchSession: an FB2 with a new write time and the same size is not scanned",
+          "[search][session][lazy]") {
+    MovableCopy copy(kFb2Fixture, "litepdf-229-lazy-touched.fb2");
+    Document doc;
+    REQUIRE_FALSE(doc.open(copy.path).has_value());
+    const auto size = std::filesystem::file_size(copy.path);
+    bump_write_time(copy.path);
+    REQUIRE(std::filesystem::file_size(copy.path) == size);
+
+    InlineDispatcher d;
+    SearchSession s(doc, d, std::nullopt, SearchOpen::AtFirstScan);
+    s.set_query(L"Lorem", SearchSession::Flags{});
+    CHECK(s.open_failed());
+    CHECK(s.hit_count() == 0);
+}
+
+TEST_CASE("SearchSession: clear and an empty query open nothing",
+          "[search][session][lazy]") {
+    MovableCopy copy(kFb2Fixture, "litepdf-229-lazy-clear.fb2");
+    Document doc;
+    REQUIRE_FALSE(doc.open(copy.path).has_value());
+
+    InlineDispatcher d;
+    SearchSession s(doc, d, std::nullopt, SearchOpen::AtFirstScan);
+    int opens = 0;
+    SearchSessionTestAccess::set_scan_hooks(s, [&] { ++opens; }, nullptr);
+    copy.move_away();
+    s.clear();
+    s.set_query(L"", SearchSession::Flags{});
+    CHECK(opens == 0);
+    CHECK_FALSE(s.open_failed());
+    CHECK(s.scan_complete());
+
+    // The file really is gone: a real query fails, and the next clear ends
+    // the failed state with its generation.
+    s.set_query(L"Lorem", SearchSession::Flags{});
+    CHECK(opens == 1);
+    CHECK(s.open_failed());
+    s.clear();
+    CHECK_FALSE(s.open_failed());
+}
+
+// A query that supersedes the one whose task is opening the document must stop
+// that task before it scans: for an FB2 the first page scan lays the whole book
+// out, and ~SearchSession waits for the running task on the UI thread.
+TEST_CASE("SearchSession: a superseded deferred open does not go on to scan",
+          "[search][session][lazy]") {
+    MovableCopy copy(kFb2Fixture, "litepdf-229-lazy-superseded.fb2");
+    Document doc;
+    REQUIRE_FALSE(doc.open(copy.path).has_value());
+
+    DeferredDispatcher d;
+    SearchSession s(doc, d, std::nullopt, SearchOpen::AtFirstScan);
+    int opens = 0;
+    int scans = 0;
+    SearchSessionTestAccess::set_scan_hooks(
+        s,
+        [&] {
+            if (++opens == 1) s.clear();
+        },
+        [&] { ++scans; });
+
+    s.set_query(L"Lorem", SearchSession::Flags{});
+    d.run_all();
+    CHECK(opens == 1);
+    CHECK(scans == 0);
+    CHECK_FALSE(s.open_failed());
+    CHECK(s.hit_count() == 0);
+
+    // The document it opened is kept: the next query scans every page and
+    // opens nothing.
+    s.set_query(L"Lorem", SearchSession::Flags{});
+    d.run_all();
+    CHECK(opens == 1);
+    CHECK(scans == static_cast<int>(doc.page_count()));
+    CHECK(s.hit_count() == total_hits(doc, "Lorem"));
+}
+
+// A failed open is tried once per generation, not once per page.
+TEST_CASE("SearchSession: a failed deferred open is tried once per query",
+          "[search][session][lazy]") {
+    MovableCopy copy(kFb2Fixture, "litepdf-229-lazy-once.fb2");
+    Document doc;
+    REQUIRE_FALSE(doc.open(copy.path).has_value());
+    REQUIRE(doc.page_count() > 1);
+
+    InlineDispatcher d;
+    SearchSession s(doc, d, std::nullopt, SearchOpen::AtFirstScan);
+    int opens = 0;
+    int scans = 0;
+    SearchSessionTestAccess::set_scan_hooks(s, [&] { ++opens; }, [&] { ++scans; });
+
+    copy.move_away();
+    s.set_query(L"Lorem", SearchSession::Flags{});
+    CHECK(opens == 1);
+    CHECK(scans == 0);
+    CHECK(s.scan_complete());
+    s.set_query(L"dolor", SearchSession::Flags{});
+    CHECK(opens == 2);
+    CHECK(scans == 0);
+}
+
+// The family's context count sees a leaked session context; a never-scanned
+// session and a scanned one must both give theirs back.
+TEST_CASE("SearchSession: a deferred session releases its context, scanned or not",
+          "[search][session][lazy]") {
+    Document doc;
+    REQUIRE_FALSE(doc.open(std::filesystem::path(kFb2Fixture)).has_value());
+    fz_context* tmp = doc.clone_context();
+    REQUIRE(tmp != nullptr);
+    EscrowContext probe = EscrowContext::clone_from(tmp);
+    fz_drop_context(tmp);
+    REQUIRE(probe.valid());
+    const int before = detail::family_context_count(probe.get());
+
+    InlineDispatcher d;
+    {
+        SearchSession s(doc, d, std::nullopt, SearchOpen::AtFirstScan);
+        REQUIRE(detail::family_context_count(probe.get()) == before + 1);
+    }
+    REQUIRE(detail::family_context_count(probe.get()) == before);
+    {
+        SearchSession s(doc, d, std::nullopt, SearchOpen::AtFirstScan);
+        s.set_query(L"Lorem", SearchSession::Flags{});
+        REQUIRE(s.hit_count() > 0);
+    }
+    REQUIRE(detail::family_context_count(probe.get()) == before);
+}
+
+// With a password the session opens at construction whatever it was asked, so
+// the password is never kept for later.
+TEST_CASE("SearchSession: a password makes a deferred session open at once",
+          "[search][session][lazy]") {
+    Document doc;
+    const auto err = doc.open(std::filesystem::path("tests/fixtures/encrypted-text.pdf"));
+    REQUIRE(err.has_value());
+    REQUIRE(doc.authenticate("test"));
+
+    InlineDispatcher d;
+    REQUIRE_THROWS_AS(
+        SearchSession(doc, d, std::string_view{"wrong"}, SearchOpen::AtFirstScan),
+        std::runtime_error);
+    SearchSession s(doc, d, std::string_view{"test"}, SearchOpen::AtFirstScan);
+    s.set_query(L"ENCRYPTED", SearchSession::Flags{});
+    CHECK(s.hit_count() == 8);
 }

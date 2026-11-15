@@ -10,7 +10,8 @@
 //   - Task lambdas submitted to dispatcher run on worker threads. They
 //     touch SearchState under its own std::mutex.
 //   - A scan never touches the tab Document (#130). The session opens its
-//     own fz_document on its own cloned context at construction, and every
+//     own fz_document on its own cloned context, at construction or, with
+//     SearchOpen::AtFirstScan, in the first scan task (#229), and every
 //     scan task runs on that pair under a session-owned mutex, which
 //     serialises the dispatcher's workers on it (MuPDF allows one document
 //     on several threads as long as the uses never overlap). The tab
@@ -23,6 +24,7 @@
 
 #include "app/SearchDispatcher.hpp"
 #include "core/Document.hpp"
+#include "core/SearchOpen.hpp"
 
 #include <cstddef>
 #include <functional>
@@ -61,8 +63,19 @@ public:
     // Throws std::runtime_error if the clone or the open fails, or if the
     // document needs a password and `password` is missing, empty or wrong,
     // after releasing whatever it acquired.
+    //
+    // (#229) With `open` == SearchOpen::AtFirstScan, no `password` and a
+    // stamp from `doc` (Document::source_stamp), the open waits for the first
+    // task of the first non-empty query instead, on the dispatcher's thread.
+    // The constructor then throws only if the clone fails or `doc` has no
+    // path. That open reads the file only while its stamp still matches the
+    // one `doc` took, before MuPDF reads it and after; a failure, or a
+    // mismatch, ends that query with no hits and open_failed() true, and the
+    // next query tries again. With a password, or no stamp, `open` is
+    // ignored and the document is opened here.
     SearchSession(const Document& doc, litepdf::app::ISearchDispatcher& dispatcher,
-                  std::optional<std::string_view> password = std::nullopt);
+                  std::optional<std::string_view> password = std::nullopt,
+                  SearchOpen open = SearchOpen::AtConstruction);
     ~SearchSession();
 
     SearchSession(const SearchSession&)            = delete;
@@ -117,6 +130,13 @@ public:
 
     std::vector<Hit> hits_for_page(std::size_t page) const;
 
+    // (#229) True while the current query's deferred open has failed, so its
+    // scan found nothing because it read nothing. False for a session that
+    // opened at construction, before the first query, after clear(), and
+    // for a new query until its own open has failed. Takes no lock a scan
+    // holds, so a UI-thread call never waits on one.
+    bool open_failed() const;
+
 private:
     // Test seam: `hook` runs on the set_query() thread right after the
     // previous generation's hits are cleared and the state mutex is
@@ -124,6 +144,10 @@ private:
     // a test land a superseded worker in exactly that window, which no
     // dispatcher double can reach. Reached only via SearchSessionTestAccess.
     void set_after_reset_hook(std::function<void()> hook);
+    // Test seams (#229): `after_open` runs right after a deferred open, worked
+    // or not, and `before_scan` right before a page's scan; both on the task's
+    // thread, holding the scan lock. Set them before the first query.
+    void set_scan_hooks(std::function<void()> after_open, std::function<void()> before_scan);
     friend struct SearchSessionTestAccess;
 
     struct Impl;
