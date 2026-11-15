@@ -1095,6 +1095,56 @@ TEST_CASE("SearchSession: an FB2 rewritten while search reads it is not scanned"
     CHECK(s.hit_count() == 0);
 }
 
+// Opened through a symbolic link, the stamp must describe the file MuPDF
+// reads, not the link: a rewritten target is not scanned. Creating a symbolic
+// link needs Developer Mode or the privilege; without it the case is skipped.
+TEST_CASE("SearchSession: an FB2 opened through a link is stamped by its target",
+          "[search][session][lazy]") {
+    MovableCopy target(kFb2Fixture, "litepdf-229-lazy-link-target.fb2");
+    const auto link =
+        std::filesystem::temp_directory_path() / "litepdf-229-lazy-link.fb2";
+    std::error_code ec;
+    std::filesystem::remove(link, ec);
+    std::filesystem::create_symlink(target.path, link, ec);
+    if (ec) {
+        SKIP("cannot create a symbolic link here: " << ec.message());
+    }
+    struct RemoveLink {
+        std::filesystem::path p;
+        ~RemoveLink() { std::error_code e; std::filesystem::remove(p, e); }
+    } remove_link{link};
+
+    Document doc;
+    REQUIRE_FALSE(doc.open(link).has_value());
+    bump_write_time(target.path);
+
+    InlineDispatcher d;
+    SearchSession s(doc, d, std::nullopt, SearchOpen::AtFirstScan);
+    s.set_query(L"Lorem", SearchSession::Flags{});
+    CHECK(s.open_failed());
+    CHECK(s.hit_count() == 0);
+}
+
+// Another file moved into the place of the one the tab read is not scanned,
+// even with the same size and write time.
+TEST_CASE("SearchSession: a different FB2 moved into place is not scanned",
+          "[search][session][lazy]") {
+    MovableCopy copy(kFb2Fixture, "litepdf-229-lazy-swapped.fb2");
+    MovableCopy twin(kFb2Fixture, "litepdf-229-lazy-swapped-twin.fb2");
+    Document doc;
+    REQUIRE_FALSE(doc.open(copy.path).has_value());
+    std::filesystem::last_write_time(twin.path, std::filesystem::last_write_time(copy.path));
+    REQUIRE(std::filesystem::file_size(twin.path) == std::filesystem::file_size(copy.path));
+    copy.move_away();
+    std::filesystem::rename(twin.path, copy.path);
+
+    InlineDispatcher d;
+    SearchSession s(doc, d, std::nullopt, SearchOpen::AtFirstScan);
+    s.set_query(L"Lorem", SearchSession::Flags{});
+    CHECK(s.open_failed());
+    CHECK(s.hit_count() == 0);
+}
+
 // A same-size rewrite is caught by the write time alone.
 TEST_CASE("SearchSession: an FB2 with a new write time and the same size is not scanned",
           "[search][session][lazy]") {
