@@ -17,6 +17,7 @@
 #include "ui/password_retry.hpp"  // Phase 8 Task 1
 #include "printing/PrintJob.hpp"  // Phase 8.5 Task 10
 #include "ui/ThumbnailPane.hpp"  // Phase 7 Task 8: F4 toggle uses ThumbnailPane methods.
+#include "ui/detail/MakeDocumentView.hpp"  // #229: one render worker for FB2
 #include "ui/detail/OpenErrorMessage.hpp"  // #184: unconvertible-path text
 #include "ui/detail/SplitterMath.hpp"  // #93: results panel height clamp
 
@@ -305,8 +306,7 @@ void MainWindow::open_tab_async(std::filesystem::path path) {
             auto tab = std::make_unique<litepdf::core::Tab>();
             tab->path  = path;
             tab->label = path.filename().wstring();
-            tab->view  = std::make_unique<litepdf::core::DocumentView>(
-                std::move(doc), dispatcher);
+            tab->view  = litepdf::ui::make_document_view(std::move(doc), dispatcher);
             litepdf::ui::ColdStartTimer::mark_sub(
                 litepdf::ui::ColdStartTimer::Sub::ViewBuilt);
             // Transfer ownership across thread boundary via raw ptr.
@@ -2300,8 +2300,8 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 auto tab = std::make_unique<litepdf::core::Tab>();
                 tab->path  = bundle->path;
                 tab->label = basename;
-                tab->view  = std::make_unique<litepdf::core::DocumentView>(
-                    std::move(bundle->doc), *search_dispatcher_, accepted_pw);
+                tab->view  = make_document_view(std::move(bundle->doc), *search_dispatcher_,
+                                                accepted_pw);
 
                 ColdStartTimer::mark(2);  // Document fully loaded.
 

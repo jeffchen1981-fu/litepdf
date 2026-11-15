@@ -1541,7 +1541,8 @@ LRESULT PdfCanvas::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
             // Place the page. BOTH slots run this: the pan is clamped against
             // the UNION of the two, so a right-slot delivery changes the height
             // a Bottom anchor measures against, and either half can land first
-            // (two workers, and an L1 cache hit returns before any MuPDF work).
+            // (two workers in every format but FB2, and an L1 cache hit returns
+            // before any MuPDF work).
             // take() therefore does not retire the anchor -- see
             // ui/detail/PageAnchor.hpp -- and mark_applied() is called ONLY when
             // the placement actually happened. A right half arriving while

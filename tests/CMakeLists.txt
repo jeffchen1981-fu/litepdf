@@ -52,6 +52,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_render_engine_cache.cpp
     unit/test_render_stress.cpp
     unit/test_document_view.cpp
+    unit/test_make_document_view.cpp  # #229 one render worker for FB2
     unit/test_mru_list.cpp
     unit/test_tab_list.cpp
     unit/test_search_dispatcher.cpp  # Phase 6 Task 4

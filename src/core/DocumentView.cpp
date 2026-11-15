@@ -287,6 +287,10 @@ int DocumentView::page_count() const {
     return static_cast<int>(impl_->doc.page_count());
 }
 
+std::size_t DocumentView::render_workers() const noexcept {
+    return impl_->engine->num_workers();
+}
+
 int DocumentView::current_page() const noexcept {
     return impl_->current_page;
 }

@@ -113,6 +113,24 @@ TEST_CASE("EffectiveLayout: strip_format_ok accepts the measured formats") {
     CHECK_FALSE(strip_format_ok(std::filesystem::path("a.pdf"), 0));
 }
 
+// #229: an FB2 is laid out whole by each copy of the book, and two workers laying
+// it out together each run ~1.27x slower, so it gets one render worker.
+TEST_CASE("EffectiveLayout: one_render_worker is FB2 only") {
+    CHECK(one_render_worker(std::filesystem::path("f.fb2")));
+    CHECK(one_render_worker(std::filesystem::path("f.FB2")));
+    CHECK(one_render_worker(std::filesystem::path("dir.pdf/f.Fb2")));
+    CHECK_FALSE(one_render_worker(std::filesystem::path("a.pdf")));
+    CHECK_FALSE(one_render_worker(std::filesystem::path("b.epub")));
+    CHECK_FALSE(one_render_worker(std::filesystem::path("c.cbz")));
+    CHECK_FALSE(one_render_worker(std::filesystem::path("e.xps")));
+    CHECK_FALSE(one_render_worker(std::filesystem::path("d.svg")));
+    CHECK_FALSE(one_render_worker(std::filesystem::path("fb2")));
+    CHECK_FALSE(one_render_worker(std::filesystem::path("f.fb2.zip")));
+    CHECK_FALSE(one_render_worker(std::filesystem::path("f.fb")));
+    CHECK_FALSE(one_render_worker(std::filesystem::path("f.fb2x")));
+    CHECK_FALSE(one_render_worker(std::filesystem::path("")));
+}
+
 TEST_CASE("StripSchedule: slot_holds_bitmap") {
     PageSlot s;
     CHECK_FALSE(slot_holds_bitmap(s));  // None

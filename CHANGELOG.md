@@ -35,8 +35,16 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   each render worker paid it again before the first page. litepdf now carries
   one change to MuPDF that finds them all in a single pass; every entry points
   where it did before. A 1,500-section book (6.5 MB) now opens in 0.85 to 0.89 s
-  instead of 7.3 to 8.4 s, and its first page shows in 5.8 to 8.5 s instead of
-  20 to 23 s (three runs each). The About box says MuPDF is modified (#229).
+  instead of 7.3 to 8.4 s, and its first page shows in 3.4 to 4.4 s instead of
+  20 to 23 s (three to five runs each). The About box says MuPDF is modified (#229).
+- A large FB2 book shows its first page sooner and holds less memory. Each render
+  worker opens its own copy of the book and lays all of it out, and two workers
+  doing that at once each ran slower than one alone, so an FB2 now gets one render
+  worker; other formats keep two. A 1,500-section book (6.5 MB) shows its first
+  page in 2.5 to 2.9 s instead of 3.4 to 4.4 s and holds 331 MiB instead of
+  415 MiB; an 800-section book (3.5 MB), 1.5 to 1.7 s instead of 2.0 to 2.9 s and
+  207 MiB instead of 252 MiB (five runs each). Turning pages, thumbnails and
+  jumping to the last page take a few milliseconds either way (#229).
 
 ## [1.8.3] — 2026-11-10 — Switching to continuous scroll keeps your place
 

@@ -50,6 +50,19 @@ inline ContinuousToggle continuous_toggle(bool pref_on, bool spread_on) noexcept
     return {!pref_on, false};
 }
 
+// True when `ext` (a path's extension().native(), dot included) equals `want`
+// ignoring ASCII case; `want` is lower-case ASCII.
+inline bool extension_is(const std::filesystem::path::string_type& ext, const char* want) {
+    std::size_t i = 0;
+    for (; want[i] != '\0'; ++i) {
+        if (i >= ext.size()) return false;
+        const auto c = ext[i];
+        const auto lower = (c >= 'A' && c <= 'Z') ? static_cast<decltype(c)>(c - 'A' + 'a') : c;
+        if (lower != static_cast<decltype(c)>(want[i])) return false;
+    }
+    return i == ext.size();
+}
+
 // The formats whose page sizes were measured cheap enough for the strip (spec 4.4,
 // 7.3), by case-insensitive extension, and a document with at least one page.
 // CBZ passes since #176: a page is sized from its image header, read ahead for
@@ -60,18 +73,18 @@ inline ContinuousToggle continuous_toggle(bool pref_on, bool spread_on) noexcept
 inline bool strip_format_ok(const std::filesystem::path& source, int page_count) {
     if (page_count < 1) return false;
     const std::filesystem::path::string_type ext = source.extension().native();
-    auto equals = [&ext](const char* want) {
-        std::size_t i = 0;
-        for (; want[i] != '\0'; ++i) {
-            if (i >= ext.size()) return false;
-            const auto c = ext[i];
-            const auto lower = (c >= 'A' && c <= 'Z') ? static_cast<decltype(c)>(c - 'A' + 'a') : c;
-            if (lower != static_cast<decltype(c)>(want[i])) return false;
-        }
-        return i == ext.size();
-    };
-    return equals(".pdf") || equals(".epub") || equals(".cbz") || equals(".fb2") ||
-           equals(".svg");
+    return extension_is(ext, ".pdf") || extension_is(ext, ".epub") ||
+           extension_is(ext, ".cbz") || extension_is(ext, ".fb2") || extension_is(ext, ".svg");
+}
+
+// #229: an FB2 gets one render worker instead of RenderEngine::kDefaultWorkers.
+// Each worker's own copy of the book is laid out whole, and two layouts at once
+// each ran ~1.27x slower than one, so one worker shows the first page sooner and
+// holds one copy (~14x the file) less. By extension, the same rule as
+// strip_format_ok: a file of another format named .fb2 opens as that format and
+// only renders more slowly.
+inline bool one_render_worker(const std::filesystem::path& source) {
+    return extension_is(source.extension().native(), ".fb2");
 }
 
 enum class KickReason {

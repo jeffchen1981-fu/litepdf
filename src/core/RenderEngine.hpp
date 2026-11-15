@@ -83,6 +83,11 @@ public:
         std::shared_ptr<const std::atomic<int>> text_wanted;
     };
 
+    // The worker count a view gets unless its format asks for fewer. An FB2
+    // gets one: each worker lays the whole book out again, and two layouts at
+    // once each run ~1.27x slower (#229, ui/detail/MakeDocumentView.hpp).
+    static constexpr std::size_t kDefaultWorkers = 2;
+
     // Construct a RenderEngine.
     //
     // @param doc          The Document to render. Must outlive this engine.
@@ -105,7 +110,8 @@ public:
     //                     rather than a bare string_view, so a stray integer
     //                     cannot compile here: a literal 0 would otherwise
     //                     convert to string_view(nullptr), which is undefined.
-    RenderEngine(Document& doc, std::size_t num_workers = 2, PageCache* cache = nullptr,
+    RenderEngine(Document& doc, std::size_t num_workers = kDefaultWorkers,
+                 PageCache* cache = nullptr,
                  std::optional<std::string_view> password = std::nullopt);
     ~RenderEngine();
 

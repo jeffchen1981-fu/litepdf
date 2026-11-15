@@ -88,7 +88,7 @@ public:
     explicit DocumentView(Document doc,
                           litepdf::app::ISearchDispatcher& dispatcher,
                           std::optional<std::string_view> password = std::nullopt,
-                          std::size_t num_workers = 2,
+                          std::size_t num_workers = RenderEngine::kDefaultWorkers,
                           std::size_t l1_capacity = 5,
                           std::size_t l2_capacity = 10,
                           std::size_t l1_budget_bytes = kDefaultL1BudgetBytes);
@@ -100,6 +100,8 @@ public:
     DocumentView& operator=(DocumentView&&)      = delete;
 
     int  page_count() const;
+    // The render engine's worker count, as constructed (#229).
+    std::size_t render_workers() const noexcept;
     int  current_page() const noexcept;
     // Clamps to [0, page_count-1]. A change drops the text slot and, unless
     // the view is continuous or the zoom is Custom, re-derives the fit for

@@ -21,7 +21,8 @@
 // While two pages fit, a reader paging on in one direction turns every page
 // from L1. Once a single page is over half the budget only one pixmap fits:
 // after a miss the current page and the prefetched one render at the same time
-// on the two workers, and whichever lands last evicts the other.
+// on the two workers (one after the other in an FB2, which has one), and
+// whichever lands last evicts the other.
 
 namespace litepdf::core {
 
