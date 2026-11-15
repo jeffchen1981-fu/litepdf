@@ -63,10 +63,12 @@ struct SearchSessionTestAccess {
     }
     // #229: `after_open` runs after a deferred open of the session's own
     // document (whether it worked or not), `before_scan` right before a page
-    // is scanned; both on the task's thread, under the scan lock.
+    // is scanned, `after_read` between MuPDF's read and the second stamp
+    // check; all on the task's thread, under the scan lock.
     static void set_scan_hooks(SearchSession& s, std::function<void()> after_open,
-                               std::function<void()> before_scan) {
-        s.set_scan_hooks(std::move(after_open), std::move(before_scan));
+                               std::function<void()> before_scan,
+                               std::function<void()> after_read = {}) {
+        s.set_scan_hooks(std::move(after_open), std::move(before_scan), std::move(after_read));
     }
 };
 
@@ -1064,6 +1066,32 @@ TEST_CASE("SearchSession: an FB2 rewritten after the tab opened it is not scanne
     // The file stays changed, so every later query fails the same way.
     s.set_query(L"dolor", SearchSession::Flags{});
     CHECK(s.open_failed());
+    CHECK(s.hit_count() == 0);
+}
+
+// The file is stamped again after MuPDF has read it: a rewrite that lands while
+// the deferred open is reading must not be scanned either.
+TEST_CASE("SearchSession: an FB2 rewritten while search reads it is not scanned",
+          "[search][session][lazy]") {
+    MovableCopy copy(kFb2Fixture, "litepdf-229-lazy-during-read.fb2");
+    Document doc;
+    REQUIRE_FALSE(doc.open(copy.path).has_value());
+
+    InlineDispatcher d;
+    SearchSession s(doc, d, std::nullopt, SearchOpen::AtFirstScan);
+    int reads = 0;
+    int scans = 0;
+    SearchSessionTestAccess::set_scan_hooks(
+        s, nullptr, [&] { ++scans; },
+        [&] {
+            ++reads;
+            bump_write_time(copy.path);
+        });
+    s.set_query(L"Lorem", SearchSession::Flags{});
+    CHECK(reads == 1);
+    CHECK(scans == 0);
+    CHECK(s.open_failed());
+    CHECK(s.scan_complete());
     CHECK(s.hit_count() == 0);
 }
 

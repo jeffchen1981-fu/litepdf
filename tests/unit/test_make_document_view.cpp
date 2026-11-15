@@ -70,11 +70,14 @@ TEST_CASE("MakeDocumentView: other formats keep the default worker count", "[ui]
 
 // The password-prompt site passes the password through. A PDF named .fb2 opens
 // as a PDF (MuPDF scores content above extension) and gets one worker by name:
-// slower, never wrong. Without the password the view's SearchSession throws
-// "document needs a password", so a view that builds proves it arrived; the
-// render workers take the same argument from DocumentView (#126, #130).
+// slower, never wrong. Since #229 an FB2-named view with no password opens its
+// search document at the first search, so a view that builds no longer proves
+// the password arrived: a search does. Without the password that open finds a
+// document that needs one and fails; with it, the session opened at
+// construction and finds the fixture's 8 lines (the render workers take the
+// same argument from DocumentView, #126).
 TEST_CASE("MakeDocumentView: the password reaches a one-worker view", "[ui][make_view]") {
-    const TempCopy file{"tests/fixtures/encrypted.pdf", L"encrypted.fb2"};
+    const TempCopy file{"tests/fixtures/encrypted-text.pdf", L"encrypted.fb2"};
     Document doc;
     const auto err = doc.open(file.path);
     REQUIRE(err.has_value());
@@ -85,6 +88,9 @@ TEST_CASE("MakeDocumentView: the password reaches a one-worker view", "[ui][make
     auto view = make_document_view(std::move(doc), disp, std::string_view("test"));
     REQUIRE(view);
     CHECK(view->render_workers() == 1);
+    view->search().set_query(L"ENCRYPTED", litepdf::core::SearchSession::Flags{});
+    CHECK_FALSE(view->search().open_failed());
+    CHECK(view->search().hit_count() == 8);
 }
 
 // #229: an FB2 view opens its search document at the first search, so a tab

@@ -106,6 +106,7 @@ struct SearchSession::Impl {
     FileStamp                               stamp;
     // Test seams (see SearchSession::set_scan_hooks). Set before any scan,
     // then only read, by tasks under scan_mtx.
+    std::function<void()>                   after_read_hook;
     std::function<void()>                   after_open_hook;
     std::function<void()>                   before_scan_hook;
 
@@ -225,13 +226,12 @@ fz_document* SearchSession::Impl::open_deferred() noexcept {
     fz_document* sdoc =
         open_scan_document(im.escrow.get(), im.path_utf8.c_str(), "", step, reason);
     if (!sdoc) {
-        // open_failure only logs here; what it returns would be for a throw.
-        try {
-            (void)detail::open_failure(step, reason);
-        } catch (...) {
-        }
+        // Logged whether or not MuPDF gave a reason (open_failure logs only
+        // with one), and without allocating: nothing may throw from a task.
+        std::fprintf(stderr, "litepdf: %s%s%s\n", step, reason[0] ? ": " : "", reason);
         return nullptr;
     }
+    if (im.after_read_hook) im.after_read_hook();
     if (changed()) {
         fz_drop_document(im.escrow.get(), sdoc);
         std::fprintf(stderr, "litepdf: SearchSession: the file changed while "
@@ -342,7 +342,9 @@ SearchSession::~SearchSession() {
     // only a task already popped is left, and the pool runs at most one
     // task of this session at a time: this waits for at most one, which
     // returns at its epoch check or stops at the cookie poll (or, on a
-    // format whose build ignores the cookie, finishes its page). A task
+    // format whose build ignores the cookie, finishes its page). A task in a
+    // deferred open (#229) finishes the open, which polls no cookie, then
+    // returns at epoch check #1c without scanning. A task
     // already past epoch check #2 also calls the on_update observer before
     // its guard decrements; every production observer posts, so the spin
     // cannot deadlock on it.
@@ -597,7 +599,9 @@ void SearchSession::set_after_reset_hook(std::function<void()> hook) {
 }
 
 void SearchSession::set_scan_hooks(std::function<void()> after_open,
-                                   std::function<void()> before_scan) {
+                                   std::function<void()> before_scan,
+                                   std::function<void()> after_read) {
+    impl_->after_read_hook  = std::move(after_read);
     impl_->after_open_hook  = std::move(after_open);
     impl_->before_scan_hook = std::move(before_scan);
 }

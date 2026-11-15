@@ -23,8 +23,9 @@ struct FileStamp {
     }
 };
 
-// The stamp of `path` now, or nothing when the file cannot be read (gone, a
-// directory, access denied).
+// The stamp of `path` now, or nothing when its attributes cannot be read (gone,
+// a path that does not resolve) or it is a directory. Needs no read access to
+// the file itself.
 [[nodiscard]] std::optional<FileStamp> file_stamp(const std::filesystem::path& path) noexcept;
 
 }  // namespace litepdf::core

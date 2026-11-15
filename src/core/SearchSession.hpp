@@ -145,9 +145,12 @@ private:
     // dispatcher double can reach. Reached only via SearchSessionTestAccess.
     void set_after_reset_hook(std::function<void()> hook);
     // Test seams (#229): `after_open` runs right after a deferred open, worked
-    // or not, and `before_scan` right before a page's scan; both on the task's
-    // thread, holding the scan lock. Set them before the first query.
-    void set_scan_hooks(std::function<void()> after_open, std::function<void()> before_scan);
+    // or not; `before_scan` right before a page's scan; `after_read` inside a
+    // deferred open, after MuPDF has read the file and before the stamp is
+    // checked again. All on the task's thread, holding the scan lock. Set them
+    // before the first query.
+    void set_scan_hooks(std::function<void()> after_open, std::function<void()> before_scan,
+                        std::function<void()> after_read = {});
     friend struct SearchSessionTestAccess;
 
     struct Impl;
