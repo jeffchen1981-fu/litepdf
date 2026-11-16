@@ -173,9 +173,10 @@ never served, and from then on no Render or Scan is admitted: the worker stops, 
   message on the UI thread (`src/printing/PrintJob.cpp`). With borrowers, that would let a dispatched tab close
   (`IDM_TAB_CLOSE`, which `PdfCanvas` posts) destroy the view and join a worker that waits for the gate the UI
   thread holds: a deadlock. It would also let a dispatched command reach `outline()` and throw the re-entry error
-  out of a window procedure. So `with_rendered_page` renders, composites over white, drops the page and RELEASES
-  the gate, and only then calls the callback with the pixmap, which it still owns and drops after the callback on
-  its own context. The pixmap does not depend on the document. The callback's bytes are unchanged.
+  out of a window procedure. So `with_rendered_page` renders, drops the page, clones an escrow context and RELEASES
+  the gate, then composites over white and calls the callback with the pixmap. It still owns the pixmap, and drops
+  it after the callback through that escrow, touching nothing of the Document: the dispatched tab close may have
+  destroyed it (amended at the plan gate, 2026-11-17). The pixmap does not depend on the document. The callback's bytes are unchanged.
 - Invariant: **no code other than MuPDF calls and their result copying runs under the gate.** In particular no
   message pump, no callback into UI code, no wait on another thread. So the UI thread never waits for a borrower
   while it holds the gate, with no reliance on which windows are disabled. Stated in the gate's header comment.
