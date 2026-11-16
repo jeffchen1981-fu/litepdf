@@ -380,9 +380,12 @@ Each mutant must fail the named test, run as `ctest -C Release -R "^<name>"` fro
   1. first page (T0->T4), `view_built`, working set and private bytes after open (median of 5);
   2. time from a search's start to its first hit and to scan complete (median of 5);
   3. UI-thread gate waits during a scan. Workload per run: 2 s after the first page, the driver starts a search for
-     `ab` from page 1, then sends 40 left presses on the canvas, 50 ms apart, while the scan runs. A temporary probe
-     (not committed) logs every Foreground acquire's wait. Statistic: the maximum over all presses of all 5 runs
-     (200 samples).
+     `ab` from page 1, then, while the scan runs, 40 rounds 150 ms apart: a Ctrl+G jump to a page at least 20 pages
+     from any page shown or prefetched so far (fixed seed), then 30 ms later a left press on that page. A temporary
+     probe (not committed) logs every Foreground acquire's wait. Statistic: the maximum over all acquires of all 5
+     runs, with the sample count; under 150 acquires is "not measured". (Amended at the plan gate, 2026-11-17: the
+     first workload, 40 presses on one page, reached `Document::text_page` about once per run, because
+     `DocumentView::text_for` reuses the text slot after the first press.)
   4. P0 render latency. Workload per run: the same search, and during the scan 40 go-to-page jumps (Ctrl+G) to
      pages chosen by a fixed seed, at least 20 pages from any page shown or prefetched so far, 150 ms apart. The
      probe logs submit to `on_complete` of each P0. Control: the same jumps with no search. Statistic: p99 by
