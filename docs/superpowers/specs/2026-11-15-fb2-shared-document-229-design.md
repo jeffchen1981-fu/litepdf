@@ -5,7 +5,9 @@ that review are folded in (§3.2 page lifetime, §3.3 priority gate, §3.1 forma
 This spec is written for the user's review before any plan or code.
 Spec gate (Full tier, routine): round 1 (Opus) fixed in place: the page-lifetime oracle's parking hook, the gate's
 re-entry check before `waiting[cls]++`, the unencrypted PDF-as-`.fb2` test, FB2 content under `.svg`, shared fonts,
-and the comment list.
+and the comment list. Codex (terra, gpt-6.1-terra, luna) on 807dfb8, fixed in one batch: print renders under the gate
+but calls back after releasing it (a tab close dispatched by print's message pump could otherwise deadlock), tickets
+inside a class, a bounded wait for Scan, named tests for every mutation, and a defined workload for §7's pass bars.
 Issue: #229 (body + 3 comments; item 3 of the third comment: "Sharing the Document's laid-out copy"). Base: main at
 dde66b6.
 Earlier #229 work, all merged, none released: #234 one-pass outline resolve (MuPDF patch), #235 one render worker for
@@ -130,37 +132,56 @@ lends nothing has only Foreground users, so its behaviour does not change.
 ```
 acquire(cls):  lock m;
                if (held && owner == this thread) throw std::system_error(resource_deadlock_would_occur);
-               waiting[cls]++;
-               cv.wait(m, [&]{ return !held && no class above cls is waiting; });
-               waiting[cls]--; held = true; owner = this thread;
+               my = next_ticket[cls]++;                       // FIFO inside a class
+               cv.wait(m, [&]{ return !held && admissible(cls, my); });
+               serving[cls]++; held = true; owner = this thread;
+               if (cls == Render) renders_since_scan++; if (cls == Scan) renders_since_scan = 0;
 release():     lock m; held = false; owner = none; cv.notify_all();
+
+admissible(cls, my):
+    my == serving[cls]                                       // the oldest waiter of its class
+    && (cls == Foreground || no Foreground waiting)
+    && (cls != Scan || no Render waiting || renders_since_scan >= kScanAfterRenders)
+    && (cls != Render || no Scan waiting || renders_since_scan < kScanAfterRenders)
 ```
 
-The re-entry check comes BEFORE `waiting[cls]++`. Placed after it, a throw would leave `waiting[Foreground]` at 1
-forever, and no Render or Scan would ever be admitted again: the worker stops, and closing the tab hangs in
+`waiting(cls)` is `next_ticket[cls] - serving[cls]`. `kScanAfterRenders = 4`.
+
+The re-entry check comes BEFORE the ticket is taken. Placed after it, a throw would leave a Foreground ticket that is
+never served, and from then on no Render or Scan is admitted: the worker stops, and closing the tab hangs in
 `~SearchSession`'s spin-wait and `~RenderEngine`'s join (§6.2 pins this).
 
-- Order: Foreground > Render > Scan. The decision is made under the gate's own mutex, so a borrower that started
-  waiting before the UI cannot slip in after it (the check-then-lock gap of the first draft).
-- Bounds: a Foreground caller waits at most for the hold in progress. A Render caller waits for the hold in
-  progress plus any Foreground holds that arrive meanwhile (rare, sub-millisecond to a few ms). A Scan caller runs
-  only when nobody else waits; a search keeps going between page turns and finishes later during heavy rendering,
-  which is the intended trade.
+- Order: Foreground first, always. Between Render and Scan, Render first, but a waiting Scan is admitted after at
+  most `kScanAfterRenders` consecutive Render holds. Inside a class, first come, first served (tickets), so a
+  Foreground caller on another thread (the CLI, tests) cannot be passed by a newer one. Every decision is made under
+  the gate's own mutex, so a borrower that started waiting before the UI cannot slip in after it (the
+  check-then-lock gap of the first draft).
+- Bounds: a Foreground caller waits for the hold in progress plus older Foreground callers (in the app, only the UI
+  thread is Foreground, so: the hold in progress). A Render caller waits for the hold in progress, any Foreground
+  holds that arrive meanwhile, and at most one Scan hold. A Scan caller waits for at most `kScanAfterRenders` Render
+  holds plus Foreground holds, so a search keeps moving while the reader scrolls, and a scan task that
+  `~SearchSession` waits for on a tab close is admitted after a bounded number of holds (the engine is still alive
+  then, and its queue may still hold prefetch and thumbnail requests).
 - RAII guard only (`GateHold`). Methods under it throw (`page_size`, `page_text`), and a leaked hold would hang
   `~RenderEngine` and `~SearchSession`.
 - Re-entry on the owning thread keeps today's behaviour: today `std::mutex::lock()` on the owning thread throws
   `std::system_error` (`resource_deadlock_would_occur`), which `Document::text_page` turns into an empty handle
   (#70) and `DocumentView::Impl::known_size` into "no size". The gate throws the same `std::system_error` when
-  `owner == this thread`. This matters for print: `with_rendered_page` holds the gate across its callback, and the
-  callback's GDI call can run `PrintJob`'s abort procedure, which dispatches messages on the UI thread.
-- Invariant: **the UI thread never waits for a borrower while it holds the gate.** The one place that runs other UI
-  code under the gate is print's message pump; it relies on the parent window being disabled for the print, so no
-  tab can close there. Stated in `with_rendered_page`'s header comment.
-- Lock order: `scan_mtx` (SearchSession) may be held while acquiring the gate. No thread acquires the gate while
-  holding the engine's queue mutex, the dispatcher's mutex, the page cache's mutex or `SearchSession::State::m`.
-  The reverse can happen: during print, the UI thread holds the gate while `abort_proc` dispatches messages, and a
-  handler there may submit a render or set a query, taking those mutexes. That is no cycle, because nothing waits
-  for the gate under them. A borrower never takes `scan_mtx` under the gate.
+  `owner == this thread`.
+- **Print no longer holds the gate across its callback.** Today `with_rendered_page` holds `doc_mutex` while its
+  callback runs, and the callback's `StretchDIBits` can run `PrintJob`'s `abort_proc`, which dispatches every queued
+  message on the UI thread (`src/printing/PrintJob.cpp`). With borrowers, that would let a dispatched tab close
+  (`IDM_TAB_CLOSE`, which `PdfCanvas` posts) destroy the view and join a worker that waits for the gate the UI
+  thread holds: a deadlock. It would also let a dispatched command reach `outline()` and throw the re-entry error
+  out of a window procedure. So `with_rendered_page` renders, composites over white, drops the page and RELEASES
+  the gate, and only then calls the callback with the pixmap, which it still owns and drops after the callback on
+  its own context. The pixmap does not depend on the document. The callback's bytes are unchanged.
+- Invariant: **no code other than MuPDF calls and their result copying runs under the gate.** In particular no
+  message pump, no callback into UI code, no wait on another thread. So the UI thread never waits for a borrower
+  while it holds the gate, with no reliance on which windows are disabled. Stated in the gate's header comment.
+- Lock order: `scan_mtx` (SearchSession) may be held while acquiring the gate. Nothing else is held while acquiring
+  it, and nothing is acquired under it: the gate's holder takes no other lock (the MuPDF family's lock table aside,
+  which is a leaf). A borrower never takes `scan_mtx` under the gate.
 
 ### 3.4 RenderEngine in shared mode
 
@@ -274,8 +295,15 @@ New `test_priority_gate.cpp`, deterministic, with no sleeps as oracles (latches 
 - Re-entry on the owning thread throws `std::system_error`; `Document::text_page` under a held Foreground gate on the
   same thread returns an empty handle (the #70 contract, re-pinned).
 - A failed re-entry leaves the gate usable: after the throw and the release, a Render and then a Scan acquire on
-  another thread succeed within a deadline (the case where the check sits after `waiting[cls]++`).
+  another thread succeed within a deadline (the case where the check sits after the ticket is taken).
+- First come, first served inside a class: A holds; Foreground F1 waits, then F2 waits (both seen waiting, in that
+  order); A releases; F1 runs before F2. The same for two Render waiters.
+- A waiting Scan is not starved: A holds; a Scan waits; Render requests keep arriving (a new one waits before each
+  release); the Scan is admitted after exactly `kScanAfterRenders` Render holds.
 - A throw under a hold releases it (RAII).
+- Print releases the gate before its callback: in the callback passed to `with_rendered_page`, a Foreground
+  acquire on the same thread (`page_size`) succeeds, and a Render acquire on another thread completes before the
+  callback returns. Today's code throws on the first and blocks the second.
 
 ### 6.3 Borrowers go through the gate
 
@@ -300,33 +328,67 @@ New `test_priority_gate.cpp`, deterministic, with no sleeps as oracles (latches 
   taken first, on the same shared document, so a second parse cannot differ);
 - every text handle's `copy()` of the whole page equals the single-threaded text.
 
-### 6.5 Proving the tests can fail (mutation checks, from a committed tree)
+### 6.5 Test names
 
-1. The gate ignores class order (FIFO by arrival): §6.2's Foreground-first tests fail.
-2. The worker's display-list build skips the gate (calls the document through a test-only raw accessor): §6.3
-   Render fails.
-3. The engine drops the page after leaving `with_document`: §6.3 page-lifetime check fails.
-4. `make_document_view` passes `Own` for FB2: §6.1 counters fail.
-5. The session opens its own document in `Shared` mode: §6.1 session counter fails.
-6. The gate's re-entry check removed: §6.2 re-entry test fails (deadlock bounded by the test's timeout, reported as
-   a failure).
-7. The re-entry check moved after `waiting[cls]++`: §6.2's "failed re-entry leaves the gate usable" fails.
-8. `make_document_view` shares by extension (`one_render_worker(path) && !password`): §6.1's unencrypted
-   PDF-as-`.fb2` test fails.
+ASCII, prefixed by subsystem, so `ctest -R` finds each one (the project's rule for TEST_CASE names). The plan may
+split a case, but keeps these names as prefixes:
+
+| id | TEST_CASE | covers |
+|---|---|---|
+| S1 | `MakeDocumentView: an FB2 view opens no document of its own` | §6.1 counters, FB2 and PDF |
+| S2 | `MakeDocumentView: an unencrypted PDF named .fb2 keeps its own documents` | §6.1 predicate |
+| S3 | `MakeDocumentView: FB2 content named .svg is shared with one worker` | §6.1, §3.1 worker count |
+| S4 | `SearchSession: a shared session opens no document` / `RenderEngine: a shared engine opens no document` | §6.1 on the classes |
+| G1 | `PriorityGate: a foreground waiter goes before waiting render and scan` | §6.2 |
+| G2 | `PriorityGate: a foreground arriving after a waiting scan goes first` | §6.2 |
+| G3 | `PriorityGate: render goes before scan` | §6.2 |
+| G4 | `PriorityGate: re-entry on the owning thread throws` and `Document: text_page under a held gate is empty` | §6.2 |
+| G5 | `PriorityGate: a failed re-entry leaves the gate usable` | §6.2 |
+| G6 | `PriorityGate: waiters of one class are served in arrival order` | §6.2 |
+| G7 | `PriorityGate: a waiting scan is admitted after four render holds` | §6.2 |
+| G8 | `PriorityGate: a throw under a hold releases it` | §6.2 |
+| G9 | `Document: with_rendered_page calls back with the gate released` | §6.2 |
+| B1 | `RenderEngine: a shared worker waits for the gate before building` | §6.3 |
+| B2 | `SearchSession: a shared scan waits for the gate before scanning` | §6.3 |
+| B3 | `SharedDocument: no live page is left past the gate` (render build, text build, scan) | §6.3 |
+| C1 | `SharedDocument: results under contention equal the single-threaded results` | §6.4 |
+
+### 6.6 Proving the tests can fail (mutation checks, from a committed tree)
+
+Each mutant must fail the named test, run as `ctest -C Release -R "^<name>"` from PowerShell:
+
+1. The gate ignores class order (one queue by arrival): G1, G2, G3.
+2. The worker's display-list build skips the gate (calls the document through a test-only raw accessor): B1.
+3. The engine drops the page after leaving `with_document`: B3.
+4. `make_document_view` passes `Own` for FB2: S1.
+5. The session opens its own document in `Shared` mode: S1, S4.
+6. The gate's re-entry check removed: G4 (the deadlock is bounded by the test's own deadline, reported as a failure).
+7. The re-entry check moved after the ticket is taken: G5.
+8. `make_document_view` shares by extension (`one_render_worker(path) && !password`): S2.
+9. Tickets removed (any waiter of the class may go): G6.
+10. `kScanAfterRenders` check removed (strict Render over Scan): G7.
+11. `with_rendered_page` calls back before releasing the gate: G9.
 
 ## 7. Development and measurement
 
 - Build the "before" exe (main at the base SHA) in a detached worktree; never check main's sources out over the
   branch (the #236 lesson: the hook refused to restore them).
 - GUI, `litepdf.exe --log-timings`, Release, pinned to 0x5555, `LITEPDF_NO_RESTORE=1`, session.json, running.lock and
-  the HKCU MRU key backed up and restored (driver: `229-tools/pr3/measure.ps1`), before and after interleaved,
-  medians of 5, 800 and 1,500 sections:
-  1. first page (T0->T4), `view_built`, working set and private bytes after open;
-  2. time from a search's start to its first hit and to scan complete;
-  3. the longest UI-thread gate wait at a left press during a scan (a temporary probe log, not committed);
-  4. P0 render latency (submit to `on_complete`) of an uncached page during a scan, against no scan.
-- Pass bars, decided before measuring: (3) under 16 ms worst, (4) p99 within 30 ms of the no-scan p99. A miss stops
-  the PR for a design change, not a merge with a residual.
+  the HKCU MRU key backed up and restored (driver: `~/.claude/compact-dumps/litepdf/229-tools/pr3/measure.ps1`,
+  extended for (2)-(4)), the OS file cache warmed by reading the book before each run, before and after
+  interleaved, 5 runs per build and book, 800 and 1,500 sections:
+  1. first page (T0->T4), `view_built`, working set and private bytes after open (median of 5);
+  2. time from a search's start to its first hit and to scan complete (median of 5);
+  3. UI-thread gate waits during a scan. Workload per run: 2 s after the first page, the driver starts a search for
+     `ab` from page 1, then sends 40 left presses on the canvas, 50 ms apart, while the scan runs. A temporary probe
+     (not committed) logs every Foreground acquire's wait. Statistic: the maximum over all presses of all 5 runs
+     (200 samples).
+  4. P0 render latency. Workload per run: the same search, and during the scan 40 go-to-page jumps (Ctrl+G) to
+     pages chosen by a fixed seed, at least 20 pages from any page shown or prefetched so far, 150 ms apart. The
+     probe logs submit to `on_complete` of each P0. Control: the same jumps with no search. Statistic: p99 by
+     nearest rank over the 200 pooled samples of each, after against control.
+- Pass bars, decided before measuring: (3) under 16 ms, (4) the scan's p99 within 30 ms of the control's p99. A miss
+  stops the PR for a design change, not a merge with a residual.
 - ctest serial from PowerShell, Release.
 
 ## 8. Risks
@@ -342,6 +404,7 @@ New `test_priority_gate.cpp`, deterministic, with no sleeps as oracles (latches 
   header states it. A shared borrower cannot skip the gate (§3.2, no stored `fz_document*`).
 - **Fonts shared across threads (§3.2).** Re-check MuPDF's lazily filled font fields on any MuPDF bump, with the
   HTML engine's output (no clip text, no Type 3).
-- **Search finishes later while the reader turns pages.** By design (Scan is the lowest class); measured in §7 (2).
+- **Search finishes later while the reader turns pages.** By design (Scan is the lowest class, with one Scan hold
+  admitted per `kScanAfterRenders` Render holds); measured in §7 (2).
 - **#232.** If ePub later shares, the gate and seam are reusable, but ePub's chapter walk makes a hold longer; it
   needs its own measurement first.
