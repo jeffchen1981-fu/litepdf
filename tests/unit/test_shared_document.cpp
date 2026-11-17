@@ -22,14 +22,18 @@
 
 #include <mupdf/fitz.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -43,6 +47,7 @@ using litepdf::core::RenderEngine;
 using litepdf::core::SearchSession;
 using litepdf::core::detail::GateClass;
 using litepdf::core::detail::SharedDocumentAccess;
+using litepdf::test_kit::BoundedRun;
 using litepdf::test_kit::Events;
 using litepdf::test_kit::finishes_within;
 using litepdf::test_kit::Gate;
@@ -423,4 +428,157 @@ TEST_CASE("SearchSession: a shared session releases its context, scanned or not"
         REQUIRE(s.hit_count() > 0);
     }
     REQUIRE(litepdf::core::detail::family_context_count(probe.get()) == before);
+}
+
+namespace {
+
+// The whole text of page `p`, through the Document's own (gated) text_page.
+std::string page_text_copy(const Document& doc, std::size_t p) {
+    const Document::TextPage t = doc.text_page(p);
+    if (!t.valid()) return "<invalid>";
+    litepdf::core::SelPoint first{}, last{};
+    if (!t.full_range(first, last)) return "";
+    return t.copy(first, last);
+}
+
+bool same_quad(const Document::PageHit& a, const Document::PageHit& b) {
+    return a.ul_x == b.ul_x && a.ul_y == b.ul_y && a.ur_x == b.ur_x && a.ur_y == b.ur_y &&
+           a.ll_x == b.ll_x && a.ll_y == b.ll_y && a.lr_x == b.lr_x && a.lr_y == b.lr_y;
+}
+
+}  // namespace
+
+// C1 (spec §6.4): a search, a render of every page and UI-thread text builds,
+// all at once on one shared document, give exactly what each gives alone. The
+// baselines come from the same document through the same code paths, so a
+// second parse cannot differ: any difference is interference.
+TEST_CASE("SharedDocument: results under contention equal the single-threaded results",
+          "[core][shared][contention]") {
+    Document doc = open_fb2();
+    const std::size_t pages = doc.page_count();
+    REQUIRE(pages > 1);
+    RenderEngine eng(doc, 1, nullptr, std::nullopt, DocumentShare::Shared);
+
+    // 1. Baselines, nothing else running.
+    std::vector<std::shared_ptr<RenderSlot>> base_px(pages);
+    for (std::size_t p = 0; p < pages; ++p) {
+        base_px[p] = std::make_shared<RenderSlot>();
+        eng.submit(render_into(static_cast<int>(p), 0.5f, base_px[p]));
+        REQUIRE(base_px[p]->wait());
+        REQUIRE(base_px[p]->non_null);
+    }
+    std::vector<std::vector<Document::PageHit>> base_hits(pages);
+    std::vector<std::string> base_text(pages);
+    for (std::size_t p = 0; p < pages; ++p) {
+        base_hits[p] = doc.page_hits(p, "Lorem", Document::SearchFlags{});
+        // The session orders a page's hits top to bottom, stably (#139).
+        std::stable_sort(base_hits[p].begin(), base_hits[p].end(),
+                         [](const Document::PageHit& a, const Document::PageHit& b) {
+                             return a.ul_y < b.ul_y;
+                         });
+        base_text[p] = page_text_copy(doc, p);
+    }
+
+    // 2. Contention, all at once.
+    ThreadPoolDispatcher pool(2);
+    SearchSession s(doc, pool, std::nullopt, DocumentShare::Shared);
+    s.set_query(L"Lorem", SearchSession::Flags{});
+    std::vector<std::shared_ptr<RenderSlot>> busy_px(pages);
+    for (std::size_t p = 0; p < pages; ++p) {
+        busy_px[p] = std::make_shared<RenderSlot>();
+        eng.submit(render_into(static_cast<int>(p), 0.5f, busy_px[p]));
+    }
+    const auto all_rendered = [&] {
+        return std::all_of(busy_px.begin(), busy_px.end(),
+                           [](const std::shared_ptr<RenderSlot>& x) { return x->is_done(); });
+    };
+    std::mt19937 rng(229);
+    std::uniform_int_distribution<std::size_t> pick(0, pages - 1);
+    std::vector<std::pair<std::size_t, std::string>> busy_text;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (!(s.scan_complete() && all_rendered()) &&
+           std::chrono::steady_clock::now() < deadline) {
+        const std::size_t p = pick(rng);
+        busy_text.emplace_back(p, page_text_copy(doc, p));
+    }
+    REQUIRE(s.scan_complete());
+    REQUIRE(all_rendered());
+    CAPTURE(busy_text.size());
+
+    // 3. Check.
+    for (std::size_t p = 0; p < pages; ++p) {
+        CAPTURE(p);
+        const auto hits = s.hits_for_page(p);
+        REQUIRE(hits.size() == base_hits[p].size());
+        for (std::size_t i = 0; i < hits.size(); ++i) {
+            CHECK(same_quad(hits[i].geom, base_hits[p][i]));
+        }
+        REQUIRE(busy_px[p]->non_null);
+        CHECK(busy_px[p]->w == base_px[p]->w);
+        CHECK(busy_px[p]->h == base_px[p]->h);
+        CHECK(busy_px[p]->stride == base_px[p]->stride);
+        CHECK(busy_px[p]->bytes == base_px[p]->bytes);
+    }
+    for (const auto& [p, text] : busy_text) {
+        CAPTURE(p);
+        CHECK(text == base_text[p]);
+    }
+}
+
+// Review Focus 2: a print that overlaps a render prints what a quiet print
+// prints. A helper holds the gate as a Render borrower while a shared engine
+// has a render queued, so the print queues behind a Render hold and ahead of a
+// Render waiter; it then calls back with the gate released.
+TEST_CASE("SharedDocument: a print during renders equals a quiet print",
+          "[core][shared][contention]") {
+    auto doc = std::make_shared<Document>(open_fb2());
+
+    struct Printed {
+        bool ok = false;
+        int  w  = 0;
+        int  h  = 0;
+        std::vector<std::uint8_t> bytes;
+    };
+    const auto print_into = [](const Document& d, Printed& out) {
+        out.ok = d.with_rendered_page(
+            0, 2.0f, 2.0f, false, [&out](int w, int h, const std::uint8_t* bgra) {
+                out.w = w;
+                out.h = h;
+                out.bytes.assign(bgra, bgra + static_cast<std::size_t>(w) * h * 4);
+            });
+    };
+    Printed quiet;
+    print_into(*doc, quiet);
+    REQUIRE(quiet.ok);
+
+    Gate   latch;
+    Events progress;
+    auto   slot = std::make_shared<RenderSlot>();
+    RenderEngine eng(*doc, 1, nullptr, std::nullopt, DocumentShare::Shared);
+    JoinAll   threads;
+    GateGuard guard(latch);
+
+    threads.add(std::thread([&] {
+        SharedDocumentAccess::with_document(*doc, GateClass::Render, [&](fz_document*) {
+            progress.record("held");
+            latch.wait();
+        });
+    }));
+    REQUIRE(progress.wait_for("held"));
+    eng.submit(render_into(1, 0.5f, slot));
+    auto& gate = SharedDocumentAccess::gate(*doc);
+    REQUIRE(poll_until([&] { return gate.waiting(GateClass::Render) == 1; }));
+
+    auto busy = std::make_shared<Printed>();
+    auto run  = BoundedRun::start([doc, busy, print_into] { print_into(*doc, *busy); });
+    REQUIRE(poll_until([&] { return gate.waiting(GateClass::Foreground) == 1; }));
+    latch.open();
+    REQUIRE(run->wait_for(std::chrono::seconds(10)));
+
+    CHECK(busy->ok);
+    CHECK(busy->w == quiet.w);
+    CHECK(busy->h == quiet.h);
+    CHECK(busy->bytes == quiet.bytes);
+    REQUIRE(slot->wait());
+    CHECK(slot->non_null);
 }
