@@ -53,12 +53,13 @@ void PriorityGate::acquire(GateClass cls) {
 }
 
 void PriorityGate::release() noexcept {
-    {
-        std::lock_guard<std::mutex> lk(m_);
-        st_.held = false;
-        owner_ = std::thread::id{};
-    }
+    std::lock_guard<std::mutex> lk(m_);
+    st_.held = false;
+    owner_ = std::thread::id{};
     // Every waiter re-checks: which one is admitted depends on all classes.
+    // Notified under the mutex: once it is unlocked, a waiter may take the
+    // gate, finish, and let the gate's owner (a Document) be destroyed, so
+    // this thread must not touch cv_ after the unlock.
     cv_.notify_all();
 }
 

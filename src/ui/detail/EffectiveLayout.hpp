@@ -77,12 +77,14 @@ inline bool strip_format_ok(const std::filesystem::path& source, int page_count)
            extension_is(ext, ".cbz") || extension_is(ext, ".fb2") || extension_is(ext, ".svg");
 }
 
-// #229: an FB2 gets one render worker instead of RenderEngine::kDefaultWorkers.
-// Each worker's own copy of the book is laid out whole, and two layouts at once
-// each ran ~1.27x slower than one, so one worker shows the first page sooner and
-// holds one copy (~14x the file) less. By extension, the same rule as
-// strip_format_ok: a file of another format named .fb2 opens as that format and
-// only renders more slowly.
+// #229 (#235): a file named .fb2 gets one render worker instead of
+// RenderEngine::kDefaultWorkers. This decides only the worker count of a view
+// that does not share its document: an FB2 that MuPDF opened as FB2 is shared
+// and gets one worker from make_document_view whatever its name
+// (Document::is_fb2, ui/detail/MakeDocumentView.hpp). What is left for this
+// rule is a file of another format named .fb2, which opens as that format,
+// keeps documents of its own and only renders more slowly. By extension, the
+// same rule as strip_format_ok.
 inline bool one_render_worker(const std::filesystem::path& source) {
     return extension_is(source.extension().native(), ".fb2");
 }
