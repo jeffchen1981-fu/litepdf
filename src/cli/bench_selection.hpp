@@ -7,7 +7,8 @@
 // resulting quads is not included):
 //
 //   acquire     Document::text_page -- every left press on a page, and Select
-//               All. Builds the page's structured text under doc_mutex. What
+//               All. Builds the page's structured text under the Document's
+//               gate. What
 //               it costs depends on what the tab's Document has loaded before,
 //               so it is reported three ways (see SelectionPageTiming).
 //   move        snap() + highlight() -- PdfCanvas::refresh_live_selection, run
@@ -19,10 +20,12 @@
 //   select all  text_page() + full_range() + highlight() + copy().
 //   search      one Document::page_hits call for a needle that never matches,
 //               so the scan walks the whole page: the per-page cost a search
-//               scan pays, cold and warm. A scan now runs on the session's own
-//               document (#130), off the tab's doc_mutex, so this is no longer
-//               how long a press can wait; it is timed through the locking
-//               Document::page_hits wrapper (spec R4).
+//               scan pays, cold and warm. A scan runs on the session's own
+//               document (#130), off the tab's gate, except in an FB2 tab,
+//               whose scan borrows the tab's document under the gate (#229):
+//               there one page's scan is how long a press can wait at most
+//               behind it. It is timed through the gated Document::page_hits
+//               wrapper (spec R4).
 //
 // Not a gate: timings are machine-dependent and nothing asserts on their size.
 // The point is to put a number on the cost before deciding whether anything

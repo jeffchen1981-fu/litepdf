@@ -13,16 +13,19 @@
 // Most cases use InlineDispatcher, which runs tasks synchronously on
 // submit(), so after set_query() returns every page has already been
 // scanned and scan_complete() is true. Some cases drive a real
-// ThreadPoolDispatcher (rapid retype; a scan completing while doc_mutex is
-// held; #140's destructor discard and pool scan order); others use
-// dispatcher doubles (DeferredDispatcher from search_test_kit.hpp,
-// ThrowingDispatcher) to pin down a task interleaving, a scan order or a
-// submit failure deterministically.
+// ThreadPoolDispatcher (rapid retype; an own-document scan completing while
+// the Document's gate is held; #140's destructor discard and pool scan
+// order); others use dispatcher doubles (DeferredDispatcher from
+// search_test_kit.hpp, ThrowingDispatcher) to pin down a task interleaving, a
+// scan order or a submit failure deterministically.
 
 #include "app/SearchDispatcher.hpp"
 #include "core/Document.hpp"
 #include "core/EscrowContext.hpp"
 #include "core/SearchSession.hpp"
+#include "core/detail/PriorityGate.hpp"
+#include "core/detail/SharedDocumentAccess.hpp"
+#include "gate_test_kit.hpp"
 #include "search_test_kit.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -335,44 +338,38 @@ TEST_CASE("SearchSession: rapid query changes settle on correct results (ThreadP
     REQUIRE(s.hit_count() == 15);  // exactly Lorem's hits, no stale leakage
 }
 
-// #130 T1: a scan must not need the tab Document's doc_mutex. with_rendered_page
-// holds doc_mutex for the whole callback, so a scan that still took it would
-// stall on every page until the callback returned.
-//
-// The session, the pool and the Document are built OUTSIDE the callback, and
-// the session outlives it: destroying the session inside it would hang instead
-// of failing, because ~SearchSession spins on tasks blocked on the held lock.
-//
-// The callback holds no REQUIRE and calls no locking Document method. It runs
-// outside fz_try, so a throw out of it (a failed REQUIRE) would leak the
-// pixmap; and a same-thread re-entry of doc_mutex throws on MSVC. set_query's
-// page_count() takes no lock, and scan_complete()/hit_count() lock only the
-// session's state. The outcome goes into locals, asserted after the return.
-// Before the change the poll times out after 5 s, the callback returns, the
-// lock is released and the scan drains, so the test fails without hanging.
-TEST_CASE("SearchSession: a scan completes while doc_mutex is held",
+// #130 T1, restated for the gate (#229): an Own session scans its own document,
+// so it never waits for the tab Document's gate. A helper thread holds the gate
+// in the Foreground class until the scan has completed or the poll has given
+// up. The session is built outside the hold and outlives it: destroying it
+// while the hold is still parked would hang instead of failing if its tasks did
+// wait on the gate. A GateGuard opens the latch on every exit, after which the
+// thread is joined.
+TEST_CASE("SearchSession: an own-document scan completes while the gate is held",
           "[search][session][threads]") {
     Document doc = open_search_fixture();
     ThreadPoolDispatcher pool(2);
     SearchSession s(doc, pool);
 
-    bool        complete = false;
-    std::size_t count    = 0;
-    const bool rendered = doc.with_rendered_page(
-        0, 1.0f, 1.0f, false, [&](int, int, const std::uint8_t*) {
-            s.set_query(L"Lorem", SearchSession::Flags{});
-            // A deadline, not an iteration count: Windows rounds a 5 ms sleep
-            // up to the ~15.6 ms timer tick.
-            const auto deadline =
-                std::chrono::steady_clock::now() + std::chrono::seconds(5);
-            while (!s.scan_complete() && std::chrono::steady_clock::now() < deadline) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            }
-            complete = s.scan_complete();
-            count    = s.hit_count();
-        });
+    litepdf::test_kit::Gate   latch;
+    litepdf::test_kit::Events progress;
+    litepdf::test_kit::JoinAll threads;
+    litepdf::test_kit::GateGuard guard(latch);
+    threads.add(std::thread([&] {
+        detail::SharedDocumentAccess::with_document(
+            doc, detail::GateClass::Foreground, [&](fz_document*) {
+                progress.record("held");
+                latch.wait();
+            });
+    }));
+    REQUIRE(progress.wait_for("held"));
 
-    REQUIRE(rendered);
+    s.set_query(L"Lorem", SearchSession::Flags{});
+    const bool        complete = litepdf::test_kit::poll_until([&] { return s.scan_complete(); });
+    const std::size_t count    = s.hit_count();
+    latch.open();
+    threads.join();
+
     REQUIRE(complete);
     REQUIRE(count == 15);
 }
