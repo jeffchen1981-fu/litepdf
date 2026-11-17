@@ -9,10 +9,12 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "app/SearchDispatcher.hpp"
 #include "core/Document.hpp"
 #include "core/DocumentShare.hpp"
 #include "core/EscrowContext.hpp"
 #include "core/RenderEngine.hpp"
+#include "core/SearchSession.hpp"
 #include "core/detail/PriorityGate.hpp"
 #include "core/detail/SharedDocumentAccess.hpp"
 #include "gate_test_kit.hpp"
@@ -28,13 +30,17 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string_view>
 #include <thread>
 #include <vector>
 
+using litepdf::app::InlineDispatcher;
+using litepdf::app::ThreadPoolDispatcher;
 using litepdf::core::Document;
 using litepdf::core::DocumentShare;
 using litepdf::core::EscrowContext;
 using litepdf::core::RenderEngine;
+using litepdf::core::SearchSession;
 using litepdf::core::detail::GateClass;
 using litepdf::core::detail::SharedDocumentAccess;
 using litepdf::test_kit::Events;
@@ -159,6 +165,16 @@ private:
     bool                    open_all_ = false;
 };
 
+// Every hit of `needle` in `doc`, page by page, through the Document's own
+// (gated) page_hits: the single-threaded answer a scan must equal.
+std::size_t total_hits(const Document& doc, std::string_view needle) {
+    std::size_t n = 0;
+    for (std::size_t p = 0; p < doc.page_count(); ++p) {
+        n += doc.page_hits(p, needle, Document::SearchFlags{}).size();
+    }
+    return n;
+}
+
 // Opens every park when the scope ends, so a failed REQUIRE never leaves a
 // borrower parked while its engine or session is being destroyed.
 struct ReleaseAll {
@@ -261,6 +277,20 @@ TEST_CASE("SharedDocument: no live page is left past the gate", "[core][shared]"
         REQUIRE(texts->wait_for("valid", std::chrono::seconds(10)));
         CHECK(slot->non_null);
     }
+
+    SECTION("scan") {
+        Parker parker(GateClass::Scan);
+        SharedDocumentAccess::set_after_release_hook(doc, &Parker::hook, &parker);
+        ThreadPoolDispatcher pool(1);
+        SearchSession s(doc, pool, std::nullopt, DocumentShare::Shared);
+        ReleaseAll release{parker};
+
+        s.set_query(L"Lorem", SearchSession::Flags{});
+        REQUIRE(parker.wait_parked(1));
+        CHECK(live_pages(doc) == 0);
+        parker.release_all();
+        CHECK(poll_until([&] { return s.scan_complete(); }, std::chrono::seconds(10)));
+    }
 }
 
 // Review Focus 3: a page that fails to load inside the hold is caught there,
@@ -314,4 +344,83 @@ TEST_CASE("RenderEngine: a shared engine releases its contexts", "[core][shared]
     REQUIRE(finishes_within(std::chrono::seconds(10),
                             [eng = std::move(eng), doc]() mutable { eng.reset(); }));
     CHECK(litepdf::core::detail::family_context_count(probe.get()) == before);
+}
+
+// S4, session half: a shared session scans the Document's own document and
+// finds what the Document itself finds.
+TEST_CASE("SearchSession: a shared session opens no document", "[core][shared]") {
+    Document doc = open_fb2();
+    const std::size_t expected = total_hits(doc, "Lorem");
+    REQUIRE(expected > 0);
+
+    InlineDispatcher d;
+    {
+        SearchSession s(doc, d, std::nullopt, DocumentShare::Shared);
+        CHECK(s.documents_opened() == 0);
+        s.set_query(L"Lorem", SearchSession::Flags{});
+        CHECK(s.scan_complete());
+        CHECK(s.hit_count() == expected);
+    }
+    {
+        SearchSession own(doc, d);
+        CHECK(own.documents_opened() == 1);
+    }
+}
+
+// B2: a shared scan waits for the gate before it scans, and publishes nothing
+// until it gets it.
+TEST_CASE("SearchSession: a shared scan waits for the gate before scanning",
+          "[core][shared]") {
+    Document doc = open_fb2();
+    const std::size_t expected = total_hits(doc, "Lorem");
+    Gate   latch;
+    Events progress;
+    ThreadPoolDispatcher pool(1);
+    SearchSession s(doc, pool, std::nullopt, DocumentShare::Shared);
+    JoinAll   threads;
+    GateGuard guard(latch);
+
+    threads.add(std::thread([&] {
+        SharedDocumentAccess::with_document(doc, GateClass::Foreground, [&](fz_document*) {
+            progress.record("held");
+            latch.wait();
+        });
+    }));
+    REQUIRE(progress.wait_for("held"));
+
+    s.set_query(L"Lorem", SearchSession::Flags{});
+    REQUIRE(poll_until(
+        [&] { return SharedDocumentAccess::gate(doc).waiting(GateClass::Scan) == 1; }));
+    CHECK(s.hit_count() == 0);
+    CHECK_FALSE(s.scan_complete());
+
+    latch.open();
+    REQUIRE(poll_until([&] { return s.scan_complete(); }, std::chrono::seconds(10)));
+    CHECK(s.hit_count() == expected);
+}
+
+// Review Focus 4: the family's context count sees a leaked session context; a
+// never-scanned shared session and a scanned one must both give theirs back.
+TEST_CASE("SearchSession: a shared session releases its context, scanned or not",
+          "[core][shared]") {
+    Document doc = open_fb2();
+    fz_context* tmp = doc.clone_context();
+    REQUIRE(tmp != nullptr);
+    EscrowContext probe = EscrowContext::clone_from(tmp);
+    fz_drop_context(tmp);
+    REQUIRE(probe.valid());
+    const int before = litepdf::core::detail::family_context_count(probe.get());
+
+    InlineDispatcher d;
+    {
+        SearchSession s(doc, d, std::nullopt, DocumentShare::Shared);
+        REQUIRE(litepdf::core::detail::family_context_count(probe.get()) == before + 1);
+    }
+    REQUIRE(litepdf::core::detail::family_context_count(probe.get()) == before);
+    {
+        SearchSession s(doc, d, std::nullopt, DocumentShare::Shared);
+        s.set_query(L"Lorem", SearchSession::Flags{});
+        REQUIRE(s.hit_count() > 0);
+    }
+    REQUIRE(litepdf::core::detail::family_context_count(probe.get()) == before);
 }

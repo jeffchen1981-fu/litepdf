@@ -24,18 +24,17 @@ namespace litepdf::ui {
 inline std::unique_ptr<litepdf::core::DocumentView> make_document_view(
     litepdf::core::Document doc, litepdf::app::ISearchDispatcher& dispatcher,
     std::optional<std::string_view> password = std::nullopt) {
+    using litepdf::core::DocumentShare;
     using litepdf::core::DocumentView;
-    using litepdf::core::SearchOpen;
     // An FB2 lays the whole book out per copy and parses it at open (#229):
-    // one render worker, and a search copy parsed only when the tab is first
-    // searched.
+    // one render worker.
     const bool fb2 = one_render_worker(doc.source_path());
     const std::size_t workers = fb2 ? 1 : litepdf::core::RenderEngine::kDefaultWorkers;
-    const SearchOpen search_open = fb2 ? SearchOpen::AtFirstScan : SearchOpen::AtConstruction;
     return std::make_unique<DocumentView>(std::move(doc), dispatcher, password, workers,
                                           DocumentView::kDefaultL1Capacity,
                                           DocumentView::kDefaultL2Capacity,
-                                          litepdf::core::kDefaultL1BudgetBytes, search_open);
+                                          litepdf::core::kDefaultL1BudgetBytes,
+                                          DocumentShare::Own);
 }
 
 }  // namespace litepdf::ui

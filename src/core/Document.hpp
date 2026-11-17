@@ -16,7 +16,6 @@
 #include <vector>
 
 #include "core/EscrowContext.hpp"
-#include "core/FileStamp.hpp"
 #include "core/TextSelection.hpp"
 
 // Forward-declare fz_context so this header can expose clone_context() without
@@ -224,12 +223,6 @@ public:
     // UTF-8 form: open() refuses one that does not (UnconvertiblePath), so the
     // workers' own u8string() cannot fail on the name.
     [[nodiscard]] const std::filesystem::path& source_path() const noexcept;
-
-    // (#229) The file's stamp as open() found it, taken just before MuPDF read
-    // it; nothing if the document is not open or the file could not be
-    // stat'ed. A later open of source_path() compares against it to tell
-    // whether it would read the same file the tab shows.
-    [[nodiscard]] std::optional<FileStamp> source_stamp() const noexcept;
 
     // ------------------------------------------------------------------
     // Synchronous render escape hatch (Phase 8.5)

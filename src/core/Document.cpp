@@ -49,7 +49,6 @@ struct Document::Impl {
     bool needs_password = false;
     bool authenticated = false;
     std::filesystem::path path;
-    std::optional<FileStamp> stamp;  // #229: see Document::source_stamp
     // Read once, when the document becomes open (open() or authenticate()),
     // so page_count() never calls into MuPDF. fz_count_pages can throw after
     // a successful open -- a /Count MuPDF rejects, or a reflowable layout that
@@ -377,11 +376,6 @@ std::optional<Document::OpenError> Document::open(const std::filesystem::path& p
     }
     const char* utf8_bytes = reinterpret_cast<const char*>(u8.c_str());
 
-    // (#229) Before the read, so a file rewritten while MuPDF reads it gets a
-    // stamp that no later read will match. Declared outside the fz_try, like
-    // the conversion above.
-    const std::optional<FileStamp> stamp = file_stamp(path);
-
     fz_try(impl_->ctx) {
         impl_->doc = fz_open_document(impl_->ctx, utf8_bytes);
     }
@@ -397,7 +391,6 @@ std::optional<Document::OpenError> Document::open(const std::filesystem::path& p
     if (!impl_->doc) return OpenError::Other;
 
     impl_->path = path;
-    impl_->stamp = stamp;
     if (is_cbz_path(path)) impl_->cbz_path = absolute_utf8(path);
     impl_->needs_password = fz_needs_password(impl_->ctx, impl_->doc) != 0;
     impl_->authenticated = !impl_->needs_password;
@@ -436,16 +429,11 @@ void Document::close() noexcept {
     impl_->authenticated = false;
     impl_->is_fb2 = false;
     impl_->path.clear();
-    impl_->stamp.reset();
     impl_->page_count = 0;
 }
 
 const std::filesystem::path& Document::source_path() const noexcept {
     return impl_->path;
-}
-
-std::optional<FileStamp> Document::source_stamp() const noexcept {
-    return impl_->stamp;
 }
 
 bool Document::with_rendered_page(

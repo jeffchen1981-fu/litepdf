@@ -70,12 +70,10 @@ TEST_CASE("MakeDocumentView: other formats keep the default worker count", "[ui]
 
 // The password-prompt site passes the password through. A PDF named .fb2 opens
 // as a PDF (MuPDF scores content above extension) and gets one worker by name:
-// slower, never wrong. Since #229 an FB2-named view with no password opens its
-// search document at the first search, so a view that builds no longer proves
-// the password arrived: a search does. Without the password that open finds a
-// document that needs one and fails; with it, the session opened at
-// construction and finds the fixture's 8 lines (the render workers take the
-// same argument from DocumentView, #126).
+// slower, never wrong. It is not FB2 and has a password, so it keeps documents
+// of its own (#229): the render worker and the search session each open and
+// authenticate one with the password, and the search finds the fixture's 8
+// lines.
 TEST_CASE("MakeDocumentView: the password reaches a one-worker view", "[ui][make_view]") {
     const TempCopy file{"tests/fixtures/encrypted-text.pdf", L"encrypted.fb2"};
     Document doc;
@@ -88,49 +86,8 @@ TEST_CASE("MakeDocumentView: the password reaches a one-worker view", "[ui][make
     auto view = make_document_view(std::move(doc), disp, std::string_view("test"));
     REQUIRE(view);
     CHECK(view->render_workers() == 1);
+    CHECK(view->render_documents_opened() == 1);
+    CHECK(view->search().documents_opened() == 1);
     view->search().set_query(L"ENCRYPTED", litepdf::core::SearchSession::Flags{});
-    CHECK_FALSE(view->search().open_failed());
     CHECK(view->search().hit_count() == 8);
-}
-
-// #229: an FB2 view opens its search document at the first search, so a tab
-// that is never searched parses the book once less. FB2 lets go of the file at
-// open, so a copy moved away before the first search shows it: the search
-// finds the file gone.
-TEST_CASE("MakeDocumentView: an FB2 view opens its search document at the first search",
-          "[ui][make_view][lazy]") {
-    const TempCopy file{"tests/fixtures/strip-chapters.fb2", L"lazy.fb2"};
-    InlineDispatcher disp;
-    auto view = make_document_view(open_fixture(file.path), disp);
-    REQUIRE(view);
-
-    const auto moved = std::filesystem::path(file.path).concat(L".moved");
-    std::filesystem::rename(file.path, moved);
-    view->search().set_query(L"Lorem", litepdf::core::SearchSession::Flags{});
-    CHECK(view->search().open_failed());
-    CHECK(view->search().hit_count() == 0);
-
-    std::filesystem::rename(moved, file.path);
-    view->search().set_query(L"Lorem", litepdf::core::SearchSession::Flags{});
-    CHECK_FALSE(view->search().open_failed());
-    CHECK(view->search().hit_count() > 0);
-}
-
-// Every other format keeps its search document from the start. SVG, like FB2,
-// reads the whole file at open and lets go of it, so it is the one that can
-// show the difference: moved away after the view is built, its search still
-// has its document and does not fail.
-TEST_CASE("MakeDocumentView: other formats open their search document with the view",
-          "[ui][make_view][lazy]") {
-    const TempCopy file{"tests/fixtures/sample.svg", L"eager.svg"};
-    InlineDispatcher disp;
-    auto view = make_document_view(open_fixture(file.path), disp);
-    REQUIRE(view);
-
-    const auto moved = std::filesystem::path(file.path).concat(L".moved");
-    std::filesystem::rename(file.path, moved);
-    view->search().set_query(L"zzzz", litepdf::core::SearchSession::Flags{});
-    CHECK_FALSE(view->search().open_failed());
-    CHECK(view->search().scan_complete());
-    std::filesystem::rename(moved, file.path);
 }

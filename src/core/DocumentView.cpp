@@ -209,7 +209,7 @@ DocumentView::DocumentView(Document doc,
                            std::size_t l1_capacity,
                            std::size_t l2_capacity,
                            std::size_t l1_budget_bytes,
-                           SearchOpen search_open)
+                           DocumentShare share)
     : impl_(std::make_unique<Impl>()) {
     impl_->doc = std::move(doc);
     impl_->l1_budget = l1_budget_bytes;
@@ -235,18 +235,19 @@ DocumentView::DocumentView(Document doc,
     impl_->cache = std::make_unique<PageCache>(l1_capacity, l2_capacity,
                                                impl_->cache_ctx.get(), l1_budget_bytes);
 
-    // Engine clones its own per-worker contexts off the Document.
+    // Engine clones its own per-worker contexts off the Document, and opens
+    // a document per worker (Own) or borrows impl_->doc's (Shared, #229).
     impl_->engine = std::make_unique<RenderEngine>(
-        impl_->doc, num_workers, impl_->cache.get(), password);
+        impl_->doc, num_workers, impl_->cache.get(), password, share);
 
     // Construct SearchSession LAST — it references impl_->doc (already
-    // moved into place) and the caller-owned dispatcher, and opens its own
-    // document on a cloned context, authenticated with the same password
-    // as the render workers (#130), here or, with SearchOpen::AtFirstScan, at
-    // the first search (#229). If it throws (clone, open or password
-    // failure), earlier members RAII-unwind via Impl's declaration order.
+    // moved into place) and the caller-owned dispatcher, and clones a
+    // context. Own: it opens its own document, authenticated with the same
+    // password as the render workers (#130). Shared: it borrows impl_->doc's
+    // (#229). If it throws (clone, open or password failure), earlier members
+    // RAII-unwind via Impl's declaration order.
     impl_->session =
-        std::make_unique<SearchSession>(impl_->doc, dispatcher, password, search_open);
+        std::make_unique<SearchSession>(impl_->doc, dispatcher, password, share);
 }
 
 DocumentView::~DocumentView() {
@@ -268,13 +269,15 @@ DocumentView::~DocumentView() {
     impl_->thumb_cache.reset();
 
     // Session first — drops the strong ref to its shared_ptr<State>.
-    // ~SearchSession drains every in-flight task first; the tasks use only
-    // the session's own context and document, not impl_->doc. impl_->doc
-    // must still be destroyed AFTER the session (below, via Impl
-    // unwinding): the session holds a `const Document&` for page_count()
-    // and query_compiles() on the UI thread.
+    // ~SearchSession drains every in-flight task first. That drain is
+    // load-bearing for impl_->doc: a shared session's tasks (#229) scan
+    // impl_->doc's own document under its gate, so it must still be alive
+    // here, and the session holds a `const Document&` for page_count() and
+    // query_compiles() on the UI thread too. impl_->doc is destroyed AFTER
+    // the session (below, via Impl unwinding).
     impl_->session.reset();
-    // Engine next — ensures no worker is mid-access to cache or contexts.
+    // Engine next — joins the workers, so none is mid-access to cache,
+    // contexts or (shared) impl_->doc's document.
     impl_->engine.reset();
     // Cache next — drops remaining pixmaps / display lists via cache_ctx.
     impl_->cache.reset();
@@ -292,6 +295,10 @@ int DocumentView::page_count() const {
 
 std::size_t DocumentView::render_workers() const noexcept {
     return impl_->engine->num_workers();
+}
+
+std::size_t DocumentView::render_documents_opened() const noexcept {
+    return impl_->engine->documents_opened();
 }
 
 int DocumentView::current_page() const noexcept {
