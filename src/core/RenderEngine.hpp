@@ -27,6 +27,7 @@
 // (#98) Document::TextPage is a nested class and cannot be forward-declared.
 // Document.hpp is MuPDF-free too.
 #include "core/Document.hpp"
+#include "core/DocumentShare.hpp"
 
 // Forward declarations — keep this header MuPDF-free (PIMPL).
 struct fz_pixmap;
@@ -74,25 +75,29 @@ public:
         // can flag it at any time, so a caller that also cancels by token can
         // see a failed render reported as cancelled.
         std::shared_ptr<std::atomic<bool>> cancel_flag;
-        // (#98) Called on the worker with the page's text, built on the worker's own
-        // document after on_complete has delivered a non-null pixmap. See the skip
-        // rules: not calling it is always allowed, and the UI then builds synchronously.
+        // (#98) Called on the worker with the page's text, built after on_complete has
+        // delivered a non-null pixmap: from the worker's own document (Own) or, shared,
+        // from the Document's under its gate (#229). See the skip rules: not calling it
+        // is always allowed, and the UI then builds synchronously.
         std::function<void(Document::TextPage)> on_text;
         // (#98) The page whose text is still wanted. on_text runs only while this holds
         // req.page_num. Owned by the DocumentView, which writes it on the UI thread.
         std::shared_ptr<const std::atomic<int>> text_wanted;
     };
 
-    // The worker count a view gets unless its format asks for fewer. An FB2
-    // gets one: each worker lays the whole book out again, and two layouts at
-    // once each run ~1.27x slower (#229, ui/detail/MakeDocumentView.hpp).
+    // The worker count a view gets unless it asks for fewer
+    // (ui/detail/MakeDocumentView.hpp). A shared FB2 gets one: a second worker
+    // would mostly wait on the Document's gate, since only rasterising runs
+    // outside it (#229). A .fb2-named file that is not FB2 keeps one by name
+    // (#235), with documents of its own.
     static constexpr std::size_t kDefaultWorkers = 2;
 
     // Construct a RenderEngine.
     //
     // @param doc          The Document to render. Must outlive this engine.
-    // @param num_workers  Number of worker threads (each gets a cloned
-    //                     fz_context + fz_document). Must be >= 1.
+    // @param num_workers  Number of worker threads, each with a cloned
+    //                     fz_context and, with DocumentShare::Own, its own
+    //                     fz_document. Must be >= 1.
     // @param cache        Optional PageCache for L1/L2 lookups. If non-null,
     //                     workers consult the cache before rendering and
     //                     populate it after. The cache pointer MUST outlive
@@ -110,9 +115,19 @@ public:
     //                     rather than a bare string_view, so a stray integer
     //                     cannot compile here: a literal 0 would otherwise
     //                     convert to string_view(nullptr), which is undefined.
+    //                     Not read with DocumentShare::Shared.
+    // @param share        Own (default): each worker opens `doc`'s file again
+    //                     on its own context, so two pages interpret in
+    //                     parallel. Shared (#229): the workers open nothing and
+    //                     build display lists and text from `doc`'s own
+    //                     document, each build inside one hold of `doc`'s gate
+    //                     in the Render class (detail/SharedDocumentAccess.hpp);
+    //                     rasterising, the cache and the callbacks stay outside
+    //                     it.
     RenderEngine(Document& doc, std::size_t num_workers = kDefaultWorkers,
                  PageCache* cache = nullptr,
-                 std::optional<std::string_view> password = std::nullopt);
+                 std::optional<std::string_view> password = std::nullopt,
+                 DocumentShare share = DocumentShare::Own);
     ~RenderEngine();
 
     RenderEngine(const RenderEngine&) = delete;
@@ -150,6 +165,10 @@ public:
     // reuse a display list and rasterise. Cancelled requests, L1 hits and
     // bypass_cache (thumbnail) requests are not counted. Test observability only.
     [[nodiscard]] std::size_t renders_started() const noexcept;
+
+    // (#229) fz_open_document calls this engine made: num_workers with
+    // DocumentShare::Own, 0 with Shared. Test observability only.
+    [[nodiscard]] std::size_t documents_opened() const noexcept;
 
 private:
     struct Impl;
