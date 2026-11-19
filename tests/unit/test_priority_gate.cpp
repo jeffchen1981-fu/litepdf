@@ -1,4 +1,4 @@
-// #229: the priority gate that replaces Document::Impl's doc_mutex (spec §3.3,
+// #229: the priority gate that serialises a Document's users (spec §3.3,
 // tests §6.2). Deterministic: every waiter is seen waiting (through
 // PriorityGate::waiting) before the next one starts or the holder lets go, and
 // no sleep is an oracle. A case whose defect could deadlock runs the blocking
