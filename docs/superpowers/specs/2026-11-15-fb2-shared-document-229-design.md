@@ -386,7 +386,10 @@ Each mutant must fail the named test, run as `ctest -C Release -R "^<name>"` fro
      probe (not committed) logs every Foreground acquire's wait. Statistic: the maximum over all acquires of all 5
      runs, with the sample count; under 150 acquires is "not measured". (Amended at the plan gate, 2026-11-17: the
      first workload, 40 presses on one page, reached `Document::text_page` about once per run, because
-     `DocumentView::text_for` reuses the text slot after the first press.)
+     `DocumentView::text_for` reuses the text slot after the first press.) The 150-acquire floor applies to the
+     in-scan acquires of both books pooled (amended 2026-11-18, user ruling): after the change an 800-section scan
+     ends in about 1.1 s, so only 7-8 of its 40 rounds land inside it, and that book alone cannot reach the floor
+     at any press delay.
   4. P0 render latency. Workload per run: the same search, and during the scan 40 go-to-page jumps (Ctrl+G) to
      pages chosen by a fixed seed, at least 20 pages from any page shown or prefetched so far, 150 ms apart. The
      probe logs submit to `on_complete` of each P0. Control: the same jumps with no search. Statistic: p99 by
