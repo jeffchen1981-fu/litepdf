@@ -69,15 +69,19 @@ Non-goals:
 
 - **Only one crash.** `epub_load_page` (`epub-doc.c:592-623`) throws on a negative chapter or
   page, returns NULL when the spine ends before `chapter`, and never checks the page number
-  against the chapter's page count. `fz_load_chapter_page` (`document.c:949-952`) writes
+  against the chapter's page count. `fz_load_chapter_page` (`document.c:953-955`) writes
   `page->chapter` through that NULL. A page number past a chapter's count draws background only
   (`fz_draw_html`). So the only crash is a chapter at or past the copy's chapter count.
 - **The check is cheap.** `fz_count_chapters` runs `fz_ensure_layout` → `epub_layout`
   (`epub-doc.c:253-286`), which stores w/h/em and invalidates an empty accelerator, then counts
   the spine list (`epub_count_chapters`). Nothing is parsed or laid out.
-- **The check is needed even for the same file.** `epub_parse_header` skips a chapter whose load
-  throws ("ignoring chapter", `epub-doc.c:1057-1069`), so a copy can have a shorter spine than
-  the Document's.
+- **What the check guards.** For the same file, two opens always give the same spine in 1.27.2:
+  a spine item enters it when `path_from_idref` finds it in the manifest (deterministic), and the
+  "ignoring chapter" catch in `epub_parse_header` (`epub-doc.c:1057-1069`) is unreachable, because
+  `epub_load_chapter` (`epub-doc.c:448-466`) only allocates and so throws only
+  `FZ_ERROR_SYSTEM`, which that catch rethrows. The check guards the case where the file on disk
+  is replaced between the Document's open and a copy's (§6.2 makes it real), and any future
+  MuPDF where the spine can differ. It is one spine walk, so it stays.
 - **The counts match.** A copy is the same file, opened with `fz_open_document` (no accelerator
   file), laid out with the same defaults (`fz_ensure_layout`: DEFW, DEFH, DEFEM). Its context is a
   clone of the Document's root context, and `fz_clone_context` shares the style, font and store
@@ -108,8 +112,15 @@ because the copy was checked against its own document. The table has no mutator,
 and search threads read it without a lock.
 
 **Read once from the Document.** `detail::ChapterPagesAccess::table(const Document&)` returns the
-pointer, read under a Foreground hold (the same friend pattern as `TextPageAccess`). Called by
-the RenderEngine and SearchSession constructors, before any of their threads start.
+pointer, read under a Foreground hold (a friend of `Document`, like `SharedDocumentAccess`).
+Called by the RenderEngine and SearchSession constructors, before any of their threads start.
+The hold can throw `std::system_error` (a re-entrant caller, #70), so each call sits where a throw
+leaves nothing behind:
+
+- SearchSession: before `open_scan_document`, after the escrow clone, whose local owner drops it
+  on a throw. Nothing else is acquired yet.
+- RenderEngine: inside `open_worker_documents`' `try`, before the loop, so the existing rollback
+  drops the contexts.
 
 **The check.** `detail::table_for_copy(fz_context*, fz_document* copy,
 std::shared_ptr<const ChapterPages> table) noexcept` → the table, or null when the table is null,
@@ -149,13 +160,14 @@ Callers:
 | RenderEngine and SearchSession, Shared | `nullptr` (§4.5) |
 
 **RenderEngine (Own).** `open_worker_documents` takes the table from
-`ChapterPagesAccess::table(doc)` before the loop. Per worker, after the open and authenticate:
+`ChapterPagesAccess::table(doc)` inside its `try`, before the loop (§4.3). Per worker, after the open and authenticate:
 `table_for_copy(ctx, wdoc, table)`, stored in a `std::vector<std::shared_ptr<const
 ChapterPages>> worker_chapters` reserved together with `worker_docs` (so the store after a
 successful check cannot throw) and cleared by the same rollback.
 
-**SearchSession (Own).** After `open_scan_document` succeeds: `table_for_copy(escrow.get(), sdoc,
-table)`, moved into `Impl::chapters` in the commit block, which stays non-throwing.
+**SearchSession (Own).** The table is read before `open_scan_document` (§4.3). After the open
+succeeds: `table_for_copy(escrow.get(), sdoc, table)` (noexcept), moved into `Impl::chapters` in
+the commit block, which stays non-throwing.
 
 ### 4.5 Shared mode passes no table
 
@@ -170,8 +182,9 @@ through the borrow, read under the same hold). The borrow seam's signature stays
 - A whole-document search of a many-chapter ePub costs what loading by location costs (§5).
 - A worker's first render of a page in a late chapter, and its first text prefetch, no longer
   lay out the chapters before it. Working set should drop with them; measured in §5.
-- A copy whose earlier chapter fails to lay out can still load a later page (today the flat walk
-  throws at the earlier chapter's count). Better, and outside the tests.
+- Nothing else. A chapter that fails to lay out already fails the Document's open
+  (`read_page_count` lays out every chapter; `open` returns `Corrupted`), so no copy with a table
+  meets one, except through a transient failure such as running out of memory.
 
 ## 5. Measurement (the issue's to-do)
 
@@ -182,6 +195,17 @@ the P-cores (0x5555), on a quiet machine (`reference_litepdf_bench_machine_noise
 - whole-document search: wall time from the query to the scan's completion, for a word on every
   page and for a word on no page;
 - working set after the scan, and after End on a freshly opened tab (worker layout).
+
+**Instrument.** Nothing in the app reports a scan's completion today (`scan_complete()` only feeds
+the find-bar counter), so the measurement uses a probe patch that is applied to both builds and
+never merged: when an environment variable (`LITEPDF_PROBE_SEARCH=1`) is set, `SearchSession`
+stamps `set_query` and prints one stderr line when the generation's last page task finishes
+(`pages_remaining` reaches 0), with the milliseconds between them and the page count. Stamping
+inside `set_query` leaves the find bar's typing debounce out of the figure. The baseline is
+116070a with that same patch; the after build is the branch with it. The working set is read
+from outside (`Get-Process`). The driver (open the book, Ctrl+F, type the word, wait for the
+line, read the working set, close) and the patch live in the plan and in
+`~/.claude/compact-dumps/litepdf/232-tools/`, as #229's did.
 
 Numbers go in §7 and the PR. Release build only.
 
@@ -208,9 +232,12 @@ helper of `test_document_page_size.cpp`), never a path that reads a table.
   through the same steps; each page's prefetched text holds the oracle's token.
 - `table_for_copy`: the Document's table against a copy of the same file → the table; against a
   copy of a file with another chapter count (`strip-chapters.epub`) → null; null in → null.
-- Determinism: for each fixture with chapters, a copy opened on `Document::clone_context()` has,
-  for every chapter, `fz_count_chapter_pages` equal to the Document's table (through
-  `ChapterPagesAccess`).
+- Determinism: for each fixture with chapters, a copy opened on `Document::clone_context()` gives
+  per-chapter counts (`fz_count_chapter_pages`) from which `ChapterPages::from_counts` builds a
+  table, and that table has the Document's chapter count and the same `locate` answer for every
+  index (the Document's table read through `ChapterPagesAccess`). Every ePub chapter has at least
+  one page (#230 §4.1), so equal answers for every index mean equal counts; no per-chapter
+  accessor is added.
 - A RenderEngine or SearchSession whose check fails still renders and finds every page by flat
   number. The mismatch is the §4.2 residual made real: the test copies `chapter-tokens.epub` to a
   temporary path, opens the Document on it, then overwrites that path with `strip-chapters.epub`
@@ -241,12 +268,19 @@ Each is bounded against a reference the test times itself on the same book: the 
 `fz_load_chapter_page` on the test's own document. The multiplier and constant are fixed by a
 probe of both routes during planning, chosen so the location route passes and the flat route
 fails each by at least 2×; the plan records the probe. **Acceptance step:** reverting each
-path's load alone to `fz_load_page` fails its oracle; the readings of both routes go in the PR.
+path's load alone to flat numbers fails its oracle; the readings of both routes go in the PR.
+`TextPageAccess::build` and `page_hits_on` each serve two paths, so a path is reverted at its
+call site, by passing `nullptr` for the table there, not inside the shared helper (which would
+revert both at once). `load_display_list`, `page_text`, `page_size` and `with_rendered_page`
+have one caller each and are reverted the same way.
 
-### 6.4 Existing tests
+### 6.4 Existing tests and helpers
 
-`test_page_hits_cookie.cpp` (3 calls) gains the `nullptr` argument; `test_document_page_size.cpp`
-keeps passing unchanged.
+`test_page_hits_cookie.cpp` (3 calls) gains the `nullptr` argument. `OwnDocument` and
+`write_many_chapter_epub` move from `test_document_page_size.cpp`'s anonymous namespace to a
+shared test header (`tests/unit/chapter_test_kit.hpp`), so the render and search tests can use
+them; `test_document_page_size.cpp` changes only by that move, and its tests keep their
+behaviour.
 
 ## 7. Results
 
@@ -268,3 +302,12 @@ the mutation acceptance step); the 4× + 25 ms bound could pass a flat search (�
 probe-fixed bound). Also taken: Shared passes `nullptr` instead of changing the seam (§4.5);
 `shared_ptr<const ChapterPages>` so a copy takes no allocation; `page_count()`; the independent
 flat oracle; the determinism assertion; the second cost part of §2.
+
+**Spec gate (Full, routine), 2026-11-23.** Round 1, Opus on b73d096: 2 findings, both verified
+against the source and fixed here. (1) §4.2 claimed the same file can give a shorter spine; the
+"ignoring chapter" catch is unreachable in 1.27.2, so the check guards a replaced file only, and
+the §4.6 bullet that rested on it is gone. (2) §5 had no instrument for a scan's completion; it now
+names an env-gated probe patch applied to both builds. Its 5 questions, all taken: where the
+table read sits relative to each rollback (§4.3), the helper move (§6.4), the determinism test
+without a per-chapter accessor (§6.2), call-site mutations for the shared helpers (§6.3), and the
+friend-pattern wording (§4.3).
