@@ -154,7 +154,14 @@ private:
     litepdf::ui::ContinuousMenuState continuous_item_state();
 
     // Tab-close handler registered with TabManager (from middle-click).
+    // The one path that destroys a tab; refuses while print_running_.
     void on_tab_close_request(int index);
+
+    // #237: true for the whole of PrintJob::run, which holds the active tab's
+    // Document by reference. Its modal dialogs and its abort procedure dispatch
+    // queued messages on this thread, so a queued tab close would otherwise
+    // destroy that Document mid-job.
+    bool print_running_ = false;
 
     // Rewrite window title based on the active tab (or reset to the bare title; dev builds add "<version>-dev").
     void update_window_title();

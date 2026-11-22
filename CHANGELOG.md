@@ -54,6 +54,9 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   reads the book again before it finds anything: its first hit comes in 6 ms
   instead of 0.87 s on the 1,500-section book, and 47 ms instead of 0.48 s on the
   800-section one. Turning pages while a search runs is no slower (#229).
+- A tab close that reaches the window while a print runs is now ignored: every
+  tab stays open and the print finishes. Closing the tab being printed left the
+  print reading that tab's closed document, which could crash litepdf (#237).
 
 ## [1.8.3] — 2026-11-10 — Switching to continuous scroll keeps your place
 

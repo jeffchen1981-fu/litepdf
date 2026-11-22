@@ -15,6 +15,8 @@ struct PrintJob {
     // active_page is reserved for future "print current page only" UX;
     // unused in T2. doc is taken by const-ref because every method we
     // call (is_open, page_count, source_path, clone_context) is const.
+    // The caller keeps doc alive for the whole call: run's dialogs and its
+    // GDI abort procedure dispatch queued messages on this thread (#237).
     [[nodiscard]] static bool run(HWND parent,
                                   const litepdf::core::Document& doc,
                                   std::size_t active_page);
