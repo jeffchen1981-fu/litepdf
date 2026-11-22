@@ -540,7 +540,6 @@ RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache,
         impl_->open_worker_documents(doc, password);
     }
 
-    //
     // Spawn workers only after all contexts and docs are ready.
     impl_->workers.reserve(n);
     try {

@@ -495,15 +495,20 @@ TEST_CASE("SharedDocument: results under contention equal the single-threaded re
     std::mt19937 rng(229);
     std::uniform_int_distribution<std::size_t> pick(0, pages - 1);
     std::vector<std::pair<std::size_t, std::string>> busy_text;
+    // Text builds that started while the scan or a render was still running:
+    // without at least one, the text half of this case compares nothing.
+    std::size_t contended_text = 0;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
     while (!(s.scan_complete() && all_rendered()) &&
            std::chrono::steady_clock::now() < deadline) {
         const std::size_t p = pick(rng);
+        if (!(s.scan_complete() && all_rendered())) ++contended_text;
         busy_text.emplace_back(p, page_text_copy(doc, p));
     }
     REQUIRE(s.scan_complete());
     REQUIRE(all_rendered());
     CAPTURE(busy_text.size());
+    REQUIRE(contended_text > 0);
 
     // 3. Check.
     for (std::size_t p = 0; p < pages; ++p) {

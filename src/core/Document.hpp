@@ -206,8 +206,9 @@ public:
     [[nodiscard]] fz_context* clone_context() const;
 
     // An EscrowContext cloned from this Document's context: the context a
-    // search session opens its own document on (#130). Unlike a bare
-    // clone_context(), it may outlive this Document.
+    // search session scans on, whether it opened its own document on it (#130)
+    // or borrows this Document's (#229). Unlike a bare clone_context(), it may
+    // outlive this Document.
     //
     // Empty if the Document is not open or the clone fails (out of memory).
     // Takes no gate: the clone locks through the family's lock table, as
