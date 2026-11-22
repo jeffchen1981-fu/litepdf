@@ -978,6 +978,12 @@ litepdf::ui::ContinuousMenuState MainWindow::continuous_item_state() {
 
 void MainWindow::on_tab_close_request(int index) {
     if (!tabs_) return;
+    // #237: a close dispatched during a print (by the print dialogs' modal
+    // loops or PrintJob's abort procedure) is dropped, not deferred: closing
+    // the tab would free the Document the print job is still reading, and a
+    // close the user made before the print ends should not land after it.
+    // The user can close the tab once the print ends.
+    if (print_running_) return;
     // Defense-in-depth against C2: if a cross-tab scan is in flight
     // (results panel visible == dispatch active), drop its sentinel and
     // restore per-session observers BEFORE destroying the tab. The
@@ -1938,7 +1944,16 @@ LRESULT MainWindow::handle_message(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     return 0;
                 case IDM_FILE_PRINT: {
                     auto* view = active_view();
-                    if (view && view->document().is_open()) {
+                    // print_running_: a nested print would share the job's
+                    // single abort flag; nothing reaches here mid-print today.
+                    if (!print_running_ && view && view->document().is_open()) {
+                        // #237: keeps every tab, so the Document PrintJob
+                        // holds outlives the job (see on_tab_close_request).
+                        print_running_ = true;
+                        struct PrintRunningReset {
+                            bool& flag;
+                            ~PrintRunningReset() { flag = false; }
+                        } print_running_reset{print_running_};
                         // false is a cancel or an error PrintJob has already
                         // reported in its own MessageBox; nothing left to do.
                         (void)litepdf::printing::PrintJob::run(
