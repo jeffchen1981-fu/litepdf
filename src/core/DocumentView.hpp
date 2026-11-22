@@ -19,9 +19,12 @@
 //   5. Document cleaned up last via unique_ptr — SearchSession keeps a
 //      `const Document&` (page_count() and query_compiles() on the UI
 //      thread), so Document must outlive the session. In-flight search
-//      tasks do not touch Document (#130): they use only the session's
-//      own context, document and mutex, and ~SearchSession drains them
-//      before dropping those. Because ~SearchSession drains every task,
+//      tasks of an Own session do not touch Document (#130): they use only
+//      the session's own context, document and mutex. A shared session's
+//      tasks (#229) DO: they scan Document's own document under its gate,
+//      as a shared engine's workers render from it. ~SearchSession drains
+//      every task and ~RenderEngine joins every worker before Document
+//      goes. Because ~SearchSession drains every task,
 //      nothing of the session's is left running on the dispatcher once
 //      the session is gone; the dispatcher (owned above DocumentView, in
 //      MainWindow, and outliving every tab) only has to outlive the
@@ -45,7 +48,7 @@
 // (#55) RenderEngine::RenderToken is a nested type and cannot be
 // forward-declared. RenderEngine.hpp is MuPDF-free.
 #include "core/RenderEngine.hpp"
-#include "core/SearchOpen.hpp"
+#include "core/DocumentShare.hpp"
 #include "core/TextSelection.hpp"
 #include "core/detail/PrefetchPlan.hpp"  // TravelDirection (standard library only)
 #include "core/detail/ViewRotation.hpp"  // Rotation (#53)
@@ -86,10 +89,11 @@ public:
     // literal 0 converting to string_view(nullptr) (see RenderEngine.hpp).
     // `l1_budget_bytes` bounds the cache's L1 pixmaps by bytes as well as
     // by count, and decides which neighbours are prefetched (#49).
-    // `search_open` is when the SearchSession opens its own document
-    // (#229): SearchOpen::AtFirstScan moves that open, and the memory it
-    // takes, from here to the tab's first search; the session ignores it
-    // when there is a password (see SearchSession's constructor).
+    // `share` (#229) goes to both the render engine and the search session:
+    // DocumentShare::Own (default) has each open `doc`'s file again, with the
+    // password; Shared has them open nothing and borrow `doc`'s own document
+    // under its gate, so the tab keeps one copy (ui::make_document_view
+    // decides: an FB2 with no password). Shared ignores `password`.
     explicit DocumentView(Document doc,
                           litepdf::app::ISearchDispatcher& dispatcher,
                           std::optional<std::string_view> password = std::nullopt,
@@ -97,7 +101,7 @@ public:
                           std::size_t l1_capacity = kDefaultL1Capacity,
                           std::size_t l2_capacity = kDefaultL2Capacity,
                           std::size_t l1_budget_bytes = kDefaultL1BudgetBytes,
-                          SearchOpen search_open = SearchOpen::AtConstruction);
+                          DocumentShare share = DocumentShare::Own);
 
     // The cache's entry counts when the caller names none.
     static constexpr std::size_t kDefaultL1Capacity = 5;
@@ -112,6 +116,9 @@ public:
     int  page_count() const;
     // The render engine's worker count, as constructed (#229).
     std::size_t render_workers() const noexcept;
+    // The render engine's own document opens (RenderEngine::documents_opened):
+    // one per worker, or 0 when shared (#229). Test observability.
+    std::size_t render_documents_opened() const noexcept;
     int  current_page() const noexcept;
     // Clamps to [0, page_count-1]. A change drops the text slot and, unless
     // the view is continuous or the zoom is Custom, re-derives the fit for

@@ -42,12 +42,15 @@ struct Document::TextPage::Impl {
 namespace detail {
 
 struct TextPageAccess {
-    // The single text-page builder: Document::text_page (under doc_mutex) and
-    // the render worker (on its own document, lock-free) both call it, so the
-    // option block exists once (spec §3.1).
+    // The single text-page builder: Document::text_page (under the Document's
+    // gate) and the render worker both call it, so the option block exists
+    // once (spec §3.1). The worker builds on its own document, lock-free
+    // (DocumentShare::Own), or on the Document's under the gate's Render class
+    // (Shared, an FB2 tab, #229).
     //
-    // `ctx` and `doc` belong to the caller, and the caller serialises their use
-    // (doc_mutex for the Document's, the worker's own thread for its clone). The
+    // The caller serialises its use of `ctx` and `doc`: the gate for the
+    // Document's document (whatever context reaches it), the worker's own
+    // thread for a worker's own context and document. The
     // handle gets its OWN escrow clone of `ctx`, so it outlives both. Empty on
     // every failure -- a bad index, a MuPDF error, a failed clone, out of memory
     // -- and never throws.

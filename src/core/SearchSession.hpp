@@ -2,29 +2,33 @@
 
 // core::SearchSession — per-tab search state: query, flags, hit cache,
 // cursor. The scan itself runs on an ISearchDispatcher's worker threads,
-// against a MuPDF document the session opens for itself. See Phase 6 design
-// §4 D1.
+// on the session's own cloned context. See Phase 6 design §4 D1.
 //
 // Thread-safety:
 //   - Public API is single-threaded (UI thread).
 //   - Task lambdas submitted to dispatcher run on worker threads. They
 //     touch SearchState under its own std::mutex.
-//   - A scan never touches the tab Document (#130). The session opens its
-//     own fz_document on its own cloned context, at construction or, with
-//     SearchOpen::AtFirstScan, in the first scan task (#229), and every
-//     scan task runs on that pair under a session-owned mutex, which
-//     serialises the dispatcher's workers on it (MuPDF allows one document
-//     on several threads as long as the uses never overlap). The tab
-//     Document's doc_mutex is never taken by a scan, so a UI-thread call
-//     into the Document never waits on a search, and a search never waits
-//     on a print or a text-selection build.
+//   - Every scan task runs under a session-owned mutex (scan_mtx), which
+//     serialises the dispatcher's workers on the session's context. The
+//     document it scans depends on the mode:
+//       DocumentShare::Own (#130): the session's own fz_document, opened at
+//         construction. A scan never touches the tab Document, so a UI-thread
+//         call into the Document never waits on a search, and a search never
+//         waits on a print or a text-selection build.
+//       DocumentShare::Shared (#229, an FB2 tab): the tab Document's own
+//         document, reached through detail::SharedDocumentAccess under the
+//         Document's gate in the Scan class, one page per hold. A scan then
+//         waits for the UI thread and the render worker (Foreground and
+//         Render go first; a waiting Scan is admitted after at most
+//         detail::kScanAfterRenders Render holds), and a UI-thread call waits
+//         for at most the one page scan in progress.
 //   - The UI-thread calls still use the tab Document: set_query's
 //     page_count() (which takes no lock) and query_compiles() (a brief
-//     doc_mutex hold on the UI thread, never on a worker).
+//     Foreground hold of the Document's gate on the UI thread).
 
 #include "app/SearchDispatcher.hpp"
 #include "core/Document.hpp"
-#include "core/SearchOpen.hpp"
+#include "core/DocumentShare.hpp"
 
 #include <cstddef>
 #include <functional>
@@ -52,30 +56,24 @@ public:
     using OnUpdate = std::function<void()>;
 
     // Caller must keep `doc` and `dispatcher` alive for the SearchSession's
-    // lifetime. SearchSession holds non-owning refs.
+    // lifetime. SearchSession holds non-owning refs. Clones a context from
+    // `doc` for the scans.
     //
-    // Opens `doc.source_path()` again on a context cloned from `doc` and,
-    // when that document needs a password, authenticates it with `password`
-    // -- pass the password `doc` was authenticated with. The scans run on
-    // that document only (see Thread-safety above). Its copy of the password
-    // is wiped on every exit.
+    // DocumentShare::Own (default): opens `doc.source_path()` again on that
+    // context and, when that document needs a password, authenticates it
+    // with `password` -- pass the password `doc` was authenticated with. The
+    // scans run on that document only (see Thread-safety above). Its copy of
+    // the password is wiped on every exit. Throws std::runtime_error if the
+    // clone or the open fails, or if the document needs a password and
+    // `password` is missing, empty or wrong, after releasing whatever it
+    // acquired.
     //
-    // Throws std::runtime_error if the clone or the open fails, or if the
-    // document needs a password and `password` is missing, empty or wrong,
-    // after releasing whatever it acquired.
-    //
-    // (#229) With `open` == SearchOpen::AtFirstScan, no `password` and a
-    // stamp from `doc` (Document::source_stamp), the open waits for the first
-    // task of the first non-empty query instead, on the dispatcher's thread.
-    // The constructor then throws only if the clone fails or `doc` has no
-    // path. That open reads the file only while its stamp still matches the
-    // one `doc` took, before MuPDF reads it and after; a failure, or a
-    // mismatch, ends that query with no hits and open_failed() true, and the
-    // next query tries again. With a password, or no stamp, `open` is
-    // ignored and the document is opened here.
+    // DocumentShare::Shared (#229): opens nothing and does not read
+    // `password`; the scans borrow `doc`'s own document under its gate.
+    // Throws std::runtime_error only if the clone fails.
     SearchSession(const Document& doc, litepdf::app::ISearchDispatcher& dispatcher,
                   std::optional<std::string_view> password = std::nullopt,
-                  SearchOpen open = SearchOpen::AtConstruction);
+                  DocumentShare share = DocumentShare::Own);
     ~SearchSession();
 
     SearchSession(const SearchSession&)            = delete;
@@ -130,12 +128,9 @@ public:
 
     std::vector<Hit> hits_for_page(std::size_t page) const;
 
-    // (#229) True while the current query's deferred open has failed, so its
-    // scan found nothing because it read nothing. False for a session that
-    // opened at construction, before the first query, after clear(), and
-    // for a new query until its own open has failed. Takes no lock a scan
-    // holds, so a UI-thread call never waits on one.
-    bool open_failed() const;
+    // (#229) fz_open_document calls this session made: 1 with
+    // DocumentShare::Own, 0 with Shared. Test observability only.
+    [[nodiscard]] std::size_t documents_opened() const noexcept;
 
 private:
     // Test seam: `hook` runs on the set_query() thread right after the
@@ -144,13 +139,6 @@ private:
     // a test land a superseded worker in exactly that window, which no
     // dispatcher double can reach. Reached only via SearchSessionTestAccess.
     void set_after_reset_hook(std::function<void()> hook);
-    // Test seams (#229): `after_open` runs right after a deferred open, worked
-    // or not; `before_scan` right before a page's scan; `after_read` inside a
-    // deferred open, after MuPDF has read the file and before the stamp is
-    // checked again. All on the task's thread, holding the scan lock. Set them
-    // before the first query.
-    void set_scan_hooks(std::function<void()> after_open, std::function<void()> before_scan,
-                        std::function<void()> after_read = {});
     friend struct SearchSessionTestAccess;
 
     struct Impl;

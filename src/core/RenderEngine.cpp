@@ -2,6 +2,8 @@
 #include "core/Document.hpp"
 #include "core/PageCache.hpp"
 #include "core/detail/OpenFailure.hpp"
+#include "core/detail/PriorityGate.hpp"
+#include "core/detail/SharedDocumentAccess.hpp"
 #include "core/detail/TextPageAccess.hpp"
 
 // RenderEngine is the only TU that includes <mupdf/fitz.h> publicly; the
@@ -27,6 +29,34 @@
 #include <windows.h>
 
 namespace litepdf::core {
+
+namespace {
+
+// Loads page `page_num` of `doc`, records it into a display list and drops the
+// page, all in one fz_try on `ctx`; the display list, or null on a failure
+// (reported, which also marks the error handled, #146). In shared mode the
+// caller runs it inside one gate hold, so the page never outlives the hold
+// (detail/SharedDocumentAccess.hpp).
+fz_display_list* load_display_list(fz_context* ctx, fz_document* doc, int page_num) noexcept {
+    fz_page* page = nullptr;
+    fz_display_list* dlist = nullptr;
+    // Modified inside fz_try and read in fz_catch or after it once an error
+    // has longjmp'd out, so fz_var them (context.h).
+    fz_var(page);
+    fz_var(dlist);
+    fz_try(ctx) {
+        page = fz_load_page(ctx, doc, page_num);
+        dlist = fz_new_display_list_from_page(ctx, page);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);   // also marks it handled (#146)
+        if (dlist) { fz_drop_display_list(ctx, dlist); dlist = nullptr; }
+    }
+    if (page) fz_drop_page(ctx, page);
+    return dlist;
+}
+
+}  // namespace
 
 struct RenderEngine::Impl {
     // Wraps a RenderRequest with stable-ordering metadata plus a
@@ -58,10 +88,19 @@ struct RenderEngine::Impl {
     // When null, worker_loop falls through to the direct render path.
     PageCache* cache = nullptr;
     std::vector<fz_context*> worker_ctxs;
-    // Per-worker fz_document handles. MuPDF forbids sharing a fz_document
-    // across contexts, so each worker gets its own handle opened on its
-    // own cloned ctx. We pay N * parse-cost but gain thread isolation.
+    // Per-worker fz_document handles (DocumentShare::Own), each opened on its
+    // worker's own cloned ctx, so two pages interpret in parallel with no lock
+    // between them. We pay N * parse-cost for that. MuPDF would also allow one
+    // document on several threads as long as the uses never overlap
+    // (docs/reference/c/overview.md, rule 2), which Shared relies on: there
+    // this stays empty and every use goes through the Document's gate.
     std::vector<fz_document*> worker_docs;
+    // (#229) The Document whose document the workers borrow, DocumentShare::
+    // Shared only; null for Own. Never a stored fz_document*: the seam is the
+    // only way to the document, so skipping the gate does not compile.
+    const Document* shared = nullptr;
+    // (#229) fz_open_document calls made; see documents_opened().
+    std::size_t opened = 0;
     std::vector<std::thread> workers;
     mutable std::mutex mtx;  // mutable: pending_count() is const but locks
     std::condition_variable cv;
@@ -80,10 +119,11 @@ struct RenderEngine::Impl {
     std::atomic<std::size_t> renders_started{0};
 
     // (#98) Called after on_complete has delivered a NON-NULL pixmap for `req`.
-    // Builds the page's text on this worker's own context and document -- no
-    // doc_mutex: nothing else touches them -- and hands it to on_text, unless a
-    // skip rule holds (spec §3.3). Not calling on_text is always allowed: the UI
-    // then builds the text synchronously.
+    // Builds the page's text on this worker's own context -- from its own
+    // document with no lock (Own: nothing else touches them), or from the
+    // Document's under one gate hold in the Render class (Shared, #229) -- and
+    // hands it to on_text, unless a skip rule holds (spec §3.3). Not calling
+    // on_text is always allowed: the UI then builds the text synchronously.
     //   1. stopping: the engine is being destroyed; the queue still drains, so
     //      without this every queued build would run while the UI thread joins.
     //   2. text_wanted no longer holds req.page_num.
@@ -98,7 +138,7 @@ struct RenderEngine::Impl {
     // be pre-empted (spec §3.3 residual).
     static void maybe_deliver_text(Impl* impl, const RenderRequest& req,
                                    const std::shared_ptr<std::atomic<bool>>& canceled,
-                                   fz_context* ctx, fz_document* wdoc) {
+                                   fz_context* ctx, std::size_t idx) {
         if (!req.on_text) return;
         {
             std::lock_guard<std::mutex> lk(impl->mtx);
@@ -117,7 +157,21 @@ struct RenderEngine::Impl {
         if (!still_wanted()) return;
 
         impl->text_builds.fetch_add(1);
-        auto text = detail::TextPageAccess::build(ctx, wdoc, req.page_num);
+        Document::TextPage text;
+        if (!impl->shared) {
+            text = detail::TextPageAccess::build(ctx, impl->worker_docs[idx], req.page_num);
+        } else {
+            try {
+                detail::SharedDocumentAccess::with_document(
+                    *impl->shared, detail::GateClass::Render, [&](fz_document* d) {
+                        text = detail::TextPageAccess::build(ctx, d, req.page_num);
+                    });
+            } catch (...) {
+                // The gate refused the acquire (std::system_error). Skipping
+                // the text is always allowed.
+                return;
+            }
+        }
 
         {
             std::lock_guard<std::mutex> lk(impl->mtx);
@@ -127,6 +181,117 @@ struct RenderEngine::Impl {
         if (text.valid()) req.on_text(std::move(text));
     }
 
+    // Opens a per-worker fz_document on each worker's ctx (DocumentShare::Own):
+    // each worker parses the file independently, so two pages interpret in
+    // parallel with no lock between them. Acceptable cost on the 2-worker
+    // default. On a throw, drops what it opened and every context.
+    void open_worker_documents(Document& doc, std::optional<std::string_view> password) {
+        // fz_open_document takes UTF-8. std::filesystem::path::string() returns
+        // the native ACP on Windows MSVC; path::u8string() returns UTF-8. Match
+        // the Document::open conversion so non-ASCII paths round-trip correctly.
+#if defined(__cpp_lib_char8_t) && __cpp_lib_char8_t >= 201907L
+        const auto path_u8 = doc.source_path().u8string();
+        const std::string path_str(reinterpret_cast<const char*>(path_u8.data()),
+                                   path_u8.size());
+#else
+        const std::string path_str = doc.source_path().u8string();
+#endif
+        if (path_str.empty()) {
+            for (auto* c : worker_ctxs) fz_drop_context(c);
+            worker_ctxs.clear();
+            throw std::runtime_error("RenderEngine: Document has no source path "
+                                     "(is the Document open?)");
+        }
+
+        // Each worker document must be authenticated too (#126). MuPDF tries a
+        // blank password on open, and the failed attempt still leaves a key in
+        // the document -- one it computed while checking "" -- so an
+        // unauthenticated worker decrypts every content stream of a user-password
+        // PDF to garbage and renders the page blank. fz_authenticate_password
+        // needs a NUL-terminated copy; it is wiped on every exit from this
+        // function, like Document::authenticate's (Phase 8 D3).
+        struct WipeOnExit {
+            std::string& s;
+            ~WipeOnExit() { SecureZeroMemory(s.data(), s.size()); }
+        };
+        std::string pw(password.value_or(std::string_view{}));
+        const WipeOnExit wipe{pw};
+
+        try {
+            worker_docs.reserve(num_workers);
+            for (std::size_t i = 0; i < num_workers; ++i) {
+                fz_context* ctx = worker_ctxs[i];
+                fz_document* wdoc = nullptr;
+                // MuPDF's message from a failed open or authenticate (#137);
+                // fz_convert_error into a fixed buffer, as in SearchSession's
+                // constructor.
+                char reason[detail::kOpenFailureReasonSize] = "";
+                fz_var(wdoc);
+                fz_try(ctx) {
+                    wdoc = fz_open_document(ctx, path_str.c_str());
+                }
+                fz_catch(ctx) {
+                    // Leave wdoc null; throw std::runtime_error below.
+                    fz_strlcpy(reason, fz_convert_error(ctx, nullptr), sizeof reason);
+                }
+                if (!wdoc) {
+                    throw std::runtime_error(detail::open_failure(
+                        "RenderEngine: fz_open_document failed for worker " +
+                        std::to_string(i), reason));
+                }
+                // Adopt before authenticating so the rollback below drops it.
+                worker_docs.push_back(wdoc);
+                ++opened;
+                if (!pw.empty()) {
+                    int ok = 0;
+                    fz_var(ok);
+                    fz_try(ctx) {
+                        ok = fz_authenticate_password(ctx, wdoc, pw.c_str());
+                    }
+                    fz_catch(ctx) {
+                        ok = 0;
+                        fz_strlcpy(reason, fz_convert_error(ctx, nullptr),
+                                   sizeof reason);
+                    }
+                    if (!ok) {
+                        throw std::runtime_error(detail::open_failure(
+                            "RenderEngine: worker " + std::to_string(i) +
+                            " rejected the document's password", reason));
+                    }
+                }
+            }
+        } catch (...) {
+            // Rollback: drop any per-worker docs we already opened, each on its
+            // own worker's ctx (the only context that has used it), then drop
+            // the ctxs, which must outlive the documents dropped through them.
+            for (std::size_t i = 0; i < worker_docs.size(); ++i) {
+                fz_drop_document(worker_ctxs[i], worker_docs[i]);
+            }
+            worker_docs.clear();
+            for (auto* c : worker_ctxs) fz_drop_context(c);
+            worker_ctxs.clear();
+            throw;
+        }
+    }
+
+    // The display list for page `page`: built from this worker's own document
+    // (Own), or from the Document's inside one gate hold in the Render class
+    // (Shared, #229). Null on a failure.
+    static fz_display_list* build_display_list(Impl* impl, fz_context* ctx, std::size_t idx,
+                                               int page) noexcept {
+        if (!impl->shared) return load_display_list(ctx, impl->worker_docs[idx], page);
+        fz_display_list* dlist = nullptr;
+        try {
+            detail::SharedDocumentAccess::with_document(
+                *impl->shared, detail::GateClass::Render,
+                [&](fz_document* d) { dlist = load_display_list(ctx, d, page); });
+        } catch (...) {
+            // The gate refused the acquire (std::system_error): a failed render.
+            return nullptr;
+        }
+        return dlist;
+    }
+
     // Graceful shutdown: predicate wakes on stopping || !q.empty(); we only
     // return when stopping AND queue is empty, so in-flight queued requests
     // get drained by remaining workers on dtor.
@@ -134,7 +299,8 @@ struct RenderEngine::Impl {
     // Rendering pipeline (Task 7):
     //   1. Pop request from heap under lock.
     //   2. Checkpoint A — cancel check before touching MuPDF.
-    //   3. fz_load_page on the worker's private fz_document.
+    //   3. fz_load_page on the worker's private fz_document, or on the
+    //      Document's under the gate (Shared, #229).
     //   4. Checkpoint B — cancel check after page load, before rasterize.
     //   5. fz_new_pixmap_from_page at the requested scale. Drop page.
     //   6. Checkpoint C — cancel check before handing ownership to callback.
@@ -149,7 +315,6 @@ struct RenderEngine::Impl {
     // throw or its drop (#146).
     static void worker_loop(Impl* impl, std::size_t idx) {
         fz_context* ctx = impl->worker_ctxs[idx];
-        fz_document* wdoc = impl->worker_docs[idx];
         for (;;) {
             RenderRequest req;
             std::shared_ptr<std::atomic<bool>> canceled;
@@ -191,7 +356,7 @@ struct RenderEngine::Impl {
                     if (req.on_complete) {
                         req.on_complete(cached, ctx);
                         // (#98) cached is non-null here.
-                        maybe_deliver_text(impl, req, canceled, ctx, wdoc);
+                        maybe_deliver_text(impl, req, canceled, ctx, idx);
                     } else {
                         fz_drop_pixmap(ctx, cached);
                     }
@@ -216,22 +381,8 @@ struct RenderEngine::Impl {
 
             if (!dlist) {
                 // Miss: build a display list via fz_load_page +
-                // fz_new_display_list_from_page. fz_try/fz_catch wraps each
-                // call so a failure cleans up intermediate resources.
-                fz_page* page = nullptr;
-                // Modified inside fz_try and read in fz_catch or after it once
-                // an error has longjmp'd out, so fz_var them (context.h).
-                fz_var(page);
-                fz_var(dlist);
-                fz_try(ctx) {
-                    page = fz_load_page(ctx, wdoc, req.page_num);
-                    dlist = fz_new_display_list_from_page(ctx, page);
-                }
-                fz_catch(ctx) {
-                    fz_report_error(ctx);   // also marks it handled (#146)
-                    if (dlist) { fz_drop_display_list(ctx, dlist); dlist = nullptr; }
-                }
-                if (page) fz_drop_page(ctx, page);
+                // fz_new_display_list_from_page (load_display_list).
+                dlist = build_display_list(impl, ctx, idx, req.page_num);
 
                 // Populate L2 if we have a cache. Refcount discipline:
                 //   fz_new_display_list_from_page → refcount 1 (we own).
@@ -346,7 +497,7 @@ struct RenderEngine::Impl {
                 // (#98) Text only after a non-null pixmap: pix is not read
                 // again, only tested. A failed page load, rasterise or invert
                 // has no text (pinned by "sends no text after a failed render").
-                if (pix) maybe_deliver_text(impl, req, canceled, ctx, wdoc);
+                if (pix) maybe_deliver_text(impl, req, canceled, ctx, idx);
             } else if (pix) {
                 // No callback supplied; we own pix — drop to avoid a leak.
                 fz_drop_pixmap(ctx, pix);
@@ -356,7 +507,7 @@ struct RenderEngine::Impl {
 };
 
 RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache,
-                           std::optional<std::string_view> password)
+                           std::optional<std::string_view> password, DocumentShare share)
     : impl_(std::make_unique<Impl>()) {
     if (n == 0)
         throw std::invalid_argument("RenderEngine: num_workers must be >= 1");
@@ -381,94 +532,12 @@ RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache,
         throw;
     }
 
-    // Open a per-worker fz_document on each worker's ctx. MuPDF does not
-    // allow sharing fz_document across contexts, so each worker parses the
-    // file independently. Acceptable cost on Phase 2's 2-worker default.
-    //
-    // fz_open_document takes UTF-8. std::filesystem::path::string() returns
-    // the native ACP on Windows MSVC; path::u8string() returns UTF-8. Match
-    // the Document::open conversion so non-ASCII paths round-trip correctly.
-#if defined(__cpp_lib_char8_t) && __cpp_lib_char8_t >= 201907L
-    const auto path_u8 = doc.source_path().u8string();
-    const std::string path_str(reinterpret_cast<const char*>(path_u8.data()),
-                               path_u8.size());
-#else
-    const std::string path_str = doc.source_path().u8string();
-#endif
-    if (path_str.empty()) {
-        for (auto* c : impl_->worker_ctxs) fz_drop_context(c);
-        impl_->worker_ctxs.clear();
-        throw std::runtime_error("RenderEngine: Document has no source path "
-                                 "(is the Document open?)");
-    }
-
-    // Each worker document must be authenticated too (#126). MuPDF tries a
-    // blank password on open, and the failed attempt still leaves a key in
-    // the document -- one it computed while checking "" -- so an
-    // unauthenticated worker decrypts every content stream of a user-password
-    // PDF to garbage and renders the page blank. fz_authenticate_password
-    // needs a NUL-terminated copy; it is wiped on every exit from this
-    // constructor, like Document::authenticate's (Phase 8 D3).
-    struct WipeOnExit {
-        std::string& s;
-        ~WipeOnExit() { SecureZeroMemory(s.data(), s.size()); }
-    };
-    std::string pw(password.value_or(std::string_view{}));
-    const WipeOnExit wipe{pw};
-
-    try {
-        impl_->worker_docs.reserve(n);
-        for (std::size_t i = 0; i < n; ++i) {
-            fz_context* ctx = impl_->worker_ctxs[i];
-            fz_document* wdoc = nullptr;
-            // MuPDF's message from a failed open or authenticate (#137);
-            // fz_convert_error into a fixed buffer, as in SearchSession's
-            // constructor.
-            char reason[detail::kOpenFailureReasonSize] = "";
-            fz_var(wdoc);
-            fz_try(ctx) {
-                wdoc = fz_open_document(ctx, path_str.c_str());
-            }
-            fz_catch(ctx) {
-                // Leave wdoc null; throw std::runtime_error below.
-                fz_strlcpy(reason, fz_convert_error(ctx, nullptr), sizeof reason);
-            }
-            if (!wdoc) {
-                throw std::runtime_error(detail::open_failure(
-                    "RenderEngine: fz_open_document failed for worker " +
-                    std::to_string(i), reason));
-            }
-            // Adopt before authenticating so the rollback below drops it.
-            impl_->worker_docs.push_back(wdoc);
-            if (!pw.empty()) {
-                int ok = 0;
-                fz_var(ok);
-                fz_try(ctx) {
-                    ok = fz_authenticate_password(ctx, wdoc, pw.c_str());
-                }
-                fz_catch(ctx) {
-                    ok = 0;
-                    fz_strlcpy(reason, fz_convert_error(ctx, nullptr),
-                               sizeof reason);
-                }
-                if (!ok) {
-                    throw std::runtime_error(detail::open_failure(
-                        "RenderEngine: worker " + std::to_string(i) +
-                        " rejected the document's password", reason));
-                }
-            }
-        }
-    } catch (...) {
-        // Rollback: drop any per-worker docs we already opened, each with
-        // its own ctx (docs MUST be dropped with the ctx they were opened
-        // on — MuPDF does not support cross-context drops), then drop ctxs.
-        for (std::size_t i = 0; i < impl_->worker_docs.size(); ++i) {
-            fz_drop_document(impl_->worker_ctxs[i], impl_->worker_docs[i]);
-        }
-        impl_->worker_docs.clear();
-        for (auto* c : impl_->worker_ctxs) fz_drop_context(c);
-        impl_->worker_ctxs.clear();
-        throw;
+    // (#229) Shared: the workers borrow `doc`'s own document, so there is
+    // nothing to open and no password to read.
+    if (share == DocumentShare::Shared) {
+        impl_->shared = &doc;
+    } else {
+        impl_->open_worker_documents(doc, password);
     }
 
     // Spawn workers only after all contexts and docs are ready.
@@ -512,14 +581,18 @@ std::size_t RenderEngine::renders_started() const noexcept {
     return impl_->renders_started.load();
 }
 
+std::size_t RenderEngine::documents_opened() const noexcept {
+    return impl_->opened;
+}
+
 RenderEngine::~RenderEngine() {
     if (impl_) {
         begin_shutdown();
         for (auto& t : impl_->workers) {
             if (t.joinable()) t.join();
         }
-        // Docs must be dropped on the SAME ctx they were opened on, and
-        // BEFORE the ctxs themselves are dropped.
+        // Each worker's doc is dropped on its own worker's ctx, BEFORE the
+        // ctxs themselves are dropped. None in shared mode.
         for (std::size_t i = 0; i < impl_->worker_docs.size(); ++i) {
             fz_drop_document(impl_->worker_ctxs[i], impl_->worker_docs[i]);
         }

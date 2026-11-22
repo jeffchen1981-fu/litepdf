@@ -4,6 +4,8 @@
 #include "core/GenerationAbort.hpp"
 #include "core/detail/OpenFailure.hpp"
 #include "core/detail/PageHitsAccess.hpp"
+#include "core/detail/PriorityGate.hpp"
+#include "core/detail/SharedDocumentAccess.hpp"
 
 #include <mupdf/fitz.h>
 
@@ -13,13 +15,13 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
-#include <filesystem>
 #include <iterator>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 
@@ -50,8 +52,8 @@ struct SearchSession::Impl {
         // A task the dispatcher discards never runs; set_query() and
         // ~SearchSession subtract the count discard() returns instead.
         // ~SearchSession spins on this counter so no worker is still
-        // using the session's own document, context or scan mutex (all
-        // in Impl) when the dtor drops them.
+        // using the session's context, document (its own, or the tab
+        // Document's when shared) or scan mutex when the dtor drops them.
         std::atomic<int>         pending_tasks{0};
         std::vector<Hit>         hits;
         std::size_t              cursor = 0;
@@ -64,11 +66,6 @@ struct SearchSession::Impl {
         bool                     anchored = false;
         std::size_t              pages_remaining = 0;
         OnUpdate                 on_update;
-        // (#229) The generation whose deferred open failed, 0 for none
-        // (generation 0 never scans). Written by a task under scan_mtx and
-        // read by open_failed() on the UI thread, which never takes
-        // scan_mtx: a scan can hold it for a whole page, or a whole layout.
-        std::atomic<std::uint64_t> failed_epoch{0};
     };
 
     const Document&                         doc;
@@ -81,40 +78,29 @@ struct SearchSession::Impl {
     // Test seam; see SearchSession::set_after_reset_hook. UI thread only.
     std::function<void()>                   after_reset_hook;
 
-    // The session's own context and document (#130): every scan runs on this
-    // pair, never on the tab Document's, so a scan never takes doc_mutex.
-    // scan_mtx serialises the dispatcher's workers on it (MuPDF allows one
-    // document on several threads only if the uses never overlap). Tasks
-    // capture raw pointers to these; ~SearchSession drains every task before
-    // it drops them. They stay out of State on purpose: a task's State
-    // reference can be the last one and die on a worker after the Document
-    // has gone (the #61 shape, spec §3.6). ~SearchSession drops sdoc
+    // The session's own context, and the document every scan runs on:
+    //   Own (#130): `sdoc`, the session's own, opened at construction. A scan
+    //     never touches the tab Document's, so it never takes its gate.
+    //   Shared (#229, `shared`): no `sdoc`. Each page's scan borrows the tab
+    //     Document's own document through detail::SharedDocumentAccess, under
+    //     its gate in the Scan class, on this session's context.
+    // scan_mtx serialises the dispatcher's workers on the context (and, for
+    // Own, the document): MuPDF allows one document on several threads as
+    // long as the uses never overlap (docs/reference/c/overview.md, rule 2).
+    // Tasks capture a raw pointer to this Impl; ~SearchSession drains every
+    // task before it drops these. They stay out of State on purpose: a task's
+    // State reference can be the last one and die on a worker after the
+    // Document has gone (the #61 shape, spec §3.6). ~SearchSession drops sdoc
     // explicitly; `escrow` then drops its context when Impl dies.
-    //
-    // (#229) With SearchOpen::AtFirstScan, `sdoc` stays null until the first
-    // task of a query opens it, under scan_mtx; from then on it is read and
-    // written only under scan_mtx, and ~SearchSession reads it after the drain.
     EscrowContext                           escrow;
     fz_document*                            sdoc = nullptr;
+    bool                                    shared = false;
     std::mutex                              scan_mtx;
-
-    // (#229) What a deferred open reads, fixed by the constructor, so a task
-    // never asks the tab Document (whose close() clears its path on the UI
-    // thread): the file by name, and the stamp the tab Document took of it.
-    std::filesystem::path                   path;
-    std::string                             path_utf8;
-    FileStamp                               stamp;
-    // Test seams (see SearchSession::set_scan_hooks). Set before any scan,
-    // then only read, by tasks under scan_mtx.
-    std::function<void()>                   after_read_hook;
-    std::function<void()>                   after_open_hook;
-    std::function<void()>                   before_scan_hook;
+    // (#229) fz_open_document calls made; see documents_opened().
+    std::size_t                             opened = 0;
 
     Impl(const Document& d, litepdf::app::ISearchDispatcher& disp)
         : doc(d), dispatcher(disp), state(std::make_shared<State>()) {}
-
-    // (#229) Opens `sdoc` for a deferred session; see the definition.
-    fz_document* open_deferred() noexcept;
 };
 
 // ---------------------------------------------------------------------------
@@ -206,48 +192,13 @@ fz_document* open_scan_document(fz_context* ctx, const char* path, const char* p
 
 }  // namespace
 
-// (#229) The deferred open, on the task's thread under scan_mtx: the file must
-// still be the one the tab Document read, before MuPDF reads it and after, or
-// the hits would land where the tab's pages do not have them. Null on any
-// failure, with the reason on stderr.
-fz_document* SearchSession::Impl::open_deferred() noexcept {
-    Impl& im = *this;
-    const auto changed = [&im] {
-        const std::optional<FileStamp> now = file_stamp(im.path);
-        return !now || *now != im.stamp;
-    };
-    if (changed()) {
-        std::fprintf(stderr, "litepdf: SearchSession: the file is gone or has "
-                             "changed since the tab opened it\n");
-        return nullptr;
-    }
-    const char* step = "";
-    char reason[detail::kOpenFailureReasonSize] = "";
-    fz_document* sdoc =
-        open_scan_document(im.escrow.get(), im.path_utf8.c_str(), "", step, reason);
-    if (!sdoc) {
-        // Logged whether or not MuPDF gave a reason (open_failure logs only
-        // with one), and without allocating: nothing may throw from a task.
-        std::fprintf(stderr, "litepdf: %s%s%s\n", step, reason[0] ? ": " : "", reason);
-        return nullptr;
-    }
-    if (im.after_read_hook) im.after_read_hook();
-    if (changed()) {
-        fz_drop_document(im.escrow.get(), sdoc);
-        std::fprintf(stderr, "litepdf: SearchSession: the file changed while "
-                             "search was reading it\n");
-        return nullptr;
-    }
-    return sdoc;
-}
-
 // ---------------------------------------------------------------------------
 // ctor / dtor
 // ---------------------------------------------------------------------------
 SearchSession::SearchSession(const Document& doc,
                              litepdf::app::ISearchDispatcher& disp,
                              std::optional<std::string_view> password,
-                             SearchOpen open)
+                             DocumentShare share)
     : impl_(std::make_unique<Impl>(doc, disp)) {
     // Everything is acquired into locals and moved into Impl only once the
     // whole open has succeeded, so a throw below leaves Impl empty: the
@@ -258,6 +209,14 @@ SearchSession::SearchSession(const Document& doc,
     if (!escrow.valid()) {
         throw std::runtime_error("SearchSession: could not clone the Document's "
                                  "context (is the Document open?)");
+    }
+
+    // (#229) Shared: the scans borrow `doc`'s own document, so there is
+    // nothing to open and no password to read.
+    if (share == DocumentShare::Shared) {
+        impl_->shared = true;
+        impl_->escrow = std::move(escrow);
+        return;
     }
 
     // fz_open_document takes UTF-8; path::u8string() is UTF-8 on MSVC, where
@@ -272,18 +231,6 @@ SearchSession::SearchSession(const Document& doc,
     if (path_str.empty()) {
         throw std::runtime_error("SearchSession: Document has no source path "
                                  "(is the Document open?)");
-    }
-
-    // (#229) Deferred only with no password, so a password is never kept past
-    // this constructor (Phase 8 D3), and only with a stamp to check the file
-    // against when it is read again; anything else opens here, as before.
-    const std::optional<FileStamp> stamp = doc.source_stamp();
-    if (open == SearchOpen::AtFirstScan && !password && stamp) {
-        impl_->path      = doc.source_path();
-        impl_->path_utf8 = std::move(path_str);
-        impl_->stamp     = *stamp;
-        impl_->escrow    = std::move(escrow);
-        return;
     }
 
     // fz_authenticate_password needs a NUL-terminated copy; it is wiped on
@@ -309,11 +256,14 @@ SearchSession::SearchSession(const Document& doc,
     // Commit; neither step can throw.
     impl_->escrow = std::move(escrow);
     impl_->sdoc   = sdoc;
+    impl_->opened = 1;
 }
 
 SearchSession::~SearchSession() {
     // Drain every in-flight task before dropping the session's own document
-    // and context, which those tasks use through raw pointers.
+    // and context, which those tasks use through raw pointers -- and, for a
+    // shared session, before the tab Document whose document they borrow can
+    // go (~DocumentView destroys the session first).
     //
     // Step 1: bump epoch so a task that has not started scanning yet --
     // one already popped, or one still queued on a dispatcher that cannot
@@ -342,22 +292,23 @@ SearchSession::~SearchSession() {
     // only a task already popped is left, and the pool runs at most one
     // task of this session at a time: this waits for at most one, which
     // returns at its epoch check or stops at the cookie poll (or, on a
-    // format whose build ignores the cookie, finishes its page). A task in a
-    // deferred open (#229) finishes the open, which polls no cookie, then
-    // returns at epoch check #1c without scanning. A task
-    // already past epoch check #2 also calls the on_update observer before
-    // its guard decrements; every production observer posts, so the spin
-    // cannot deadlock on it.
+    // format whose build ignores the cookie, finishes its page). A task of a
+    // shared session (#229) may first wait for the Document's gate. Its
+    // holder is the render worker, which finishes its hold, or a Foreground
+    // caller on another thread -- never this (UI) thread, which holds the
+    // gate only around MuPDF work and is here instead (detail/PriorityGate.hpp's
+    // invariant). A waiting Scan is admitted after at most kScanAfterRenders
+    // Render holds, so the wait is bounded while the engine still drains its
+    // queue. A task already past epoch check #2 also calls the on_update
+    // observer before its guard decrements; every production observer posts,
+    // so the spin cannot deadlock on it.
     while (st.pending_tasks.load(std::memory_order_acquire) > 0) {
         std::this_thread::yield();
     }
 
-    // Step 4: no task can still be using the pair. Drop the document on its
-    // own context; `escrow` drops the context when Impl dies, after this. A
-    // deferred session that never scanned has none to drop. The lock is not
-    // contended (the drain is over); it only makes the read of a pointer a
-    // task wrote under it plainly ordered after that write.
-    std::lock_guard<std::mutex> scan_lock(impl_->scan_mtx);
+    // Step 4: no task can still be using the context or the document. Drop an
+    // Own session's document on its own context; `escrow` drops the context
+    // when Impl dies, after this. A shared session has none to drop.
     if (impl_->sdoc) {
         fz_drop_document(impl_->escrow.get(), impl_->sdoc);
         impl_->sdoc = nullptr;
@@ -452,10 +403,9 @@ void SearchSession::set_query(std::wstring q, Flags f, std::size_t start_page) {
     // thread is mid-execution when the session is destroyed. The
     // dispatcher itself holds a weak_ptr for the runnability gate.
     std::shared_ptr<Impl::State> state_strong = impl_->state;
-    // The session's own pair and its mutex (#130), reached through Impl, so a
-    // deferred session's tasks see the document the first of them opens
-    // (#229). A raw pointer: ~SearchSession drains every task before Impl
-    // goes.
+    // The session's context, its own document or the Document to borrow
+    // from, and its mutex (#130, #229), reached through Impl. A raw pointer:
+    // ~SearchSession drains every task before Impl goes.
     Impl*                        self         = impl_.get();
     const std::string            needle_utf8  = utf16_to_utf8(state_strong->query);
     const Flags                  captured_flags = f;
@@ -504,28 +454,22 @@ void SearchSession::set_query(std::wstring q, Flags f, std::size_t start_page) {
                 if (state_strong->epoch.load(std::memory_order_acquire) != ep) {
                     return;
                 }
-                // (#229) A deferred session's first task opens the document,
-                // once per query until an open works: a failure is kept for
-                // this generation, so its other tasks skip the scan (and still
-                // count their page done), and the next query tries again.
-                if (!self->sdoc &&
-                    state_strong->failed_epoch.load(std::memory_order_acquire) != ep) {
-                    self->sdoc = self->open_deferred();
-                    if (!self->sdoc) {
-                        state_strong->failed_epoch.store(ep, std::memory_order_release);
+                // (#229) Shared: one gate hold in the Scan class around the
+                // page's load, scan and drop (page_hits_on does all three), on
+                // this session's context. scan_mtx is held while waiting for
+                // the gate, which the lock order allows (PriorityGate.hpp). A
+                // gate that refuses the acquire (std::system_error) leaves the
+                // page with no hits, like a MuPDF failure.
+                if (self->shared) {
+                    try {
+                        detail::SharedDocumentAccess::with_document(
+                            self->doc, detail::GateClass::Scan, [&](fz_document* d) {
+                                raw_hits = detail::page_hits_on(self->escrow.get(), d, i,
+                                                                needle_utf8, df, cookie.get());
+                            });
+                    } catch (const std::system_error&) {
                     }
-                    if (self->after_open_hook) self->after_open_hook();
-                    // Epoch check #1c: the open took a while (a whole parse,
-                    // for an FB2) and cannot be cut short. A query that
-                    // superseded it meanwhile must not also wait for this
-                    // task's first scan, which lays the book out: on a tab
-                    // close ~SearchSession waits for it on the UI thread.
-                    if (state_strong->epoch.load(std::memory_order_acquire) != ep) {
-                        return;
-                    }
-                }
-                if (self->sdoc) {
-                    if (self->before_scan_hook) self->before_scan_hook();
+                } else {
                     raw_hits = detail::page_hits_on(self->escrow.get(), self->sdoc, i,
                                                     needle_utf8, df, cookie.get());
                 }
@@ -598,18 +542,8 @@ void SearchSession::set_after_reset_hook(std::function<void()> hook) {
     impl_->after_reset_hook = std::move(hook);
 }
 
-void SearchSession::set_scan_hooks(std::function<void()> after_open,
-                                   std::function<void()> before_scan,
-                                   std::function<void()> after_read) {
-    impl_->after_read_hook  = std::move(after_read);
-    impl_->after_open_hook  = std::move(after_open);
-    impl_->before_scan_hook = std::move(before_scan);
-}
-
-bool SearchSession::open_failed() const {
-    const auto& st = *impl_->state;
-    const std::uint64_t ep = st.epoch.load(std::memory_order_acquire);
-    return ep != 0 && st.failed_epoch.load(std::memory_order_acquire) == ep;
+std::size_t SearchSession::documents_opened() const noexcept {
+    return impl_->opened;
 }
 
 void SearchSession::clear() {

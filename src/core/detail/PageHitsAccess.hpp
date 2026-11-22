@@ -37,8 +37,11 @@ inline bool abort_requested(fz_cookie& c) noexcept {
 }
 
 // All hits for `needle_utf8` on `page` of `doc`, the body of Document::page_hits.
-// Takes NO lock: the caller serialises its use of `ctx` and `doc` (doc_mutex for
-// the tab Document's pair, the session mutex for a search session's own).
+// Takes NO lock: the caller serialises its use of `ctx` and `doc`. For the tab
+// Document's pair that is the Document's gate (Document::page_hits). A search
+// session scans on its own context under its own mutex, and on its own document
+// (DocumentShare::Own) or on the tab Document's under the gate's Scan class
+// (Shared, an FB2 tab, #229).
 //
 // The text build runs with `cookie` (null for none), so an abort set from another
 // thread stops it at MuPDF's next poll; the match loop then checks the same

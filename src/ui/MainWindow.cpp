@@ -2487,14 +2487,6 @@ void MainWindow::update_find_counter() {
         find_bar_->set_counter(L"");
         return;
     }
-    // (#229) A search whose deferred open failed read nothing: say so rather
-    // than show an empty counter, as for a query with no hits. Reopening the
-    // file is the fix whether it was moved, deleted or changed. Short: the
-    // counter is kCounterWidthDip (60 DIP) wide.
-    if (v->search().open_failed()) {
-        find_bar_->set_counter(L"Reopen file");
-        return;
-    }
     const std::size_t n   = v->search().hit_count();
     const bool        eof = v->search().scan_complete();
     if (n == 0) {

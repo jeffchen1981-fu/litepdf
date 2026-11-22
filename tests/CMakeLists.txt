@@ -128,6 +128,9 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_canvas_spread_wiring.cpp # #196
     unit/test_canvas_rotation.cpp      # #53
     unit/test_view_rotation.cpp        # #53 Task 2
+    unit/test_priority_gate.cpp        # #229 priority gate
+    unit/test_document_gate.cpp        # #229 Document gate
+    unit/test_shared_document.cpp      # #229 shared FB2 document
     # The real canvas, for the wiring tests above: they drive it on a hidden
     # window. Compiled here because it is not part of litepdf_core.
     "${CMAKE_SOURCE_DIR}/src/ui/Clipboard.cpp"

@@ -5,6 +5,8 @@
 #include "core/detail/CbzPageSizer.hpp"
 #include "core/detail/ChapterPages.hpp"
 #include "core/detail/PageHitsAccess.hpp"
+#include "core/detail/PriorityGate.hpp"
+#include "core/detail/SharedDocumentAccess.hpp"
 #include "core/detail/TextPageAccess.hpp"
 #include "core/SearchQuery.hpp"
 #include "core/SystemFonts.hpp"
@@ -17,8 +19,8 @@
 #include <cassert>
 #include <climits>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
-#include <mutex>
 #include <new>
 #include <optional>
 #include <stdexcept>
@@ -47,7 +49,6 @@ struct Document::Impl {
     bool needs_password = false;
     bool authenticated = false;
     std::filesystem::path path;
-    std::optional<FileStamp> stamp;  // #229: see Document::source_stamp
     // Read once, when the document becomes open (open() or authenticate()),
     // so page_count() never calls into MuPDF. fz_count_pages can throw after
     // a successful open -- a /Count MuPDF rejects, or a reflowable layout that
@@ -83,19 +84,33 @@ struct Document::Impl {
         cbz_path.clear();
     }
 
-    // Serializes every method that touches impl_->ctx via fz_try/fz_catch.
-    // MuPDF's exception handling uses a per-fz_context setjmp/longjmp error
-    // stack that is NOT thread-safe — two threads in fz_try on the same ctx
-    // corrupt the stack and crash. The MuPDFRoot lock table above covers the
-    // allocator / font cache / freetype / glyph cache, but NOT the error
-    // stack. Holding this mutex across each fz_try ... fz_catch block
-    // serializes the error stack usage.
+    // (#229) Serializes every use of `ctx` and `doc`. MuPDF's exception
+    // handling uses a per-fz_context setjmp/longjmp error stack that is NOT
+    // thread-safe -- two threads in fz_try on the same ctx corrupt the stack
+    // and crash. The MuPDFRoot lock table above covers the allocator / font
+    // cache / freetype / glyph cache, but NOT the error stack. Holding the
+    // gate across each fz_try ... fz_catch block serializes it.
     //
-    // It guards this Document's own context and document only. Search scans
-    // run on a session-owned document and context, under the session's own
-    // lock, so they never take this one (#130); render workers likewise use
-    // their own documents. In practice only the UI thread takes it.
-    mutable std::mutex doc_mutex;
+    // It also guards `doc` for the borrowers of an FB2 tab (DocumentShare::
+    // Shared): its render worker and search scans reach `doc` on their own
+    // contexts through detail::SharedDocumentAccess, under this gate in the
+    // Render and Scan classes. MuPDF allows that: "The document can be used
+    // from several different threads as long as there are safeguards in place
+    // to prevent the usages being simultaneous" (docs/reference/c/overview.md,
+    // rule 2). The Document's own methods hold it in the Foreground class. A
+    // Document that lends nothing has only Foreground users, so for it the
+    // gate is the plain mutex it replaced. Classes, bounds, the invariant and
+    // the lock order: detail/PriorityGate.hpp.
+    mutable detail::PriorityGate gate;
+
+    // (#229) MuPDF opened `doc` as FictionBook2; see Document::is_fb2. Set at a
+    // successful open, reset by close.
+    bool is_fb2 = false;
+
+    // (#229) Test seam: detail::SharedDocumentAccess::set_after_release_hook.
+    // Written under a Foreground hold, read by each borrower under its own.
+    void (*after_release_hook)(void*, detail::GateClass) = nullptr;
+    void* after_release_arg = nullptr;
 
     Impl() : root(detail::MuPDFRoot::create()) {
         ctx = root->ctx;
@@ -291,6 +306,23 @@ std::optional<detail::ChapterPages> read_chapter_pages(fz_context* ctx, fz_docum
     }
 }
 
+// (#229) True when MuPDF opened `doc` as FictionBook2, the format string of its
+// FB2 handler (source/html/html-doc.c). The caller holds the gate, or nothing
+// else can reach `doc` yet (open).
+bool read_is_fb2(fz_context* ctx, fz_document* doc) noexcept {
+    char buf[32] = "";
+    int n = -1;
+    fz_var(n);
+    fz_try(ctx) {
+        n = fz_lookup_metadata(ctx, doc, FZ_META_FORMAT, buf, sizeof buf);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);   // also marks it handled (#146)
+        return false;
+    }
+    return n > 0 && std::strcmp(buf, "FictionBook2") == 0;
+}
+
 // #230: where fz_load_page would find flat page `index`, from the chapter
 // table, as plain ints filled before a fz_try (no object with a destructor
 // crosses into it). False when there is no table or the index is past it;
@@ -314,6 +346,7 @@ std::optional<Document::OpenError> Document::open(const std::filesystem::path& p
 
     impl_->reset_cbz();
     impl_->chapters.reset();
+    impl_->is_fb2 = false;
 
     // UTF-8 conversion — fz_open_document takes UTF-8 char*. On Windows,
     // path.string() returns ACP (CP950/936/etc); path.u8string() returns
@@ -343,11 +376,6 @@ std::optional<Document::OpenError> Document::open(const std::filesystem::path& p
     }
     const char* utf8_bytes = reinterpret_cast<const char*>(u8.c_str());
 
-    // (#229) Before the read, so a file rewritten while MuPDF reads it gets a
-    // stamp that no later read will match. Declared outside the fz_try, like
-    // the conversion above.
-    const std::optional<FileStamp> stamp = file_stamp(path);
-
     fz_try(impl_->ctx) {
         impl_->doc = fz_open_document(impl_->ctx, utf8_bytes);
     }
@@ -363,7 +391,6 @@ std::optional<Document::OpenError> Document::open(const std::filesystem::path& p
     if (!impl_->doc) return OpenError::Other;
 
     impl_->path = path;
-    impl_->stamp = stamp;
     if (is_cbz_path(path)) impl_->cbz_path = absolute_utf8(path);
     impl_->needs_password = fz_needs_password(impl_->ctx, impl_->doc) != 0;
     impl_->authenticated = !impl_->needs_password;
@@ -377,7 +404,12 @@ std::optional<Document::OpenError> Document::open(const std::filesystem::path& p
         return OpenError::Corrupted;
     }
     impl_->chapters = read_chapter_pages(impl_->ctx, impl_->doc, impl_->page_count);
+    impl_->is_fb2 = read_is_fb2(impl_->ctx, impl_->doc);
     return std::nullopt;
+}
+
+bool Document::is_fb2() const noexcept {
+    return is_open() && impl_->is_fb2;
 }
 
 bool Document::is_open() const noexcept {
@@ -395,17 +427,13 @@ void Document::close() noexcept {
     }
     impl_->needs_password = false;
     impl_->authenticated = false;
+    impl_->is_fb2 = false;
     impl_->path.clear();
-    impl_->stamp.reset();
     impl_->page_count = 0;
 }
 
 const std::filesystem::path& Document::source_path() const noexcept {
     return impl_->path;
-}
-
-std::optional<FileStamp> Document::source_stamp() const noexcept {
-    return impl_->stamp;
 }
 
 bool Document::with_rendered_page(
@@ -419,111 +447,133 @@ bool Document::with_rendered_page(
 {
     if (!impl_->doc || !impl_->ctx) return false;
 
-    // Use this Document's own fz_context + fz_document so authentication
-    // (encrypted PDFs, Phase 8) and reflowable layout state (ePub, CBZ)
-    // are preserved. Cloning would lose both. doc_mutex serializes with
-    // every other user of this context; see the Impl comment.
-    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
+    fz_pixmap*     pix     = nullptr;
+    int            w       = 0;
+    int            h       = 0;
+    std::uint8_t*  samples = nullptr;
+    // (#229) The context the pixmap is dropped through after the callback.
+    // Declared before the guard below, so it outlives that drop.
+    EscrowContext  drop_ctx;
+    {
+        // Use this Document's own fz_context + fz_document so authentication
+        // (encrypted PDFs, Phase 8) and reflowable layout state (ePub, CBZ)
+        // are preserved. Cloning would lose both. The gate serializes with
+        // every other user of this context and document; see Impl::gate.
+        // Held for the MuPDF work only (#229): it is released before the
+        // callback, whose abort_proc dispatches messages (see Document.hpp).
+        detail::GateHold hold(impl_->gate, detail::GateClass::Foreground);
 
-    fz_context*  ctx  = impl_->ctx;
-    fz_document* doc  = impl_->doc;
-    fz_page*     page = nullptr;
-    fz_pixmap*   pix  = nullptr;
-    bool         ok   = false;
-
-    fz_device* dev = nullptr;
-    // #230: a multi-chapter page by its chapter location. Printing calls this
-    // once per page, and fz_load_page would walk the chapters from the first
-    // for each one.
-    int chapter = 0, page_in_chapter = 0;
-    const bool by_location = chapter_location(impl_->chapters, page_idx, chapter, page_in_chapter);
-    fz_var(page);
-    fz_var(pix);
-    fz_var(dev);
-    fz_try(ctx) {
-        page = by_location
-            ? fz_load_chapter_page(ctx, doc, chapter, page_in_chapter)
-            : fz_load_page(ctx, doc, static_cast<int>(page_idx));
-        if (page) {
-            fz_matrix m = fz_scale(scale_x_px_per_pt, scale_y_px_per_pt);
-            if (rotate_90) m = fz_pre_rotate(m, 90.0f);
-            // Render onto an OPAQUE WHITE background. fz_new_pixmap_from_page
-            // with alpha=1 clears to TRANSPARENT, which a downstream consumer
-            // that ignores alpha (printer DC BitBlt, D2D ALPHA_MODE_IGNORE)
-            // paints as opaque BLACK for any unfilled page area — so pages
-            // without their own white fill printed/rendered black. Keep the
-            // 4-channel BGRA buffer but clear it to white, then run the page.
-            fz_irect bbox = fz_round_rect(
-                fz_transform_rect(fz_bound_page(ctx, page), m));
-            pix = fz_new_pixmap_with_bbox(ctx, fz_device_bgr(ctx), bbox,
-                                          nullptr, /*alpha*/ 1);
-            fz_clear_pixmap_with_value(ctx, pix, 0xFF);  // opaque white
-            dev = fz_new_draw_device(ctx, fz_identity, pix);
-            fz_run_page(ctx, page, dev, m, nullptr);
-            fz_close_device(ctx, dev);
+        fz_context*  ctx  = impl_->ctx;
+        fz_document* doc  = impl_->doc;
+        fz_page*     page = nullptr;
+        fz_device*   dev  = nullptr;
+        // #230: a multi-chapter page by its chapter location. Printing calls this
+        // once per page, and fz_load_page would walk the chapters from the first
+        // for each one.
+        int chapter = 0, page_in_chapter = 0;
+        const bool by_location = chapter_location(impl_->chapters, page_idx, chapter, page_in_chapter);
+        fz_var(page);
+        fz_var(pix);
+        fz_var(dev);
+        fz_try(ctx) {
+            page = by_location
+                ? fz_load_chapter_page(ctx, doc, chapter, page_in_chapter)
+                : fz_load_page(ctx, doc, static_cast<int>(page_idx));
+            if (page) {
+                fz_matrix m = fz_scale(scale_x_px_per_pt, scale_y_px_per_pt);
+                if (rotate_90) m = fz_pre_rotate(m, 90.0f);
+                // Render onto an OPAQUE WHITE background. fz_new_pixmap_from_page
+                // with alpha=1 clears to TRANSPARENT, which a downstream consumer
+                // that ignores alpha (printer DC BitBlt, D2D ALPHA_MODE_IGNORE)
+                // paints as opaque BLACK for any unfilled page area — so pages
+                // without their own white fill printed/rendered black. Keep the
+                // 4-channel BGRA buffer but clear it to white, then run the page.
+                fz_irect bbox = fz_round_rect(
+                    fz_transform_rect(fz_bound_page(ctx, page), m));
+                pix = fz_new_pixmap_with_bbox(ctx, fz_device_bgr(ctx), bbox,
+                                              nullptr, /*alpha*/ 1);
+                fz_clear_pixmap_with_value(ctx, pix, 0xFF);  // opaque white
+                dev = fz_new_draw_device(ctx, fz_identity, pix);
+                fz_run_page(ctx, page, dev, m, nullptr);
+                fz_close_device(ctx, dev);
+            }
+        } fz_always(ctx) {
+            if (dev) fz_drop_device(ctx, dev);
+        } fz_catch(ctx) {
+            fz_report_error(ctx);   // also marks it handled (#146)
+            if (pix)  { fz_drop_pixmap(ctx, pix);   pix  = nullptr; }
+            if (page) { fz_drop_page(ctx, page);    page = nullptr; }
+            return false;
         }
-    } fz_always(ctx) {
-        if (dev) fz_drop_device(ctx, dev);
-    } fz_catch(ctx) {
-        fz_report_error(ctx);   // also marks it handled (#146)
-        if (pix)  { fz_drop_pixmap(ctx, pix);   pix  = nullptr; }
-        if (page) { fz_drop_page(ctx, page);    page = nullptr; }
-        return false;
-    }
 
-    if (page) fz_drop_page(ctx, page);
-    if (!pix) return false;
+        if (page) fz_drop_page(ctx, page);
+        if (!pix) return false;
 
-    int w = 0, h = 0;
-    const std::uint8_t* samples = nullptr;
-    fz_try(ctx) {
-        w       = fz_pixmap_width(ctx, pix);
-        h       = fz_pixmap_height(ctx, pix);
-        samples = fz_pixmap_samples(ctx, pix);
-    } fz_catch(ctx) {
-        fz_report_error(ctx);   // also marks it handled (#146)
-        fz_drop_pixmap(ctx, pix);
-        return false;
-    }
-
-    if (samples && w > 0 && h > 0) {
-        // MuPDF with alpha=1 initializes the pixmap to TRANSPARENT
-        // (0,0,0,0), not white. Pages with no explicit white-background
-        // drawing (ePub, some encrypted PDFs) leave the un-covered area
-        // transparent. StretchDIBits with BI_RGB ignores the alpha
-        // channel, so those pixels would be blitted as BGR=(0,0,0)
-        // -- solid black. Composite each pixel over white in-place so
-        // the resulting BGRA can be safely SRCCOPY'd.
-        //
-        // MuPDF pixmaps use PREMULTIPLIED alpha during rendering
-        // (mupdf/fitz/pixmap.h:37). For premultiplied source over a
-        // solid white background:
-        //   out_color = src_color + (255 - alpha)  (clamped)
-        // -- because src_color already encodes color * alpha. Using the
-        // straight-alpha formula (src_color * alpha + 255 * inv) on a
-        // premultiplied buffer produces fringe-darkening on partial-alpha
-        // edges (anti-aliased glyph borders show ~25% too dark for
-        // saturated colors).
-        // The const_cast is safe: this Document owns the pixmap (about to
-        // drop it after the callback) and doc_mutex serializes all access.
-        std::uint8_t* mut = const_cast<std::uint8_t*>(samples);
-        const std::size_t n_pixels = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
-        for (std::size_t i = 0; i < n_pixels; ++i) {
-            std::uint8_t* p = mut + i * 4;  // BGRA layout
-            const int a = p[3];
-            if (a == 255) continue;  // fully opaque -- common case, no work
-            const int inv = 255 - a;
-            p[0] = static_cast<std::uint8_t>(std::min(255, p[0] + inv));
-            p[1] = static_cast<std::uint8_t>(std::min(255, p[1] + inv));
-            p[2] = static_cast<std::uint8_t>(std::min(255, p[2] + inv));
-            p[3] = 255;
+        fz_try(ctx) {
+            w       = fz_pixmap_width(ctx, pix);
+            h       = fz_pixmap_height(ctx, pix);
+            samples = fz_pixmap_samples(ctx, pix);
+        } fz_catch(ctx) {
+            fz_report_error(ctx);   // also marks it handled (#146)
+            fz_drop_pixmap(ctx, pix);
+            return false;
         }
-        callback(w, h, samples);
-        ok = true;
+
+        // (#229) The callback may destroy this Document (a tab close that
+        // PrintJob's abort_proc dispatches), so the pixmap is dropped through
+        // a context of its own that keeps the family's lock table and root
+        // context alive. The clone needs no gate (clone_escrow_context); it is
+        // taken here only so that a failed clone can drop the pixmap on the
+        // Document's context and give up.
+        drop_ctx = EscrowContext::clone_from(ctx);
+        if (!drop_ctx.valid()) {
+            fz_drop_pixmap(ctx, pix);
+            return false;
+        }
     }
 
-    fz_drop_pixmap(ctx, pix);
-    return ok;
+    // The gate is released. From here on, nothing touches `this` or impl_:
+    // only the pixmap, which this call alone owns, and `drop_ctx`, which only
+    // this thread uses. Drops the pixmap after the callback returns or throws.
+    struct DropPixmap {
+        fz_context* ctx;
+        fz_pixmap*  pix;
+        ~DropPixmap() { fz_drop_pixmap(ctx, pix); }
+    } drop_pix{drop_ctx.get(), pix};
+
+    if (!samples || w <= 0 || h <= 0) return false;
+
+    // MuPDF with alpha=1 initializes the pixmap to TRANSPARENT
+    // (0,0,0,0), not white. Pages with no explicit white-background
+    // drawing (ePub, some encrypted PDFs) leave the un-covered area
+    // transparent. StretchDIBits with BI_RGB ignores the alpha
+    // channel, so those pixels would be blitted as BGR=(0,0,0)
+    // -- solid black. Composite each pixel over white in-place so
+    // the resulting BGRA can be safely SRCCOPY'd.
+    //
+    // MuPDF pixmaps use PREMULTIPLIED alpha during rendering
+    // (mupdf/fitz/pixmap.h:37). For premultiplied source over a
+    // solid white background:
+    //   out_color = src_color + (255 - alpha)  (clamped)
+    // -- because src_color already encodes color * alpha. Using the
+    // straight-alpha formula (src_color * alpha + 255 * inv) on a
+    // premultiplied buffer produces fringe-darkening on partial-alpha
+    // edges (anti-aliased glyph borders show ~25% too dark for
+    // saturated colors).
+    // Pure memory on a pixmap only this call owns, so it runs outside the gate.
+    const std::size_t n_pixels = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
+    for (std::size_t i = 0; i < n_pixels; ++i) {
+        std::uint8_t* p = samples + i * 4;  // BGRA layout
+        const int a = p[3];
+        if (a == 255) continue;  // fully opaque -- common case, no work
+        const int inv = 255 - a;
+        p[0] = static_cast<std::uint8_t>(std::min(255, p[0] + inv));
+        p[1] = static_cast<std::uint8_t>(std::min(255, p[1] + inv));
+        p[2] = static_cast<std::uint8_t>(std::min(255, p[2] + inv));
+        p[3] = 255;
+    }
+    callback(w, h, samples);
+    return true;
 }
 
 bool Document::authenticate(std::string_view password) {
@@ -570,9 +620,11 @@ std::size_t Document::page_count() const {
 PageSize Document::page_size(std::size_t index) const {
     if (!impl_->doc) throw std::logic_error("page_size called on unopened document");
 
-    // Defense in depth: protect impl_->ctx error stack from any concurrent
-    // call into this Document's context. See Impl::doc_mutex.
-    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
+    // Protects impl_->ctx's error stack and impl_->doc from every other user,
+    // a borrowing render worker or search scan included. See Impl::gate. The
+    // CBZ header sizer below reads the archive through MuPDF, so it runs under
+    // the hold too.
+    detail::GateHold hold(impl_->gate, detail::GateClass::Foreground);
 
     // A CBZ page's size from its image header (#176): loading the page reads
     // the whole image out of the archive first. Outside the fz_try below,
@@ -638,7 +690,7 @@ PageSize Document::page_size(std::size_t index) const {
 }
 bool Document::read_ahead_page_sizes() const {
     if (!impl_->doc || impl_->cbz_path.empty()) return false;
-    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
+    detail::GateHold hold(impl_->gate, detail::GateClass::Foreground);
     if (!impl_->cbz_probed) {
         impl_->cbz_probed = true;
         impl_->cbz = detail::CbzPageSizer::create(impl_->ctx, impl_->doc, impl_->cbz_path.c_str(),
@@ -650,9 +702,9 @@ bool Document::read_ahead_page_sizes() const {
 std::string Document::page_text(std::size_t index) const {
     if (!impl_->doc) throw std::logic_error("page_text called on unopened document");
 
-    // Defense in depth: serialize with any concurrent call into this
-    // Document's context. See Impl::doc_mutex.
-    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
+    // Serialize with every other user of this Document's context and
+    // document. See Impl::gate.
+    detail::GateHold hold(impl_->gate, detail::GateClass::Foreground);
     fz_page*       page  = nullptr;
     fz_stext_page* stext = nullptr;
     fz_buffer*     buf   = nullptr;
@@ -824,18 +876,18 @@ std::vector<Document::PageHit> Document::page_hits(
 {
     if (!is_open() || needle_utf8.empty()) return {};
 
-    // Serialize access to impl_->ctx. See Impl::doc_mutex rationale.
+    // Serialize access to impl_->ctx and impl_->doc. See Impl::gate.
     // Must cover the whole helper, since every MuPDF call in it pushes and
     // pops frames on the per-ctx error stack.
-    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
+    detail::GateHold hold(impl_->gate, detail::GateClass::Foreground);
     return detail::page_hits_on(impl_->ctx, impl_->doc, page, needle_utf8, flags,
                                 nullptr);
 }
 
 EscrowContext Document::clone_escrow_context() const {
     if (!is_open()) return EscrowContext{};
-    // No doc_mutex: fz_clone_context locks through the family's lock table
-    // (see clone_context()).
+    // No gate: fz_clone_context locks through the family's lock table (see
+    // clone_context()).
     return EscrowContext::clone_from(impl_->ctx);
 }
 
@@ -846,7 +898,7 @@ bool Document::query_compiles(std::string_view needle_utf8, SearchFlags flags) c
         build_search_needle(needle_utf8, flags.whole_word, flags.regex);
     const auto options = static_cast<fz_search_options>(
         search_options_value(flags.match_case, true));
-    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
+    detail::GateHold hold(impl_->gate, detail::GateClass::Foreground);
     fz_context* ctx = impl_->ctx;
     fz_search* search = nullptr;
     bool ok = true;
@@ -869,9 +921,9 @@ std::vector<Document::OutlineEntry> Document::outline() const {
     std::vector<OutlineEntry> result;
     if (!impl_->doc) return result;
 
-    // Defense in depth: serialize with any concurrent call into this
-    // Document's context. See Impl::doc_mutex.
-    std::lock_guard<std::mutex> lk(impl_->doc_mutex);
+    // Serialize with every other user of this Document's context and
+    // document. See Impl::gate.
+    detail::GateHold hold(impl_->gate, detail::GateClass::Foreground);
     fz_outline* root = nullptr;
     fz_try(impl_->ctx) {
         root = fz_load_outline(impl_->ctx, impl_->doc);
@@ -1125,23 +1177,56 @@ Document::TextPage Document::text_page(std::size_t index) const noexcept {
     // context: building the stext page loads a page from impl_->doc. Everything
     // afterwards runs on the handle's escrow, lock-free (spec §3.2).
     //
-    // Taken through a deferred unique_lock rather than a lock_guard because this
-    // function is noexcept: std::mutex::lock() throws std::system_error when the
-    // calling thread already holds the mutex (MSVC raises
-    // resource_deadlock_would_occur), and a throw out of a noexcept function is
-    // std::terminate, not the empty handle this contract promises. No caller
-    // holds doc_mutex today -- and none may: the empty handle is SILENT in every
-    // configuration this project can build (all of them define NDEBUG; Debug
-    // does not link against the Release-only MuPDF libs), so a re-entrant caller
-    // would just see a selection that never starts (#70).
-    std::unique_lock<std::mutex> lk(impl_->doc_mutex, std::defer_lock);
+    // Taken through an optional emplaced in a try rather than a plain hold
+    // because this function is noexcept: the gate throws std::system_error
+    // (resource_deadlock_would_occur) when the calling thread already holds it,
+    // as std::mutex::lock() did before #229, and a throw out of a noexcept
+    // function is std::terminate, not the empty handle this contract promises.
+    // No caller holds the gate today -- and none may: the empty handle is
+    // SILENT in every configuration this project can build (all of them define
+    // NDEBUG; Debug does not link against the Release-only MuPDF libs), so a
+    // re-entrant caller would just see a selection that never starts (#70).
+    std::optional<detail::GateHold> hold;
     try {
-        lk.lock();
+        hold.emplace(impl_->gate, detail::GateClass::Foreground);
     } catch (...) {
         return TextPage{};
     }
 
     return detail::TextPageAccess::build(impl_->ctx, impl_->doc, static_cast<int>(index));
+}
+
+// ----------------------------------------------------------------------
+// The borrow seam (#229)
+// ----------------------------------------------------------------------
+
+bool detail::SharedDocumentAccess::borrow(const Document& d, GateClass cls,
+                                          void (*call)(void*, fz_document*), void* fn) {
+    if (!d.is_open()) return false;
+    // Copied under the hold; nothing of `d` is read after the release, so the
+    // Document may be destroyed as soon as the last hold ends.
+    void (*hook)(void*, GateClass) = nullptr;
+    void* arg = nullptr;
+    {
+        GateHold hold(d.impl_->gate, cls);
+        hook = d.impl_->after_release_hook;
+        arg  = d.impl_->after_release_arg;
+        call(fn, d.impl_->doc);
+    }
+    if (hook) hook(arg, cls);
+    return true;
+}
+
+detail::PriorityGate& detail::SharedDocumentAccess::gate(const Document& d) noexcept {
+    return d.impl_->gate;
+}
+
+void detail::SharedDocumentAccess::set_after_release_hook(const Document& d,
+                                                          void (*hook)(void*, GateClass),
+                                                          void* arg) {
+    GateHold hold(d.impl_->gate, GateClass::Foreground);
+    d.impl_->after_release_hook = hook;
+    d.impl_->after_release_arg  = arg;
 }
 
 } // namespace litepdf::core

@@ -16,7 +16,6 @@
 #include <vector>
 
 #include "core/EscrowContext.hpp"
-#include "core/FileStamp.hpp"
 #include "core/TextSelection.hpp"
 
 // Forward-declare fz_context so this header can expose clone_context() without
@@ -29,7 +28,10 @@ struct fz_context;
 
 namespace litepdf::core {
 
-namespace detail { struct TextPageAccess; }  // core/detail/TextPageAccess.hpp (#98)
+namespace detail {
+struct TextPageAccess;        // core/detail/TextPageAccess.hpp (#98)
+struct SharedDocumentAccess;  // core/detail/SharedDocumentAccess.hpp (#229)
+}
 
 struct PageSize {
     float width_pt;
@@ -67,6 +69,13 @@ public:
 
     [[nodiscard]] bool is_open() const noexcept;
     void close() noexcept;
+
+    // (#229) True when the document is open and MuPDF opened it as FictionBook2
+    // (its FZ_META_FORMAT, read once at open). The content decides, not the
+    // file name: FB2 content named .svg is FB2, a PDF named .fb2 is not. A tab
+    // whose document is FB2 lends it to its render worker and search session
+    // instead of each opening a copy (ui::make_document_view).
+    [[nodiscard]] bool is_fb2() const noexcept;
 
     // For encrypted documents. Returns true if password accepted. An accepted
     // document whose pages cannot be counted is closed rather than reported
@@ -106,8 +115,8 @@ public:
     // Search (Phase 6)
     // ------------------------------------------------------------------
     // Stateless per-page search. core::SearchSession drives the cursor/cache
-    // and epoch-based cancellation on top of the same per-page search, run on
-    // its own document (see page_hits below).
+    // and epoch-based cancellation on top of the same per-page search (see
+    // page_hits below).
     //
     // Search options. On MuPDF 1.27.2 all three are honored via the
     // incremental fz_search matcher; see SearchQuery.hpp for the
@@ -146,12 +155,14 @@ public:
     //
     // Not cancellable. The body is detail::page_hits_on (core/detail/
     // PageHitsAccess.hpp), which a search scan calls with a cookie on its own
-    // context and document (#130).
+    // context, and on its own document (#130) or, for an FB2 tab, on this
+    // Document's under the gate (#229).
     //
     // Thread-safety: SAFE to call concurrently from multiple threads on
-    // the same Document instance. An internal std::mutex serializes this
-    // method with every other one that touches this Document's context —
-    // MuPDF's fz_try/fz_catch uses a per-ctx error stack that is not
+    // the same Document instance. The Document's gate (a Foreground hold)
+    // serialises this method with every other user of this Document's context
+    // and document, a borrowing render worker or search scan included (#229)
+    // -- MuPDF's fz_try/fz_catch uses a per-ctx error stack that is not
     // thread-safe, so this serialization is mandatory.
     [[nodiscard]] std::vector<PageHit> page_hits(
         std::size_t page,
@@ -195,28 +206,24 @@ public:
     [[nodiscard]] fz_context* clone_context() const;
 
     // An EscrowContext cloned from this Document's context: the context a
-    // search session opens its own document on (#130). Unlike a bare
-    // clone_context(), it may outlive this Document.
+    // search session scans on, whether it opened its own document on it (#130)
+    // or borrows this Document's (#229). Unlike a bare clone_context(), it may
+    // outlive this Document.
     //
     // Empty if the Document is not open or the clone fails (out of memory).
-    // Takes no doc_mutex: the clone locks through the family's lock table, as
+    // Takes no gate: the clone locks through the family's lock table, as
     // clone_context() does.
     [[nodiscard]] EscrowContext clone_escrow_context() const;
 
     // Returns the path that was last successfully passed to open(). If the
     // document is not open (or was never opened), returns a reference to an
-    // empty path. RenderEngine workers use this to re-open the file on their
-    // own fz_context (MuPDF forbids sharing fz_document across contexts).
-    // A non-empty path always has a UTF-8 form: open() refuses one that does
-    // not (UnconvertiblePath), so the workers' own u8string() cannot fail on
-    // the name.
+    // empty path. Render workers and search sessions that do not share this
+    // Document's document (DocumentShare::Own) open the file again by this
+    // path on their own context, so two pages can interpret in parallel;
+    // shared ones (an FB2, #229) never read it. A non-empty path always has a
+    // UTF-8 form: open() refuses one that does not (UnconvertiblePath), so the
+    // workers' own u8string() cannot fail on the name.
     [[nodiscard]] const std::filesystem::path& source_path() const noexcept;
-
-    // (#229) The file's stamp as open() found it, taken just before MuPDF read
-    // it; nothing if the document is not open or the file could not be
-    // stat'ed. A later open of source_path() compares against it to tell
-    // whether it would read the same file the tab shows.
-    [[nodiscard]] std::optional<FileStamp> source_stamp() const noexcept;
 
     // ------------------------------------------------------------------
     // Synchronous render escape hatch (Phase 8.5)
@@ -240,11 +247,15 @@ public:
     // or rendering fails. On false, callback is not invoked.
     //
     // Thread-safety: SAFE concurrently with other Document methods on
-    // the same instance -- internal doc_mutex serializes all callers.
-    // Holds the mutex for the entire render duration (~50-300ms at
-    // print DPI). Any other call into this Document's own context waits
-    // for it; acceptable because print is a rare modal operation. Render
-    // workers and search scans run on their own documents and do not wait.
+    // the same instance. The render holds the Document's gate (Foreground,
+    // ~50-300ms at print DPI); a borrowing render worker or search scan waits
+    // for it, workers and scans on their own documents do not. The gate is
+    // RELEASED before `callback` runs (#229): PrintJob's callback runs its
+    // abort_proc, which dispatches every queued message on the UI thread, and a
+    // dispatched call into this Document, or a tab close that joins a worker
+    // waiting for the gate, must not find it held. The callback may even
+    // destroy this Document: nothing after it touches the Document, and the
+    // pixmap is dropped through an escrow context of its own.
     [[nodiscard]] bool with_rendered_page(
         std::size_t page_idx,
         float scale_x_px_per_pt,
@@ -269,8 +280,8 @@ public:
     //
     // Coordinates are MuPDF page space; see SelPoint in core/TextSelection.hpp.
     //
-    // Thread-safety: only acquiring a handle (Document::text_page) takes
-    // doc_mutex. Every method below is lock-free: it reads an immutable
+    // Thread-safety: only acquiring a handle (Document::text_page) takes the
+    // Document's gate. Every method below is lock-free: it reads an immutable
     // structure the handle holds a ref to, and copy() allocates on the handle's
     // own escrow, whose error stack is its own (spec §3.2).
     //
@@ -335,13 +346,15 @@ public:
     // The build itself is detail::TextPageAccess::build (core/detail/
     // TextPageAccess.hpp), shared with the render worker's prefetch (#98).
     //
-    // noexcept, and it takes doc_mutex: a caller that already holds the lock on
-    // this thread gets an empty handle rather than the std::terminate a throw
-    // out of a noexcept function would be (#70). Do not rely on that -- the
-    // empty handle is silent. Nothing may call this under doc_mutex.
+    // noexcept, and it takes the Document's gate (Foreground): a caller that
+    // already holds the gate on this thread gets an empty handle rather than the
+    // std::terminate a throw out of a noexcept function would be (#70). Do not
+    // rely on that -- the empty handle is silent. Nothing may call this under
+    // the gate.
     [[nodiscard]] TextPage text_page(std::size_t page) const noexcept;
 
 private:
+    friend struct detail::SharedDocumentAccess;
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
