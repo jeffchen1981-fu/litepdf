@@ -37,7 +37,9 @@ So the cost has two parts:
   1,500 chapters). The whole-document search is the one loop that pays it per page: 864 ms
   by location against 3,611 ms by flat number at 1,500 chapters (the issue's probe).
 - **On a fresh copy, once per chapter:** a copy opened with `fz_open_document` has an empty
-  accelerator. The first flat load of a page in chapter c lays out chapters 0..c-1 first, and
+  accelerator. The first flat load of a page in chapter c lays out chapters 0..c, because
+  `fz_load_page` counts chapter c's pages before it loads from it (`document.c:788-792`), where a
+  load by location lays out chapter c alone; and
   `TextPageAccess::build`'s `fz_count_pages` lays out the whole book, on each worker copy. The
   issue's table does not count this part; it is found by reading the source, not yet measured.
 
@@ -51,7 +53,7 @@ Non-goals:
 
 - No MuPDF patch. The O(c) spine walk inside `epub_load_page` stays (#230 §7).
 - No change to which documents are shared (#229) or to the worker count (#235).
-- No new chapter table for a Shared borrower (§4.5).
+- No change to the borrow seam (§4.5).
 
 ## 4. Design
 
@@ -117,10 +119,17 @@ Called by the RenderEngine and SearchSession constructors, before any of their t
 The hold can throw `std::system_error` (a re-entrant caller, #70), so each call sits where a throw
 leaves nothing behind:
 
-- SearchSession: before `open_scan_document`, after the escrow clone, whose local owner drops it
-  on a throw. Nothing else is acquired yet.
-- RenderEngine: inside `open_worker_documents`' `try`, before the loop, so the existing rollback
-  drops the contexts.
+- SearchSession: right after the escrow clone, whose local owner drops it on a throw, and
+  before the Shared/Own split, so both modes read it there. Nothing else is acquired yet.
+- RenderEngine: at the top of the constructor, before the worker contexts are cloned, so both
+  modes read it there with nothing yet to roll back. (The Shared branch,
+  `RenderEngine.cpp:537-538`, has no cleanup of its own for the contexts cloned above it, so a
+  read there would leak them.) Own hands the table to `open_worker_documents`.
+
+**Declarations.** `ChapterPagesAccess` and `table_for_copy` are declared in a new
+`detail/ChapterPagesAccess.hpp` (forward-declared fz types, like `TextPageAccess.hpp`), the loader
+in `detail/PageLoad.hpp`; all three are defined in `Document.cpp`, where the table and MuPDF
+already meet, and included by `RenderEngine.cpp` and `SearchSession.cpp`.
 
 **The check.** `detail::table_for_copy(fz_context*, fz_document* copy,
 std::shared_ptr<const ChapterPages> table) noexcept` → the table, or null when the table is null,
@@ -157,10 +166,10 @@ Callers:
 | `Document::text_page`, `page_hits`, `page_text`, `page_size`, `with_rendered_page` | `impl_->chapters.get()` |
 | RenderEngine, Own | that worker's checked table |
 | SearchSession, Own | the session's checked table |
-| RenderEngine and SearchSession, Shared | `nullptr` (§4.5) |
+| RenderEngine and SearchSession, Shared | the Document's table, unchecked (§4.5) |
 
-**RenderEngine (Own).** `open_worker_documents` takes the table from
-`ChapterPagesAccess::table(doc)` inside its `try`, before the loop (§4.3). Per worker, after the open and authenticate:
+**RenderEngine (Own).** `open_worker_documents` receives the table the constructor read (§4.3).
+Per worker, after the open and authenticate:
 `table_for_copy(ctx, wdoc, table)`, stored in a `std::vector<std::shared_ptr<const
 ChapterPages>> worker_chapters` reserved together with `worker_docs` (so the store after a
 successful check cannot throw) and cleared by the same rollback.
@@ -169,13 +178,19 @@ successful check cannot throw) and cleared by the same rollback.
 succeeds: `table_for_copy(escrow.get(), sdoc, table)` (noexcept), moved into `Impl::chapters` in
 the commit block, which stays non-throwing.
 
-### 4.5 Shared mode passes no table
+### 4.5 Shared mode uses the Document's table as it is
 
-A Shared borrower runs on the Document's own document, so the Document's table would be right
-for it. But only FB2 is shared, and FB2 has one chapter (only `epub-doc.c` sets
-`count_chapters`), so that table is always null. The Shared branches pass `nullptr` with a
-comment saying why and what to do if another format becomes shareable (hand the Document's table
-through the borrow, read under the same hold). The borrow seam's signature stays as #229 left it.
+A Shared borrower runs on the Document's own document, the one the table was built from, so it
+needs no check. The engine and the session read it once at construction, through the same
+`ChapterPagesAccess::table` as Own, and pass it on every borrow. It stays right for as long as they
+live: a borrower's Document is const to it and is not reopened or closed under it (the #229 rule in
+`SharedDocumentAccess.hpp`), and the `shared_ptr` keeps the table alive regardless. The borrow
+seam's signature stays as #229 left it.
+
+In the product only FB2 is shared (`MakeDocumentView.hpp`: `doc.is_fb2() && !password`), and FB2
+has one chapter (only `epub-doc.c` sets `count_chapters`), so there the table is null. But both
+constructors accept `DocumentShare::Shared` for any document, so an ePub constructed Shared loads
+by location too; §6.2 tests it.
 
 ### 4.6 What changes for a user
 
@@ -204,8 +219,9 @@ stamps `set_query` and prints one stderr line when the generation's last page ta
 inside `set_query` leaves the find bar's typing debounce out of the figure. The baseline is
 116070a with that same patch; the after build is the branch with it. The working set is read
 from outside (`Get-Process`). The driver (open the book, Ctrl+F, type the word, wait for the
-line, read the working set, close) and the patch live in the plan and in
-`~/.claude/compact-dumps/litepdf/232-tools/`, as #229's did.
+line, read the working set, close) and the patch are written by the plan. Neither is merged into
+`src`; both go in the PR description in full (the patch as a diff, the driver as a script), with
+the book generator's parameters, so the numbers can be reproduced from the PR alone.
 
 Numbers go in §7 and the PR. Release build only.
 
@@ -227,22 +243,27 @@ helper of `test_document_page_size.cpp`), never a path that reads a table.
 - `Document::page_text(i)` and `Document::text_page(i)`'s full-range copy contain exactly the
   token the oracle finds on page i, for every page.
 - `Document::page_hits(i, "tokC_P")` hits only page i, for every token.
-- SearchSession (Own) on `chapter-tokens.epub`: each token's hits are on the oracle's page.
-- RenderEngine (Own, 2 workers, no cache): each page's pixmap bytes equal the oracle's render
-  through the same steps; each page's prefetched text holds the oracle's token.
+- SearchSession on `chapter-tokens.epub`, Own and Shared: each token's hits are on the oracle's
+  page.
+- RenderEngine (2 workers Own, 1 worker Shared; no cache): each page's pixmap bytes equal the
+  oracle's render through the same steps; each page's prefetched text holds the oracle's token.
+  Shared on an ePub is constructed directly, as the product never does (§4.5).
 - `table_for_copy`: the Document's table against a copy of the same file → the table; against a
   copy of a file with another chapter count (`strip-chapters.epub`) → null; null in → null.
 - Determinism: for each fixture with chapters, a copy opened on `Document::clone_context()` gives
   per-chapter counts (`fz_count_chapter_pages`) from which `ChapterPages::from_counts` builds a
-  table, and that table has the Document's chapter count and the same `locate` answer for every
-  index (the Document's table read through `ChapterPagesAccess`). Every ePub chapter has at least
-  one page (#230 §4.1), so equal answers for every index mean equal counts; no per-chapter
-  accessor is added.
+  table, and that table has the Document's chapter count, the Document's page count
+  (`page_count()`), and the same `locate` answer for every index below it (the Document's table
+  read through `ChapterPagesAccess`). Equal totals rule out a longer last chapter that the
+  per-index comparison alone would miss; every ePub chapter has at least one page
+  (`count_laid_out_pages`, `epub-doc.c:178-183`), so equal answers for every index then mean
+  equal counts. No per-chapter accessor is added.
 - A RenderEngine or SearchSession whose check fails still renders and finds every page by flat
   number. The mismatch is the §4.2 residual made real: the test copies `chapter-tokens.epub` to a
   temporary path, opens the Document on it, then overwrites that path with `strip-chapters.epub`
-  (another chapter count) before constructing the engine or session; each page must equal the
-  oracle's flat load of the new file. If Windows refuses the overwrite while MuPDF holds the
+  (another chapter count) before constructing the engine or session; each page below the
+  Document's page count (which stays the old file's, at most 60 pages, while `strip-chapters.epub`
+  has 400) must equal the oracle's flat load of the new file. If Windows refuses the overwrite while MuPDF holds the
   file, the plan substitutes a test-only hook on `ChapterPagesAccess` that hands out a table of
   another chapter count. Mutation check: using the Document's table without the check fails it.
 - `page_at` / `load_page_at`: an index past the table throws as `fz_load_page` does.
@@ -257,17 +278,28 @@ therefore gets a cost oracle that fails if that path alone is left on `fz_load_p
 1,500-chapter book written at test time (#230's `write_many_chapter_epub`, moved to a shared
 test helper):
 
-- **Fresh copy, last page** (RenderEngine render, RenderEngine text prefetch, one SearchSession
-  `page_hits_on` of the last page): by location lays out one chapter; by flat number it lays out
-  1,499 (render, search) or the whole book (prefetch's `fz_count_pages`).
+- **Fresh copy, last page**: by location lays out one chapter; by flat number all 1,500.
+  - RenderEngine render: a new engine, no cache, one request for the last page; time from submit
+    to `on_complete`.
+  - RenderEngine text prefetch: the same request with `on_text` and `text_wanted` set to the last
+    page; time from `on_complete` to `on_text` (the render has laid out only the last chapter, so a
+    flat `fz_count_pages` lays out the other 1,499).
+  - SearchSession: a new session on a `DeferredDispatcher` (`search_test_kit.hpp`),
+    `set_query(..., start_page = last)`, and only the first queued task run, which scans the last
+    page; time of that task.
 - **Warm loop** (Document's `page_text`, `page_hits`, `text_page`; SearchSession whole-document
   search, second run on the same session so the chapters are in the store): every page, best of
   3; by flat number each call adds the O(c²) walk.
+- `page_size` and `with_rendered_page` keep #230's speed test (`test_document_page_size.cpp`,
+  "Document on a 1500-chapter ePub: ..."), which already fails when either is reverted; moving
+  them onto `load_page_at` must keep it passing.
 
-Each is bounded against a reference the test times itself on the same book: the same work by
-`fz_load_chapter_page` on the test's own document. The multiplier and constant are fixed by a
-probe of both routes during planning, chosen so the location route passes and the flat route
-fails each by at least 2×; the plan records the probe. **Acceptance step:** reverting each
+Each new oracle asserts `measured <= k * reference + c`, where the reference is the same work the
+test times itself on the same book by `fz_load_chapter_page` on its own document, and `k` and `c`
+are constants in the test source. They are chosen during planning from a probe of both routes on
+this machine: the location route must pass with at least 2× headroom and the flat route must
+fail by at least 2×. The probe's readings are recorded in the plan and in a comment next to the
+constants, as #230's test records its own. **Acceptance step:** reverting each
 path's load alone to flat numbers fails its oracle; the readings of both routes go in the PR.
 `TextPageAccess::build` and `page_hits_on` each serve two paths, so a path is reverted at its
 call site, by passing `nullptr` for the table there, not inside the shared helper (which would
@@ -276,11 +308,16 @@ have one caller each and are reverted the same way.
 
 ### 6.4 Existing tests and helpers
 
-`test_page_hits_cookie.cpp` (3 calls) gains the `nullptr` argument. `OwnDocument` and
-`write_many_chapter_epub` move from `test_document_page_size.cpp`'s anonymous namespace to a
-shared test header (`tests/unit/chapter_test_kit.hpp`), so the render and search tests can use
-them; `test_document_page_size.cpp` changes only by that move, and its tests keep their
-behaviour.
+`test_page_hits_cookie.cpp` (3 calls) gains the `nullptr` argument. `OwnDocument`,
+`write_many_chapter_epub` and the `utf8_of` it calls move from `test_document_page_size.cpp`'s
+anonymous namespace to a shared test header (`tests/unit/chapter_test_kit.hpp`), with `inline`
+functions so two test files can include it, as `search_test_kit.hpp` does. The render and search
+tests can then use them; `test_document_page_size.cpp` changes only by that move, and its tests
+keep their behaviour.
+
+New test sources: `tests/unit/test_chapter_copies.cpp` (§6.2) and
+`tests/unit/test_chapter_copies_cost.cpp` (§6.3), each added to the explicit source list in
+`tests/CMakeLists.txt`; the fixture generator is `scripts/generate-chapter-tokens-fixture.py`.
 
 ## 7. Results
 
@@ -299,7 +336,8 @@ the MuPDF source (only crash is a chapter past the spine; `fz_count_chapters` la
 clones share style/font/store; the four paths are every flat load in `src`). Two findings on the
 tests, both taken: no test failed when a non-search path stayed flat (→ §6.3 per-path oracles and
 the mutation acceptance step); the 4× + 25 ms bound could pass a flat search (→ warm runs and a
-probe-fixed bound). Also taken: Shared passes `nullptr` instead of changing the seam (§4.5);
+probe-fixed bound). Also taken: Shared passes `nullptr` instead of changing the seam (§4.5; the
+spec gate later replaced `nullptr` with the Document's table, still without changing the seam);
 `shared_ptr<const ChapterPages>` so a copy takes no allocation; `page_count()`; the independent
 flat oracle; the determinism assertion; the second cost part of §2.
 
@@ -311,3 +349,21 @@ names an env-gated probe patch applied to both builds. Its 5 questions, all take
 table read sits relative to each rollback (§4.3), the helper move (§6.4), the determinism test
 without a per-chapter accessor (§6.2), call-site mutations for the shared helpers (§6.3), and the
 friend-pattern wording (§4.3).
+
+Codex lens 3 on efa8bb0, all three runs on that one commit, valid reads (bundle + ≤ 3 files):
+
+- terra@medium: the flat fresh-copy load lays out chapters 0..c, not 0..c-1 (taken, §2, §6.3);
+  the cost bounds had no stated predicate (taken, with luna's same finding: §6.3 now states the
+  predicate, the 2× margins and where the readings are recorded; the constants themselves come
+  from the planning probe, since they are a measurement).
+- gpt-6.1-terra: both constructors accept Shared for any document, so a Shared ePub stayed on
+  flat numbers (taken: Shared uses the Document's table, §4.5, tested in §6.2); `page_size` and
+  `with_rendered_page` had no named cost oracle (taken: #230's test, §6.3); the determinism test
+  missed a longer last chapter (taken: compare totals, §6.2). Its questions on the mismatch
+  test's page range and on isolating one page of a search were answered in §6.2 and §6.3.
+- luna@max: the helper move left `utf8_of` behind and needed `inline` (taken, §6.4); the
+  measurement's patch and driver lived only outside the repo (taken: they go in the PR in full,
+  §5); test sources and declaration headers were unnamed (taken, §4.3, §6.4). **Declined:** that
+  a same-chapter-count replacement can give a wrong page. It is the residual §4.2 already
+  accepts; preventing it would need every copy's per-chapter counts, which is the whole-book
+  layout approach 2 rejects.
