@@ -11,7 +11,7 @@
 // RenderEngine is the only TU that includes <mupdf/fitz.h> publicly; the
 // header stays MuPDF-free so UI code can consume it without the MuPDF
 // include path. Task 7 introduces actual rasterization, so we now need
-// the full fitz types (fz_open_document, fz_load_page, fz_new_pixmap_from_page,
+// the full fitz types (fz_open_document, fz_new_pixmap_from_page,
 // fz_scale, fz_device_rgb, etc.).
 #include <mupdf/fitz.h>
 

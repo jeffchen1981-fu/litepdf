@@ -415,7 +415,10 @@ void check_every_token_page(RenderEngine& engine, OwnDocument& own) {
         REQUIRE(own.rendered_via_list(i, 1.0f, want, ww, wh));
         CHECK(gw == ww);
         CHECK(gh == wh);
-        CHECK(got == want);
+        REQUIRE(got.size() == want.size());
+        const auto diff = std::mismatch(got.begin(), got.end(), want.begin());
+        INFO("first differing byte " << (diff.first - got.begin()) << " of " << got.size());
+        CHECK(diff.first == got.end());
         CHECK(tokens_in(text) == tokens_in(own.text(i)));
     }
 }
@@ -466,7 +469,10 @@ TEST_CASE("RenderEngine chapters: a copy of a file replaced after open renders e
         REQUIRE(fresh.rendered_via_list(i, 1.0f, want, ww, wh));
         CHECK(gw == ww);
         CHECK(gh == wh);
-        CHECK(got == want);
+        REQUIRE(got.size() == want.size());
+        const auto diff = std::mismatch(got.begin(), got.end(), want.begin());
+        INFO("first differing byte " << (diff.first - got.begin()) << " of " << got.size());
+        CHECK(diff.first == got.end());
     }
 }
 

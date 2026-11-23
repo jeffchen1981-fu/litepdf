@@ -56,7 +56,7 @@ Determinism (the --check contract, as in generate-large-fixture.py):
     workflow installs that version before running --check.
   * FB2: plain UTF-8 XML with "\n" line ends, built from fixed strings.
 
---check regenerates all five to a temp dir, asserts byte identity with the
+--check regenerates all six to a temp dir, asserts byte identity with the
 committed files, asserts the PDF has zero FlateDecode streams and that every
 zip entry is stored, and exits 1 on any drift.
 
@@ -67,7 +67,7 @@ White page fills are required because LitePDF's PdfCanvas uses a dark D2D
 surface; see generate-search-fixture.py for the full rationale.
 
 Usage:
-  python scripts/generate-strip-fixtures.py            # write the five fixtures
+  python scripts/generate-strip-fixtures.py            # write the six fixtures
   python scripts/generate-strip-fixtures.py --check    # verify byte identity
   python scripts/generate-strip-fixtures.py --pdf-pages 10000 --pdf-out %TEMP%\\strip-10000.pdf
 """

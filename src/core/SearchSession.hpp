@@ -66,11 +66,15 @@ public:
     // the password is wiped on every exit. Throws std::runtime_error if the
     // clone or the open fails, or if the document needs a password and
     // `password` is missing, empty or wrong, after releasing whatever it
-    // acquired.
+    // acquired. It also reads `doc`'s chapter table under a Foreground gate
+    // hold, so a caller already holding that gate gets the std::system_error
+    // a re-entrant hold throws (#70), which is a std::runtime_error too.
     //
     // DocumentShare::Shared (#229): opens nothing and does not read
     // `password`; the scans borrow `doc`'s own document under its gate.
-    // Throws std::runtime_error only if the clone fails.
+    // Throws std::runtime_error if the clone fails, or the std::system_error
+    // (a std::runtime_error) of a re-entrant hold when the chapter-table
+    // read finds the caller already inside `doc`'s gate (#70).
     SearchSession(const Document& doc, litepdf::app::ISearchDispatcher& dispatcher,
                   std::optional<std::string_view> password = std::nullopt,
                   DocumentShare share = DocumentShare::Own);

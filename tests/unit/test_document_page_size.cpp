@@ -12,11 +12,9 @@
 #include <mupdf/fitz.h>
 
 #include <algorithm>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
