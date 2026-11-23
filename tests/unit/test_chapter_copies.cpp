@@ -4,6 +4,8 @@
 // wrong place within it shows the wrong token.
 #include "chapter_test_kit.hpp"
 #include "core/Document.hpp"
+#include "core/DocumentShare.hpp"
+#include "core/RenderEngine.hpp"
 #include "core/detail/ChapterPagesAccess.hpp"
 #include "core/detail/PageLoad.hpp"
 
@@ -11,13 +13,23 @@
 
 #include <mupdf/fitz.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <future>
 #include <iterator>
+#include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace litepdf::test_kit;
 using litepdf::core::Document;
+using litepdf::core::DocumentShare;
+using litepdf::core::RenderEngine;
 using litepdf::core::SelPoint;
 using litepdf::core::detail::ChapterPages;
 using litepdf::core::detail::ChapterPagesAccess;
@@ -316,5 +328,137 @@ TEST_CASE("ChapterPagesAccess: a copy's own chapter counts give the Document's t
             CHECK(a->chapter == b->chapter);
             CHECK(a->page == b->page);
         }
+    }
+}
+
+// --- the render workers (Task 5) ---------------------------------------------
+
+namespace {
+
+// What one request delivered. Shared with the request's callbacks, so the worker
+// can still be inside a promise's set_value after the test has seen its future.
+struct Delivery {
+    std::vector<std::uint8_t> bgra;
+    int w = 0;
+    int h = 0;
+    bool got_pixmap = false;
+    std::string text;
+    std::promise<void> completed;
+    std::promise<void> texted;
+};
+
+// Renders `page` at scale 1 on `engine` and takes its prefetched text: one
+// request (priority 0, bypass_cache) whose on_complete copies the pixmap's rows
+// through its stride and drops it, and whose on_text stores the full-range copy.
+// Waits for both callbacks (10 s each). False when either does not arrive or the
+// pixmap is null. One request at a time, so no skip rule drops the text.
+bool render_and_text(RenderEngine& engine, int page, std::vector<std::uint8_t>& bgra,
+                     int& w, int& h, std::string& text) {
+    auto d = std::make_shared<Delivery>();
+    auto completed = d->completed.get_future();
+    auto texted = d->texted.get_future();
+    RenderEngine::RenderRequest r{page, 0, 1.0f, [d](fz_pixmap* pix, fz_context* ctx) {
+        if (pix) {
+            d->got_pixmap = true;
+            d->w = fz_pixmap_width(ctx, pix);
+            d->h = fz_pixmap_height(ctx, pix);
+            const std::uint8_t* samples = fz_pixmap_samples(ctx, pix);
+            const std::size_t stride = static_cast<std::size_t>(fz_pixmap_stride(ctx, pix));
+            const std::size_t row = static_cast<std::size_t>(d->w) * 4;
+            d->bgra.resize(row * static_cast<std::size_t>(d->h));
+            for (int y = 0; y < d->h; ++y) {
+                const std::uint8_t* src = samples + static_cast<std::size_t>(y) * stride;
+                std::copy(src, src + row,
+                          d->bgra.begin() +
+                              static_cast<std::ptrdiff_t>(row * static_cast<std::size_t>(y)));
+            }
+            fz_drop_pixmap(ctx, pix);
+        }
+        d->completed.set_value();
+    }};
+    r.bypass_cache = true;
+    r.on_text = [d](Document::TextPage tp) {
+        SelPoint a, b;
+        if (tp.full_range(a, b)) d->text = tp.copy(a, b);
+        d->texted.set_value();
+    };
+    r.text_wanted = std::make_shared<const std::atomic<int>>(page);
+    engine.submit(std::move(r));
+    constexpr auto kWait = std::chrono::seconds(10);
+    if (completed.wait_for(kWait) != std::future_status::ready) return false;
+    if (!d->got_pixmap) return false;
+    if (texted.wait_for(kWait) != std::future_status::ready) return false;
+    bgra = std::move(d->bgra);
+    w = d->w;
+    h = d->h;
+    text = std::move(d->text);
+    return true;
+}
+
+// Every page of the token fixture from `engine` against `own`'s flat load
+// through the worker's raster steps, and its prefetched text's tokens against
+// `own`'s.
+void check_every_token_page(RenderEngine& engine, OwnDocument& own) {
+    for (int i = 0; i < 35; ++i) {
+        INFO("page " << i);
+        std::vector<std::uint8_t> got, want;
+        int gw = 0, gh = 0, ww = 0, wh = 0;
+        std::string text;
+        REQUIRE(render_and_text(engine, i, got, gw, gh, text));
+        REQUIRE(own.rendered_via_list(i, 1.0f, want, ww, wh));
+        CHECK(gw == ww);
+        CHECK(gh == wh);
+        CHECK(got == want);
+        CHECK(tokens_in(text) == tokens_in(own.text(i)));
+    }
+}
+
+}  // namespace
+
+TEST_CASE("RenderEngine chapters: two own workers render and prefetch each page as a flat load does",
+          "[core][render][chapters]") {
+    OwnDocument own(kTokensFixture);
+    Document doc;
+    REQUIRE_FALSE(doc.open(kTokensFixture).has_value());
+    REQUIRE(doc.page_count() == 35);
+    RenderEngine engine(doc, 2, nullptr);
+    check_every_token_page(engine, own);
+}
+
+TEST_CASE("RenderEngine chapters: a shared worker renders and prefetches each page as a flat load does",
+          "[core][render][chapters]") {
+    // The product never builds a Shared ePub (spec 4.5); the constructor accepts one.
+    OwnDocument own(kTokensFixture);
+    Document doc;
+    REQUIRE_FALSE(doc.open(kTokensFixture).has_value());
+    REQUIRE(doc.page_count() == 35);
+    RenderEngine engine(doc, 1, nullptr, std::nullopt, DocumentShare::Shared);
+    check_every_token_page(engine, own);
+}
+
+TEST_CASE("RenderEngine chapters: a copy of a file replaced after open renders every page by flat number",
+          "[core][render][chapters]") {
+    const TempDir dir;   // first: destroyed after every document that opens the file
+    const std::filesystem::path book = dir.path / "book.epub";
+    std::filesystem::copy_file(kTokensFixture, book);
+    Document doc;
+    REQUIRE_FALSE(doc.open(book).has_value());
+    REQUIRE(doc.page_count() == 35);
+    // Another chapter count under the open Document (planning finding P2: a file
+    // MuPDF holds open can be overwritten), so each worker's check refuses the table.
+    std::filesystem::copy_file(kStripEpub, book,
+                               std::filesystem::copy_options::overwrite_existing);
+    RenderEngine engine(doc, 2, nullptr);
+    OwnDocument fresh(utf8_of(book).c_str());
+    for (int i = 0; i < static_cast<int>(doc.page_count()); ++i) {
+        INFO("page " << i);
+        std::vector<std::uint8_t> got, want;
+        int gw = 0, gh = 0, ww = 0, wh = 0;
+        std::string text;
+        REQUIRE(render_and_text(engine, i, got, gw, gh, text));
+        REQUIRE(fresh.rendered_via_list(i, 1.0f, want, ww, wh));
+        CHECK(gw == ww);
+        CHECK(gh == wh);
+        CHECK(got == want);
     }
 }

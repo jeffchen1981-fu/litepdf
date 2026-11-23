@@ -360,6 +360,36 @@ inline void small_pixmap(fz_context* ctx, fz_page* page) {
                                                 fz_device_bgr(ctx), 1));
 }
 
+// #232: the render worker's raster steps for a loaded `page` at scale 1, as
+// OwnDocument::rendered_via_list runs them (display list, rounded bbox, BGR +
+// alpha pixmap cleared to 0xFF, draw device, fz_run_display_list), with the
+// result dropped. Called inside the caller's fz_try and throws as MuPDF does;
+// its own fz_try only drops what it made before rethrowing. Nothing here has a
+// destructor (#179).
+inline void render_scale1_via_list(fz_context* ctx, fz_page* page) {
+    fz_display_list* dl = nullptr;
+    fz_pixmap* pix = nullptr;
+    fz_device* dev = nullptr;
+    fz_var(dl);
+    fz_var(pix);
+    fz_var(dev);
+    fz_try(ctx) {
+        dl = fz_new_display_list_from_page(ctx, page);
+        const fz_irect bbox = fz_round_rect(fz_bound_display_list(ctx, dl));
+        pix = fz_new_pixmap_with_bbox(ctx, fz_device_bgr(ctx), bbox, nullptr, 1);
+        fz_clear_pixmap_with_value(ctx, pix, 0xFF);
+        dev = fz_new_draw_device(ctx, fz_identity, pix);
+        fz_run_display_list(ctx, dl, dev, fz_identity, fz_infinite_rect, nullptr);
+        fz_close_device(ctx, dev);
+    }
+    fz_always(ctx) {
+        fz_drop_device(ctx, dev);
+        fz_drop_pixmap(ctx, pix);
+        fz_drop_display_list(ctx, dl);
+    }
+    fz_catch(ctx) { fz_rethrow(ctx); }
+}
+
 // --- the token fixture (tests/fixtures/chapter-tokens.epub, #232) ------------
 
 inline constexpr const char* kTokensFixture = "tests/fixtures/chapter-tokens.epub";
