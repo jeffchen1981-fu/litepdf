@@ -26,7 +26,9 @@ overturned it; see "Planning findings" below.
   `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe`
   (`ctest.exe` beside it); never the `cmake` on PATH. Build: `& $cmake --build build --target litepdf_unit_tests --config Release`.
   Run tests **from the worktree root** (fixtures resolve relative to it), from **PowerShell**:
-  `.\build\tests\Release\litepdf_unit_tests.exe "<name or [tag]>"`. Full suite: `ctest` serial, no `-j`.
+  `.\build\tests\Release\litepdf_unit_tests.exe "<name or [tag]>"`. Full suite, serial (no `-j`),
+  through the BuildTools `ctest.exe` (a bare `ctest` resolves to a MinGW CMake on PATH):
+  `& "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe" --test-dir build -C Release`.
 - The worktree's `third_party\mupdf` is a junction to the main checkout's built submodule. Stage
   with `git add <paths>`; `git commit -a` fails while the junction is in place.
 - `fz_try` bodies hold no object with a destructor and throw no C++ exception (#179). Every
@@ -36,7 +38,8 @@ overturned it; see "Planning findings" below.
   leaves nothing acquired.
 - No MuPDF patch. No change to which documents are shared (#229), to the worker count (#235), or
   to the borrow seam's signature (`SharedDocumentAccess`).
-- After Task 3, `git grep -n "fz_load_page(" -- src` matches only inside `load_page_at`.
+- After Task 5 (when `load_display_list` moves too), `git grep -n "fz_load_page(" -- src` matches
+  only inside `load_page_at`. After Task 3 it still matches `RenderEngine.cpp`'s `load_display_list`.
 - `TEST_CASE` names are ASCII and start with the subsystem (`Document chapters:`,
   `RenderEngine chapters:`, `SearchSession chapters:`, `PageLoad:`, `ChapterPagesAccess:`,
   `ChapterPages:`, `ChapterTokens:`). Tags: every new case carries `[chapters]`, plus
@@ -52,10 +55,14 @@ overturned it; see "Planning findings" below.
 ## Planning findings (2026-11-23, probe on this machine)
 
 A throwaway probe (two test files, never committed) settled four premises before tasks were cut.
+Both are kept beside the plan gate's evidence, in the session scratchpad: `probe_232_record.cpp`
+(P3's timings) and `probe_232b_record.cpp` (P1's pagination walk and P2's overwrite); the
+`page-break-before` variants were four generator edits run through the latter.
 
-- **P1. `page-break-before` does nothing in an ePub here; `page-break-after` works.** A chapter of
-  `<p>` blocks styled `page-break-before:always` (class selector, inline style, `<h1>`, wrapping
-  `<div>`: all four) laid out as ONE page per chapter. `page-break-after:always` breaks, and on the
+- **P1. `page-break-before` had no effect in an ePub here; `page-break-after` works.** MuPDF has
+  code for it (`html-layout.c:1099-1125`), but a chapter of `<p>` blocks styled
+  `page-break-before:always` (class selector, inline style, `<h1>`, wrapping `<div>`: all four)
+  laid out as ONE page per chapter. Why was not chased: the fixture only needs a break that works. `page-break-after:always` breaks, and on the
   chapter's last block adds an empty trailing page. So the fixture styles every page's paragraph
   except the chapter's last with `page-break-after:always`. Verified: 12 chapters with counts
   `1 4 2 5 3 1 4 2 5 3 1 4`, 35 pages, flat page *i* holding exactly one token, the expected one.
@@ -76,9 +83,10 @@ A throwaway probe (two test files, never committed) settled four premises before
 
   (3,000 chapters: 1.33 / 509.90, 0.04 / 507.55, 0.77 / 492.05, 66.28 / 9,922.51, 66.39 /
   9,915.70.) With `k = 4`, `c = 25 ms` (#230's constants) the bound is about 30 ms for a
-  fresh-copy oracle and about 140 ms for a warm loop: the flat route fails it by at least 5×, and the
-  location route passes it with at least 3× to spare as long as the product adds under ~10 ms per
-  fresh oracle and ~15 ms per warm loop over the MuPDF-only reading. Every oracle `WARN`s both
+  fresh-copy oracle and about 140 ms for a warm loop: the flat route fails it by at least 5×. The
+  location route keeps at least 2.5× to spare while the product adds under ~10 ms per fresh oracle
+  (25.16 / 10.04 = 2.51× for the text route, the tightest), and 3× while it adds under ~15 ms per
+  warm loop (140.04 / 43.76 = 3.2×); the 2× stop rule below fires at about 12.5 ms and 40 ms extra. Every oracle `WARN`s both
   readings; **if any location-route reading has less than 2× headroom, stop and re-derive k and c**
   (spec §6.3) before committing.
 - **P4. Fixture generator location.** The fixture's builder joins `scripts/generate-strip-fixtures.py`
@@ -151,11 +159,12 @@ A throwaway probe (two test files, never committed) settled four premises before
   - new free functions: `std::vector<std::string> tokens_in(std::string_view text)` (every `tok` + 2 digits + `_` + 1 digit, in order); `inline constexpr int kTokenChapterPages[12] = {1, 4, 2, 5, 3, 1, 4, 2, 5, 3, 1, 4};` `std::string expected_token(int flat_index)` (walks `kTokenChapterPages`; `"tok%02d_%d"`); `inline constexpr const char* kTokensFixture = "tests/fixtures/chapter-tokens.epub";`.
 - Consumes: nothing new.
 
-- [ ] **Step 1: Add the fixture builder.** In `generate-strip-fixtures.py`: `TOKENS_EPUB_NAME = "chapter-tokens.epub"`, `TOKENS_CHAPTER_PAGES = [1, 4, 2, 5, 3, 1, 4, 2, 5, 3, 1, 4]`, chapter file names `t%02d.xhtml` (0-based), identifier `litepdf-chapter-tokens`, via the existing `content_opf`, `CONTAINER_XML`, `write_stored_zip`. Chapter `c`'s body is one `<p>tok%02d_%d</p>` per page `p`; every one but the chapter's last has `class="brk"`, and the head carries `<style>.brk{page-break-after:always}</style>` (P1: `page-break-before` is ignored). No `<h1>`; `<title>` is not rendered. Add the docstring entry (12 chapters, counts above, 35 pages, "the oracle for loading pages by chapter location in every copy (#232), not a gate fixture") and the `BUILDERS` row.
+- [ ] **Step 1: Add the fixture builder.** In `generate-strip-fixtures.py`: `TOKENS_EPUB_NAME = "chapter-tokens.epub"`, `TOKENS_CHAPTER_PAGES = [1, 4, 2, 5, 3, 1, 4, 2, 5, 3, 1, 4]`, identifier `litepdf-chapter-tokens`, via the existing `content_opf`, `CONTAINER_XML`, `write_stored_zip`. `content_opf` calls its name function with `n` = 1..12, so the token builder's name function is `lambda n: "t%02d.xhtml" % (n - 1)` and the chapter entries are written for `n` in 1..12 with `c = n - 1`: the OPF's hrefs are then exactly the zip's `OEBPS/t00.xhtml`..`t11.xhtml`. Chapter `c`'s body is one `<p>tok%02d_%d</p>` per page `p`; every one but the chapter's last has `class="brk"`, and the head carries `<style>.brk{page-break-after:always}</style>` (P1: `page-break-before` is ignored). No `<h1>`; `<title>` is not rendered. Add the docstring entry (12 chapters, counts above, 35 pages, "the oracle for loading pages by chapter location in every copy (#232), not a gate fixture") and the `BUILDERS` row.
 
 - [ ] **Step 2: Generate and check it.**
+  The writer rewrites ALL six fixtures, and the PDF and CBZ bytes are identical only with the CI pins. First: `pip show reportlab Pillow` must print 4.4.10 and 12.2.0 (else `pip install "reportlab==4.4.10" "Pillow==12.2.0"`, as `benchmark.yml` does).
   Run: `python scripts/generate-strip-fixtures.py` then `python scripts/generate-strip-fixtures.py --check`
-  Expected: `[OK] chapter-tokens.epub byte-identical`, and every other fixture `[OK]` (unchanged bytes; `git status` shows only the new `.epub` among fixtures).
+  Expected: every fixture `[OK] ... byte-identical`, and `git status --short tests/fixtures` shows ONLY `?? tests/fixtures/chapter-tokens.epub` (the `--check` cannot see drift the writer just wrote, so this status line is the guard; restore any other with `git checkout -- <file>` and fix the pins).
 
 - [ ] **Step 3: Move the helpers into `chapter_test_kit.hpp` and add the new ones.** `test_document_page_size.cpp` keeps only `read_operations()` in its anonymous namespace, includes the kit and adds `using namespace litepdf::test_kit;`. Its tests do not change.
 
@@ -167,11 +176,13 @@ TEST_CASE("ChapterTokens: each page of the fixture holds its own token, by flat 
     OwnDocument own(kTokensFixture);
     REQUIRE(own.page_count() == 35);
     int nc = -1;
+    fz_var(nc);   // assigned in the try, read after a catch that falls through (#178)
     fz_try(own.ctx) { nc = fz_count_chapters(own.ctx, own.doc); }
     fz_catch(own.ctx) { fz_report_error(own.ctx); }
     REQUIRE(nc == 12);
     for (int c = 0; c < 12; ++c) {
         int m = -1;
+        fz_var(m);
         fz_try(own.ctx) { m = fz_count_chapter_pages(own.ctx, own.doc, c); }
         fz_catch(own.ctx) { fz_report_error(own.ctx); }
         CHECK(m == kTokenChapterPages[c]);
@@ -242,7 +253,7 @@ TEST_CASE("ChapterTokens: each page of the fixture holds its own token, by flat 
 ### Task 3: The Document's own paths
 
 **Files:**
-- Modify: `src/core/detail/TextPageAccess.hpp:62-63`, `src/core/detail/PageHitsAccess.hpp:51-53`
+- Modify: `src/core/detail/TextPageAccess.hpp:57-58`, `src/core/detail/PageHitsAccess.hpp:50-52`
 - Modify: `src/core/Document.cpp` — `page_text` (`:702-755`), `page_hits_on` (`:777-870`), `page_hits` (`:872-885`), `TextPageAccess::build` (`:1122-1171`), `text_page` (`:1173-1197`)
 - Modify: `src/core/RenderEngine.cpp:162,167`, `src/core/SearchSession.cpp` scan task (the two `page_hits_on` calls) — pass `nullptr` for now (Tasks 5, 6 replace it)
 - Modify: `tests/unit/test_page_hits_cookie.cpp:59,75,105` (`nullptr` after the document)
@@ -334,7 +345,7 @@ TEST_CASE("ChapterTokens: each page of the fixture holds its own token, by flat 
   - `void open_worker_documents(Document& doc, std::optional<std::string_view> password, const std::shared_ptr<const detail::ChapterPages>& table)`.
 - Consumes: Task 4's `ChapterPagesAccess::table`, `table_for_copy`; Task 3's `TextPageAccess::build` signature.
 
-Constructor order (spec §4.3): the **first** statement after the `n == 0` check is `auto table = detail::ChapterPagesAccess::table(doc);` — before any context is cloned, so a throw from its hold leaves nothing behind. Shared: `impl_->chapters = std::move(table);`. Own: `open_worker_documents(doc, password, table)`, which reserves `worker_chapters` next to `worker_docs` and, per worker after its open and authenticate, `worker_chapters.push_back(detail::table_for_copy(ctx, wdoc, table));` (cannot throw after the reserve). Both rollbacks clear `worker_chapters`. Call sites: Own passes `impl->worker_chapters[idx].get()`, Shared `impl->chapters.get()`, to `load_display_list` and `TextPageAccess::build`.
+Constructor order (spec §4.3): the **first** statement after the `n == 0` check is `auto table = detail::ChapterPagesAccess::table(doc);` — before any context is cloned, so a throw from its hold leaves nothing behind. Shared: `impl_->chapters = std::move(table);`. Own: `open_worker_documents(doc, password, table)`, which reserves `worker_chapters` next to `worker_docs` and, per worker after its open and authenticate, `worker_chapters.push_back(detail::table_for_copy(ctx, wdoc, table));` (cannot throw after the reserve). Both rollbacks clear `worker_chapters`. **Also move the pre-existing `impl_->workers.reserve(n);` (`:544`) inside the start-workers `try`** (plan-gate finding, luna): today a `std::bad_alloc` from it leaks every worker document and context, because a throwing constructor runs no `~RenderEngine` and `Impl` has no destructor. Not testable without allocation-failure injection; say so in the PR. Call sites: Own passes `impl->worker_chapters[idx].get()`, Shared `impl->chapters.get()`, to `load_display_list` and `TextPageAccess::build`.
 
 - [ ] **Step 1: Write the token tests.** A test-local helper `render_and_text(RenderEngine&, int page, std::vector<std::uint8_t>& bgra, int& w, int& h, std::string& text)`: one request `{page, 0, 1.0f, on_complete}` with `bypass_cache = true`, `on_text` storing `tp.copy(full range)`, `text_wanted` an atomic holding `page`; `on_complete` copies the pixmap's rows (`fz_pixmap_stride`) and drops it; waits for both callbacks (promises, 10 s bound). One request at a time.
   - `RenderEngine chapters: two own workers render and prefetch each page as a flat load does` — `RenderEngine engine(doc, 2, nullptr)` on `kTokensFixture`; for all 35 pages: bytes, `w`, `h` equal `own.rendered_via_list(i, 1.0f, ...)`, and `tokens_in(text) == tokens_in(own.text(i))`.
@@ -346,13 +357,15 @@ Constructor order (spec §4.3): the **first** statement after the `n == 0` check
   - `RenderEngine chapters cost: a fresh worker prefetches the last page's text as cheaply as loading by chapter` — measured: `on_complete` (stamped inside it) to `on_text`; reference: untimed load + render of chapter 1499, then timed `fz_load_chapter_page` + `stext_default`.
   Best of 3, `CHECK(measured <= kCostK * ref + kCostC)`, `WARN` both.
 
-- [ ] **Step 3: Run to see them fail.** Token tests and the replaced-file test pass (today's flat loads are correct); both cost oracles FAIL (flat ≈ 158 ms against bounds ≈ 30 ms).
+- [ ] **Step 3: Run to see them fail.** Token tests and the replaced-file test pass (today's flat loads are correct). The render oracle FAILS (flat ≈ 158 ms against a bound ≈ 30 ms). The prefetch oracle PASSES here, and that is expected: today's flat render has already counted every chapter into the copy's accelerator (`fz_load_page` counts chapters 0..1499 before it loads, `document.c:784-795`), so the flat text build that follows pays only spine walks. Its red comes in Step 5.
 
 - [ ] **Step 4: Implement.**
 
 - [ ] **Step 5: Run.** `"[chapters]"`, `"[render]"` (every render-engine and text-prefetch case) and `"[shared]"`: all pass. `WARN` headroom ≥ 2×.
 
-- [ ] **Step 6: Commit** — `perf(core): render workers load an ePub page by its chapter on their own copies (#232)`.
+- [ ] **Step 6: The prefetch oracle's red.** Pass `nullptr` at `maybe_deliver_text`'s Own call site only (Task 7's M2: render by location, text flat), rebuild, run the prefetch oracle: it must FAIL (≈ 158 ms, the flat `fz_count_pages` lays out the other 1,499 chapters). The file also holds this task's uncommitted work, so undo that one edit by hand (not `git checkout`), rebuild, and rerun to see it pass.
+
+- [ ] **Step 7: Commit** — `perf(core): render workers load an ePub page by its chapter on their own copies (#232)`.
 
 ---
 
@@ -374,7 +387,7 @@ Constructor order (spec §4.3): `auto table = detail::ChapterPagesAccess::table(
   - `SearchSession chapters: a session on a file replaced after open finds hits by flat number` — the Task 5 replacement setup; query `L"Chapter"`; for every `i < 35`, `hits_for_page(i)` equals (count and each quad's `ul_x`, `ul_y`) the oracle `detail::page_hits_on(fresh.ctx, fresh.doc, nullptr, i, "Chapter", {}, nullptr)` (with `nullptr` the helper loads by flat number: an independent route). "Chapter" is on the first page of each `strip-chapters.epub` chapter only, so a location from the old table lands on the wrong page.
 
 - [ ] **Step 2: Write the cost oracles** (1,500-chapter book):
-  - `SearchSession chapters cost: a fresh session scans the last page as cheaply as loading by chapter` — per run a NEW `SearchSession(doc, deferred, std::nullopt)` on `test_kit::DeferredDispatcher`, `set_query(L"Lorem", {}, 1499)`, timed `deferred.run(0)`; afterwards `REQUIRE(!s.hits_for_page(1499).empty())` (the task scanned the last page). Reference per run: new `OwnDocument`, untimed `fz_count_chapters`, timed `fz_load_chapter_page(.., 1499, 0)` + `stext_dehyphenate`.
+  - `SearchSession chapters cost: a fresh session scans the last page as cheaply as loading by chapter` — per run a NEW `test_kit::DeferredDispatcher deferred` declared first, then a NEW `SearchSession s(doc, deferred, std::nullopt)` (a reused dispatcher never frees its slots, so `run(0)` would run run 1's emptied slot), `set_query(L"Lorem", {}, 1499)`, timed `deferred.run(0)`; afterwards `REQUIRE(!s.hits_for_page(1499).empty())` (the task scanned the last page). Reference per run: new `OwnDocument`, untimed `fz_count_chapters`, timed `fz_load_chapter_page(.., 1499, 0)` + `stext_dehyphenate`.
   - `SearchSession chapters cost: a warm whole-book search costs what loading by chapter costs, own session` — one session; `set_query(L"Lorem", {})` + `run_all()` untimed (lays out its copy); measured best of 3 of `set_query` + `run_all`; reference `for_each_page_by_location(own, stext_dehyphenate)`.
   - `SearchSession chapters cost: ... shared session` — the same with `DocumentShare::Shared` (pins Review Focus 3; the Shared session's document is the Document's, already laid out, so only the O(c²) walk separates the routes — the P3 warm row).
 
@@ -407,11 +420,11 @@ Constructor order (spec §4.3): `auto table = detail::ChapterPagesAccess::table(
   | M8 | `Document::page_size`: `nullptr` | #230's 1500-chapter test (page_size) |
   | M9 | `Document::with_rendered_page`: `nullptr` | #230's 1500-chapter test (printing) |
   | M10 | `table_for_copy` returns `table` without comparing | both replaced-file tests |
-  | M11 | `page_at`: `chapter + 1` | Document chapters token tests |
+  | M11 | `page_at`: `chapter + 1` below the last chapter (`chapter + 1 < table->chapter_count()`); a plain `+ 1` sends pages 31-34 to chapter 12, past the spine, and the run dies in the §4.2 crash instead of failing cleanly | Document chapters token tests |
   | M12 | `page_at`: `page + 1` | Document chapters token tests |
 
   Not pinned by a cost oracle, by decision: the Shared render worker's two call sites (the product never builds a Shared ePub; their token test proves the pages are right). Say so in the PR.
-- [ ] **Step 3: Full suite.** `ctest` serial from PowerShell (`--test-dir build -C Release`): all pass; note the count against `ctest -N`.
+- [ ] **Step 3: Full suite.** The BuildTools `ctest.exe` (full path, Global Constraints) `--test-dir build -C Release`, serial, from PowerShell: all pass; note the count against `-N`.
 - [ ] **Step 4:** Record every oracle's two readings (product location route from the passing run's `WARN`, flat from the mutant) in a table for spec §7 and the PR. No commit.
 
 ---
@@ -423,7 +436,7 @@ Constructor order (spec §4.3): `auto table = detail::ChapterPagesAccess::table(
 - Modify: `CHANGELOG.md` (`[Unreleased]` → `### Changed`)
 - Never committed (go into the PR description in full): the probe patch, the book generator, the driver.
 
-- [ ] **Step 1: Books.** A Python generator (stdlib only, `random.Random(232)`): N spine items × 10 paragraphs of 60 words drawn from a fixed 500-word lowercase vocabulary, every paragraph starting with `quartz` (the word on every page); `xylograph` is in no paragraph (the word on no page). Stored zip, as `write_stored_zip`. N = 800 and 1,500, written outside the repo.
+- [ ] **Step 1: Books.** A Python generator (stdlib only, `random.Random(232)`): N spine items × 10 paragraphs of 60 words drawn from a fixed 500-word lowercase vocabulary, every paragraph starting AND ending with `quartz` (the word on every page: a paragraph is far shorter than a page, so every page holds a paragraph's start or end, including a chapter's last page that holds only the tail of one); `xylograph` is in no paragraph (the word on no page). Stored zip, as `write_stored_zip`. N = 800 and 1,500, written outside the repo.
 - [ ] **Step 2: Probe patch**, applied to both builds. In `SearchSession`: `State` gains `std::chrono::steady_clock::time_point probe_t0` and `std::size_t probe_pages`; when `std::getenv("LITEPDF_PROBE_SEARCH")` is set, `set_query` stamps both where it sets `pages_remaining = pages`, and the scan task that decrements `pages_remaining` to 0 prints `litepdf-probe-search: <ms> ms, <pages> pages` to stderr (outside the state lock).
 - [ ] **Step 3: Two builds.** After: this branch + patch, target `litepdf`, Release. Before: a throwaway worktree at `116070a` (junction + configure as in the build memory) + the same patch. Confirm both print the probe line (launch with `Start-Process -RedirectStandardError`; if a GUI-subsystem launch loses stderr, switch the patch to append the line to the file named by the variable's value, in both builds).
 - [ ] **Step 4: Driver** (PowerShell 5.1, no `?.`/`??`/ternary). Wrap every run: back up and restore `%LOCALAPPDATA%\LitePDF\session.json`, `HKCU\Software\LitePDF\MRU` and `crashes\`, set `LITEPDF_NO_RESTORE=1`. Per run: launch the exe on the book, set `ProcessorAffinity = 0x5555`, wait for the window; search: `scripts/ux-probe.ps1 send-cmd 40042` (IDM_FIND), `WM_SETTEXT` the word into the `LitePDFFindBar`'s edit child, wait (60 s deadline) for the probe line, read `WorkingSet64`; End: a fresh launch, the End key to the canvas, wait until `WorkingSet64` is stable for 2 s, read it. Close with `CloseMainWindow` + `WaitForExit(5000)`.
@@ -432,6 +445,28 @@ Constructor order (spec §4.3): `auto table = detail::ChapterPagesAccess::table(
 - [ ] **Step 7: Commit** — `docs: #232 results and CHANGELOG line`.
 
 ---
+
+## Plan gate (Full, routine), 2026-11-23, on c058e88
+
+Evidence: the spec gate's bundle plus 22 excerpts the plan relies on (3,607 lines), the two probe
+records. All findings verified against the source before they were taken.
+
+- **Opus (slot-1):** 4 findings, 3 questions, all taken. The fresh-prefetch oracle cannot go red
+  before Task 5, because today's flat render has already counted every chapter (Task 5 Steps 3, 6);
+  the pagination pin read `nc`/`m` after a fall-through catch without `fz_var` (#178); the
+  `fz_load_page` grep checkpoint belongs after Task 5, not Task 3; P3's "3× to spare" was 2.5×
+  for the fresh oracles. Questions taken: a new `DeferredDispatcher` per fresh-scan run; M11 kept
+  below the last chapter (a plain `+ 1` crashes); the probe records named. Also from its negative
+  sweep: the fixture writer rewrites every fixture, so Task 1 Step 2 pins the generator's packages
+  and guards with `git status`.
+- **Codex terra@medium:** 1 finding (the 3× arithmetic, = Opus).
+- **Codex gpt-6.1-terra@medium:** 2 findings (`content_opf` numbers chapters from 1, so a 0-based
+  file name breaks the spine — fixed in Task 1 Step 1; the `fz_var` finding, = Opus), and one
+  question taken: `quartz` at a paragraph's start alone could miss a chapter's last page.
+- **Codex luna@max:** 4 findings, all taken: the `content_opf` numbering (= 6.1); the
+  `DeferredDispatcher` reuse (= Opus Q2); a bare `ctest` resolves to the wrong CMake; and a
+  pre-existing leak, `workers.reserve(n)` outside the start-workers `try` in `RenderEngine`'s
+  constructor (Task 5 moves it in).
 
 ## After the plan
 
