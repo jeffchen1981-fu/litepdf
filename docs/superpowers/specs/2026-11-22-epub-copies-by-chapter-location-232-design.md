@@ -327,8 +327,82 @@ New test sources: `tests/unit/test_chapter_copies.cpp` (§6.2) and
 
 ## 7. Results
 
-Filled in after implementation: the §5 in-app numbers, and the §6.3 readings of both routes per
-path.
+### 7.1 In the app (§5), 2026-11-24
+
+Books: the §5 generator (stdlib Python, `random.Random(232)`), N spine items × 10 paragraphs of
+60 words from a fixed 500-word lowercase vocabulary, every paragraph starting and ending with
+`quartz` (on every page), `xylograph` on no page; stored zip. 800 chapters = 2,400 pages
+(3.7 MB), 1,500 chapters = 4,500 pages (6.9 MB). Builds: Release `litepdf`, before = 116070a,
+after = this branch (115d9b0), both with the same probe patch (`LITEPDF_PROBE_SEARCH`; the line
+arrived on stderr through `Start-Process -RedirectStandardError`, so no file fallback). Driver:
+a fresh launch per run, `LITEPDF_NO_RESTORE=1`, affinity 0x5555, wait for the window to name the
+book and the working set to hold still for 2 s; search = IDM_FIND, `WM_SETTEXT` of the word into
+the find bar, wait for the probe line, read `WorkingSet64`; End = the End key to the canvas, wait
+for the working set to hold within 1 MiB for 2 s, read it (the page box read 2400 / 4500 after
+every End run). Before and after alternate inside each round, the order flipped every round.
+
+Every search scanned every page (2,400 / 4,500 in every probe line). Medians of 5, [min-max]:
+
+| book | measure | before (116070a) | after | change |
+|---|---|---|---|---|
+| 800 ch | search `quartz` (ms) | 1,713 [1,708-1,751] | 1,478 [1,462-1,530] | 1.16× faster |
+| 800 ch | search `xylograph` (ms) | 1,678 [1,672-1,693] | 1,441 [1,423-1,481] | 1.16× faster |
+| 1,500 ch | search `quartz` (ms) | 5,125 [5,060-5,344] | 2,799 [2,758-2,816] | 1.83× faster |
+| 1,500 ch | search `xylograph` (ms) | 5,075 [5,040-5,398] | 2,753 [2,739-2,822] | 1.84× faster |
+| 800 ch | working set after the `quartz` scan (MiB) | 228.9 | 176.2 | -52.7 |
+| 1,500 ch | working set after the `quartz` scan (MiB) | 372.1 | 272.8 | -99.3 |
+| 800 ch | working set after End, fresh tab (MiB) | 232.2 [231.9-232.3] | 127.6 [127.2-127.9] | -104.6 |
+| 1,500 ch | working set after End, fresh tab (MiB) | 371.2 [370.8-371.3] | 174.2 [174.1-174.5] | -197.0 |
+| 800 ch | working set once the open settles (MiB) | 169.5 | 117.5 | -52.0 |
+| 1,500 ch | working set once the open settles (MiB) | 262.1 | 164.1 | -98.0 |
+
+(`xylograph`'s working sets are within 4 MiB of `quartz`'s. Every working-set cell spreads under
+1 MiB, the two sets below taken together.)
+
+Two sets were run. The first (all three modes) ran while another session's link job and endpoint
+protection held the machine at 70-100 % CPU from its second round on: its search times spread up
+to 2.8× (e.g. 1,500 ch `xylograph` before 5,072-9,253 ms) and are not quoted. Its working sets
+match the second set's to under 1 MiB, so the End rows above are from it. The search rows are
+from the second set (searches only, 5 rounds, machine CPU 7-32 % before each run), whose spreads
+are within 7 % of the median; no outlier was dropped.
+
+Reading: the search's gain is the chapter walk alone: 2.3 s at 1,500 chapters, 0.24 s at 800.
+Per page the walk grows with c² (§2), so half the chapters over half the pages cost about an
+eighth (2.33 s / 8 = 0.29 s, against 0.24 s measured). The rest of each scan (text extraction and matching per page, the same in both builds)
+is why the in-app ratio is below the MuPDF-only one in the issue (3,611 vs 864 ms). The working
+set drops at open already, before any search or End: consistent with §2's second part, where each
+fresh worker copy's first text prefetch laid out the whole book through `fz_count_pages`; End then
+adds the layout of every chapter before the last on a worker copy (before: +109 MiB at 1,500
+chapters; after: +10 MiB).
+
+### 7.2 Cost oracles (§6.3), Task 7, on 115d9b0
+
+Clean-tree readings (`[cost][chapters]` plus #230's test: 9 cases, 89 assertions, all pass),
+`measured / reference` ms, bound = `4.0 × reference + 25`; the flat reading is the same oracle with
+that path alone reverted to flat numbers at its call site (mutants M1-M9):
+
+| oracle | location route (ms) | reference (ms) | bound (ms) | headroom | flat route, mutant (ms) | flat / bound |
+|---|---|---|---|---|---|---|
+| RenderEngine fresh worker render | 2.11 | 1.92 | 32.68 | 15.5× | 239.10 (M1) | 7.3× |
+| RenderEngine fresh worker text prefetch | 0.17 | 0.05 | 25.19 | 147× | 237.44 (M2) | 9.4× |
+| SearchSession fresh scan | 1.24 | 1.12 | 29.46 | 23.8× | 244.55 (M3) | 8.3× |
+| SearchSession warm, Own | 136.57 | 81.37 | 350.47 | 2.57× | 1,417.50 (M3) | 4.0× |
+| SearchSession warm, Shared | 128.23 | 82.30 | 354.22 | 2.76× | 1,421.87 (M4) | 4.0× |
+| Document `page_text`, every page | 99.14 | 54.24 | 241.97 | 2.44× | 1,393.43 (M5) | 5.8× |
+| Document `page_hits` | 132.59 | 82.26 | 354.06 | 2.67× | 1,435.50 (M6) | 4.1× |
+| Document `text_page` | 102.02 | 51.12 | 229.47 | 2.25× | 6,392.94 (M7) | 27.9× |
+| #230 `page_size` | 4.71 | 7.41 | 54.62 | 11.6× | 1,319.63 (M8) | 24.2× |
+| #230 `with_rendered_page` | 125.62 | 70.77 | 308.06 | 2.45× | 1,400.15 (M9) | 4.5× |
+
+Every location-route reading keeps at least 2.25× headroom (the 2× stop line was not reached),
+and every flat reading fails its bound by at least 4.0×. M3 and M4 isolate each other (with one
+live, the other mode's warm oracle passed), as do M8 and M9 inside #230's test. Three more mutants:
+M10, `table_for_copy` returning the table without the count check, fails both replaced-file tests
+(run one at a time; the two run in one process did not finish in 5 minutes and were killed, not
+chased); M11, the next chapter in `page_at`, and M12, `page + 1`, fail the `Document chapters:`
+token tests (85 and 94 assertions). 12 of 12 killed. Full suite after: 985 of 985, serial. Not
+pinned by a cost oracle, by decision: the Shared render worker's two call sites (the product
+shares only FB2, which has no table); their token test proves the pages right.
 
 ## 8. CHANGELOG
 
