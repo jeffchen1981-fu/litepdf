@@ -4,6 +4,7 @@
 #include "core/EscrowContext.hpp"
 #include "core/detail/CbzPageSizer.hpp"
 #include "core/detail/ChapterPages.hpp"
+#include "core/detail/ChapterPagesAccess.hpp"
 #include "core/detail/PageHitsAccess.hpp"
 #include "core/detail/PageLoad.hpp"
 #include "core/detail/PriorityGate.hpp"
@@ -1267,6 +1268,28 @@ void detail::SharedDocumentAccess::set_after_release_hook(const Document& d,
     GateHold hold(d.impl_->gate, GateClass::Foreground);
     d.impl_->after_release_hook = hook;
     d.impl_->after_release_arg  = arg;
+}
+
+// ----------------------------------------------------------------------
+// The chapter table for a copy (#232)
+// ----------------------------------------------------------------------
+
+std::shared_ptr<const detail::ChapterPages> detail::ChapterPagesAccess::table(const Document& d) {
+    if (!d.is_open()) return nullptr;
+    // Foreground hold: open/close/authenticate write `chapters` ungated, but never
+    // beside a borrower (see SharedDocumentAccess.hpp); the hold also orders this
+    // read against the borrow seam's writers.
+    GateHold hold(d.impl_->gate, GateClass::Foreground);
+    return d.impl_->chapters;
+}
+
+std::shared_ptr<const detail::ChapterPages> detail::table_for_copy(
+    fz_context* ctx, fz_document* copy, std::shared_ptr<const ChapterPages> table) noexcept {
+    if (!table) return nullptr;   // no MuPDF call
+    int nc = 0;
+    if (!read_chapter_count(ctx, copy, nc)) return nullptr;
+    if (nc < 0 || static_cast<std::size_t>(nc) != table->chapter_count()) return nullptr;
+    return table;
 }
 
 } // namespace litepdf::core

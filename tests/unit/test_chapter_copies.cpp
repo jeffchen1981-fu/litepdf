@@ -4,6 +4,7 @@
 // wrong place within it shows the wrong token.
 #include "chapter_test_kit.hpp"
 #include "core/Document.hpp"
+#include "core/detail/ChapterPagesAccess.hpp"
 #include "core/detail/PageLoad.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -19,9 +20,11 @@ using namespace litepdf::test_kit;
 using litepdf::core::Document;
 using litepdf::core::SelPoint;
 using litepdf::core::detail::ChapterPages;
+using litepdf::core::detail::ChapterPagesAccess;
 using litepdf::core::detail::PageAt;
 using litepdf::core::detail::load_page_at;
 using litepdf::core::detail::page_at;
+using litepdf::core::detail::table_for_copy;
 
 namespace {
 
@@ -176,6 +179,142 @@ TEST_CASE("Document chapters: page_hits finds each token on its own page only",
             INFO("token of page " << i << " searched on page " << j);
             CHECK(doc.page_hits(static_cast<std::size_t>(j), token, {}).size() ==
                   (i == j ? 1u : 0u));
+        }
+    }
+}
+
+// --- a table for a copy (Task 4) ---------------------------------------------
+
+namespace {
+
+// A second fz_document of `path` on a clone of `doc`'s context family, as a
+// render worker or a search session opens its own. The copy is dropped before
+// its context. fz_open_document sits in a fz_try with nothing that has a
+// destructor (#179); the catch reports (#146).
+struct CopyDocument {
+    fz_context*  ctx  = nullptr;
+    fz_document* copy = nullptr;
+
+    CopyDocument(const Document& doc, const char* path) {
+        ctx = doc.clone_context();
+        REQUIRE(ctx != nullptr);
+        fz_try(ctx) { copy = fz_open_document(ctx, path); }
+        fz_catch(ctx) { fz_report_error(ctx); copy = nullptr; }
+        REQUIRE(copy != nullptr);
+    }
+    ~CopyDocument() {
+        fz_drop_document(ctx, copy);
+        fz_drop_context(ctx);
+    }
+    CopyDocument(const CopyDocument&) = delete;
+    CopyDocument& operator=(const CopyDocument&) = delete;
+
+    // The copy's own chapter counts; false when MuPDF throws.
+    bool chapter_counts(std::vector<int>& counts) {
+        int nc = -1;
+        fz_var(nc);
+        fz_try(ctx) { nc = fz_count_chapters(ctx, copy); }
+        fz_catch(ctx) { fz_report_error(ctx); nc = -1; }
+        if (nc < 0) return false;
+        counts.assign(static_cast<std::size_t>(nc), 0);
+        for (int c = 0; c < nc; ++c) {
+            int m = -1;
+            fz_var(m);
+            fz_try(ctx) { m = fz_count_chapter_pages(ctx, copy, c); }
+            fz_catch(ctx) { fz_report_error(ctx); m = -1; }
+            if (m < 0) return false;
+            counts[static_cast<std::size_t>(c)] = m;
+        }
+        return true;
+    }
+};
+
+constexpr const char* kStripEpub = "tests/fixtures/strip-chapters.epub";
+constexpr const char* kSizesEpub = "tests/fixtures/chapter-sizes.epub";
+constexpr const char* kSearchPdf = "tests/fixtures/search.pdf";
+constexpr const char* kStripFb2  = "tests/fixtures/strip-chapters.fb2";
+
+}  // namespace
+
+TEST_CASE("ChapterPagesAccess: a copy of the same file gets the Document's table",
+          "[document][chapters]") {
+    Document doc;
+    REQUIRE_FALSE(doc.open(kTokensFixture).has_value());
+    const auto t = ChapterPagesAccess::table(doc);
+    REQUIRE(t != nullptr);
+    CopyDocument c(doc, kTokensFixture);
+    CHECK(table_for_copy(c.ctx, c.copy, t).get() == t.get());
+}
+
+TEST_CASE("ChapterPagesAccess: a copy with another chapter count gets no table",
+          "[document][chapters]") {
+    Document doc;
+    REQUIRE_FALSE(doc.open(kTokensFixture).has_value());
+    const auto t = ChapterPagesAccess::table(doc);
+    REQUIRE(t != nullptr);
+    {
+        CopyDocument c(doc, kStripEpub);
+        CHECK(table_for_copy(c.ctx, c.copy, t) == nullptr);
+    }
+    {
+        CopyDocument c(doc, kSearchPdf);
+        CHECK(table_for_copy(c.ctx, c.copy, t) == nullptr);
+    }
+}
+
+TEST_CASE("ChapterPagesAccess: no table in, no table out", "[document][chapters]") {
+    Document doc;
+    REQUIRE_FALSE(doc.open(kTokensFixture).has_value());
+    CopyDocument c(doc, kTokensFixture);
+    CHECK(table_for_copy(c.ctx, c.copy, nullptr) == nullptr);
+}
+
+TEST_CASE("ChapterPagesAccess: a non-ePub Document has no table", "[document][chapters]") {
+    for (const char* path : {kSearchPdf, kStripFb2}) {
+        INFO(path);
+        Document doc;
+        REQUIRE_FALSE(doc.open(path).has_value());
+        CHECK(ChapterPagesAccess::table(doc) == nullptr);
+    }
+}
+
+TEST_CASE("ChapterPagesAccess: the table outlives the Document's close", "[document][chapters]") {
+    Document doc;
+    REQUIRE_FALSE(doc.open(kTokensFixture).has_value());
+    const auto t = ChapterPagesAccess::table(doc);
+    REQUIRE(t != nullptr);
+    doc.close();
+    CHECK(ChapterPagesAccess::table(doc) == nullptr);
+    CHECK(t->page_count() == 35);
+    const auto at = t->locate(34);
+    REQUIRE(at.has_value());
+    CHECK(at->chapter == 11);
+    CHECK(at->page == 3);
+}
+
+TEST_CASE("ChapterPagesAccess: a copy's own chapter counts give the Document's table",
+          "[document][chapters]") {
+    for (const char* path : {kTokensFixture, kSizesEpub, kStripEpub}) {
+        INFO(path);
+        Document doc;
+        REQUIRE_FALSE(doc.open(path).has_value());
+        const auto t = ChapterPagesAccess::table(doc);
+        REQUIRE(t != nullptr);
+        CopyDocument c(doc, path);
+        std::vector<int> counts;
+        REQUIRE(c.chapter_counts(counts));
+        const auto own = ChapterPages::from_counts(counts, doc.page_count());
+        REQUIRE(own.has_value());
+        CHECK(own->chapter_count() == t->chapter_count());
+        CHECK(own->page_count() == doc.page_count());
+        CHECK(t->page_count() == doc.page_count());
+        for (std::size_t i = 0; i < doc.page_count(); ++i) {
+            const auto a = own->locate(i);
+            const auto b = t->locate(i);
+            REQUIRE(a.has_value());
+            REQUIRE(b.has_value());
+            CHECK(a->chapter == b->chapter);
+            CHECK(a->page == b->page);
         }
     }
 }
