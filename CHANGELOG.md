@@ -24,13 +24,14 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 - Searching an ePub split into many files (chapters) is faster, and the book
   holds less memory. The search, and each render worker, found a page by
   counting through every chapter before it, and laid out chapters it was not
-  showing; they now go straight to the page's chapter, as showing a page already
-  did since #230. A whole-book search of a 1,500-chapter book (6.9 MB, 4,500
-  pages) takes 2.8 s instead of 5.1 s, and of an 800-chapter book (3.7 MB, 2,400
-  pages) 1.4 to 1.5 s instead of 1.7 s (medians of five runs). After that search
-  the 1,500-chapter book holds 273 MiB instead of 372 MiB (800 chapters: 176
-  instead of 229 MiB), and jumping to its last page in a newly opened tab leaves
-  it at 174 MiB instead of 371 MiB (800 chapters: 128 instead of 232 MiB) (#232).
+  showing; they now go straight to the page's chapter, as sizing and printing a
+  page already did since #230. A whole-book search of a 1,500-chapter book
+  (6.9 MB, 4,500 pages) takes 2.8 s instead of 5.1 s, and of an 800-chapter book
+  (3.7 MB, 2,400 pages) 1.4 to 1.5 s instead of 1.7 s (medians of five runs).
+  After that search the 1,500-chapter book holds 273 MiB instead of 372 MiB
+  (800 chapters: 176 instead of 229 MiB), and jumping to its last page in a
+  newly opened tab leaves it at 174 MiB instead of 371 MiB (800 chapters: 128
+  instead of 232 MiB) (#232).
 
 ### Fixed
 

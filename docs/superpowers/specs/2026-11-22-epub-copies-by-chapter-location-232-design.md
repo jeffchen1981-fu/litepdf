@@ -368,8 +368,9 @@ are within 7 % of the median; no outlier was dropped.
 
 Reading: the search's gain is the chapter walk alone: 2.3 s at 1,500 chapters, 0.24 s at 800.
 Per page the walk grows with c² (§2), so half the chapters over half the pages cost about an
-eighth (2.33 s / 8 = 0.29 s, against 0.24 s measured). The rest of each scan (text extraction and matching per page, the same in both builds)
-is why the in-app ratio is below the MuPDF-only one in the issue (3,611 vs 864 ms). The working
+eighth (2.33 s / 8 = 0.29 s, against 0.24 s measured). The rest of each scan (text extraction
+and matching per page, the same in both builds) is why the in-app ratio is below the MuPDF-only
+one in the issue (3,611 vs 864 ms). The working
 set drops at open already, before any search or End: consistent with §2's second part, where each
 fresh worker copy's first text prefetch laid out the whole book through `fz_count_pages`; End then
 adds the layout of every chapter before the last on a worker copy (before: +109 MiB at 1,500
