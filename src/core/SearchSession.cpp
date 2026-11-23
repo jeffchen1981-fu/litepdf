@@ -2,6 +2,7 @@
 
 #include "core/EscrowContext.hpp"
 #include "core/GenerationAbort.hpp"
+#include "core/detail/ChapterPagesAccess.hpp"
 #include "core/detail/OpenFailure.hpp"
 #include "core/detail/PageHitsAccess.hpp"
 #include "core/detail/PriorityGate.hpp"
@@ -16,6 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <iterator>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -95,6 +97,13 @@ struct SearchSession::Impl {
     EscrowContext                           escrow;
     fz_document*                            sdoc = nullptr;
     bool                                    shared = false;
+    // (#232) The chapter table every scan loads by: Shared, the Document's,
+    // unchecked, since the scans borrow the very document it was built from
+    // (spec §4.5); Own, the Document's after the check against `sdoc`
+    // (detail::table_for_copy), or null when that copy loads by flat number.
+    // Null too for a document without chapters. Immutable, so the scans read
+    // it without a lock.
+    std::shared_ptr<const detail::ChapterPages> chapters;
     std::mutex                              scan_mtx;
     // (#229) fz_open_document calls made; see documents_opened().
     std::size_t                             opened = 0;
@@ -211,11 +220,18 @@ SearchSession::SearchSession(const Document& doc,
                                  "context (is the Document open?)");
     }
 
+    // (#232) The Document's chapter table, read right after the clone and
+    // before the Shared/Own split, so both modes read it here: its Foreground
+    // hold throws std::system_error on re-entry (#70), and that throw drops
+    // only the local `escrow` (spec §4.3).
+    auto table = detail::ChapterPagesAccess::table(doc);
+
     // (#229) Shared: the scans borrow `doc`'s own document, so there is
     // nothing to open and no password to read.
     if (share == DocumentShare::Shared) {
         impl_->shared = true;
         impl_->escrow = std::move(escrow);
+        impl_->chapters = std::move(table);   // no check: the scans borrow `doc` itself
         return;
     }
 
@@ -253,10 +269,17 @@ SearchSession::SearchSession(const Document& doc,
         open_scan_document(escrow.get(), path_str.c_str(), pw.c_str(), step, reason);
     if (!sdoc) throw std::runtime_error(detail::open_failure(step, reason));
 
-    // Commit; neither step can throw.
-    impl_->escrow = std::move(escrow);
-    impl_->sdoc   = sdoc;
-    impl_->opened = 1;
+    // (#232) After the open and authenticate, on the copy's own context: the
+    // table only when this copy's chapter count matches it, else null (a file
+    // replaced under the open Document), and the scans load by flat number.
+    // noexcept.
+    auto checked = detail::table_for_copy(escrow.get(), sdoc, std::move(table));
+
+    // Commit; no step can throw (the last is a shared_ptr move).
+    impl_->escrow   = std::move(escrow);
+    impl_->sdoc     = sdoc;
+    impl_->opened   = 1;
+    impl_->chapters = std::move(checked);
 }
 
 SearchSession::~SearchSession() {
@@ -459,19 +482,22 @@ void SearchSession::set_query(std::wstring q, Flags f, std::size_t start_page) {
                 // this session's context. scan_mtx is held while waiting for
                 // the gate, which the lock order allows (PriorityGate.hpp). A
                 // gate that refuses the acquire (std::system_error) leaves the
-                // page with no hits, like a MuPDF failure.
+                // page with no hits, like a MuPDF failure. (#232) Both modes load
+                // the page by chapter location when `chapters` holds it.
                 if (self->shared) {
                     try {
                         detail::SharedDocumentAccess::with_document(
                             self->doc, detail::GateClass::Scan, [&](fz_document* d) {
-                                raw_hits = detail::page_hits_on(self->escrow.get(), d, nullptr, i,
+                                raw_hits = detail::page_hits_on(self->escrow.get(), d,
+                                                                self->chapters.get(), i,
                                                                 needle_utf8, df, cookie.get());
                             });
                     } catch (const std::system_error&) {
                     }
                 } else {
-                    raw_hits = detail::page_hits_on(self->escrow.get(), self->sdoc, nullptr, i,
-                                                    needle_utf8, df, cookie.get());
+                    raw_hits = detail::page_hits_on(self->escrow.get(), self->sdoc,
+                                                    self->chapters.get(), i, needle_utf8, df,
+                                                    cookie.get());
                 }
             }
 

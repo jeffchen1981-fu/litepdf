@@ -16,11 +16,14 @@
 // fz_search_stext_page for the needle on every page, which the probe's scan row
 // does not, so its bound is larger: about 340 ms on this machine.
 //
-// The fresh-copy oracles (a new RenderEngine's one worker, the last page):
+// The fresh-copy oracles (a new RenderEngine's one worker or a new
+// SearchSession's own copy, the last page):
 // load + display list + scale-1 render:
 //   by location    1.29 ms     by flat number  158.23 ms
 // text of the last page after that render:
 //   by location    0.04 ms     by flat number  157.65 ms
+// and a new search session's scan of the last page (load + dehyphenated stext):
+//   by location    0.63 ms     by flat number  155.87 ms
 // so the bound is about 30 ms and the flat route fails it by at least 5x, while
 // the location route keeps 2.5x to spare while the product adds under ~10 ms.
 //
@@ -28,7 +31,10 @@
 // re-deriving, not loosening here.
 #include "chapter_test_kit.hpp"
 #include "core/Document.hpp"
+#include "core/DocumentShare.hpp"
 #include "core/RenderEngine.hpp"
+#include "core/SearchSession.hpp"
+#include "search_test_kit.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -42,6 +48,7 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -330,4 +337,119 @@ TEST_CASE("RenderEngine chapters cost: a fresh worker prefetches the last page's
     INFO("fresh worker text prefetch " << ms << " ms against load by chapter + stext " << ref_ms << " ms");
     CHECK(ms <= kCostK * ref_ms + kCostC);
     WARN("fresh worker text prefetch " << ms << " / " << ref_ms << " ms");
+}
+
+// --- the search sessions (Task 6) ---------------------------------------------
+
+TEST_CASE("SearchSession chapters cost: a fresh session scans the last page as cheaply as loading by chapter",
+          "[search][chapters][cost]") {
+    const TempDir dir;   // first: destroyed after every document that opens the file
+    const std::filesystem::path file = dir.path / "chapters-1500.epub";
+    REQUIRE(write_many_chapter_epub(file, 1500));
+    Document doc;
+    REQUIRE_FALSE(doc.open(file).has_value());
+    REQUIRE(doc.page_count() == 1500);
+    const std::string file_utf8 = utf8_of(file);
+
+    double ref_ms = 0.0;
+    REQUIRE(best_of_3_readings(
+        [&](double& ms) {
+            return fresh_reference(file_utf8.c_str(), 1499, false, stext_dehyphenate, ms);
+        },
+        ref_ms));
+    double ms = 0.0;
+    REQUIRE(best_of_3_readings(
+        [&](double& reading) {
+            // A NEW dispatcher per run, declared before the session: a reused one
+            // never frees its slots, so run(0) would run an emptied slot.
+            DeferredDispatcher deferred;
+            SearchSession s(doc, deferred, std::nullopt);
+            s.set_query(L"Lorem", {}, 1499);   // the first task scans the last page
+            const Clock::time_point t0 = Clock::now();
+            deferred.run(0);
+            reading = ms_between(t0, Clock::now());
+            return !s.hits_for_page(1499).empty();
+        },
+        ms));
+
+    INFO("fresh session scan " << ms << " ms against load by chapter + scan " << ref_ms << " ms");
+    CHECK(ms <= kCostK * ref_ms + kCostC);
+    WARN("fresh session scan " << ms << " / " << ref_ms << " ms");
+}
+
+namespace {
+
+// The best of 3 of a whole-book search for "Lorem" on `session` (on `deferred`),
+// after one untimed search that lays out the session's document. False when a
+// scan does not complete.
+bool warm_search_ms(SearchSession& session, DeferredDispatcher& deferred,
+                    double& best) {
+    session.set_query(L"Lorem", {});
+    deferred.run_all();
+    if (!session.scan_complete()) return false;
+    bool complete = true;
+    best = best_of_3_ms([&] {
+        session.set_query(L"Lorem", {});
+        deferred.run_all();
+        complete = session.scan_complete() && complete;
+    });
+    return complete && !session.hits_for_page(1499).empty();
+}
+
+}  // namespace
+
+TEST_CASE("SearchSession chapters cost: a warm whole-book search costs what loading by chapter costs, own session",
+          "[search][chapters][cost]") {
+    const TempDir dir;
+    const std::filesystem::path file = dir.path / "chapters-1500.epub";
+    REQUIRE(write_many_chapter_epub(file, 1500));
+    Document doc;
+    REQUIRE_FALSE(doc.open(file).has_value());
+    REQUIRE(doc.page_count() == 1500);
+    const std::string file_utf8 = utf8_of(file);
+    OwnDocument own(file_utf8.c_str());
+    REQUIRE(own.page_count() == 1500);
+
+    bool own_ok = true;
+    const double ref_ms = best_of_3_ms([&] {
+        own_ok = for_each_page_by_location(own, stext_dehyphenate) && own_ok;
+    });
+    REQUIRE(own_ok);
+    DeferredDispatcher deferred;   // before the session
+    SearchSession session(doc, deferred, std::nullopt);
+    double ms = 0.0;
+    REQUIRE(warm_search_ms(session, deferred, ms));
+
+    INFO("warm own search " << ms << " ms against chapter-order scan " << ref_ms << " ms");
+    CHECK(ms <= kCostK * ref_ms + kCostC);
+    WARN("warm own search " << ms << " / " << ref_ms << " ms");
+}
+
+TEST_CASE("SearchSession chapters cost: a warm whole-book search costs what loading by chapter costs, shared session",
+          "[search][chapters][cost]") {
+    // The Shared session's document is the Document's, laid out at its open, so
+    // only fz_load_page's walk from the first chapter separates the routes.
+    const TempDir dir;
+    const std::filesystem::path file = dir.path / "chapters-1500.epub";
+    REQUIRE(write_many_chapter_epub(file, 1500));
+    Document doc;
+    REQUIRE_FALSE(doc.open(file).has_value());
+    REQUIRE(doc.page_count() == 1500);
+    const std::string file_utf8 = utf8_of(file);
+    OwnDocument own(file_utf8.c_str());
+    REQUIRE(own.page_count() == 1500);
+
+    bool own_ok = true;
+    const double ref_ms = best_of_3_ms([&] {
+        own_ok = for_each_page_by_location(own, stext_dehyphenate) && own_ok;
+    });
+    REQUIRE(own_ok);
+    DeferredDispatcher deferred;   // before the session
+    SearchSession session(doc, deferred, std::nullopt, DocumentShare::Shared);
+    double ms = 0.0;
+    REQUIRE(warm_search_ms(session, deferred, ms));
+
+    INFO("warm shared search " << ms << " ms against chapter-order scan " << ref_ms << " ms");
+    CHECK(ms <= kCostK * ref_ms + kCostC);
+    WARN("warm shared search " << ms << " / " << ref_ms << " ms");
 }

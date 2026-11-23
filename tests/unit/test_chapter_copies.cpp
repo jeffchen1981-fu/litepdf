@@ -2,17 +2,21 @@
 // token fixture (chapter-tokens.epub, from scripts/generate-strip-fixtures.py)
 // holds one token per page, so a page loaded from the wrong chapter or the
 // wrong place within it shows the wrong token.
+#include "app/SearchDispatcher.hpp"
 #include "chapter_test_kit.hpp"
 #include "core/Document.hpp"
 #include "core/DocumentShare.hpp"
 #include "core/RenderEngine.hpp"
+#include "core/SearchSession.hpp"
 #include "core/detail/ChapterPagesAccess.hpp"
+#include "core/detail/PageHitsAccess.hpp"
 #include "core/detail/PageLoad.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <mupdf/fitz.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -27,15 +31,18 @@
 #include <vector>
 
 using namespace litepdf::test_kit;
+using litepdf::app::InlineDispatcher;
 using litepdf::core::Document;
 using litepdf::core::DocumentShare;
 using litepdf::core::RenderEngine;
+using litepdf::core::SearchSession;
 using litepdf::core::SelPoint;
 using litepdf::core::detail::ChapterPages;
 using litepdf::core::detail::ChapterPagesAccess;
 using litepdf::core::detail::PageAt;
 using litepdf::core::detail::load_page_at;
 using litepdf::core::detail::page_at;
+using litepdf::core::detail::page_hits_on;
 using litepdf::core::detail::table_for_copy;
 
 namespace {
@@ -461,4 +468,91 @@ TEST_CASE("RenderEngine chapters: a copy of a file replaced after open renders e
         CHECK(gh == wh);
         CHECK(got == want);
     }
+}
+
+// --- the search sessions (Task 6) --------------------------------------------
+
+namespace {
+
+// The token as set_query takes it. The tokens are ASCII.
+std::wstring widen(const std::string& s) { return std::wstring(s.begin(), s.end()); }
+
+// Each page's token, searched by `session` (on an InlineDispatcher, so each
+// query's scan is done when set_query returns), hits its own page and no other.
+void check_every_token_search(SearchSession& session) {
+    for (int i = 0; i < 35; ++i) {
+        session.set_query(widen(expected_token(i)), {});
+        REQUIRE(session.scan_complete());
+        for (int j = 0; j < 35; ++j) {
+            INFO("token of page " << i << " searched on page " << j);
+            CHECK(session.hits_for_page(static_cast<std::size_t>(j)).size() ==
+                  (i == j ? 1u : 0u));
+        }
+    }
+}
+
+}  // namespace
+
+TEST_CASE("SearchSession chapters: an own session finds each token on its own page",
+          "[search][chapters]") {
+    Document doc;
+    REQUIRE_FALSE(doc.open(kTokensFixture).has_value());
+    REQUIRE(doc.page_count() == 35);
+    InlineDispatcher disp;
+    SearchSession session(doc, disp, std::nullopt);
+    check_every_token_search(session);
+}
+
+TEST_CASE("SearchSession chapters: a shared session finds each token on its own page",
+          "[search][chapters]") {
+    // The product never builds a Shared ePub (spec 4.5); the constructor accepts one.
+    Document doc;
+    REQUIRE_FALSE(doc.open(kTokensFixture).has_value());
+    REQUIRE(doc.page_count() == 35);
+    InlineDispatcher disp;
+    SearchSession session(doc, disp, std::nullopt, DocumentShare::Shared);
+    check_every_token_search(session);
+}
+
+TEST_CASE("SearchSession chapters: a session on a file replaced after open finds hits by flat number",
+          "[search][chapters]") {
+    const TempDir dir;   // first: destroyed after every document that opens the file
+    const std::filesystem::path book = dir.path / "book.epub";
+    std::filesystem::copy_file(kTokensFixture, book);
+    Document doc;
+    REQUIRE_FALSE(doc.open(book).has_value());
+    REQUIRE(doc.page_count() == 35);
+    // Another chapter count under the open Document (planning finding P2), so the
+    // session's check refuses the table. "Chapter" is on the first page of each
+    // strip-chapters.epub chapter only, so a location from the old table would
+    // land on the wrong page.
+    std::filesystem::copy_file(kStripEpub, book,
+                               std::filesystem::copy_options::overwrite_existing);
+    InlineDispatcher disp;
+    SearchSession session(doc, disp, std::nullopt);
+    session.set_query(L"Chapter", {});
+    REQUIRE(session.scan_complete());
+
+    // The oracle: the new file loaded by flat number on the test's own document.
+    OwnDocument fresh(utf8_of(book).c_str());
+    std::size_t oracle_total = 0;
+    for (std::size_t i = 0; i < 35; ++i) {
+        INFO("page " << i);
+        std::vector<Document::PageHit> want =
+            page_hits_on(fresh.ctx, fresh.doc, nullptr, i, "Chapter", {}, nullptr);
+        // The session orders a page's hits top to bottom, stably (#139).
+        std::stable_sort(want.begin(), want.end(),
+                         [](const Document::PageHit& a, const Document::PageHit& b) {
+                             return a.ul_y < b.ul_y;
+                         });
+        oracle_total += want.size();
+        const std::vector<SearchSession::Hit> got = session.hits_for_page(i);
+        REQUIRE(got.size() == want.size());
+        for (std::size_t k = 0; k < got.size(); ++k) {
+            CHECK(got[k].page == i);
+            CHECK(got[k].geom.ul_x == want[k].ul_x);
+            CHECK(got[k].geom.ul_y == want[k].ul_y);
+        }
+    }
+    CHECK(oracle_total > 0);   // the comparison is not vacuous
 }
