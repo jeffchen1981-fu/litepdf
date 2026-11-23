@@ -67,3 +67,9 @@ TEST_CASE("ChapterPages: refuses counts that do not describe the document", "[co
     REQUIRE(empty.has_value());
     CHECK_FALSE(empty->locate(0).has_value());
 }
+
+TEST_CASE("ChapterPages: page_count is the sum of the chapter counts", "[core][chapters]") {
+    const auto t = ChapterPages::from_counts({1, 4, 0, 2}, 7);
+    REQUIRE(t);
+    CHECK(t->page_count() == 7);
+}

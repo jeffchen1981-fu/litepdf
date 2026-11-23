@@ -56,6 +56,9 @@ public:
 
     std::size_t chapter_count() const noexcept { return starts_.size() - 1; }
 
+    // The pages of every chapter together: the document's page count.
+    std::size_t page_count() const noexcept { return starts_.back(); }
+
 private:
     explicit ChapterPages(std::vector<std::size_t> starts) : starts_(std::move(starts)) {}
 
