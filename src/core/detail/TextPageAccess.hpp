@@ -7,6 +7,7 @@
 
 #include "core/Document.hpp"
 #include "core/EscrowContext.hpp"
+#include "core/detail/ChapterPages.hpp"
 
 #include <mupdf/fitz.h>
 
@@ -55,6 +56,7 @@ struct TextPageAccess {
     // every failure -- a bad index, a MuPDF error, a failed clone, out of memory
     // -- and never throws.
     [[nodiscard]] static Document::TextPage build(fz_context* ctx, fz_document* doc,
+                                                  const ChapterPages* chapters,
                                                   int index) noexcept;
 };
 

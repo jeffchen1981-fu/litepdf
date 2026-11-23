@@ -3,6 +3,7 @@
 // holds one token per page, so a page loaded from the wrong chapter or the
 // wrong place within it shows the wrong token.
 #include "chapter_test_kit.hpp"
+#include "core/Document.hpp"
 #include "core/detail/PageLoad.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -15,6 +16,8 @@
 #include <vector>
 
 using namespace litepdf::test_kit;
+using litepdf::core::Document;
+using litepdf::core::SelPoint;
 using litepdf::core::detail::ChapterPages;
 using litepdf::core::detail::PageAt;
 using litepdf::core::detail::load_page_at;
@@ -131,4 +134,48 @@ TEST_CASE("PageLoad: load_page_at loads the located page and throws past the las
     CHECK_FALSE(past.by_location);
     std::string text;
     CHECK_FALSE(text_by_page_at(own, past, 35, text));
+}
+
+// --- the Document's own paths (Task 3) ---------------------------------------
+
+TEST_CASE("Document chapters: page_text holds each page's own token", "[document][chapters]") {
+    OwnDocument own(kTokensFixture);
+    Document doc;
+    REQUIRE_FALSE(doc.open(kTokensFixture).has_value());
+    REQUIRE(doc.page_count() == 35);
+    for (int i = 0; i < 35; ++i) {
+        INFO("page " << i);
+        CHECK(tokens_in(doc.page_text(static_cast<std::size_t>(i))) == tokens_in(own.text(i)));
+    }
+}
+
+TEST_CASE("Document chapters: text_page copies each page's own token", "[document][chapters]") {
+    OwnDocument own(kTokensFixture);
+    Document doc;
+    REQUIRE_FALSE(doc.open(kTokensFixture).has_value());
+    REQUIRE(doc.page_count() == 35);
+    for (int i = 0; i < 35; ++i) {
+        INFO("page " << i);
+        const Document::TextPage tp = doc.text_page(static_cast<std::size_t>(i));
+        REQUIRE(tp.valid());
+        SelPoint a, b;
+        REQUIRE(tp.full_range(a, b));
+        CHECK(tokens_in(tp.copy(a, b)) == tokens_in(own.text(i)));
+    }
+    CHECK_FALSE(doc.text_page(35).valid());
+}
+
+TEST_CASE("Document chapters: page_hits finds each token on its own page only",
+          "[document][chapters]") {
+    Document doc;
+    REQUIRE_FALSE(doc.open(kTokensFixture).has_value());
+    REQUIRE(doc.page_count() == 35);
+    for (int i = 0; i < 35; ++i) {
+        const std::string token = expected_token(i);
+        for (int j = 0; j < 35; ++j) {
+            INFO("token of page " << i << " searched on page " << j);
+            CHECK(doc.page_hits(static_cast<std::size_t>(j), token, {}).size() ==
+                  (i == j ? 1u : 0u));
+        }
+    }
 }

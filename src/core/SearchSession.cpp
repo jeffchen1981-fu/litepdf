@@ -464,13 +464,13 @@ void SearchSession::set_query(std::wstring q, Flags f, std::size_t start_page) {
                     try {
                         detail::SharedDocumentAccess::with_document(
                             self->doc, detail::GateClass::Scan, [&](fz_document* d) {
-                                raw_hits = detail::page_hits_on(self->escrow.get(), d, i,
+                                raw_hits = detail::page_hits_on(self->escrow.get(), d, nullptr, i,
                                                                 needle_utf8, df, cookie.get());
                             });
                     } catch (const std::system_error&) {
                     }
                 } else {
-                    raw_hits = detail::page_hits_on(self->escrow.get(), self->sdoc, i,
+                    raw_hits = detail::page_hits_on(self->escrow.get(), self->sdoc, nullptr, i,
                                                     needle_utf8, df, cookie.get());
                 }
             }

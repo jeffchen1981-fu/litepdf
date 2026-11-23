@@ -352,8 +352,8 @@ bool read_is_fb2(fz_context* ctx, fz_document* doc) noexcept {
 namespace detail {
 
 // #232: the one page loader (detail/PageLoad.hpp). page_at replaces #230's
-// chapter_location: where fz_load_page would find flat page `index`, from the
-// chapter table, as plain ints filled before a fz_try (no object with a
+// per-call location lookup: where fz_load_page would find flat page `index`,
+// from the chapter table, as plain ints filled before a fz_try (no object with a
 // destructor crosses into it).
 PageAt page_at(const ChapterPages* table, std::size_t index) noexcept {
     PageAt at;
@@ -734,6 +734,8 @@ std::string Document::page_text(std::size_t index) const {
     // Serialize with every other user of this Document's context and
     // document. See Impl::gate.
     detail::GateHold hold(impl_->gate, detail::GateClass::Foreground);
+    // #232: the page's chapter location, computed before the fz_try.
+    const detail::PageAt at = detail::page_at(impl_->chapters.get(), index);
     fz_page*       page  = nullptr;
     fz_stext_page* stext = nullptr;
     fz_buffer*     buf   = nullptr;
@@ -746,7 +748,7 @@ std::string Document::page_text(std::size_t index) const {
     fz_var(out);
 
     fz_try(impl_->ctx) {
-        page  = fz_load_page(impl_->ctx, impl_->doc, static_cast<int>(index));
+        page  = detail::load_page_at(impl_->ctx, impl_->doc, at, static_cast<int>(index));
         fz_stext_options opts = {};
         stext = fz_new_stext_page_from_page(impl_->ctx, page, &opts);
 
@@ -804,7 +806,7 @@ fz_context* Document::clone_context() const {
 }
 
 std::vector<Document::PageHit> detail::page_hits_on(
-    fz_context* ctx, fz_document* doc, std::size_t page,
+    fz_context* ctx, fz_document* doc, const ChapterPages* chapters, std::size_t page,
     std::string_view needle_utf8, Document::SearchFlags flags, fz_cookie* cookie)
 {
     std::vector<Document::PageHit> out;
@@ -814,6 +816,9 @@ std::vector<Document::PageHit> detail::page_hits_on(
         build_search_needle(needle_utf8, flags.whole_word, flags.regex);
     const auto options = static_cast<fz_search_options>(
         search_options_value(flags.match_case, flags.regex || flags.whole_word));
+
+    // #232: the page's chapter location, computed before the fz_try.
+    const PageAt at = page_at(chapters, page);
 
     fz_page* fzpage = nullptr;
     fz_stext_page* stext = nullptr;
@@ -829,7 +834,7 @@ std::vector<Document::PageHit> detail::page_hits_on(
 
     fz_try(ctx) {
         fz_stext_options so = { FZ_STEXT_DEHYPHENATE };   // match legacy fz_search_page
-        fzpage = fz_load_page(ctx, doc, static_cast<int>(page));
+        fzpage = load_page_at(ctx, doc, at, static_cast<int>(page));
         // An abort set during the build stops it early WITHOUT throwing and
         // leaves a partial page; the match loop's abort check below runs before
         // anything searches it (spec §3.4).
@@ -909,7 +914,7 @@ std::vector<Document::PageHit> Document::page_hits(
     // Must cover the whole helper, since every MuPDF call in it pushes and
     // pops frames on the per-ctx error stack.
     detail::GateHold hold(impl_->gate, detail::GateClass::Foreground);
-    return detail::page_hits_on(impl_->ctx, impl_->doc, page, needle_utf8, flags,
+    return detail::page_hits_on(impl_->ctx, impl_->doc, impl_->chapters.get(), page, needle_utf8, flags,
                                 nullptr);
 }
 
@@ -1149,9 +1154,14 @@ std::string Document::TextPage::copy(SelPoint a, SelPoint b) const {
 }
 
 Document::TextPage detail::TextPageAccess::build(fz_context* ctx, fz_document* doc,
+                                                 const ChapterPages* chapters,
                                                  int index) noexcept {
     Document::TextPage result;
     if (!ctx || !doc || index < 0) return result;
+
+    // #232: with a table the range check is the table's (by_location implies
+    // index < page_count), so a fresh ePub copy never runs fz_count_pages.
+    const PageAt at = page_at(chapters, static_cast<std::size_t>(index));
 
     std::shared_ptr<Document::TextPage::Impl> handle;
     try {
@@ -1168,8 +1178,8 @@ Document::TextPage detail::TextPageAccess::build(fz_context* ctx, fz_document* d
     fz_var(page);
     fz_var(stext);
     fz_try(ctx) {
-        if (index < fz_count_pages(ctx, doc)) {
-            page = fz_load_page(ctx, doc, index);
+        if (at.by_location || index < fz_count_pages(ctx, doc)) {
+            page = load_page_at(ctx, doc, at, index);
             // Pinned to default options, the same as page_text. Two flags must
             // NOT be added (spec §3.1): FZ_STEXT_COLLECT_STRUCTURE nests text
             // under struct blocks the selection walkers skip, and
@@ -1222,7 +1232,8 @@ Document::TextPage Document::text_page(std::size_t index) const noexcept {
         return TextPage{};
     }
 
-    return detail::TextPageAccess::build(impl_->ctx, impl_->doc, static_cast<int>(index));
+    return detail::TextPageAccess::build(impl_->ctx, impl_->doc, impl_->chapters.get(),
+                                                 static_cast<int>(index));
 }
 
 // ----------------------------------------------------------------------

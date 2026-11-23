@@ -6,6 +6,7 @@
 // by translation units that already build against <mupdf/fitz.h>.
 
 #include "core/Document.hpp"
+#include "core/detail/ChapterPages.hpp"
 
 #include <mupdf/fitz.h>
 
@@ -48,7 +49,7 @@ inline bool abort_requested(fz_cookie& c) noexcept {
 // abort and returns whatever hits it already collected. Empty on a null `ctx` or
 // `doc`, an empty needle, an invalid regex, or a MuPDF failure, which is logged.
 std::vector<Document::PageHit> page_hits_on(
-    fz_context* ctx, fz_document* doc, std::size_t page,
+    fz_context* ctx, fz_document* doc, const ChapterPages* chapters, std::size_t page,
     std::string_view needle_utf8, Document::SearchFlags flags, fz_cookie* cookie);
 
 }  // namespace litepdf::core::detail

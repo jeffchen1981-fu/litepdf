@@ -159,12 +159,12 @@ struct RenderEngine::Impl {
         impl->text_builds.fetch_add(1);
         Document::TextPage text;
         if (!impl->shared) {
-            text = detail::TextPageAccess::build(ctx, impl->worker_docs[idx], req.page_num);
+            text = detail::TextPageAccess::build(ctx, impl->worker_docs[idx], nullptr, req.page_num);
         } else {
             try {
                 detail::SharedDocumentAccess::with_document(
                     *impl->shared, detail::GateClass::Render, [&](fz_document* d) {
-                        text = detail::TextPageAccess::build(ctx, d, req.page_num);
+                        text = detail::TextPageAccess::build(ctx, d, nullptr, req.page_num);
                     });
             } catch (...) {
                 // The gate refused the acquire (std::system_error). Skipping
