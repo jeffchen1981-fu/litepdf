@@ -9,29 +9,54 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-11-24 — Rotate the view; large FB2 and ePub books get faster
+
 ### Added
 
-- Rotate the view in 90° steps: View > Rotate Clockwise / Counterclockwise (#53).
+- Rotate the view in 90° steps: View > Rotate Clockwise (Ctrl+Shift+=) and
+  Rotate Counterclockwise (Ctrl+Shift+-), in every layout. Each tab keeps its
+  own turn, which is not remembered after LitePDF closes; printing and
+  thumbnails stay upright. After a turn the view shows the top of the current
+  page (#53).
 
 ### Changed
 
 - FB2 books now open in continuous scroll, like ePub. An FB2 book is laid out
   while it opens, as it always was, so continuous scroll reads nothing more to
   size its pages: sizing every page of a 3,700-page book takes under 1 ms (#169).
-  XPS documents still open one page at a time. Finding an XPS page's size means
-  reading that whole page, and an 870-page XPS took about 0.2 s, longer than the
-  0.1 s continuous scroll allows itself before it shows a document (#169).
+  XPS documents stay out of continuous scroll, as before. Finding an XPS page's
+  size means reading that whole page, and sizing an 870-page XPS took about
+  0.2 s, over the 0.1 s a format may take to size its pages to be shown in
+  continuous scroll (#169).
 - Searching an ePub split into many files (chapters) is faster, and the book
   holds less memory. The search, and each render worker, found a page by
   counting through every chapter before it, and laid out chapters it was not
   showing; they now go straight to the page's chapter, as sizing and printing a
-  page already did since #230. A whole-book search of a 1,500-chapter book
+  page now also do (#230). A whole-book search of a 1,500-chapter book
   (6.9 MB, 4,500 pages) takes 2.8 s instead of 5.1 s, and of an 800-chapter book
-  (3.7 MB, 2,400 pages) 1.4 to 1.5 s instead of 1.7 s (medians of five runs).
+  (3.7 MB, 2,400 pages) 1.5 s instead of 1.7 s (medians of five runs).
   After that search the 1,500-chapter book holds 273 MiB instead of 372 MiB
   (800 chapters: 176 instead of 229 MiB), and jumping to its last page in a
   newly opened tab leaves it at 174 MiB instead of 371 MiB (800 chapters: 128
-  instead of 232 MiB) (#232).
+  instead of 232 MiB). A newly opened tab of the 1,500-chapter book settles at
+  164 MiB instead of 262 MiB (800 chapters: 117 instead of 169 MiB) (#232).
+- A large FB2 book shows its first page far sooner and holds far less memory.
+  Two costs grew with the book. MuPDF searched the whole book again for each
+  section title to find where its table-of-contents entry points, so that work
+  grew with the square of the number of titles. And the tab, each of its two
+  render workers and search each kept a copy of the book of their own, each
+  about 14 times the file's size once laid out. litepdf now carries one change to
+  MuPDF that finds every title in a single pass (every entry points where it
+  did before; the About box says MuPDF is modified), and an FB2 tab keeps one
+  copy, shared by its one render worker and by search. Other files keep two
+  render workers, except that any file named .fb2 gets one. A 1,500-section
+  book (6.5 MB) now shows its first page in 1.0 to 1.1 s instead of 14.6 to
+  19.3 s and holds 152 to 155 MiB instead of 415 MiB; an 800-section book
+  (3.5 MB), 0.66 to 0.70 s instead of 4.8 to 5.5 s and 112 to 113 MiB instead
+  of 252 MiB (five runs each against 1.8.3, memory read 10 s after the first
+  page). Now that search shares the book, a page you
+  jump to while a search runs renders about as fast as with no search running
+  (#229).
 
 ### Fixed
 
@@ -40,31 +65,6 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   longer the more chapters the book had, growing much faster than the book:
   0.26 s for 800 chapters and 2.5 s for 1,500. It now takes 3 ms and 10 ms.
   Printing finds each page the same way (#230).
-- A large FB2 book opens much faster. After laying the book out, MuPDF searched
-  the whole book again for each section title to find where its table-of-contents
-  entry points, so the cost grew with the square of the number of titles, and
-  each render worker paid it again before the first page. litepdf now carries
-  one change to MuPDF that finds them all in a single pass; every entry points
-  where it did before. A 1,500-section book (6.5 MB) now opens in 0.85 to 0.89 s
-  instead of 7.3 to 8.4 s, and its first page shows in 3.4 to 4.4 s instead of
-  20 to 23 s (three to five runs each). The About box says MuPDF is modified (#229).
-- A large FB2 book shows its first page sooner and holds less memory. Each render
-  worker opens its own copy of the book and lays all of it out, and two workers
-  doing that at once each ran slower than one alone, so an FB2 now gets one render
-  worker; other formats keep two. A 1,500-section book (6.5 MB) shows its first
-  page in 2.5 to 2.9 s instead of 3.4 to 4.4 s and holds 331 MiB instead of
-  415 MiB; an 800-section book (3.5 MB), 1.5 to 1.7 s instead of 2.0 to 2.9 s and
-  207 MiB instead of 252 MiB (five runs each). Turning pages, thumbnails and
-  jumping to the last page take a few milliseconds either way (#229).
-- An FB2 book keeps one copy in memory for showing and searching. The render
-  worker and search used to read and lay out copies of their own, each about 14
-  times the file's size; they now share the tab's. A 1,500-section book (6.5 MB)
-  shows its first page in 1.16 s and holds 152 MiB, against 1.85 s and 243 MiB on
-  the build just before this change; an 800-section book (3.5 MB), 0.79 s and
-  110 MiB against 1.16 s and 159 MiB (medians of five runs). A search no longer
-  reads the book again before it finds anything: its first hit comes in 6 ms
-  instead of 0.87 s on the 1,500-section book, and 47 ms instead of 0.48 s on the
-  800-section one. Turning pages while a search runs is no slower (#229).
 - A tab close that reaches the window while a print runs is now ignored: every
   tab stays open and the print finishes. Closing the tab being printed left the
   print reading that tab's closed document, which could crash litepdf (#237).
@@ -914,7 +914,7 @@ and Phase 12 (release hardening: crash-safe session restore).
 
 [Compare initial commit…0.0.1-phase0](https://github.com/jeffchen1981-fu/litepdf/compare/v0.0.1-phase0)
 
-[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.8.3...HEAD
+[Unreleased]: https://github.com/jeffchen1981-fu/litepdf/compare/v1.9.0...HEAD
 [0.0.12-phase10]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.12-phase10
 [0.0.11-phase9]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.11-phase9
 [0.0.10-phase8.5]: https://github.com/jeffchen1981-fu/litepdf/releases/tag/v0.0.10-phase8.5
