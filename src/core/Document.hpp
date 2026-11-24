@@ -31,6 +31,7 @@ namespace litepdf::core {
 namespace detail {
 struct TextPageAccess;        // core/detail/TextPageAccess.hpp (#98)
 struct SharedDocumentAccess;  // core/detail/SharedDocumentAccess.hpp (#229)
+struct ChapterPagesAccess;    // core/detail/ChapterPagesAccess.hpp (#232)
 }
 
 struct PageSize {
@@ -355,6 +356,7 @@ public:
 
 private:
     friend struct detail::SharedDocumentAccess;
+    friend struct detail::ChapterPagesAccess;
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

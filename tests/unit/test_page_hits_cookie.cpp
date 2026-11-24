@@ -56,7 +56,7 @@ TEST_CASE("Document: page_hits_on passes the cookie to the text build",
     REQUIRE(d.doc != nullptr);
 
     fz_cookie c{};
-    REQUIRE(detail::page_hits_on(esc.get(), d.doc, 0, "Lorem", {}, &c).size() == 12);
+    REQUIRE(detail::page_hits_on(esc.get(), d.doc, nullptr, 0, "Lorem", {}, &c).size() == 12);
     REQUIRE(c.progress > 0);
 }
 
@@ -72,7 +72,7 @@ TEST_CASE("Document: page_hits_on stops before the build when the cookie is abor
     fz_cookie c{};
     detail::request_abort(c);
     REQUIRE(detail::abort_requested(c));
-    REQUIRE(detail::page_hits_on(esc.get(), d.doc, 0, "Lorem", {}, &c).empty());
+    REQUIRE(detail::page_hits_on(esc.get(), d.doc, nullptr, 0, "Lorem", {}, &c).empty());
     // MuPDF checks abort before it counts a token (pdf-interpret.c:1558-1561).
     REQUIRE(c.progress == 0);
 }
@@ -102,7 +102,7 @@ TEST_CASE("Document: page_hits_on leaves no unhandled error on its context",
 
     Document::SearchFlags regex{};
     regex.regex = true;
-    REQUIRE(detail::page_hits_on(ctx, d.doc, 0, "foo(", regex, nullptr).empty());
+    REQUIRE(detail::page_hits_on(ctx, d.doc, nullptr, 0, "foo(", regex, nullptr).empty());
 
     bool caught = false;
     fz_try(ctx) {

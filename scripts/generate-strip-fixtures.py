@@ -22,6 +22,12 @@ Generate the continuous-scroll strip fixtures (#55, spec section 9.4):
                                        paragraphs (different page counts). The
                                        oracle for loading pages by chapter
                                        location (#230), not a gate fixture.
+  tests/fixtures/chapter-tokens.epub   12 chapters with 1 4 2 5 3 1 4 2 5 3 1 4
+                                       pages (35 in all), every page holding
+                                       exactly one token tokCC_P (chapter CC,
+                                       page P). The oracle for loading pages by
+                                       chapter location in every copy (#232),
+                                       not a gate fixture.
 
 They feed the page-sizing gate (spec section 4.4): litepdf-cli
 --bench-page-sizes times DocumentView::page_sizes() on each of them. The
@@ -50,7 +56,7 @@ Determinism (the --check contract, as in generate-large-fixture.py):
     workflow installs that version before running --check.
   * FB2: plain UTF-8 XML with "\n" line ends, built from fixed strings.
 
---check regenerates all five to a temp dir, asserts byte identity with the
+--check regenerates all six to a temp dir, asserts byte identity with the
 committed files, asserts the PDF has zero FlateDecode streams and that every
 zip entry is stored, and exits 1 on any drift.
 
@@ -61,7 +67,7 @@ White page fills are required because LitePDF's PdfCanvas uses a dark D2D
 surface; see generate-search-fixture.py for the full rationale.
 
 Usage:
-  python scripts/generate-strip-fixtures.py            # write the five fixtures
+  python scripts/generate-strip-fixtures.py            # write the six fixtures
   python scripts/generate-strip-fixtures.py --check    # verify byte identity
   python scripts/generate-strip-fixtures.py --pdf-pages 10000 --pdf-out %TEMP%\\strip-10000.pdf
 """
@@ -105,6 +111,9 @@ SIZES_CHAPTERS = 12
 # come from this text.
 SIZES_TEXT = ("Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod "
               "tempor incididunt ut labore et dolore magna aliqua.")
+
+TOKENS_EPUB_NAME = "chapter-tokens.epub"
+TOKENS_CHAPTER_PAGES = [1, 4, 2, 5, 3, 1, 4, 2, 5, 3, 1, 4]
 
 ZIP_DATE_TIME = (2026, 1, 1, 0, 0, 0)
 
@@ -265,6 +274,43 @@ def build_sizes_epub(out_path):
     write_stored_zip(out_path, entries)
 
 
+# --- EPUB, one token per page (#232) ----------------------------------------
+
+def tokens_chapter_xhtml(c):
+    # c is 0-based. Every page's paragraph but the chapter's last carries
+    # page-break-after:always (page-break-before is ignored in an ePub here),
+    # so chapter c has exactly TOKENS_CHAPTER_PAGES[c] pages, each holding
+    # its own token.
+    last = TOKENS_CHAPTER_PAGES[c] - 1
+    paragraphs = "\n".join(
+        ('<p class="brk">tok%02d_%d</p>' if p < last else '<p>tok%02d_%d</p>') % (c, p)
+        for p in range(TOKENS_CHAPTER_PAGES[c]))
+    return """<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>c</title><style>.brk{page-break-after:always}</style></head>
+<body>
+%s
+</body>
+</html>
+""" % paragraphs
+
+
+def build_tokens_epub(out_path):
+    chapters = len(TOKENS_CHAPTER_PAGES)
+    # content_opf numbers chapters 1..N; the zip entries are t00..t11.
+    opf = content_opf(chapters, lambda n: "t%02d.xhtml" % (n - 1),
+                      "LitePDF chapter tokens fixture", "litepdf-chapter-tokens")
+    entries = [
+        ("mimetype", b"application/epub+zip"),
+        ("META-INF/container.xml", CONTAINER_XML.encode("utf-8")),
+        ("OEBPS/content.opf", opf.encode("utf-8")),
+    ]
+    for n in range(1, chapters + 1):
+        c = n - 1
+        entries.append(("OEBPS/t%02d.xhtml" % c, tokens_chapter_xhtml(c).encode("utf-8")))
+    write_stored_zip(out_path, entries)
+
+
 # --- CBZ --------------------------------------------------------------------
 
 def cbz_png(n, font):
@@ -317,6 +363,7 @@ BUILDERS = [
     (CBZ_NAME, build_cbz),
     (FB2_NAME, build_fb2),
     (SIZES_EPUB_NAME, build_sizes_epub),
+    (TOKENS_EPUB_NAME, build_tokens_epub),
 ]
 
 

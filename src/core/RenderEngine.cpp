@@ -1,7 +1,9 @@
 #include "core/RenderEngine.hpp"
 #include "core/Document.hpp"
 #include "core/PageCache.hpp"
+#include "core/detail/ChapterPagesAccess.hpp"
 #include "core/detail/OpenFailure.hpp"
+#include "core/detail/PageLoad.hpp"
 #include "core/detail/PriorityGate.hpp"
 #include "core/detail/SharedDocumentAccess.hpp"
 #include "core/detail/TextPageAccess.hpp"
@@ -9,7 +11,7 @@
 // RenderEngine is the only TU that includes <mupdf/fitz.h> publicly; the
 // header stays MuPDF-free so UI code can consume it without the MuPDF
 // include path. Task 7 introduces actual rasterization, so we now need
-// the full fitz types (fz_open_document, fz_load_page, fz_new_pixmap_from_page,
+// the full fitz types (fz_open_document, fz_new_pixmap_from_page,
 // fz_scale, fz_device_rgb, etc.).
 #include <mupdf/fitz.h>
 
@@ -36,8 +38,13 @@ namespace {
 // page, all in one fz_try on `ctx`; the display list, or null on a failure
 // (reported, which also marks the error handled, #146). In shared mode the
 // caller runs it inside one gate hold, so the page never outlives the hold
-// (detail/SharedDocumentAccess.hpp).
-fz_display_list* load_display_list(fz_context* ctx, fz_document* doc, int page_num) noexcept {
+// (detail/SharedDocumentAccess.hpp). #232: by chapter location when `chapters`
+// (a table that serves `doc`, or null) holds the page, else by flat number.
+fz_display_list* load_display_list(fz_context* ctx, fz_document* doc,
+                                   const detail::ChapterPages* chapters, int page_num) noexcept {
+    // Plain ints, computed before the fz_try (#179). A negative page_num wraps
+    // past any table, so it loads by flat number and fails as before.
+    const detail::PageAt at = detail::page_at(chapters, static_cast<std::size_t>(page_num));
     fz_page* page = nullptr;
     fz_display_list* dlist = nullptr;
     // Modified inside fz_try and read in fz_catch or after it once an error
@@ -45,7 +52,7 @@ fz_display_list* load_display_list(fz_context* ctx, fz_document* doc, int page_n
     fz_var(page);
     fz_var(dlist);
     fz_try(ctx) {
-        page = fz_load_page(ctx, doc, page_num);
+        page = detail::load_page_at(ctx, doc, at, page_num);
         dlist = fz_new_display_list_from_page(ctx, page);
     }
     fz_catch(ctx) {
@@ -99,6 +106,16 @@ struct RenderEngine::Impl {
     // Shared only; null for Own. Never a stored fz_document*: the seam is the
     // only way to the document, so skipping the gate does not compile.
     const Document* shared = nullptr;
+    // (#232) The Document's chapter table, DocumentShare::Shared only: the
+    // workers borrow the very document it was built from, so it needs no check
+    // (spec §4.5). Null for Own, and for a document without chapters.
+    std::shared_ptr<const detail::ChapterPages> chapters;
+    // (#232) DocumentShare::Own: worker i's table, the Document's after the
+    // check against worker i's own copy (detail::table_for_copy), or null, when
+    // that copy loads by flat number. Index = worker, parallel to worker_docs,
+    // and cleared with it. The tables are immutable, so each worker reads its
+    // own without a lock.
+    std::vector<std::shared_ptr<const detail::ChapterPages>> worker_chapters;
     // (#229) fz_open_document calls made; see documents_opened().
     std::size_t opened = 0;
     std::vector<std::thread> workers;
@@ -159,12 +176,14 @@ struct RenderEngine::Impl {
         impl->text_builds.fetch_add(1);
         Document::TextPage text;
         if (!impl->shared) {
-            text = detail::TextPageAccess::build(ctx, impl->worker_docs[idx], req.page_num);
+            text = detail::TextPageAccess::build(ctx, impl->worker_docs[idx],
+                                                 impl->worker_chapters[idx].get(), req.page_num);
         } else {
             try {
                 detail::SharedDocumentAccess::with_document(
                     *impl->shared, detail::GateClass::Render, [&](fz_document* d) {
-                        text = detail::TextPageAccess::build(ctx, d, req.page_num);
+                        text = detail::TextPageAccess::build(ctx, d, impl->chapters.get(),
+                                                             req.page_num);
                     });
             } catch (...) {
                 // The gate refused the acquire (std::system_error). Skipping
@@ -185,7 +204,13 @@ struct RenderEngine::Impl {
     // each worker parses the file independently, so two pages interpret in
     // parallel with no lock between them. Acceptable cost on the 2-worker
     // default. On a throw, drops what it opened and every context.
-    void open_worker_documents(Document& doc, std::optional<std::string_view> password) {
+    //
+    // (#232) `table` is the Document's chapter table, read by the constructor.
+    // Each worker keeps it only once its own copy's chapter count matches
+    // (detail::table_for_copy); a file replaced under the open Document gives
+    // that worker no table, so it loads by flat number, as before.
+    void open_worker_documents(Document& doc, std::optional<std::string_view> password,
+                               const std::shared_ptr<const detail::ChapterPages>& table) {
         // fz_open_document takes UTF-8. std::filesystem::path::string() returns
         // the native ACP on Windows MSVC; path::u8string() returns UTF-8. Match
         // the Document::open conversion so non-ASCII paths round-trip correctly.
@@ -219,6 +244,8 @@ struct RenderEngine::Impl {
 
         try {
             worker_docs.reserve(num_workers);
+            // Reserved with worker_docs, so the push_back below cannot throw.
+            worker_chapters.reserve(num_workers);
             for (std::size_t i = 0; i < num_workers; ++i) {
                 fz_context* ctx = worker_ctxs[i];
                 fz_document* wdoc = nullptr;
@@ -259,6 +286,10 @@ struct RenderEngine::Impl {
                             " rejected the document's password", reason));
                     }
                 }
+                // (#232) After the open and authenticate, on this worker's own
+                // context. noexcept, and the reserve above makes the store
+                // non-throwing.
+                worker_chapters.push_back(detail::table_for_copy(ctx, wdoc, table));
             }
         } catch (...) {
             // Rollback: drop any per-worker docs we already opened, each on its
@@ -268,6 +299,7 @@ struct RenderEngine::Impl {
                 fz_drop_document(worker_ctxs[i], worker_docs[i]);
             }
             worker_docs.clear();
+            worker_chapters.clear();
             for (auto* c : worker_ctxs) fz_drop_context(c);
             worker_ctxs.clear();
             throw;
@@ -279,12 +311,16 @@ struct RenderEngine::Impl {
     // (Shared, #229). Null on a failure.
     static fz_display_list* build_display_list(Impl* impl, fz_context* ctx, std::size_t idx,
                                                int page) noexcept {
-        if (!impl->shared) return load_display_list(ctx, impl->worker_docs[idx], page);
+        if (!impl->shared) {
+            return load_display_list(ctx, impl->worker_docs[idx],
+                                     impl->worker_chapters[idx].get(), page);
+        }
         fz_display_list* dlist = nullptr;
         try {
             detail::SharedDocumentAccess::with_document(
-                *impl->shared, detail::GateClass::Render,
-                [&](fz_document* d) { dlist = load_display_list(ctx, d, page); });
+                *impl->shared, detail::GateClass::Render, [&](fz_document* d) {
+                    dlist = load_display_list(ctx, d, impl->chapters.get(), page);
+                });
         } catch (...) {
             // The gate refused the acquire (std::system_error): a failed render.
             return nullptr;
@@ -299,8 +335,9 @@ struct RenderEngine::Impl {
     // Rendering pipeline (Task 7):
     //   1. Pop request from heap under lock.
     //   2. Checkpoint A — cancel check before touching MuPDF.
-    //   3. fz_load_page on the worker's private fz_document, or on the
-    //      Document's under the gate (Shared, #229).
+    //   3. Load the page on the worker's private fz_document, or on the
+    //      Document's under the gate (Shared, #229), by chapter location when
+    //      the worker has a chapter table (#232), else by flat number.
     //   4. Checkpoint B — cancel check after page load, before rasterize.
     //   5. fz_new_pixmap_from_page at the requested scale. Drop page.
     //   6. Checkpoint C — cancel check before handing ownership to callback.
@@ -380,7 +417,7 @@ struct RenderEngine::Impl {
             }
 
             if (!dlist) {
-                // Miss: build a display list via fz_load_page +
+                // Miss: load the page and build a display list via
                 // fz_new_display_list_from_page (load_display_list).
                 dlist = build_display_list(impl, ctx, idx, req.page_num);
 
@@ -512,6 +549,11 @@ RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache,
     if (n == 0)
         throw std::invalid_argument("RenderEngine: num_workers must be >= 1");
 
+    // (#232) The Document's chapter table, read FIRST, before any context is
+    // cloned: its Foreground hold throws std::system_error on re-entry (#70),
+    // and here that leaves nothing behind. Both modes read it here (spec §4.3).
+    auto table = detail::ChapterPagesAccess::table(doc);
+
     impl_->num_workers = n;
     impl_->cache = cache;  // non-owning; may be null (direct render path)
     impl_->worker_ctxs.reserve(n);
@@ -536,13 +578,17 @@ RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache,
     // nothing to open and no password to read.
     if (share == DocumentShare::Shared) {
         impl_->shared = &doc;
+        impl_->chapters = std::move(table);   // no check: the workers borrow `doc` itself
     } else {
-        impl_->open_worker_documents(doc, password);
+        impl_->open_worker_documents(doc, password, table);
     }
 
     // Spawn workers only after all contexts and docs are ready.
-    impl_->workers.reserve(n);
     try {
+        // Inside the try: a std::bad_alloc from the reserve must reach the
+        // rollback below, since a throwing constructor runs no ~RenderEngine
+        // and Impl drops no document or context of its own.
+        impl_->workers.reserve(n);
         for (std::size_t i = 0; i < n; ++i) {
             impl_->workers.emplace_back(&Impl::worker_loop, impl_.get(), i);
         }
@@ -559,6 +605,7 @@ RenderEngine::RenderEngine(Document& doc, std::size_t n, PageCache* cache,
             fz_drop_document(impl_->worker_ctxs[i], impl_->worker_docs[i]);
         }
         impl_->worker_docs.clear();
+        impl_->worker_chapters.clear();
         for (auto* c : impl_->worker_ctxs) fz_drop_context(c);
         impl_->worker_ctxs.clear();
         throw;

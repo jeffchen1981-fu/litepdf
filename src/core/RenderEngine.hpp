@@ -110,6 +110,10 @@ public:
     //                     authenticated with it; without that, a PDF with a
     //                     user password renders blank (#126). Throws
     //                     std::runtime_error if a worker rejects it. The
+    //                     constructor first reads `doc`'s chapter table under
+    //                     a Foreground gate hold, so a caller already inside
+    //                     that gate gets the std::system_error (a
+    //                     std::runtime_error) of a re-entrant hold (#70). The
     //                     engine's NUL-terminated copy is wiped before the
     //                     constructor returns (Phase 8 D3). std::optional
     //                     rather than a bare string_view, so a stray integer
