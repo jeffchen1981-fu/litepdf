@@ -2,7 +2,7 @@
 
 A lightweight PDF / ePub / CBZ / XPS reader for Windows 11, optimized for mechanical hard drives. Single self-contained executable, no runtime dependencies.
 
-- **Status:** released — latest [`v1.8.3`](https://github.com/jeffchen1981-fu/litepdf/releases/latest)
+- **Status:** released — latest [`v1.9.0`](https://github.com/jeffchen1981-fu/litepdf/releases/latest)
 - **License:** [AGPL-3.0](LICENSE)
 - **Design:** [`docs/plans/2026-04-15-litepdf-design.md`](docs/plans/2026-04-15-litepdf-design.md)
 - **Roadmap:** [`docs/plans/2026-04-15-litepdf-roadmap.md`](docs/plans/2026-04-15-litepdf-roadmap.md)
@@ -28,7 +28,7 @@ Download the latest release from
 > The binary is the one built by the [release workflow](.github/workflows/release.yml)
 > from the tagged source.
 
-## Features (v1.8.3)
+## Features (v1.9.0)
 
 Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab independent state. Cold-start budget under 1 s on SSD; tuned for HDD-friendly I/O patterns.
 
@@ -38,10 +38,11 @@ Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab i
 - **Thumbnails** — lazy-rendered side pane (F4)
 - **Invert colors** — per-tab dark-mode toggle (Ctrl+Shift+I, Phase 8)
 - **Two-page spread** — book-style side-by-side layout with cover-page rule (Ctrl+Shift+D, Phase 8); search hits are highlighted on both pages (v1.8.0)
-- **Continuous scroll** — pages in one vertical strip with a scroll bar, on by default; View → Continuous Scroll switches back to one page at a time and is remembered. Two-page spread still shows two pages at a time. XPS documents stay one page at a time (v1.6.0; CBZ joined the strip in v1.7.0, FB2 after v1.8.3)
+- **Continuous scroll** — pages in one vertical strip with a scroll bar, on by default; View → Continuous Scroll switches back to one page at a time and is remembered. Two-page spread still shows two pages at a time. XPS documents stay out of the strip (v1.6.0; CBZ joined the strip in v1.7.0, FB2 in v1.9.0)
 - **Print** — standard `PrintDlgEx` with page range, copies, scale modes (fit / actual / custom %), auto-rotate, and mid-job cancel (Ctrl+P, Phase 8.5)
 - **CJK rendering** — Chinese / Japanese / Korean text renders from your installed Windows fonts (no bundled CJK font), keeping `litepdf.exe` ~7 MB (v1.2.0)
 - **Zoom** — Zoom In / Out / Reset actually change what you see, at the right resolution on high-DPI displays (Ctrl+= / Ctrl+- / Ctrl+0, v1.3.0)
+- **Rotate view** — turn the pages a quarter turn at a time, per tab and in every layout; printing and thumbnails stay upright, and the turn is not remembered (Ctrl+Shift+= / Ctrl+Shift+-, v1.9.0)
 - **Mouse-wheel scrolling** — scrolls within a page and turns the page at the edge, honouring your system's lines-per-notch setting; Ctrl+wheel zooms (v1.3.0). Shift+wheel, a tilt wheel or a sideways touchpad swipe scrolls a zoomed-in page left and right (v1.4.0). In continuous scroll the wheel moves through the pages without turning them
 - **Page indicator** — status bar showing the current page and page count, with a box you can type a page into (v1.3.0). It also shows the current zoom percentage, and View → Status Bar hides it (v1.4.0). Ctrl+G (View → Go to Page) puts the cursor in the box, showing the bar if it is hidden (v1.5.0)
 - **Text selection and copy** — drag to select, double-click for a word, triple-click for a line; Ctrl+C copies and Ctrl+A selects the page (v1.4.0)
@@ -69,6 +70,7 @@ Open and read PDFs, ePub, CBZ, and XPS via MuPDF. Multi-tab interface, per-tab i
 | Ctrl+Shift+D       | Two-page spread (per tab)           |
 | Ctrl+= / Ctrl+-    | Zoom in / out                       |
 | Ctrl+0             | Reset zoom                          |
+| Ctrl+Shift+= / Ctrl+Shift+- | Rotate the view clockwise / counterclockwise (per tab) |
 | Ctrl+G             | Go to page (focus the page box)     |
 | PgDn / PgUp        | Next / previous page (or pair in spread mode); most of a screen down / up in continuous scroll |
 | Home / End         | First / last page (top / bottom of the document in continuous scroll) |
@@ -101,7 +103,7 @@ The produced `build/Release/litepdf.exe` is a single self-contained binary.
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-859 tests at `v1.8.3`. The CI workflow (`.github/workflows/ci.yml`) runs configure + build + version-sync gate + ctest on `windows-2022` (pinned for the VS 2022 / v143 toolset) for every push and pull request.
+985 tests at `v1.9.0`. The CI workflow (`.github/workflows/ci.yml`) runs configure + build + version-sync gate + ctest on `windows-2022` (pinned for the VS 2022 / v143 toolset) for every push and pull request.
 
 The PowerShell smoke harness exercises the full app via launch-and-poll:
 
