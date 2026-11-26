@@ -68,4 +68,9 @@ std::size_t PriorityGate::waiting(GateClass cls) const {
     return static_cast<std::size_t>(waiting_in(st_, cls));
 }
 
+std::uint64_t PriorityGate::served(GateClass cls) const {
+    std::lock_guard<std::mutex> lk(m_);
+    return st_.serving[idx(cls)];
+}
+
 }  // namespace litepdf::core::detail

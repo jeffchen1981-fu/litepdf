@@ -654,10 +654,34 @@ PageSize Document::page_size(std::size_t index) const {
 
     // Protects impl_->ctx's error stack and impl_->doc from every other user,
     // a borrowing render worker or search scan included. See Impl::gate. The
-    // CBZ header sizer below reads the archive through MuPDF, so it runs under
-    // the hold too.
+    // CBZ header sizer reads the archive through MuPDF, so it runs under the
+    // hold too.
     detail::GateHold hold(impl_->gate, detail::GateClass::Foreground);
+    return page_size_held(index);
+}
 
+void Document::size_pages(std::vector<std::optional<PageSize>>& sizes) const {
+    // is_open(), not doc alone: a document still waiting for its password has
+    // no page count yet, and the loop below would size nothing.
+    if (!is_open()) throw std::logic_error("size_pages called on unopened document");
+
+    // (#239) One hold for every page, not one per page: between two holds the
+    // gate is free, and a borrower of an FB2 tab could take it there, once per
+    // page. Nothing but MuPDF work and the copy of its result runs under it.
+    detail::GateHold hold(impl_->gate, detail::GateClass::Foreground);
+    const std::size_t n = std::min(sizes.size(), impl_->page_count);
+    for (std::size_t i = 0; i < n; ++i) {
+        if (sizes[i]) continue;
+        try {
+            sizes[i] = page_size_held(i);
+        } catch (const std::exception&) {
+            // Left empty, as a page_size that throws leaves it (#55).
+        }
+    }
+}
+
+// page_size's work; the caller holds the gate in the Foreground class.
+PageSize Document::page_size_held(std::size_t index) const {
     // A CBZ page's size from its image header (#176): loading the page reads
     // the whole image out of the archive first. Outside the fz_try below,
     // which must not be returned from. A page the header path declines is

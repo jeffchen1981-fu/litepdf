@@ -7,7 +7,9 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "app/SearchDispatcher.hpp"
 #include "core/Document.hpp"
+#include "core/DocumentView.hpp"
 #include "core/detail/PriorityGate.hpp"
 #include "core/detail/SharedDocumentAccess.hpp"
 #include "gate_test_kit.hpp"
@@ -20,14 +22,20 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <vector>
 
 #include <windows.h>
 
+using litepdf::app::InlineDispatcher;
 using litepdf::core::Document;
+using litepdf::core::DocumentView;
+using litepdf::core::PageSize;
 using litepdf::core::detail::GateClass;
+using litepdf::core::detail::PriorityGate;
 using litepdf::core::detail::SharedDocumentAccess;
 using litepdf::test_kit::BoundedRun;
 using litepdf::test_kit::finishes_within;
@@ -191,4 +199,81 @@ TEST_CASE("Document: with_rendered_page touches nothing of its Document after th
     CHECK(owner == nullptr);
     REQUIRE_FALSE(row.empty());
     CHECK(std::any_of(row.begin(), row.end(), [](std::uint8_t b) { return b != 0; }));
+}
+
+// #239: the strip sizes every page under ONE Foreground hold. With a hold per
+// page, the gate was free between two pages, and a borrower of an FB2 tab (a
+// queued render or a running search) could take it there: a probe on a
+// 3,102-page book admitted 5-29 scan holds or about 200 render holds into one
+// pass, which then took 3-150 ms instead of 0.5 ms. Counting the holds is the
+// deterministic form of that race.
+TEST_CASE("DocumentView: page_sizes sizes every page under one gate hold",
+          "[core][gate][document]") {
+    Document doc = open_fixture(kFb2);
+    const std::size_t n = doc.page_count();
+    REQUIRE(n > 1);
+    InlineDispatcher disp;
+    DocumentView view(std::move(doc), disp);
+    PriorityGate& gate = SharedDocumentAccess::gate(view.document());
+
+    const std::uint64_t before = gate.served(GateClass::Foreground);
+    const std::vector<PageSize>& sizes = view.page_sizes();
+    CHECK(gate.served(GateClass::Foreground) - before == 1);
+
+    REQUIRE(sizes.size() == n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const PageSize expected = view.document().page_size(i);
+        CHECK(sizes[i].width_pt == expected.width_pt);
+        CHECK(sizes[i].height_pt == expected.height_pt);
+    }
+}
+
+// #239: size_pages fills only the empty entries, leaves a page that cannot be
+// sized empty, and takes one Foreground hold for all of them.
+// damaged-pages.pdf: pages 2, 3, 5 and 6 cannot be sized.
+TEST_CASE("Document: size_pages sizes every empty entry under one gate hold",
+          "[core][gate][document]") {
+    Document doc = open_fixture("tests/fixtures/damaged-pages.pdf");
+    const std::size_t n = doc.page_count();
+    REQUIRE(n >= 7);
+    REQUIRE_THROWS(doc.page_size(2));   // Control: the fixture still fails.
+
+    // One entry past the last page, which stays empty.
+    std::vector<std::optional<PageSize>> sizes(n + 1);
+    const PageSize kept{1.0f, 2.0f};
+    sizes[1] = kept;
+    PriorityGate& gate = SharedDocumentAccess::gate(doc);
+
+    const std::uint64_t before = gate.served(GateClass::Foreground);
+    doc.size_pages(sizes);
+    CHECK(gate.served(GateClass::Foreground) - before == 1);
+
+    REQUIRE(sizes[1].has_value());
+    CHECK(sizes[1]->width_pt == kept.width_pt);
+    CHECK(sizes[1]->height_pt == kept.height_pt);
+    for (std::size_t i : {std::size_t{2}, std::size_t{3}, std::size_t{5}, std::size_t{6}, n}) {
+        CHECK_FALSE(sizes[i].has_value());
+    }
+    for (std::size_t i : {std::size_t{0}, std::size_t{4}}) {
+        REQUIRE(sizes[i].has_value());
+        const PageSize expected = doc.page_size(i);
+        CHECK(sizes[i]->width_pt == expected.width_pt);
+        CHECK(sizes[i]->height_pt == expected.height_pt);
+    }
+}
+
+// #239 PR gate: a document still waiting for its password has a document but
+// no page count, so a check on the document alone would return having sized
+// nothing. size_pages throws as documented instead.
+TEST_CASE("Document: size_pages on a document waiting for its password throws",
+          "[core][gate][document]") {
+    Document doc;
+    const auto err = doc.open("tests/fixtures/encrypted.pdf");
+    REQUIRE(err.has_value());
+    REQUIRE(*err == Document::OpenError::NeedsPassword);
+    REQUIRE_FALSE(doc.is_open());
+
+    std::vector<std::optional<PageSize>> sizes(1);
+    CHECK_THROWS_AS(doc.size_pages(sizes), std::logic_error);
+    CHECK_FALSE(sizes[0].has_value());
 }

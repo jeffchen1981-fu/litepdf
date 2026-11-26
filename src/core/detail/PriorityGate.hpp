@@ -94,6 +94,10 @@ public:
     // For tests.
     std::size_t waiting(GateClass cls) const;
 
+    // Holds admitted in `cls` since the gate was made, the one in progress
+    // included. For tests.
+    std::uint64_t served(GateClass cls) const;
+
 private:
     mutable std::mutex      m_;
     std::condition_variable cv_;
