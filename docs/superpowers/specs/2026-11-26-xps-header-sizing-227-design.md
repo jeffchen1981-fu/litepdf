@@ -30,11 +30,14 @@ MuPDF 1.27.2 Release:
 | root-tag prefix through `fz_open_archive_entry` | 81 ms | 101-103 ms |
 | the same after one sequential read of the file | - | 77-82 ms |
 
-Two costs, then. Parsing every whole page (§3.3 removes it). And `lookup_zip_entry`
-(`source/fitz/unzip.c:495-504`), a linear `fz_strcasecmp` scan from entry 0: page k of a WPF file
-sits near entry 2k, so sizing N pages costs O(N × entries); 866 → 1,003 pages took it from 45 to
-62 ms (ratio 1.38, the square of the page ratio is 1.34). The current path pays it twice per page
-(`xps_read_part` calls `fz_has_archive_entry`, then `fz_read_archive_entry`). A prefix read
+Two costs, then. `lookup_zip_entry` (`source/fitz/unzip.c:495-504`), a linear `fz_strcasecmp`
+scan from entry 0: page k of a WPF file sits near entry 2k, so sizing N pages costs
+O(N × entries); 866 → 1,003 pages took one lookup per page from 45 to 62 ms (ratio 1.38, the
+square of the page ratio is 1.34). The current path pays it three times per page:
+`xps_read_part` calls `fz_has_archive_entry` (xps-zip.c:81), then `fz_read_archive_entry`, whose
+`fz_try_read_archive_entry` calls `has_entry` again (archive.c:98) before `read_zip_entry` looks the
+name up a third time (unzip.c:551) — about 186 of the 249 ms. The rest is reading and parsing every
+whole page (§3.3 removes it). A prefix read
 through MuPDF's lookup would pass this machine warm with about 20 % margin, the margin growing
 thinner with the page count and on an E-core (about 2× slower on this machine); §3.4 avoids the
 scan.
@@ -134,8 +137,15 @@ Shared by both routes (§3.4, §3.5). Input: an `fz_stream*` over the part's inf
   else nullopt. Why: `fz_parse_xml` picks an encoding from the XML declaration before the first `>`
   or, failing that, from a `<meta http-equiv content-type charset=...>` anywhere in the buffer
   (`find_xml_encoding` / `find_meta_encoding`, xml.c:895-952). A whole page could carry such a
-  meta element past the root and the prefix not. Every table MuPDF knows (`encoding_aliases`,
-  xml.c:824) maps bytes below 0x80 to ASCII, so an ASCII cut parses the same either way.
+  meta element past the root and the prefix not. Every table MuPDF can load for an
+  `encoding_aliases` name (xml.c:824) maps bytes below 0x80 to ASCII, so an ASCII cut with no BOM
+  parses the same either way (checked on crafted files for big5, big5-hkscs, gbk, euc-kr, euc-jp,
+  euc-tw, koi8-r, windows-1252 at the spec gate); `shift_jis` names a CMap that does not exist
+  (`90msp-H`, text-decoder.c:203-204), so the whole page throws, which is §3.6 item 1's class. The
+  UTF-8 BOM is the one non-ASCII prefix allowed (WPF writes one on every page), and it is not
+  exact: `convert_to_utf8` skips the BOM only when it found no encoding (xml.c:989-1004), so with a
+  multi-byte table the BOM's last byte and the root's `<` can decode as one character. §3.6 item 3
+  accepts that.
 - Cap reached, stream ended, or 16 cuts tried without a root → nullopt.
 
 ### 3.4 Direct route (after `prepare_all`)
@@ -162,8 +172,10 @@ stream route for every page.
 `fz_tolower`, stop at the terminating NUL; the result as a `std::u32string`. Two names fold equal
 exactly when `fz_strcasecmp` returns 0 (string.c:137-154 compares the same runes). The table maps
 `fold(MuPDF name i)` → the first i only, so a duplicate name resolves as MuPDF's first-match scan
-does. A page name is turned into its key in MuPDF's order: drop one leading `/` (xps-zip.c:74-75),
-`fz_cleanname` on a copy (`fz_open_archive_entry`, archive.c:59), drop one leading `/` again
+does. A page name is turned into its key in MuPDF's order: drop one leading `/` (xps-zip.c:76-77),
+`fz_cleanname` on a copy (`fz_open_archive_entry`, archive.c:59) held in a `std::vector<char>` of
+`max(2, len + 1)` bytes, as `fz_cleanname_strdup` sizes it (string.c:526: an empty name becomes
+`"."`), drop one leading `/` again
 (`lookup_zip_entry`, unzip.c:498-499), fold. Each page's entry index is resolved once in
 `prepare_all`; a page with no entry (MuPDF then reads it as pieces) takes the stream route.
 
@@ -175,10 +187,14 @@ Otherwise, as `read_zip_entry_header` (unzip.c:433-462): seek to the local heade
 must be `50 4B 03 04`; general flag bit 0 (encrypted) → nullopt, as MuPDF throws; take the method,
 name length and extra length from the **local** header (MuPDF ignores its sizes); data starts after
 them. Method 0: `fz_open_null_filter(file, uncompressed_size, data)`, as `open_zip_entry`
-(unzip.c:518-519). Method 8: `fz_open_flated(fz_open_null_filter(file, compressed_size, data), -15)`
-— the same inflate as MuPDF's stream, bounded by the entry so a read never runs into the next
-local header, and never cut short of the entry, so the flate filter's "premature end" warning
-(filter-flate.c:75-78) cannot fire on an intact entry. Any other method → nullopt (MuPDF throws).
+(unzip.c:518-519). Method 8: a null filter `fz_open_null_filter(file, compressed_size, data)`
+under `fz_open_flated(null, -15)` — the same inflate as MuPDF's stream, bounded by the entry so a
+read never runs into the next local header, and never cut short of the entry, so the flate
+filter's "premature end" warning (filter-flate.c:75-78) cannot fire on an intact entry. Both
+streams are locals of their own (`fz_var`), each dropped in `fz_always`: each filter keeps its
+chain (`fz_keep_stream`, filter-basic.c:77, filter-flate.c:142), so a nested call that drops only
+the outer stream leaks the null filter and with it a reference on MuPDF's file, which then stays
+open after the document is dropped. Any other method → nullopt (MuPDF throws).
 Then §3.3. A failure of the header read itself (short read, wrong signature) → stream route for
 that page.
 
@@ -208,6 +224,13 @@ Where the prefix gives a size and the full path does not:
    directory names match byte for byte but whose offsets differ would size from the other file
    (each read is bounds-checked; a wrong signature takes the stream route). `CbzPageSizer` reopens
    by path too; accepted for the same reason.
+
+3. **A UTF-8 BOM and a multi-byte `<meta ... charset=...>` element past the root.** The full parse
+   decodes the BOM with the table (§3.3) and can swallow the root's `<`: a single-root page then
+   throws in MuPDF (tag mismatch), a page with a second root element sizes from that one (both
+   measured at the spec gate on crafted files with `charset=gbk`); the prefix gives the first
+   root's size. Needs a non-conforming FixedPage (no `meta` element in the XPS schema). Refusing
+   BOM prefixes instead would send every WPF page to the full load.
 
 Where a size differs, the consequences are those of #176 §3.4: the strip slot and the bitmap
 differ, paged fit and printing scale by the header size.
@@ -260,13 +283,16 @@ object with a destructor lives inside one (#179).
 
 ### 3.11 MuPDF bump guard
 
-§3.3-§3.5 and §3.7 copy rules from four MuPDF files: the FixedPage root rules and the bound
+§3.3-§3.5 and §3.7 rely on rules in eight MuPDF files: the FixedPage root rules and the bound
 arithmetic (`source/xps/xps-doc.c`), the part-name handling (`source/xps/xps-zip.c`), the struct
-layout and `xps_load_page` (`source/xps/xps-imp.h`), and the zip lookup, name rewriting, local
-header and stream rules (`source/fitz/unzip.c`). `cmake/ImportMuPDF.cmake` gets the #229 pattern
+layout and `xps_load_page` (`source/xps/xps-imp.h`), the zip lookup, name rewriting, local
+header and stream rules (`source/fitz/unzip.c`), the cleaning of a name before every entry call
+(`source/fitz/archive.c`), the case folding `fz_strcasecmp` does (`source/fitz/string.c`), the
+truncated-document parse, attribute order and encoding choice (`source/fitz/xml.c`), and the
+encoding tables (`source/fitz/text-decoder.c`). `cmake/ImportMuPDF.cmake` gets the #229 pattern
 for each: SHA-256 of the file with CRLF normalised to LF, compared at configure against a
 recorded value; a change fails configure with a message naming #227 and the rules to re-check.
-The four files join `CMAKE_CONFIGURE_DEPENDS`. A renamed field fails the build anyway; the hash
+The eight files join `CMAKE_CONFIGURE_DEPENDS`. A renamed field fails the build anyway; the hash
 catches a changed rule.
 
 ## 4. XPS in the strip
@@ -277,8 +303,9 @@ catches a changed rule.
   fixture opens in the strip with View → Continuous Scroll enabled and checked.
 - `CHANGELOG.md` (Unreleased): XPS documents open in continuous scroll. `README.md`'s format list
   where it says which formats scroll continuously.
-- Upstream spec §4.4: the XPS block records the §6 readings and that XPS passes; the "the format
-  passed §4.4" sentence lists XPS.
+- Upstream spec §4.4: the XPS block records the §6 readings and that XPS passes, with the drive
+  (NVMe) and that a hard drive was not measured (README's hard-drive target, as #176 recorded);
+  the "the format passed §4.4" sentence lists XPS.
 
 ## 5. Tests
 
@@ -286,14 +313,18 @@ catches a changed rule.
 
 New `scripts/generate-xps-sizing-fixture.py` (Python `zipfile`, fixed `date_time`,
 `create_system`, `external_attr`; deflated entries depend on zlib, so the docstring names the
-version and the file is not byte-reproducible across zlib versions, as `cbz-sizing.cbz`). It
-writes `_rels/.rels`, the FixedDocumentSequence, one FixedDocument, and these pages, every
+version and the file is not byte-reproducible across zlib versions, as `cbz-sizing.cbz`). After
+`zipfile` writes the archive, the generator rewrites p01's local header to carry a 28-byte extra
+field (type 0xA220, as System.IO.Packaging writes on every WPF entry; its central record keeps
+none), shifting the later local-header offsets in the central directory and the directory offset
+in the end record: `zipfile` writes the same extra in both headers, and WPF files differ there,
+so without it no test sees a data start taken from the central lengths. It writes `_rels/.rels`, the FixedDocumentSequence, one FixedDocument, and these pages, every
 size different so a wrong entry shows (the spike's files had one size on every page and could not
 tell):
 
 | page | FixedPage part | expected route |
 |---|---|---|
-| p01 | `Width="816" Height="1056"`, deflated | Direct |
+| p01 | `Width="816" Height="1056"`, deflated, local extra field ≠ central | Direct |
 | p02 | `<?xml ...?>` and a comment before the root, 612 × 792 | Direct (third cut) |
 | p03 | `Width="1000.9" Height="  700"` (`atoi` stops / skips spaces) | Direct |
 | p04 | `Width="&#56;16"` (character reference) | Direct |
@@ -315,7 +346,7 @@ equality, not the gate (the gate files stay local, §6, as #169 ruled).
 
 ### 5.2 Unit tests (`tests/unit/test_xps_page_sizer.cpp`, `[core][xps]`)
 
-With a test-owned context and document (`OwnDocument` of `test_document_page_size.cpp`):
+With a test-owned context and document (`OwnDocument` of `tests/unit/chapter_test_kit.hpp:57`):
 
 1. `create`: non-null for both fixtures; null for `simple.pdf` (another handler) and for
    `page_count` off by one.
@@ -333,7 +364,11 @@ With a test-owned context and document (`OwnDocument` of `test_document_page_siz
    implicit).
 7. Mutation checks before commit (`mutation-test-hygiene`): the fold keeping the last duplicate
    instead of the first (p13 must fail), skipping the binding (the escaped fixture must fail), a
-   cut only at the first `>` (p02 must fail), and dropping the ASCII rule (p08 must fail).
+   cut only at the first `>` (p02 must fail), dropping the ASCII rule (p08 must fail), and the data
+   start taken from the central record's name and extra lengths (p01 must leave the Direct route).
+8. Stream ownership: after `prepare_all` and `header_size` over every page of a temp copy of the
+   fixture, closing the `Document` lets `DeleteFileW` remove the copy (a leaked null filter keeps
+   MuPDF's file open, §3.4).
 
 ### 5.3 Read-ahead tests (`tests/unit/test_zip_read_ahead.cpp`)
 
@@ -343,10 +378,14 @@ unchanged.
 
 ## 6. Gate (local, not in CI)
 
-Files (scratch, never committed), made with `227-tools/make-wpf-xps.ps1`:
+Files (scratch, never committed), made with `227-tools/make-wpf-xps.ps1`, which gains an
+`-ImageKB <n>` parameter for the second file (a `BlockUIContainer` holding a WPF `Image` of a
+random-noise PNG of about n KB, one per page, seeded):
 
 - **dense**: 1,003 Letter pages of random words (4.3 MB), the spike's file;
-- **scattered**: about 1,000 pages each carrying a ≥ 64 KB incompressible image, so page parts lie
+- **scattered**: about 1,000 pages each carrying a ≥ 64 KB incompressible image (`-ImageKB 64`;
+  the gate record states the page count and that each image part sits between two page parts),
+  so page parts lie
   far apart in the file and the cold read cannot ride the cache manager's clustering (the dense
   file's cold reading is only 20 ms above warm for that reason).
 
@@ -355,8 +394,9 @@ Protocol (#176 §6): a Release build of the branch head; per file three cold sin
 `--iterations 9` (warm median); `--bench-page-sizes` times `DocumentView::page_sizes()`, so the
 directory read, the binding, the index and the read-ahead are inside. Also per file one warm
 median with the process pinned to an E-core (`start /affinity` on an E-core mask) and one cold
-single after an hour without touching the file. Pass: every cold single and every warm median
-≤ 100 ms on both files, P-core and E-core. Recorded, not gated: the scattered file with the
+single after an hour without touching the file. Pass: on both files, every cold single, the
+hour-idle single and the warm median ≤ 100 ms unpinned, and the E-core warm median ≤ 100 ms (no
+E-core cold reading: the I/O wait does not depend on the core). Recorded, not gated: the scattered file with the
 read-ahead disabled, and `xps-escaped-name`-style binding failure on the dense file (stream route
 throughout). Raw output saved next to the scripts. A miss stops the PR before `strip_format_ok`
 changes.
