@@ -121,12 +121,15 @@ std::optional<std::vector<ZipEntryRef>> parse_zip_directory(const unsigned char*
         const std::size_t name_length = le16(r + 28);
         const std::size_t extra_length = le16(r + 30);
         const std::size_t comment_length = le16(r + 32);
+        const std::uint32_t compressed = le32(r + 20);
+        const std::uint32_t uncompressed = le32(r + 24);
         const std::uint32_t local = le32(r + 42);
         const std::size_t record = kCentralRecordSize + name_length + extra_length + comment_length;
         if (n - pos < record) return std::nullopt;
         if (local >= dir.offset) return std::nullopt;
         out.push_back(ZipEntryRef{
-            std::string(reinterpret_cast<const char*>(r + kCentralRecordSize), name_length), local});
+            std::string(reinterpret_cast<const char*>(r + kCentralRecordSize), name_length), local,
+            compressed, uncompressed});
         pos += record;
     }
     return out;
@@ -134,10 +137,15 @@ std::optional<std::vector<ZipEntryRef>> parse_zip_directory(const unsigned char*
 
 std::vector<FileRange> plan_read_ahead(const std::vector<std::uint64_t>& offsets,
                                        std::uint64_t file_size) {
+    if (offsets.empty()) return {};
+    return plan_read_ahead(offsets, file_size,
+                           std::clamp(kReadAheadBudget / offsets.size(), kReadAheadMinSpan,
+                                      kReadAheadMaxSpan));
+}
+
+std::vector<FileRange> plan_read_ahead(const std::vector<std::uint64_t>& offsets,
+                                       std::uint64_t file_size, std::size_t span) {
     std::vector<FileRange> out;
-    if (offsets.empty()) return out;
-    const std::size_t span = std::clamp(kReadAheadBudget / offsets.size(), kReadAheadMinSpan,
-                                        kReadAheadMaxSpan);
     out.reserve(offsets.size());
     for (const std::uint64_t at : offsets) {
         if (at >= file_size) continue;

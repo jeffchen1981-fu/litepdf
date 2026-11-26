@@ -233,6 +233,58 @@ TEST_CASE("ZipReadAhead: the directory matches MuPDF's entry list", "[core][zip]
             CHECK(std::memcmp(file.data() + at + 30, e.name.data(), e.name.size()) == 0);
         }
     }
+
+    // The sizes, as Python's zipfile reports them for tests/fixtures/cbz-sizing.cbz.
+    const auto entries = read_zip_directory(L"tests/fixtures/cbz-sizing.cbz");
+    REQUIRE(entries.has_value());
+    const auto size_of = [&](const char* name) -> const ZipEntryRef* {
+        for (const ZipEntryRef& e : *entries)
+            if (e.name == name) return &e;
+        return nullptr;
+    };
+    const ZipEntryRef* deflated = size_of("p12_deflated.jpg");
+    REQUIRE(deflated != nullptr);
+    CHECK(deflated->compressed_size == 472);
+    CHECK(deflated->uncompressed_size == 2833);
+    const ZipEntryRef* stored = size_of("p01_jfif300.jpg");
+    REQUIRE(stored != nullptr);
+    CHECK(stored->compressed_size == 4429);
+    CHECK(stored->uncompressed_size == 4429);
+}
+
+TEST_CASE("ZipReadAhead: parse_zip_directory returns both sizes", "[core][zip]") {
+    Bytes first = record("a.jpg", 0);
+    put32(first, 20, 0x1234);
+    put32(first, 24, 0x5678);
+    Bytes second = record("b.png", 100);
+    put32(second, 20, 0xFFFFFFFFu);
+    put32(second, 24, 0xFFFFFFFFu);
+    Bytes two = first;
+    append(two, second);
+    const auto entries = parse(two, ZipDirectory{1000, two.size(), 2});
+    REQUIRE(entries.has_value());
+    REQUIRE(entries->size() == 2);
+    CHECK((*entries)[0].name == "a.jpg");
+    CHECK((*entries)[0].local_header_offset == 0);
+    CHECK((*entries)[0].compressed_size == 0x1234);
+    CHECK((*entries)[0].uncompressed_size == 0x5678);
+    CHECK((*entries)[1].name == "b.png");
+    CHECK((*entries)[1].local_header_offset == 100);
+    CHECK((*entries)[1].compressed_size == 0xFFFFFFFFu);
+    CHECK((*entries)[1].uncompressed_size == 0xFFFFFFFFu);
+}
+
+TEST_CASE("ZipReadAhead: plan_read_ahead with a fixed span", "[core][zip]") {
+    const auto r = plan_read_ahead({0, 100, 5000}, 6000, 4096);
+    REQUIRE(r.size() == 3);
+    CHECK(r[0].offset == 0);
+    CHECK(r[0].length == 4096);
+    CHECK(r[1].offset == 100);
+    CHECK(r[1].length == 4096);
+    CHECK(r[2].offset == 5000);
+    CHECK(r[2].length == 1000);
+    CHECK(plan_read_ahead({6000}, 6000, 4096).empty());
+    CHECK(plan_read_ahead({}, 10, 4096).empty());
 }
 
 TEST_CASE("ZipReadAhead: find_zip_directory refuses what it does not handle", "[core][zip]") {
