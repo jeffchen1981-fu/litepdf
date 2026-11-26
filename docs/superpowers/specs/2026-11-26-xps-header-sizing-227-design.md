@@ -200,7 +200,8 @@ chain (`fz_keep_stream`, filter-basic.c:77, filter-flate.c:142), so a nested cal
 the outer stream leaks the null filter and with it a reference on MuPDF's file, which then stays
 open after the document is dropped. Any other method → nullopt (MuPDF throws).
 Then §3.3. A failure of the header read itself (short read, wrong signature) → stream route for
-that page.
+that page. A throw while reading the data (a flate error) → nullopt: the stream route would
+inflate the same bytes.
 
 ### 3.5 Stream route (before `prepare_all`, or where §3.4 declines)
 
@@ -351,15 +352,17 @@ tell):
 | p12 | split as `p12.fpage/[0].piece` + `[1].last.piece` | None |
 | p13 | two entries `p13.fpage` (300 × 300) then `P13.fpage` (400 × 400) | Direct, 300 × 300 |
 | p14 | a 64 KB page (random-word Glyphs) behind a short root | Direct |
+| p15 | `Name="a>b"` before `Width` (a `>` inside a quoted value, so the first cut throws) | Direct |
 
-`tests/fixtures/xps-sizing.xps` (14 pages) and `tests/fixtures/xps-escaped-name.xps`: three pages
+`tests/fixtures/xps-sizing.xps` (15 pages) and `tests/fixtures/xps-escaped-name.xps`: three pages
 of which one entry's raw name, written without the UTF-8 flag, contains `#U0070` (MuPDF renames
 it to `p`), so the binding fails and every page takes the stream route. Both are small; they test
 equality, not the gate (the gate files stay local, §6, as #169 ruled).
 
 ### 5.2 Unit tests (`tests/unit/test_xps_page_sizer.cpp`, `[core][xps]`)
 
-With a test-owned context and document (`OwnDocument` of `tests/unit/chapter_test_kit.hpp:57`):
+With a test-owned context and document that collects the context's warnings (the file-local
+`OwnDocument` of `tests/unit/test_cbz_page_sizer.cpp:53-120`, with its `throw_on_context`):
 
 1. `create`: non-null for both fixtures; null for `simple.pdf` (another handler) and for
    `page_count` off by one.
@@ -377,7 +380,9 @@ With a test-owned context and document (`OwnDocument` of `tests/unit/chapter_tes
    implicit).
 7. Mutation checks before commit (`mutation-test-hygiene`): the fold keeping the last duplicate
    instead of the first (p13 must fail), skipping the binding (the escaped fixture must fail), a
-   cut only at the first `>` (p02 must fail), dropping the ASCII rule (p08 must fail), and the data
+   cut only at the first `>` (p02 must fail), a parse error ending the search instead of trying the
+   next `>` (p15 must fail), a parse error left uncleared (the error-state test must fail),
+   dropping the ASCII rule (p08 must fail), and the data
    start taken from the central record's name and extra lengths (p01 must leave the Direct route),
    and the sizes taken from the local header (p02 and p05 must leave it). A prefetch forced to
    fail (test seam) must leave every Direct row Direct.
@@ -393,22 +398,26 @@ unchanged.
 
 ## 6. Gate (local, not in CI)
 
-Files (scratch, never committed), made with `227-tools/make-wpf-xps.ps1`, which gains an
-`-ImageKB <n>` parameter for the second file (a `BlockUIContainer` holding a WPF `Image` of a
-random-noise PNG of about n KB, one per page, seeded):
+Files (scratch, never committed):
 
-- **dense**: 1,003 Letter pages of random words (4.3 MB), the spike's file;
-- **scattered**: about 1,000 pages each carrying a ≥ 64 KB incompressible image (`-ImageKB 64`;
-  the gate record states the page count and that each image part sits between two page parts),
-  so page parts lie
-  far apart in the file and the cold read cannot ride the cache manager's clustering (the dense
-  file's cold reading is only 20 ms above warm for that reason).
+- **dense**: 1,003 Letter pages of random words (4.3 MB), the spike's file
+  (`227-tools/make-wpf-xps.ps1 -Words 540000 -Seed 228`);
+- **scattered**: the dense file rewritten by a local Python script (`227-tools/scatter-xps.py`)
+  that copies every entry in order and inserts after each `.fpage` entry an unreferenced, stored
+  entry `Resources/pad/<n>.bin` of 64 KiB seeded random bytes, so page parts lie 64 KiB apart and
+  the cold read cannot ride the cache manager's clustering (the dense file's cold reading is only
+  20 ms above warm for that reason). MuPDF reads only referenced parts, so the pages and sizes are
+  the dense file's. (A WPF `Image` per page does not do it: the plan gate measured WPF writing one
+  shared image part for all pages, and the stretched images doubled the page count.) The rewrite
+  goes through `zipfile`, so its local headers lose WPF's 0xA220 extra field; the dense file keeps
+  them.
 
 Protocol (#176 §6): a Release build of the branch head; per file three cold singles
 (`evict.ps1`, then `litepdf-cli <file> --bench-page-sizes --iterations 1`), then
 `--iterations 9` (warm median); `--bench-page-sizes` times `DocumentView::page_sizes()`, so the
 directory read, the binding, the index and the read-ahead are inside. Also per file one warm
-median with the process pinned to an E-core (`start /affinity` on an E-core mask) and one cold
+median with the process pinned to an E-core (`start "" /b /wait /affinity <mask>`, `/b` so the
+output stays in the redirect) and one cold
 single after an hour without touching the file. Pass: on both files, every cold single, the
 hour-idle single and the warm median ≤ 100 ms unpinned, and the E-core warm median ≤ 100 ms (no
 E-core cold reading: the I/O wait does not depend on the core). Recorded, not gated: the scattered file with the
