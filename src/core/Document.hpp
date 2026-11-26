@@ -97,9 +97,10 @@ public:
     // under one hold of the gate (#239): a page_size call per page leaves the
     // gate free between two pages, and a borrowing render worker or search
     // scan (an FB2 tab) can take it there. Entry i is page i. An entry already
-    // set is kept as it is; one whose page cannot be sized, or that lies past
-    // the last page, stays empty. Throws std::logic_error when the document is
-    // not open.
+    // set is kept as it is. An entry whose page_size() throws, or that lies
+    // past the last page, stays empty; any size page_size() returns is stored
+    // as it is, usable or not (a CBZ page MuPDF cannot decode). Throws
+    // std::logic_error when the document is not open.
     void size_pages(std::vector<std::optional<PageSize>>& sizes) const;
 
     // A hint that every page's size is about to be read. For a CBZ it reads

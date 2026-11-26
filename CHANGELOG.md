@@ -11,9 +11,9 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
 
 ### Changed
 
-- The first switch of an FB2 book to continuous scroll no longer waits on a
-  search or on page renders: every page is now sized in one step, so neither
-  can cut in between two pages. On a 3,102-page book with a search and renders
+- When continuous scroll sizes an FB2 book's pages while a search or page
+  renders are pending, neither can cut in between two pages any more: every
+  page is now sized in one step. On a 3,102-page book with a search and renders
   running, sizing its pages took up to about 0.15 s; it now takes under 2 ms
   (#239).
 
