@@ -93,6 +93,15 @@ public:
     [[nodiscard]] std::size_t page_count() const;
     [[nodiscard]] PageSize page_size(std::size_t index) const;
 
+    // Fills every empty entry of `sizes` with that page's page_size(), all
+    // under one hold of the gate (#239): a page_size call per page leaves the
+    // gate free between two pages, and a borrowing render worker or search
+    // scan (an FB2 tab) can take it there. Entry i is page i. An entry already
+    // set is kept as it is; one whose page cannot be sized, or that lies past
+    // the last page, stays empty. Throws std::logic_error when the document is
+    // not open.
+    void size_pages(std::vector<std::optional<PageSize>>& sizes) const;
+
     // A hint that every page's size is about to be read. For a CBZ it reads
     // every page entry's first bytes into the file cache at once, so the
     // per-page header reads that follow do not wait one at a time (#176); it
@@ -359,6 +368,9 @@ private:
     friend struct detail::ChapterPagesAccess;
     struct Impl;
     std::unique_ptr<Impl> impl_;
+
+    // page_size's work, for a caller that already holds the gate.
+    PageSize page_size_held(std::size_t index) const;
 };
 
 } // namespace litepdf::core

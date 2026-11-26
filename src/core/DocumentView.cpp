@@ -348,12 +348,13 @@ const std::vector<PageSize>& DocumentView::page_sizes() {
         const std::size_t n = impl_->doc.page_count();
         auto& cache = impl_->page_sizes;
         if (cache.size() < n) cache.resize(n);
-        // Reads through the #49 size cache and fills it with every size that
-        // reads; a page that throws is left unknown there, and fill_page_sizes
-        // gives it its stand-in in strip_sizes only.
+        // Fills the #49 size cache with every size that reads, all under one
+        // gate hold (#239); a page that cannot be sized is left unknown there,
+        // and fill_page_sizes gives it its stand-in in strip_sizes only (an
+        // empty entry reads as 0 x 0, which is not usable).
+        impl_->doc.size_pages(cache);
         impl_->strip_sizes = detail::fill_page_sizes(n, [&](std::size_t i) {
-            if (!cache[i]) cache[i] = impl_->doc.page_size(i);
-            return *cache[i];
+            return cache[i].value_or(PageSize{0.0f, 0.0f});
         });
         impl_->strip_sized = true;
     }
