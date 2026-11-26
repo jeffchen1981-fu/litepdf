@@ -1,7 +1,8 @@
 # XPS page sizes from the FixedPage root (#227) — design
 
-Status: draft 2026-11-26, written after a spike and two Fable design reviews (chat); spec gate
-pending.
+Status: approved for planning 2026-11-27 after a spike and two Fable design reviews (chat); spec
+gate passed 2026-11-27 (routine Full: Opus slot-1, then gpt-5.6-terra, gpt-6.1-terra and
+gpt-5.6-luna on one commit; fixes in a6793ff and the commit after it).
 Issue: #227. Upstream spec: `docs/superpowers/specs/2026-10-22-continuous-scroll-design.md`
 (§4.4 page-sizing gate, §7.3 formats). Precedent: `2026-10-25-cbz-header-sizing-176-design.md`
 (CBZ header sizing and the zip read-ahead, `CbzPageSizer` / `ZipReadAhead`).
@@ -81,7 +82,8 @@ public:
 
     // Every page is about to be sized: builds the direct index (§3.4) and reads every page
     // part's first bytes ahead (§3.9), once. True when this call was the one that did it,
-    // whatever the outcome; any failure leaves the sizer on the stream path (§3.5).
+    // whatever the outcome. A directory or binding failure leaves every page on the stream
+    // route (§3.5) and skips the read-ahead; a read-ahead failure keeps the direct index.
     bool prepare_all() noexcept;
 };
 
@@ -161,10 +163,12 @@ handle. `ZipEntryRef` gains `compressed_size` and `uncompressed_size` (central r
 `fz_count_archive_entries(ctx, zip)` equals the parsed record count and, for every index i,
 `fz_list_archive_entry(ctx, zip, i)` (MuPDF's stored name, `list_zip_entry`, unzip.c:622-628) is
 byte-equal to record i's raw name, length included (a raw name holding a NUL fails). MuPDF fills
-its entry array in central-directory order. MuPDF rewrites a name that has no UTF-8 flag
-(`unescape` turns `#Uxxxx` / `#Lxxxxxx` into UTF-8, unzip.c:96-150, :361-362) and replaces it with
-an Info-ZIP Unicode Path field (0x7075, unzip.c:390-404); either makes the names differ, so such
-an archive never gets the direct route, and the rule needs no "ASCII only" test. Any mismatch, or
+its entry array in central-directory order. MuPDF runs `unescape` on a name that has no UTF-8
+flag (unzip.c:96, :361-362), which changes it only where it holds `#Uxxxx` / `#Lxxxxxx` (turned
+into UTF-8; any other byte is copied), and replaces a name with an Info-ZIP Unicode Path field
+(0x7075, unzip.c:390-404). Only a name actually rewritten differs, so only an archive holding one
+loses the direct route; ordinary ASCII names without the UTF-8 flag (every WPF entry) bind, and
+the rule needs no "ASCII only" test. Any mismatch, or
 `read_zip_directory` returning nullopt (Zip64, malformed, I/O error), leaves the sizer on the
 stream route for every page.
 
@@ -215,7 +219,10 @@ or `Height` (the full path then throws, as today), encrypted entries, methods ot
 Where the prefix gives a size and the full path does not:
 
 1. **Damaged past the root tag.** A deflated part corrupt or cut short after the bytes §3.3
-   reads, wrong central sizes (`read_zip_entry` throws at unzip.c:583-586), or XML malformed past
+   reads, wrong central sizes of a deflated entry (`read_zip_entry` throws at unzip.c:583-586; a
+   stored entry's short read only warns, unzip.c:547-549, and both routes read the same
+   `uncompressed_size` bytes from the data start, so a stored entry is not in this item), or XML
+   malformed past
    the root: the full path throws, `page_size` throws today and the strip gives that page its
    stand-in; the prefix gives the root's size. Rendering that page still fails. Same class as
    #176 §3.4 item 2.
@@ -251,8 +258,9 @@ the expression of `xps_bound_page` (int × float / float) minus the rect's zero 
   `xps_path = absolute_utf8(path)`; empty when that fails (#182), and then no sizer.
 - `page_size_held`, before the `fz_try` and after the CBZ block: if `xps_path` is set and
   `!xps_probed`, create once; if `xps` and `header_size(index)` gives a size, return it.
-- `read_ahead_page_sizes()`, under its gate hold: for an XPS, create if not probed, then
-  `xps->prepare_all()`. Its comment changes from "a CBZ reads its pages' headers ahead" to "every
+- `read_ahead_page_sizes()`: its early return becomes `!doc || (cbz_path.empty() &&
+  xps_path.empty())` (today it returns on an empty `cbz_path`, Document.cpp:746, which would skip
+  every XPS); under its gate hold, for an XPS, create if not probed, then `xps->prepare_all()`. Its comment changes from "a CBZ reads its pages' headers ahead" to "every
   page is about to be sized" (`DocumentView::page_sizes()` calls it before `size_pages`, so the
   direct route and the read-ahead are inside the §6 timing).
 - Thread safety: the sizer uses only the Document's context, document and archive, always under
@@ -270,7 +278,7 @@ clamp and becomes a call to it. `kXpsReadAheadSpan` = 12 KiB: the 30-byte local 
 name, and the first 12 KiB of compressed data minus those, which a 16 KiB root cap of text at
 WPF's ratio (about 4.5:1) never exceeds. Ranges of a dense file overlap; that only reads the same
 pages once. Without the direct index (binding failed) the read-ahead is skipped: the stream route
-reads at MuPDF's pace. A cache hint only: failure changes no size.
+reads at MuPDF's pace. A cache hint only: its failure changes no size and keeps the direct index.
 
 ### 3.10 MuPDF error state (#146)
 
@@ -283,16 +291,18 @@ object with a destructor lives inside one (#179).
 
 ### 3.11 MuPDF bump guard
 
-§3.3-§3.5 and §3.7 rely on rules in eight MuPDF files: the FixedPage root rules and the bound
+§3.3-§3.5 and §3.7 rely on rules in ten MuPDF files: the FixedPage root rules and the bound
 arithmetic (`source/xps/xps-doc.c`), the part-name handling (`source/xps/xps-zip.c`), the struct
 layout and `xps_load_page` (`source/xps/xps-imp.h`), the zip lookup, name rewriting, local
 header and stream rules (`source/fitz/unzip.c`), the cleaning of a name before every entry call
 (`source/fitz/archive.c`), the case folding `fz_strcasecmp` does (`source/fitz/string.c`), the
-truncated-document parse, attribute order and encoding choice (`source/fitz/xml.c`), and the
-encoding tables (`source/fitz/text-decoder.c`). `cmake/ImportMuPDF.cmake` gets the #229 pattern
+truncated-document parse, attribute order and encoding choice (`source/fitz/xml.c`), the
+encoding tables (`source/fitz/text-decoder.c`), and the null filter's bound and the flate
+filter's inflate, warnings and chain ownership (`source/fitz/filter-basic.c`,
+`source/fitz/filter-flate.c`). `cmake/ImportMuPDF.cmake` gets the #229 pattern
 for each: SHA-256 of the file with CRLF normalised to LF, compared at configure against a
 recorded value; a change fails configure with a message naming #227 and the rules to re-check.
-The eight files join `CMAKE_CONFIGURE_DEPENDS`. A renamed field fails the build anyway; the hash
+The ten files join `CMAKE_CONFIGURE_DEPENDS`. A renamed field fails the build anyway; the hash
 catches a changed rule.
 
 ## 4. XPS in the strip
@@ -318,17 +328,20 @@ version and the file is not byte-reproducible across zlib versions, as `cbz-sizi
 field (type 0xA220, as System.IO.Packaging writes on every WPF entry; its central record keeps
 none), shifting the later local-header offsets in the central directory and the directory offset
 in the end record: `zipfile` writes the same extra in both headers, and WPF files differ there,
-so without it no test sees a data start taken from the central lengths. It writes `_rels/.rels`, the FixedDocumentSequence, one FixedDocument, and these pages, every
+so without it no test sees a data start taken from the central lengths. It also zeroes the
+CRC-32, compressed and uncompressed size fields of p02's (deflated) and p05's (stored) local
+headers, as a writer using data descriptors leaves them (MuPDF ignores them), so no test passes
+with sizes read from the local header. It writes `_rels/.rels`, the FixedDocumentSequence, one FixedDocument, and these pages, every
 size different so a wrong entry shows (the spike's files had one size on every page and could not
 tell):
 
 | page | FixedPage part | expected route |
 |---|---|---|
 | p01 | `Width="816" Height="1056"`, deflated, local extra field ≠ central | Direct |
-| p02 | `<?xml ...?>` and a comment before the root, 612 × 792 | Direct (third cut) |
+| p02 | `<?xml ...?>` and a comment before the root, 612 × 792; local sizes zero | Direct (third cut) |
 | p03 | `Width="1000.9" Height="  700"` (`atoi` stops / skips spaces) | Direct |
 | p04 | `Width="&#56;16"` (character reference) | Direct |
-| p05 | stored (method 0), 500 × 400 | Direct |
+| p05 | stored (method 0), 500 × 400; local sizes zero | Direct |
 | p06 | `mc:AlternateContent` root around a FixedPage | None |
 | p07 | UTF-16LE with BOM | None |
 | p08 | `xml:lang` with a non-ASCII value before `Width` | None |
@@ -365,7 +378,9 @@ With a test-owned context and document (`OwnDocument` of `tests/unit/chapter_tes
 7. Mutation checks before commit (`mutation-test-hygiene`): the fold keeping the last duplicate
    instead of the first (p13 must fail), skipping the binding (the escaped fixture must fail), a
    cut only at the first `>` (p02 must fail), dropping the ASCII rule (p08 must fail), and the data
-   start taken from the central record's name and extra lengths (p01 must leave the Direct route).
+   start taken from the central record's name and extra lengths (p01 must leave the Direct route),
+   and the sizes taken from the local header (p02 and p05 must leave it). A prefetch forced to
+   fail (test seam) must leave every Direct row Direct.
 8. Stream ownership: after `prepare_all` and `header_size` over every page of a temp copy of the
    fixture, closing the `Document` lets `DeleteFileW` remove the copy (a leaked null filter keeps
    MuPDF's file open, §3.4).
