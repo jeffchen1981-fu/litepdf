@@ -261,3 +261,19 @@ TEST_CASE("Document: size_pages sizes every empty entry under one gate hold",
         CHECK(sizes[i]->height_pt == expected.height_pt);
     }
 }
+
+// #239 PR gate: a document still waiting for its password has a document but
+// no page count, so a check on the document alone would return having sized
+// nothing. size_pages throws as documented instead.
+TEST_CASE("Document: size_pages on a document waiting for its password throws",
+          "[core][gate][document]") {
+    Document doc;
+    const auto err = doc.open("tests/fixtures/encrypted.pdf");
+    REQUIRE(err.has_value());
+    REQUIRE(*err == Document::OpenError::NeedsPassword);
+    REQUIRE_FALSE(doc.is_open());
+
+    std::vector<std::optional<PageSize>> sizes(1);
+    CHECK_THROWS_AS(doc.size_pages(sizes), std::logic_error);
+    CHECK_FALSE(sizes[0].has_value());
+}

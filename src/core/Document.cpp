@@ -661,7 +661,9 @@ PageSize Document::page_size(std::size_t index) const {
 }
 
 void Document::size_pages(std::vector<std::optional<PageSize>>& sizes) const {
-    if (!impl_->doc) throw std::logic_error("size_pages called on unopened document");
+    // is_open(), not doc alone: a document still waiting for its password has
+    // no page count yet, and the loop below would size nothing.
+    if (!is_open()) throw std::logic_error("size_pages called on unopened document");
 
     // (#239) One hold for every page, not one per page: between two holds the
     // gate is free, and a borrower of an FB2 tab could take it there, once per
