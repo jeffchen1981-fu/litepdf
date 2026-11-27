@@ -200,8 +200,11 @@ chain (`fz_keep_stream`, filter-basic.c:77, filter-flate.c:142), so a nested cal
 the outer stream leaks the null filter and with it a reference on MuPDF's file, which then stays
 open after the document is dropped. Any other method → nullopt (MuPDF throws).
 Then §3.3. A failure of the header read itself (short read, wrong signature) → stream route for
-that page. A throw while reading the data (a flate error) → nullopt: the stream route would
-inflate the same bytes.
+that page. A flate error while reading the data does not throw: `fz_read` goes through
+`fz_available` (stream.h:399-425), which reports the error, warns "read error; treating as end of
+file" and ends the stream, so §3.3 sees a short prefix — nullopt if the root tag is not complete
+by then (the stream route would inflate the same bytes and stop at the same place), the root's
+size if it is (§3.6 item 1). Found in Task 3.
 
 ### 3.5 Stream route (before `prepare_all`, or where §3.4 declines)
 
@@ -285,7 +288,9 @@ reads at MuPDF's pace. A cache hint only: its failure changes no size and keeps 
 
 Every new `fz_catch` is an expected-failure probe (`fz_parse_xml` on a cut inside markup, an
 entry that is not there): `fz_convert_error(ctx, nullptr)`, result discarded, so nothing is
-printed per page. Buffers, streams and XML trees are dropped in `fz_always`; every MuPDF-owned
+printed per page for an intact file. A page whose deflate data is damaged makes MuPDF itself print
+its "zlib error" report and the "read error; treating as end of file" warning once (from
+`fz_available`, on either route), as the full load does for the same page; accepted. Buffers, streams and XML trees are dropped in `fz_always`; every MuPDF-owned
 local assigned inside a `fz_try` and read in its `fz_always` or `fz_catch` is declared before it and
 marked `fz_var` (#178). No `return`, `break` or `continue` leaves a `fz_try` body, and no C++
 object with a destructor lives inside one (#179).
