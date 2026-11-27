@@ -6,7 +6,9 @@
 // scripts/generate-xps-sizing-fixture.py; each page and what it covers are
 // listed there and in the spec,
 // docs/superpowers/specs/2026-11-26-xps-header-sizing-227-design.md, section 5.1.
+#include "app/SearchDispatcher.hpp"
 #include "core/Document.hpp"
+#include "core/DocumentView.hpp"
 #include "core/detail/XpsPageSizer.hpp"
 #include "core/detail/ZipReadAhead.hpp"
 
@@ -753,5 +755,153 @@ TEST_CASE("XpsPageSizer: a CJK path takes the direct route", "[core][xps]") {
         CHECK(route == Route::Direct);
         REQUIRE(got.has_value());
         CHECK(same_bits(*got, table_size(kSizingDims[0])));
+    }
+}
+
+TEST_CASE("XpsPageSizer: Document::page_size equals the loaded page's bounds", "[core][xps]") {
+    TempFile file{fs::temp_directory_path() /
+                  ("litepdf-xps-227-doc-" + std::to_string(GetCurrentProcessId()) + ".xps")};
+    REQUIRE(fs::copy_file(kSizing, file.path, fs::copy_options::overwrite_existing));
+
+    Document doc;
+    REQUIRE_FALSE(doc.open(file.path).has_value());
+    REQUIRE(doc.page_count() == static_cast<std::size_t>(kSizingPages));
+    OwnDocument own(utf8_of(file.path));
+
+    const auto check_every_page = [&] {
+        for (int i = 0; i < kSizingPages; ++i) {
+            CAPTURE(i);
+            if (i == kNoHeightPage - 1) {
+                CHECK_THROWS_AS(doc.page_size(static_cast<std::size_t>(i)), std::runtime_error);
+                continue;
+            }
+            bool threw = false;
+            const PageSize want = loaded_size(own, i, &threw);
+            REQUIRE_FALSE(threw);
+            CHECK(same_bits(doc.page_size(static_cast<std::size_t>(i)), want));
+        }
+    };
+
+    check_every_page();                       // stream route, sizer made by page_size
+    CHECK(doc.read_ahead_page_sizes());       // binds the direct route
+    CHECK_FALSE(doc.read_ahead_page_sizes()); // once
+    check_every_page();                       // direct route
+
+    std::vector<std::optional<PageSize>> sizes(static_cast<std::size_t>(kSizingPages));
+    doc.size_pages(sizes);
+    for (int i = 0; i < kSizingPages; ++i) {
+        CAPTURE(i);
+        if (i == kNoHeightPage - 1) {
+            CHECK_FALSE(sizes[static_cast<std::size_t>(i)].has_value());
+            continue;
+        }
+        bool threw = false;
+        const PageSize want = loaded_size(own, i, &threw);
+        REQUIRE_FALSE(threw);
+        REQUIRE(sizes[static_cast<std::size_t>(i)].has_value());
+        CHECK(same_bits(*sizes[static_cast<std::size_t>(i)], want));
+    }
+}
+
+TEST_CASE("XpsPageSizer: page_sizes asks for the read-ahead", "[core][xps]") {
+    litepdf::app::InlineDispatcher disp;
+    Document doc;
+    REQUIRE_FALSE(doc.open(kSizing).has_value());
+    DocumentView view(std::move(doc), disp);
+    (void)view.page_sizes();
+    CHECK_FALSE(view.document().read_ahead_page_sizes());   // page_sizes already did
+}
+
+TEST_CASE("XpsPageSizer: closing the document releases the file", "[core][xps]") {
+    // MuPDF opens files without FILE_SHARE_DELETE: the copy cannot be deleted
+    // while the sizer's archive or the document still holds it.
+    TempFile file{fs::temp_directory_path() /
+                  ("litepdf-xps-227-close-" + std::to_string(GetCurrentProcessId()) + ".xps")};
+    REQUIRE(fs::copy_file(kSizing, file.path, fs::copy_options::overwrite_existing));
+
+    Document doc;
+    REQUIRE_FALSE(doc.open(file.path).has_value());
+    CHECK(doc.read_ahead_page_sizes());
+    for (std::size_t i = 0; i < doc.page_count(); ++i) {
+        try {
+            (void)doc.page_size(i);
+        } catch (const std::runtime_error&) {
+            // p09 has no size
+        }
+    }
+    doc.close();
+    CHECK(DeleteFileW(file.path.c_str()) != 0);
+}
+
+TEST_CASE("XpsPageSizer: close and open size the new document", "[core][xps]") {
+    Document doc;
+    REQUIRE_FALSE(doc.open(kSizing).has_value());
+    (void)doc.page_size(0);
+    doc.close();
+
+    REQUIRE_FALSE(doc.open(kEscaped).has_value());
+    CHECK(doc.read_ahead_page_sizes());   // a new sizer, not the old one
+    REQUIRE(doc.page_count() == static_cast<std::size_t>(kEscapedPages));
+    CHECK(same_bits(doc.page_size(0), table_size(kEscapedDims[0])));
+    OwnDocument own(kEscaped);
+    for (int i = 0; i < kEscapedPages; ++i) {
+        CAPTURE(i);
+        bool threw = false;
+        const PageSize want = loaded_size(own, i, &threw);
+        REQUIRE_FALSE(threw);
+        CHECK(same_bits(doc.page_size(static_cast<std::size_t>(i)), want));
+    }
+}
+
+TEST_CASE("XpsPageSizer: a page past the end", "[core][xps]") {
+    OwnDocument own(kSizing);
+    auto sizer = own.sizer(kSizingPages);
+    REQUIRE(sizer != nullptr);
+    CHECK_FALSE(sizer->header_size(kSizingPages).has_value());
+
+    Document doc;
+    REQUIRE_FALSE(doc.open(kSizing).has_value());
+    CHECK_THROWS_AS(doc.page_size(kSizingPages), std::runtime_error);
+}
+
+TEST_CASE("XpsPageSizer: a relative path in a directory with no UTF-8 form", "[core][xps]") {
+    // The name is convertible, so the open succeeds, but its absolute form holds
+    // an unpaired UTF-16 surrogate: path::u8string() throws there. The open must
+    // not throw; the XPS is sized by loading each page instead.
+    const std::string fixture = utf8_of(fs::absolute(kSizing));
+    std::wstring dir_name = L"litepdf-xps-";
+    dir_name += static_cast<wchar_t>(0xD800);
+    const fs::path dir = fs::temp_directory_path() / dir_name;
+    fs::create_directories(dir);
+    fs::copy_file(kSizing, dir / "relative.xps", fs::copy_options::overwrite_existing);
+    const TempTree remove_dir{dir};
+    // Declared after `remove_dir`, so the working directory is restored first.
+    struct RestoreCwd {
+        fs::path cwd = fs::current_path();
+        ~RestoreCwd() {
+            std::error_code ec;
+            fs::current_path(cwd, ec);
+        }
+    } restore_cwd;
+    fs::current_path(dir);
+
+    Document doc;
+    std::optional<Document::OpenError> err;
+    REQUIRE_NOTHROW(err = doc.open("relative.xps"));
+    REQUIRE_FALSE(err.has_value());
+    CHECK_FALSE(doc.read_ahead_page_sizes());
+
+    OwnDocument own(fixture);
+    REQUIRE(own.page_count() == doc.page_count());
+    for (int i = 0; i < kSizingPages; ++i) {
+        CAPTURE(i);
+        if (i == kNoHeightPage - 1) {
+            CHECK_THROWS_AS(doc.page_size(static_cast<std::size_t>(i)), std::runtime_error);
+            continue;
+        }
+        bool threw = false;
+        const PageSize want = loaded_size(own, i, &threw);
+        REQUIRE_FALSE(threw);
+        CHECK(same_bits(doc.page_size(static_cast<std::size_t>(i)), want));
     }
 }

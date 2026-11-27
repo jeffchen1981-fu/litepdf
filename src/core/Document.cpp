@@ -3,6 +3,7 @@
 #include "core/MuPDFRoot.hpp"
 #include "core/EscrowContext.hpp"
 #include "core/detail/CbzPageSizer.hpp"
+#include "core/detail/XpsPageSizer.hpp"
 #include "core/detail/ChapterPages.hpp"
 #include "core/detail/ChapterPagesAccess.hpp"
 #include "core/detail/PageHitsAccess.hpp"
@@ -90,10 +91,20 @@ struct Document::Impl {
     bool cbz_probed = false;
     std::unique_ptr<detail::CbzPageSizer> cbz;
 
-    void reset_cbz() noexcept {
+    // #227: an XPS page's size from its FixedPage root tag, with the same
+    // rules as the CBZ members above (`xps_path` absolute UTF-8, the sizer
+    // created on first use, declared after `root`).
+    std::string xps_path;
+    bool xps_probed = false;
+    std::unique_ptr<detail::XpsPageSizer> xps;
+
+    void reset_sizers() noexcept {
         cbz.reset();
         cbz_probed = false;
         cbz_path.clear();
+        xps.reset();
+        xps_probed = false;
+        xps_path.clear();
     }
 
     // (#229) Serializes every use of `ctx` and `doc`. MuPDF's exception
@@ -136,6 +147,7 @@ struct Document::Impl {
     // last context of the family to die (#61).
     ~Impl() {
         cbz.reset();
+        xps.reset();
         if (doc) fz_drop_document(ctx, doc);
     }
 };
@@ -228,6 +240,14 @@ bool is_cbz_path(const std::filesystem::path& path) {
     std::transform(ext.begin(), ext.end(), ext.begin(),
                    [](wchar_t c) { return (c >= L'A' && c <= L'Z') ? static_cast<wchar_t>(c - L'A' + L'a') : c; });
     return ext == L".cbz";
+}
+
+// True for a path whose extension is .xps, in any case.
+bool is_xps_path(const std::filesystem::path& path) {
+    std::wstring ext = path.extension().wstring();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+                   [](wchar_t c) { return (c >= L'A' && c <= L'Z') ? static_cast<wchar_t>(c - L'A' + L'a') : c; });
+    return ext == L".xps";
 }
 
 // The UTF-8 bytes of `path` made absolute, or "" when it cannot be.
@@ -379,7 +399,7 @@ std::optional<Document::OpenError> Document::open(const std::filesystem::path& p
 
     if (!looks_like_supported_document(path)) return OpenError::UnsupportedFormat;
 
-    impl_->reset_cbz();
+    impl_->reset_sizers();
     impl_->chapters.reset();
     impl_->is_fb2 = false;
 
@@ -427,6 +447,7 @@ std::optional<Document::OpenError> Document::open(const std::filesystem::path& p
 
     impl_->path = path;
     if (is_cbz_path(path)) impl_->cbz_path = absolute_utf8(path);
+    if (is_xps_path(path)) impl_->xps_path = absolute_utf8(path);
     impl_->needs_password = fz_needs_password(impl_->ctx, impl_->doc) != 0;
     impl_->authenticated = !impl_->needs_password;
     if (impl_->needs_password) {
@@ -454,7 +475,7 @@ bool Document::is_open() const noexcept {
 }
 
 void Document::close() noexcept {
-    impl_->reset_cbz();
+    impl_->reset_sizers();
     impl_->chapters.reset();
     if (impl_->doc) {
         fz_drop_document(impl_->ctx, impl_->doc);
@@ -698,6 +719,20 @@ PageSize Document::page_size_held(std::size_t index) const {
         }
     }
 
+    // An XPS page's size from the root tag of its FixedPage part (#227), by
+    // the same rules; a page the sizer declines is loaded as before.
+    if (!impl_->xps_path.empty()) {
+        if (!impl_->xps_probed) {
+            impl_->xps_probed = true;
+            impl_->xps = detail::XpsPageSizer::create(impl_->ctx, impl_->doc,
+                                                      impl_->xps_path.c_str(),
+                                                      impl_->page_count);
+        }
+        if (impl_->xps) {
+            if (const auto size = impl_->xps->header_size(index)) return *size;
+        }
+    }
+
     // #230: where a multi-chapter page lies, computed before the fz_try.
     const detail::PageAt at = detail::page_at(impl_->chapters.get(), index);
 
@@ -743,14 +778,24 @@ PageSize Document::page_size_held(std::size_t index) const {
     return result;
 }
 bool Document::read_ahead_page_sizes() const {
-    if (!impl_->doc || impl_->cbz_path.empty()) return false;
+    if (!impl_->doc || (impl_->cbz_path.empty() && impl_->xps_path.empty())) return false;
     detail::GateHold hold(impl_->gate, detail::GateClass::Foreground);
-    if (!impl_->cbz_probed) {
-        impl_->cbz_probed = true;
-        impl_->cbz = detail::CbzPageSizer::create(impl_->ctx, impl_->doc, impl_->cbz_path.c_str(),
+    if (!impl_->cbz_path.empty()) {
+        if (!impl_->cbz_probed) {
+            impl_->cbz_probed = true;
+            impl_->cbz = detail::CbzPageSizer::create(impl_->ctx, impl_->doc,
+                                                      impl_->cbz_path.c_str(),
+                                                      impl_->page_count);
+        }
+        return impl_->cbz && impl_->cbz->read_ahead();
+    }
+    if (!impl_->xps_probed) {
+        impl_->xps_probed = true;
+        impl_->xps = detail::XpsPageSizer::create(impl_->ctx, impl_->doc,
+                                                  impl_->xps_path.c_str(),
                                                   impl_->page_count);
     }
-    return impl_->cbz && impl_->cbz->read_ahead();
+    return impl_->xps && impl_->xps->prepare_all();
 }
 
 std::string Document::page_text(std::size_t index) const {
