@@ -675,8 +675,8 @@ PageSize Document::page_size(std::size_t index) const {
 
     // Protects impl_->ctx's error stack and impl_->doc from every other user,
     // a borrowing render worker or search scan included. See Impl::gate. The
-    // CBZ header sizer reads the archive through MuPDF, so it runs under the
-    // hold too.
+    // CBZ and XPS header sizers (#176, #227) read the archive through MuPDF, so
+    // they run under the hold too.
     detail::GateHold hold(impl_->gate, detail::GateClass::Foreground);
     return page_size_held(index);
 }

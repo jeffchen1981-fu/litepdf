@@ -260,6 +260,7 @@ for D2D.
   | 302 pages, random words (1.6 MB) | about 7 MB | 57-61 ms | 37.8 ms |
   | 870 pages, random words (4.4 MB) | 19.9 MB | 262-267 ms | 200 ms |
 
+  MuPDF reads the optional `Width`/`Height` hints on the FixedDocument's `PageContent` elements at open but always parses the FixedPage when it loads the page, and WPF does not write those hints, so they were no shortcut.
   #227 sizes a page from the root of its FixedPage part instead (its zip entry found through a
   directory bound to MuPDF's; design: `2026-11-26-xps-header-sizing-227-design.md`), as #176 did
   for CBZ images. Readings of the #227 gate (NVMe SSD; Release build of 50f9da0;

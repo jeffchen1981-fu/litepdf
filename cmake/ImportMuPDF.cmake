@@ -284,8 +284,9 @@ if(NOT _html_outline_sha STREQUAL _HTML_OUTLINE_SHA256_1272)
 endif()
 
 # Every configure: XpsPageSizer (#227) reads XPS pages' sizes without loading
-# them, and relies on rules in ten MuPDF files it does not patch: how
-# xps-doc.c / xps-zip.c find and name the page parts, how unzip.c and archive.c
+# them, and relies on rules in eleven MuPDF files it does not patch: how
+# xps-doc.c / xps-zip.c find and name the page parts, how document.c
+# dispatches fz_bound_page, how unzip.c and archive.c
 # index and open zip entries, how string.c / xml.c / text-decoder.c parse and
 # decode, and how filter-basic.c / filter-flate.c end a stream. A MuPDF bump
 # that changes one of them can leave the sizer reading different sizes than the
@@ -296,6 +297,7 @@ set(_LITEPDF_XPS_SIZER_SHA256_1272
     "source/xps/xps-imp.h|47e6f986eddc5e4cc4a7ad708444cfccfb73c3152d541872fd58093389f72702"
     "source/fitz/unzip.c|daaafe68aa71820e304006c8c4bab092dd1feed84a2f589fc9492c020cfacc4a"
     "source/fitz/archive.c|1ea6283ace46ceddb9ae8300977677ddab7b7c045a4174b7c7deb47f80684fcf"
+    "source/fitz/document.c|f21903d0464dbce5d0954c73ccbeb1bd43fadc62d2d4ba9ec999241cb168a718"
     "source/fitz/string.c|c72981bc65c7f78e91ee1ec4fc9e641b9cf821fb7a601f1865b867fdb8a67fc5"
     "source/fitz/xml.c|1c10e88735ddd22a2dd1fda8a34f2a4e20d276db2e0a431a76987977dffd526e"
     "source/fitz/text-decoder.c|f6a3710abc1a74b1ca6665e19a98a7ea3cd4fd4238283b9493087ecdb825c5a1"

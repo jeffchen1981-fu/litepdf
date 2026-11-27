@@ -294,25 +294,25 @@ Every new `fz_catch` is an expected-failure probe (`fz_parse_xml` on a cut insid
 entry that is not there): `fz_convert_error(ctx, nullptr)`, result discarded, so nothing is
 printed per page for an intact file. A page whose deflate data is damaged makes MuPDF itself print
 its "zlib error" report and the "read error; treating as end of file" warning once (from
-`fz_available`, on either route), as the full load does for the same page; accepted. Buffers, streams and XML trees are dropped in `fz_always`; every MuPDF-owned
+`fz_available`, on either route), as the full load does for the same page; accepted. Buffers and XML trees are dropped in `fz_always`; a stream handed to a caller is dropped by it once, after it is read (§3.4); every MuPDF-owned
 local assigned inside a `fz_try` and read in its `fz_always` or `fz_catch` is declared before it and
 marked `fz_var` (#178). No `return`, `break` or `continue` leaves a `fz_try` body, and no C++
 object with a destructor lives inside one (#179).
 
 ### 3.11 MuPDF bump guard
 
-§3.3-§3.5 and §3.7 rely on rules in ten MuPDF files: the FixedPage root rules and the bound
+§3.3-§3.5 and §3.7 rely on rules in eleven MuPDF files: the FixedPage root rules and the bound
 arithmetic (`source/xps/xps-doc.c`), the part-name handling (`source/xps/xps-zip.c`), the struct
 layout and `xps_load_page` (`source/xps/xps-imp.h`), the zip lookup, name rewriting, local
 header and stream rules (`source/fitz/unzip.c`), the cleaning of a name before every entry call
-(`source/fitz/archive.c`), the case folding `fz_strcasecmp` does (`source/fitz/string.c`), the
+(`source/fitz/archive.c`), the `fz_bound_page` to `bound_page` dispatch the size arithmetic goes through (`source/fitz/document.c`), the case folding `fz_strcasecmp` does (`source/fitz/string.c`), the
 truncated-document parse, attribute order and encoding choice (`source/fitz/xml.c`), the
 encoding tables (`source/fitz/text-decoder.c`), and the null filter's bound and the flate
 filter's inflate, warnings and chain ownership (`source/fitz/filter-basic.c`,
 `source/fitz/filter-flate.c`). `cmake/ImportMuPDF.cmake` gets the #229 pattern
 for each: SHA-256 of the file with CRLF normalised to LF, compared at configure against a
 recorded value; a change fails configure with a message naming #227 and the rules to re-check.
-The ten files join `CMAKE_CONFIGURE_DEPENDS`. A renamed field fails the build anyway; the hash
+The eleven files join `CMAKE_CONFIGURE_DEPENDS`. A renamed field fails the build anyway; the hash
 catches a changed rule.
 
 ## 4. XPS in the strip
