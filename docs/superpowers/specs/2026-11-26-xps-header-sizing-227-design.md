@@ -381,7 +381,10 @@ With a test-owned context and document that collects the context's warnings (the
 7. Mutation checks before commit (`mutation-test-hygiene`): the fold keeping the last duplicate
    instead of the first (p13 must fail), skipping the binding (the escaped fixture must fail), a
    cut only at the first `>` (p02 must fail), a parse error ending the search instead of trying the
-   next `>` (p15 must fail), a parse error left uncleared (the error-state test must fail),
+   next `>` (p15 must fail), a parse error left uncleared (a test whose LAST cut throws must
+   fail: a page with 16 quoted `>` before the root ends; MuPDF clears the error code at the end
+   of every `fz_try` that did not throw, so a page whose search goes on after a throwing cut, as
+   p15's does, cannot show the residue — found in Task 3),
    dropping the ASCII rule (p08 must fail), and the data
    start taken from the central record's name and extra lengths (p01 must leave the Direct route),
    and the sizes taken from the local header (p02 and p05 must leave it). A prefetch forced to

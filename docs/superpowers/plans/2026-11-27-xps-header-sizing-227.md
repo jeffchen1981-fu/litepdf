@@ -236,7 +236,7 @@ The pages of `xps-sizing.xps` (spec §5.1, with sizes fixed here; `W × H` are t
 
 - [ ] **Step 6: Run** `"[xps]"`. Expected: PASS.
 
-- [ ] **Step 7: Mutation checks** (`mutation-test-hygiene`; restore after each, rebuild, confirm green): cut only at the first `>` → p02 must fail; `Parse::Error` returning nullopt instead of trying the next `>` → p15 must fail; drop `fz_convert_error` from `parse_cut`'s catch → the error-state test must fail; drop the ASCII rule → p08 must fail (it then gives a size where the test expects `None`); accept an `AlternateContent` root's inner FixedPage → p06 must fail. Record each RED in the task report.
+- [ ] **Step 7: Mutation checks** (`mutation-test-hygiene`; restore after each, rebuild, confirm green): cut only at the first `>` → p02 must fail; `Parse::Error` returning nullopt instead of trying the next `>` → p15 must fail; drop `fz_convert_error` from `parse_cut`'s catch → `XpsPageSizer: at most 16 cuts, and a throwing last cut leaves no MuPDF error` must fail (added in Task 3: the briefed error-state test cannot see it, because MuPDF clears the error code at the end of every `fz_try` that did not throw and p15's search goes on); drop the ASCII rule → p08 must fail (it then gives a size where the test expects `None`); accept an `AlternateContent` root's inner FixedPage → p06 must fail. Record each RED in the task report.
 
 - [ ] **Step 8: Commit** the new sources, `CMakeLists.txt`, the test — `feat(core): XPS page sizes from the FixedPage root, stream route (#227)`.
 
