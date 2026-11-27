@@ -8,14 +8,20 @@
 // docs/superpowers/specs/2026-11-26-xps-header-sizing-227-design.md, section 5.1.
 #include "core/Document.hpp"
 #include "core/detail/XpsPageSizer.hpp"
+#include "core/detail/ZipReadAhead.hpp"
+
+#include "chapter_test_kit.hpp"   // utf8_of
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <mupdf/fitz.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
@@ -27,6 +33,7 @@
 
 using namespace litepdf::core;
 namespace fs = std::filesystem;
+using litepdf::test_kit::utf8_of;
 
 namespace {
 
@@ -362,9 +369,9 @@ TEST_CASE("XpsPageSizer: at most 16 cuts, and a throwing last cut leaves no MuPD
     const XpsDims past{670, 870};
     TempFile file{fs::temp_directory_path() /
                   ("litepdf-xps-227-cuts-" + std::to_string(GetCurrentProcessId()) + ".xps")};
-    write_xps(file.path.string(), {page_with_quoted_gt(15, fits), page_with_quoted_gt(16, past)});
+    write_xps(utf8_of(file.path), {page_with_quoted_gt(15, fits), page_with_quoted_gt(16, past)});
 
-    OwnDocument own(file.path.string());
+    OwnDocument own(utf8_of(file.path));
     REQUIRE(own.page_count() == 2);
     auto sizer = own.sizer(2);
     REQUIRE(sizer != nullptr);
@@ -391,4 +398,77 @@ TEST_CASE("XpsPageSizer: at most 16 cuts, and a throwing last cut leaves no MuPD
 
     INFO("warnings:" << '\n' << own.warnings);
     CHECK(own.warnings.find(kUnhandled) == std::string::npos);
+}
+
+TEST_CASE("XpsPageSizer: a part that fails to inflate leaves no MuPDF error", "[core][xps]") {
+    // A copy of xps-sizing.xps whose p14 (deflated) has every compressed byte
+    // overwritten with 0xFF, file length and offsets unchanged: the first
+    // byte is a reserved deflate block type, so the flate filter throws
+    // "zlib error" on the first read. fz_read does not pass that on:
+    // fz_available (stream.h) catches every error but FZ_ERROR_TRYLATER,
+    // reports it through the error callback, warns and ends the stream. So the
+    // page is declined as a stream that ended without a root.
+    constexpr int kDamagedPage = 14;
+    const char* const kDamagedName = "Documents/1/Pages/p14.fpage";
+    TempFile file{fs::temp_directory_path() /
+                  ("litepdf-xps-227-damaged-" + std::to_string(GetCurrentProcessId()) + ".xps")};
+    REQUIRE(fs::copy_file(kSizing, file.path, fs::copy_options::overwrite_existing));
+
+    const auto entries = detail::read_zip_directory(file.path.wstring());
+    REQUIRE(entries.has_value());
+    const detail::ZipEntryRef* entry = nullptr;
+    for (const detail::ZipEntryRef& e : *entries) {
+        if (e.name == kDamagedName) entry = &e;
+    }
+    REQUIRE(entry != nullptr);
+
+    std::vector<unsigned char> bytes;
+    {
+        std::ifstream in(file.path, std::ios::binary);
+        REQUIRE(in);
+        bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    const std::size_t lho = static_cast<std::size_t>(entry->local_header_offset);
+    REQUIRE(lho + 30 <= bytes.size());
+    const unsigned char* const local = bytes.data() + lho;
+    REQUIRE(std::memcmp(local, "PK\x03\x04", 4) == 0);
+    const unsigned method = local[8] | (local[9] << 8);
+    REQUIRE(method == 8);
+    const std::size_t name_len = local[26] | (local[27] << 8);
+    const std::size_t extra_len = local[28] | (local[29] << 8);
+    const std::size_t data = lho + 30 + name_len + extra_len;
+    REQUIRE(entry->compressed_size > 1);
+    REQUIRE(data + entry->compressed_size <= bytes.size());
+    std::fill(bytes.begin() + static_cast<std::ptrdiff_t>(data),
+              bytes.begin() + static_cast<std::ptrdiff_t>(data + entry->compressed_size),
+              static_cast<unsigned char>(0xFF));
+    {
+        std::ofstream out(file.path, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(bytes.data()),
+                  static_cast<std::streamsize>(bytes.size()));
+        REQUIRE(out);
+    }
+
+    {
+        OwnDocument own(utf8_of(file.path));
+        std::string errors;   // MuPDF's report of the zlib error, kept off stderr
+        fz_set_error_callback(own.ctx, [](void* user, const char* message) noexcept {
+            *static_cast<std::string*>(user) += std::string(message) + "\n";
+        }, &errors);
+        REQUIRE(own.page_count() == static_cast<std::size_t>(kSizingPages));
+        auto sizer = own.sizer(kSizingPages);
+        REQUIRE(sizer != nullptr);
+
+        Route route = Route::Stream;
+        CHECK_FALSE(sizer->header_size(kDamagedPage - 1, &route).has_value());
+        CHECK(route == Route::None);
+        own.throw_on_context();
+
+        INFO("warnings:" << '\n' << own.warnings << "errors:" << '\n' << errors);
+        // The damage was read (not, say, the entry missed): MuPDF's stream
+        // layer reported it and ended the stream.
+        CHECK(errors.find("zlib error") != std::string::npos);
+        CHECK(own.warnings.find("read error; treating as end of file") != std::string::npos);
+        CHECK(own.warnings.find(kUnhandled) == std::string::npos);
+    }
 }
