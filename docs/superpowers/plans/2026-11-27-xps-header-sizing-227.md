@@ -162,7 +162,7 @@ The pages of `xps-sizing.xps` (spec §5.1, with sizes fixed here; `W × H` are t
 | p04 | `Width="&#56;16" Height="500"` | 816 × 500 | Direct |
 | p05 | stored (method 0); local CRC/sizes zeroed | 500 × 400 | Direct |
 | p06 | `<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="xps"><FixedPage Width="640" Height="480" ...>` (`Requires="xps"` is the one MuPDF takes, xps-common.c:43-48, so it loads) | 640 × 480 | None |
-| p07 | UTF-16LE with BOM, deflated | 700 × 900 | None |
+| p07 | UTF-16LE with BOM, deflated | 700 × 900 | None (Direct since UTF-16 roots were added after the PR opened; spec §5.1 holds the current table, with p16) |
 | p08 | `xml:lang="中文"` (UTF-8) before `Width` | 720 × 960 | None |
 | p09 | no `Height` (MuPDF's load throws) | 800 × – | None |
 | p10 | a 20 KB attribute value (no `>`) before `Width` | 610 × 810 | None |
@@ -208,7 +208,7 @@ The pages of `xps-sizing.xps` (spec §5.1, with sizes fixed here; `W × H` are t
   - Add `OwnDocument::sizer(std::size_t page_count)` returning `detail::XpsPageSizer::create(ctx, doc, path, page_count)` (the member Task 2 left out).
   - `XpsPageSizer: create applies only to an XPS with a matching page list` — non-null for both fixtures with the right `page_count`; null for `tests/fixtures/simple.pdf`; null for `xps-sizing.xps` with `page_count` 14 and 16.
   - `XpsPageSizer: before prepare_all every page takes the stream route or none` — for each table row: rows `None` give nullopt and `Route::None`; every other row gives `Route::Stream` and a size bitwise equal to `loaded_size`; p13 gives 300 × 300; the escaped fixture's three pages `Stream` and equal.
-  - `XpsPageSizer: declined pages leave no MuPDF error behind` (Review Focus 3) — as `CbzPageSizer: declined pages leave no MuPDF error behind` (`test_cbz_page_sizer.cpp:262-281`): `header_size` on p15 (a throwing cut), p06, p07, p08, p10, p12, each followed by `own.throw_on_context()`; then `CHECK(own.warnings.find("UNHANDLED EXCEPTION!") == std::string::npos)`. A check of `fz_caught` at the end only would miss a residue that a later throw overwrites (error.c:335-339).
+  - `XpsPageSizer: declined pages leave no MuPDF error behind` (Review Focus 3) — as `CbzPageSizer: declined pages leave no MuPDF error behind` (`test_cbz_page_sizer.cpp:262-281`): `header_size` on p15 (a throwing cut), p06, p07 (dropped once UTF-16 roots were sized), p08, p10, p12, each followed by `own.throw_on_context()`; then `CHECK(own.warnings.find("UNHANDLED EXCEPTION!") == std::string::npos)`. A check of `fz_caught` at the end only would miss a residue that a later throw overwrites (error.c:335-339).
 
 - [ ] **Step 2: Run** `"[xps]"`. Expected: build fails (no `XpsPageSizer`).
 

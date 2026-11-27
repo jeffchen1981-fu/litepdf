@@ -33,7 +33,9 @@ xps-sizing.xps has 16 pages; W x H are the root's Width/Height values:
        throws)                                                     650 x 850
   p16  UTF-16BE with a BOM, no declaration; before Width a CJK
        xml:lang and a Name of twenty U+4E3E (bytes 4E 3E, a 0x3E
-       byte that is no '>') and one U+1F600 (a surrogate pair)     740 x 980
+       byte that is no '>'), one U+1F600 (a surrogate pair), nine
+       quoted '>' (cuts that throw, all in the first 512 bytes)
+       and 200 'n', so the root's '>' lies past the first read    740 x 980
 
 xps-escaped-name.xps has three pages: page1.fpage 300 x 200, the raw entry
 name #U0070age2.fpage (ASCII, no UTF-8 flag; MuPDF renames it page2.fpage)
@@ -237,8 +239,9 @@ def make_sizing():
     one("p15.fpage", "p15.fpage", page(650, 850, attrs_before=' Name="a>b"'))
     pages.append((PAGES_DIR + "p16.fpage", [(
         PAGES_DIR + "p16.fpage",
-        b"\xfe\xff" + page(740, 980, attrs_before=' xml:lang="%s" Name="%s%s"'
-                            % (CJK_LANG, FALSE_GT * 20, SMILE)).encode("utf-16-be"), D)]))
+        b"\xfe\xff" + page(740, 980, attrs_before=' xml:lang="%s" Name="%s%s%s%s"'
+                            % (CJK_LANG, FALSE_GT * 20, SMILE, "a>" * 9, "n" * 200))
+        .encode("utf-16-be"), D)]))
 
     parts = package_parts([ref for ref, _ in pages])
     for _, entries in pages:
@@ -340,10 +343,14 @@ def check_sizing(blob):
     p16t = p16[2:].decode("utf-16-be")
     assert p16t.startswith("<FixedPage ") and "<?xml" not in p16t
     assert p16t.index('xml:lang="%s"' % CJK_LANG) < p16t.index("Width=")
-    assert p16t.index(FALSE_GT * 20 + SMILE) < p16t.index("Width=")
+    assert p16t.index(FALSE_GT * 20 + SMILE + "a>" * 9) < p16t.index("Width=")
     assert 'Width="740" Height="980"' in p16t
-    root16 = p16[:p16.index(">".encode("utf-16-be")) + 2]
-    assert root16.count(b">") == 21, root16.count(b">")   # 20 false bytes + the root's
+    tail16 = 'Height="980">'.encode("utf-16-be")
+    root_end = p16.index(tail16) + len(tail16)    # bytes through the root's '>' unit
+    gt_units = [i for i in range(2, root_end, 2) if p16[i:i + 2] == b"\x00>"]
+    assert len(gt_units) == 10, gt_units          # nine quoted, then the root's
+    assert gt_units[8] + 2 <= 512 < gt_units[9], gt_units
+    assert p16[:root_end].count(b">") == 30       # 20 false bytes + 10 units
     assert b"\xd8\x3d\xde\x00" in p16
     # p01 sanity and page order in the FixedDocument.
     refs = [s for s in fdoc.split('Source="')[1:]]

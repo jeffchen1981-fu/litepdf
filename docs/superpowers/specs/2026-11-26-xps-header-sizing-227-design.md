@@ -374,7 +374,7 @@ tell):
 | p13 | two entries `p13.fpage` (300 × 300) then `P13.fpage` (400 × 400) | Direct, 300 × 300 |
 | p14 | a 64 KB page (random-word Glyphs) behind a short root | Direct |
 | p15 | `Name="a>b"` before `Width` (a `>` inside a quoted value, so the first cut throws) | Direct |
-| p16 | UTF-16BE with BOM, no declaration; before `Width`, a CJK `xml:lang` and a `Name` of twenty U+4E3E (each `4E 3E`) and one U+1F600 (a surrogate pair) | Direct |
+| p16 | UTF-16BE with BOM, no declaration; before `Width`, a CJK `xml:lang` and a `Name` of twenty U+4E3E (each `4E 3E`), one U+1F600 (a surrogate pair), nine quoted `>` within the first 512 bytes and 200 `n`, so the root's `>` lies past the first read | Direct (tenth cut) |
 
 `tests/fixtures/xps-sizing.xps` (16 pages) and `tests/fixtures/xps-escaped-name.xps`: three pages
 of which one entry's raw name, written without the UTF-8 flag, contains `#U0070` (MuPDF renames
@@ -410,7 +410,8 @@ With a test-owned context and document that collects the context's warnings (the
    dropping the ASCII rule (p08 must fail), for UTF-16 a cut at any `>` byte (p07 and p16 must
    leave the Direct route), a cut one byte short of its unit (p07 must), a unit read
    little-endian whatever the BOM (p16 must), a unit's high byte ignored (p16 must: twenty
-   false cuts pass the limit), the ASCII rule applied to UTF-16 cuts too (p16 must), and the data
+   false cuts pass the limit), a scan that restarts at the BOM on every read (p16 must: its
+   nine quoted cuts count twice), the ASCII rule applied to UTF-16 cuts too (p16 must), and the data
    start taken from the central record's name and extra lengths (p01 must leave the Direct route),
    and the sizes taken from the local header (p02 and p05 must leave it). A prefetch forced to
    fail (test seam) must leave every Direct row Direct.
