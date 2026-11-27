@@ -194,11 +194,15 @@ them. Method 0: `fz_open_null_filter(file, uncompressed_size, data)`, as `open_z
 (unzip.c:518-519). Method 8: a null filter `fz_open_null_filter(file, compressed_size, data)`
 under `fz_open_flated(null, -15)` — the same inflate as MuPDF's stream, bounded by the entry so a
 read never runs into the next local header, and never cut short of the entry, so the flate
-filter's "premature end" warning (filter-flate.c:75-78) cannot fire on an intact entry. Both
-streams are locals of their own (`fz_var`), each dropped in `fz_always`: each filter keeps its
-chain (`fz_keep_stream`, filter-basic.c:77, filter-flate.c:142), so a nested call that drops only
-the outer stream leaks the null filter and with it a reference on MuPDF's file, which then stays
-open after the document is dropped. Any other method → nullopt (MuPDF throws).
+filter's "premature end" warning (filter-flate.c:75-78) cannot fire on an intact entry. Each
+filter keeps its chain (`fz_keep_stream`, filter-basic.c:77, filter-flate.c:142), so a nested
+call that drops only the outer stream leaks the null filter and with it a reference on MuPDF's
+file, which then stays open after the document is dropped. Ownership: the opening helper holds
+both streams as `fz_var` locals and hands ONE owned stream to its caller (method 0 the null
+filter; method 8 the flate stream, after dropping its own null reference in `fz_always`); a throw
+drops whatever it opened. The caller reads it (§3.3) outside any `fz_try` and drops it once —
+never before it is read (corrected at the plan gate and in Task 4). An opening that throws sends
+the page to the stream route. Any other method → nullopt (MuPDF throws).
 Then §3.3. A failure of the header read itself (short read, wrong signature) → stream route for
 that page. A flate error while reading the data does not throw: `fz_read` goes through
 `fz_available` (stream.h:399-425), which reports the error, warns "read error; treating as end of
