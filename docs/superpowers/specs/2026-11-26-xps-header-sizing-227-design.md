@@ -502,6 +502,11 @@ Pass on all three files. Before round B the word file took 235-258 ms cold pinne
 its 1,004 sizes is equal to `fz_load_page` + `fz_bound_page` (`check: checked=1004
 mismatched=0`, from a probe build that compares every page; not committed).
 
+Round B reads lower than round A on the unchanged dense and scattered files, and no code explains
+it: back to back on dense at 23:50, a build of 8162313's sources (with the probe counters) read
+18.8 and 19.0 ms warm and 97c1a67 16.8 and 16.8 ms. So the gap is the machine's state on the
+morning of round A, not the code. Both rounds pass, so neither is retaken.
+
 ## 7. Review
 
 Tier Full (src/core, CMake). Spec gate on this file; PR-merge gate before merge.

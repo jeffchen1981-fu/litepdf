@@ -15,8 +15,8 @@ release has a matching `vX.Y.Z` git tag. Releases before 1.0.0 were tagged
   page is sized from the start of its page part instead of the whole page, so a
   1,003-page XPS of text-heavy pages takes about 45 ms to size on a cold start
   instead of about 290 ms, and about 30 ms once warm instead of about 250 ms.
-  XPS files saved from Microsoft Word, whose pages are UTF-16, size as fast
-  (#227).
+  XPS files saved from Microsoft Word, whose pages are UTF-16, size as quickly
+  as other XPS files (#227).
 
 ### Changed
 
