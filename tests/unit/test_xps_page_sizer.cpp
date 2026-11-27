@@ -7,6 +7,7 @@
 // listed there and in the spec,
 // docs/superpowers/specs/2026-11-26-xps-header-sizing-227-design.md, section 5.1.
 #include "core/Document.hpp"
+#include "core/detail/XpsPageSizer.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -14,9 +15,18 @@
 
 #include <cstddef>
 #include <cstring>
+#include <filesystem>
+#include <memory>
+#include <optional>
 #include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
+
+#include <windows.h>
 
 using namespace litepdf::core;
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -25,6 +35,10 @@ constexpr const char* kEscaped = "tests/fixtures/xps-escaped-name.xps";
 constexpr int kSizingPages = 15;
 constexpr int kEscapedPages = 3;
 constexpr int kNoHeightPage = 9;   // p09: no Height, MuPDF's load throws
+constexpr int kDuplicatePage = 13; // p13: two entries differing in case, MuPDF takes the first
+constexpr const char* kUnhandled = "UNHANDLED EXCEPTION!";
+
+using Route = detail::XpsPageSizer::Route;
 
 // One xps-sizing.xps page. `direct`: the root-tag route sizes it once
 // prepare_all has run (true), or declines it (false); before prepare_all a
@@ -100,6 +114,10 @@ struct OwnDocument {
         }
         REQUIRE(caught);
     }
+
+    std::unique_ptr<detail::XpsPageSizer> sizer(std::size_t page_count) {
+        return detail::XpsPageSizer::create(ctx, doc, path.c_str(), page_count);
+    }
 };
 
 // fz_load_page + fz_bound_page on the test's own context, as Document::page_size
@@ -139,6 +157,84 @@ PageSize table_size(const XpsDims& d) {
     return PageSize{d.w * 72.0f / 96.0f - 0.0f, d.h * 72.0f / 96.0f - 0.0f};
 }
 
+// A FixedPage part whose root carries `quoted` attributes holding a '>' before
+// Width, so each of the first `quoted` cuts ends inside a value and throws.
+std::string page_with_quoted_gt(int quoted, const XpsDims& d) {
+    std::string s = "<FixedPage xmlns=\"http://schemas.microsoft.com/xps/2005/06\"";
+    for (int k = 1; k <= quoted; ++k) s += " q" + std::to_string(k) + "=\"x>y\"";
+    s += " Width=\"" + std::to_string(d.w) + "\" Height=\"" + std::to_string(d.h) +
+         "\"></FixedPage>";
+    return s;
+}
+
+// Writes an XPS of one FixedDocument with `pages` (whole FixedPage parts, as
+// Documents/1/Pages/<n>.fpage) to `utf8_path`, with MuPDF's zip writer. The
+// parts are built before the fz_try: no object with a destructor inside it (#179).
+void write_xps(const std::string& utf8_path, const std::vector<std::string>& pages) {
+    std::vector<std::pair<std::string, std::string>> parts;
+    parts.emplace_back("_rels/.rels",
+                       "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+                       "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/"
+                       "relationships\"><Relationship Id=\"R1\" Type=\"http://schemas.microsoft"
+                       ".com/xps/2005/06/fixedrepresentation\" "
+                       "Target=\"/FixedDocumentSequence.fdseq\"/></Relationships>");
+    parts.emplace_back("FixedDocumentSequence.fdseq",
+                       "<FixedDocumentSequence xmlns=\"http://schemas.microsoft.com/xps/2005/06\">"
+                       "<DocumentReference Source=\"/Documents/1/FixedDocument.fdoc\"/>"
+                       "</FixedDocumentSequence>");
+    std::string fdoc = "<FixedDocument xmlns=\"http://schemas.microsoft.com/xps/2005/06\">";
+    for (std::size_t i = 0; i < pages.size(); ++i) {
+        fdoc += "<PageContent Source=\"/Documents/1/Pages/" + std::to_string(i + 1) +
+                ".fpage\"/>";
+    }
+    fdoc += "</FixedDocument>";
+    parts.emplace_back("Documents/1/FixedDocument.fdoc", fdoc);
+    for (std::size_t i = 0; i < pages.size(); ++i) {
+        parts.emplace_back("Documents/1/Pages/" + std::to_string(i + 1) + ".fpage", pages[i]);
+    }
+    const std::pair<std::string, std::string>* const part = parts.data();
+    const std::size_t count = parts.size();
+
+    fz_context* ctx = fz_new_context(nullptr, nullptr, FZ_STORE_DEFAULT);
+    REQUIRE(ctx != nullptr);
+    fz_zip_writer* zip = nullptr;
+    fz_buffer* buf = nullptr;
+    bool ok = true;
+    fz_var(zip);
+    fz_var(buf);
+    fz_try(ctx) {
+        zip = fz_new_zip_writer(ctx, utf8_path.c_str());
+        for (std::size_t i = 0; i < count; ++i) {
+            buf = fz_new_buffer_from_copied_data(
+                ctx, reinterpret_cast<const unsigned char*>(part[i].second.data()),
+                part[i].second.size());
+            fz_write_zip_entry(ctx, zip, part[i].first.c_str(), buf, 1);
+            fz_drop_buffer(ctx, buf);
+            buf = nullptr;
+        }
+        fz_close_zip_writer(ctx, zip);
+    }
+    fz_always(ctx) {
+        fz_drop_buffer(ctx, buf);
+        fz_drop_zip_writer(ctx, zip);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        ok = false;
+    }
+    fz_drop_context(ctx);
+    REQUIRE(ok);
+}
+
+// Removes the file at `path` when it goes out of scope.
+struct TempFile {
+    fs::path path;
+    ~TempFile() {
+        std::error_code ec;
+        fs::remove(path, ec);
+    }
+};
+
 }  // namespace
 
 TEST_CASE("XpsPageSizer: the fixtures load as the table says", "[core][xps]") {
@@ -170,4 +266,129 @@ TEST_CASE("XpsPageSizer: the fixtures load as the table says", "[core][xps]") {
             CHECK(same_bits(got, table_size(kEscapedDims[i])));
         }
     }
+}
+
+TEST_CASE("XpsPageSizer: create applies only to an XPS with a matching page list",
+          "[core][xps]") {
+    SECTION("xps-sizing.xps") {
+        OwnDocument own(kSizing);
+        CHECK(own.sizer(kSizingPages) != nullptr);
+        CHECK(own.sizer(kSizingPages - 1) == nullptr);
+        CHECK(own.sizer(kSizingPages + 1) == nullptr);
+    }
+    SECTION("xps-escaped-name.xps") {
+        OwnDocument own(kEscaped);
+        CHECK(own.sizer(kEscapedPages) != nullptr);
+    }
+    SECTION("simple.pdf, another handler") {
+        OwnDocument own("tests/fixtures/simple.pdf");
+        CHECK(own.sizer(own.page_count()) == nullptr);
+    }
+}
+
+TEST_CASE("XpsPageSizer: before prepare_all every page takes the stream route or none",
+          "[core][xps]") {
+    SECTION("xps-sizing.xps") {
+        OwnDocument own(kSizing);
+        auto sizer = own.sizer(kSizingPages);
+        REQUIRE(sizer != nullptr);
+        for (const XpsRow& row : kRows) {
+            CAPTURE(row.page);
+            Route route = Route::Direct;   // anything but what is expected
+            const std::optional<PageSize> got =
+                sizer->header_size(static_cast<std::size_t>(row.page - 1), &route);
+            if (!row.direct) {
+                CHECK_FALSE(got.has_value());
+                CHECK(route == Route::None);
+                continue;
+            }
+            CHECK(route == Route::Stream);
+            REQUIRE(got.has_value());
+            bool threw = false;
+            const PageSize want = loaded_size(own, row.page - 1, &threw);
+            REQUIRE_FALSE(threw);
+            CHECK(same_bits(*got, want));
+            if (row.page == kDuplicatePage) {
+                CHECK(same_bits(*got, table_size(XpsDims{300, 300})));
+            }
+        }
+        Route past = Route::Stream;
+        CHECK_FALSE(sizer->header_size(kSizingPages, &past).has_value());
+        CHECK(past == Route::None);
+    }
+    SECTION("xps-escaped-name.xps") {
+        OwnDocument own(kEscaped);
+        auto sizer = own.sizer(kEscapedPages);
+        REQUIRE(sizer != nullptr);
+        for (int i = 0; i < kEscapedPages; ++i) {
+            CAPTURE(i);
+            Route route = Route::None;
+            const std::optional<PageSize> got =
+                sizer->header_size(static_cast<std::size_t>(i), &route);
+            CHECK(route == Route::Stream);
+            REQUIRE(got.has_value());
+            bool threw = false;
+            const PageSize want = loaded_size(own, i, &threw);
+            REQUIRE_FALSE(threw);
+            CHECK(same_bits(*got, want));
+        }
+    }
+}
+
+TEST_CASE("XpsPageSizer: declined pages leave no MuPDF error behind", "[core][xps]") {
+    OwnDocument own(kSizing);
+    auto sizer = own.sizer(kSizingPages);
+    REQUIRE(sizer != nullptr);
+
+    // p15's first cut throws in the parser; p06-p08, p10 and p12 are declined
+    // (p12's entry is not there, so opening it throws).
+    for (const int page : {15, 6, 7, 8, 10, 12}) {
+        CAPTURE(page);
+        (void)sizer->header_size(static_cast<std::size_t>(page - 1));
+        own.throw_on_context();
+    }
+
+    INFO("warnings:\n" << own.warnings);
+    CHECK(own.warnings.find(kUnhandled) == std::string::npos);
+}
+
+TEST_CASE("XpsPageSizer: at most 16 cuts, and a throwing last cut leaves no MuPDF error",
+          "[core][xps]") {
+    // Page 1: fifteen cuts throw, the sixteenth ends the root tag. Page 2: all
+    // sixteen throw and the search stops there, so the last MuPDF call of the
+    // sizer is a parse that threw (no fixture page ends that way: a later
+    // fz_try resets the error code, error.c fz_do_catch).
+    const XpsDims fits{660, 860};
+    const XpsDims past{670, 870};
+    TempFile file{fs::temp_directory_path() /
+                  ("litepdf-xps-227-cuts-" + std::to_string(GetCurrentProcessId()) + ".xps")};
+    write_xps(file.path.string(), {page_with_quoted_gt(15, fits), page_with_quoted_gt(16, past)});
+
+    OwnDocument own(file.path.string());
+    REQUIRE(own.page_count() == 2);
+    auto sizer = own.sizer(2);
+    REQUIRE(sizer != nullptr);
+
+    Route route = Route::None;
+    const std::optional<PageSize> first = sizer->header_size(0, &route);
+    CHECK(route == Route::Stream);
+    REQUIRE(first.has_value());
+    CHECK(same_bits(*first, table_size(fits)));
+
+    route = Route::Stream;
+    CHECK_FALSE(sizer->header_size(1, &route).has_value());
+    CHECK(route == Route::None);
+    own.throw_on_context();
+
+    // Both pages load in full: only the cut limit declined page 2.
+    for (int i = 0; i < 2; ++i) {
+        CAPTURE(i);
+        bool threw = false;
+        const PageSize loaded = loaded_size(own, i, &threw);
+        REQUIRE_FALSE(threw);
+        CHECK(same_bits(loaded, table_size(i == 0 ? fits : past)));
+    }
+
+    INFO("warnings:" << '\n' << own.warnings);
+    CHECK(own.warnings.find(kUnhandled) == std::string::npos);
 }
