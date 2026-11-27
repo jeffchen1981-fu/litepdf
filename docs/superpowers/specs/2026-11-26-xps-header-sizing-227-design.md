@@ -437,6 +437,33 @@ read-ahead disabled, and `xps-escaped-name`-style binding failure on the dense f
 throughout). Raw output saved next to the scripts. A miss stops the PR before `strip_format_ok`
 changes.
 
+### 6.1 Record
+
+Gate run 2026-11-27 on a Release `litepdf-cli` built from head 50f9da0, drive NVMe, i7-12700.
+Raw output: `227-tools/gate/raw-<tag>-<file>-<kind>.txt` (not committed). The hour-idle singles
+were taken at 10:56 on the binary built from 50f9da0's sources; `git diff --stat 50f9da0 HEAD --
+src/core` is empty (the later work changed only `strip_format_ok`, tests, smoke and docs).
+
+- **dense**: 1,003 pages, 4,282,580 bytes, 2,011 zip entries.
+- **scattered**: 1,003 pages, 69,972,648 bytes, 3,014 zip entries; every page part is followed
+  by a 64 KiB stored pad part (`scatter-xps.py` asserted it, and that the page count equals the
+  dense file's).
+- **E-core**: the machine has 12 cores / 20 logical CPUs (8 P with HT, 4 E). A single-thread
+  loop pinned to logical CPU 0 / 2 ran in 503-537 ms, pinned to 16 / 17 in 1152-1270 ms (about
+  2.4x slower), so mask 0x10000 is an E-core.
+
+`page_sizes` times in ms (unpinned unless noted):
+
+| file | cold singles | warm median | E-core warm median | hour-idle single |
+|---|---|---|---|---|
+| dense | 43.3 / 42.0 / 45.4 | 30.0 | 34.0 | 46.4 |
+| scattered | 49.8 / 47.5 / 49.1 | 33.5 | 36.7 | 64.1 |
+| scattered, read-ahead disabled (recorded) | 210.8 / 253.2 / 212.3 | 32.0 | | |
+| dense, stream route throughout (recorded) | 226.5 / 203.0 / 258.2 | 176.1 | | |
+
+Pass: every gated reading is at or under 100 ms. Without the read-ahead the scattered cold reading
+is 2 to 2.5 times the gate, so the read-ahead is what holds it.
+
 ## 7. Review
 
 Tier Full (src/core, CMake). Spec gate on this file; PR-merge gate before merge.
