@@ -68,13 +68,16 @@ inline bool extension_is(const std::filesystem::path::string_type& ext, const ch
 // CBZ passes since #176: a page is sized from its image header, read ahead for
 // all pages at once (docs/superpowers/specs/2026-10-25-cbz-header-sizing-176-design.md).
 // FB2 passes since #169: the book is laid out by the page count Document::open
-// takes, so sizing its pages afterwards reads nothing. XPS stays out: sizing a page parses that page's whole
-// FixedPage part, and an 870-page document missed the gate (spec 4.4; #227).
+// takes, so sizing its pages afterwards reads nothing.
+// XPS passes since #227: a page is sized from the root of its FixedPage part, its zip entry
+// found through a directory bound to MuPDF's
+// (docs/superpowers/specs/2026-11-26-xps-header-sizing-227-design.md).
 inline bool strip_format_ok(const std::filesystem::path& source, int page_count) {
     if (page_count < 1) return false;
     const std::filesystem::path::string_type ext = source.extension().native();
     return extension_is(ext, ".pdf") || extension_is(ext, ".epub") ||
-           extension_is(ext, ".cbz") || extension_is(ext, ".fb2") || extension_is(ext, ".svg");
+           extension_is(ext, ".cbz") || extension_is(ext, ".fb2") || extension_is(ext, ".svg") ||
+           extension_is(ext, ".xps");
 }
 
 // #229 (#235): a file named .fb2 gets one render worker instead of
