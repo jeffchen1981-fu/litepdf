@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -242,6 +243,99 @@ struct TempFile {
     }
 };
 
+// Removes the directory at `path` and everything in it when it goes out of scope.
+struct TempTree {
+    fs::path path;
+    ~TempTree() {
+        std::error_code ec;
+        fs::remove_all(path, ec);
+    }
+};
+
+// The prefetch seam's record (spec section 3.9). Reset by PrefetchSeam.
+struct PrefetchLog {
+    int calls = 0;
+    std::wstring path;
+    std::vector<detail::FileRange> ranges;
+};
+PrefetchLog g_prefetch_log;
+
+// Records the call and fails it, as a failed PrefetchVirtualMemory would.
+bool failing_prefetch(const std::wstring& path,
+                      const std::vector<detail::FileRange>& ranges) noexcept {
+    ++g_prefetch_log.calls;
+    try {
+        g_prefetch_log.path = path;
+        g_prefetch_log.ranges = ranges;
+    } catch (...) {
+    }
+    return false;
+}
+
+// Installs `fn` as prepare_all's read-ahead call; the real one comes back at
+// scope exit, whatever the test does.
+struct PrefetchSeam {
+    explicit PrefetchSeam(detail::XpsPageSizer::PrefetchFn fn) {
+        g_prefetch_log = PrefetchLog{};
+        detail::XpsPageSizer::set_prefetch_for_test(fn);
+    }
+    ~PrefetchSeam() { detail::XpsPageSizer::set_prefetch_for_test(nullptr); }
+    PrefetchSeam(const PrefetchSeam&) = delete;
+    PrefetchSeam& operator=(const PrefetchSeam&) = delete;
+};
+
+// Spec section 3.9: bytes read ahead from each page's local header.
+constexpr std::size_t kReadAheadSpan = 12 * 1024;
+
+std::vector<unsigned char> read_bytes(const fs::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    REQUIRE(in);
+    return std::vector<unsigned char>(std::istreambuf_iterator<char>(in),
+                                      std::istreambuf_iterator<char>());
+}
+
+void write_bytes(const fs::path& path, const std::vector<unsigned char>& bytes) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(bytes.data()),
+              static_cast<std::streamsize>(bytes.size()));
+    REQUIRE(out);
+}
+
+// The first central-directory record named exactly `name`.
+const detail::ZipEntryRef* find_entry(const std::vector<detail::ZipEntryRef>& entries,
+                                      const std::string& name) {
+    for (const detail::ZipEntryRef& e : entries) {
+        if (e.name == name) return &e;
+    }
+    return nullptr;
+}
+
+// Where `entry`'s data starts in `bytes`: after its local header and the
+// local header's own name and extra field. Checks the signature and that the
+// entry is deflated.
+std::size_t deflated_data_start(const std::vector<unsigned char>& bytes,
+                                const detail::ZipEntryRef& entry) {
+    const std::size_t lho = static_cast<std::size_t>(entry.local_header_offset);
+    REQUIRE(lho + 30 <= bytes.size());
+    const unsigned char* const local = bytes.data() + lho;
+    REQUIRE(std::memcmp(local, "PK\x03\x04", 4) == 0);
+    const unsigned method = local[8] | (local[9] << 8);
+    REQUIRE(method == 8);
+    const std::size_t name_len = local[26] | (local[27] << 8);
+    const std::size_t extra_len = local[28] | (local[29] << 8);
+    const std::size_t data = lho + 30 + name_len + extra_len;
+    REQUIRE(data + entry.compressed_size <= bytes.size());
+    return data;
+}
+
+// xps-sizing.xps's zip name for page `page` (1-based); p11 is stored in lower
+// case, p13's first entry is the lower-case one.
+std::string sizing_entry_name(int page) {
+    std::string n = std::to_string(page);
+    if (n.size() < 2) n = "0" + n;
+    return "Documents/1/Pages/p" + n + ".fpage";
+}
+
 }  // namespace
 
 TEST_CASE("XpsPageSizer: the fixtures load as the table says", "[core][xps]") {
@@ -416,38 +510,16 @@ TEST_CASE("XpsPageSizer: a part that fails to inflate leaves no MuPDF error", "[
 
     const auto entries = detail::read_zip_directory(file.path.wstring());
     REQUIRE(entries.has_value());
-    const detail::ZipEntryRef* entry = nullptr;
-    for (const detail::ZipEntryRef& e : *entries) {
-        if (e.name == kDamagedName) entry = &e;
-    }
+    const detail::ZipEntryRef* const entry = find_entry(*entries, kDamagedName);
     REQUIRE(entry != nullptr);
 
-    std::vector<unsigned char> bytes;
-    {
-        std::ifstream in(file.path, std::ios::binary);
-        REQUIRE(in);
-        bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-    }
-    const std::size_t lho = static_cast<std::size_t>(entry->local_header_offset);
-    REQUIRE(lho + 30 <= bytes.size());
-    const unsigned char* const local = bytes.data() + lho;
-    REQUIRE(std::memcmp(local, "PK\x03\x04", 4) == 0);
-    const unsigned method = local[8] | (local[9] << 8);
-    REQUIRE(method == 8);
-    const std::size_t name_len = local[26] | (local[27] << 8);
-    const std::size_t extra_len = local[28] | (local[29] << 8);
-    const std::size_t data = lho + 30 + name_len + extra_len;
+    std::vector<unsigned char> bytes = read_bytes(file.path);
+    const std::size_t data = deflated_data_start(bytes, *entry);
     REQUIRE(entry->compressed_size > 1);
-    REQUIRE(data + entry->compressed_size <= bytes.size());
     std::fill(bytes.begin() + static_cast<std::ptrdiff_t>(data),
               bytes.begin() + static_cast<std::ptrdiff_t>(data + entry->compressed_size),
               static_cast<unsigned char>(0xFF));
-    {
-        std::ofstream out(file.path, std::ios::binary | std::ios::trunc);
-        out.write(reinterpret_cast<const char*>(bytes.data()),
-                  static_cast<std::streamsize>(bytes.size()));
-        REQUIRE(out);
-    }
+    write_bytes(file.path, bytes);
 
     {
         OwnDocument own(utf8_of(file.path));
@@ -470,5 +542,216 @@ TEST_CASE("XpsPageSizer: a part that fails to inflate leaves no MuPDF error", "[
         CHECK(errors.find("zlib error") != std::string::npos);
         CHECK(own.warnings.find("read error; treating as end of file") != std::string::npos);
         CHECK(own.warnings.find(kUnhandled) == std::string::npos);
+    }
+}
+
+TEST_CASE("XpsPageSizer: after prepare_all the routes are the table's", "[core][xps]") {
+    OwnDocument own(kSizing);
+    auto sizer = own.sizer(kSizingPages);
+    REQUIRE(sizer != nullptr);
+    CHECK(sizer->prepare_all());
+    CHECK_FALSE(sizer->prepare_all());   // once
+
+    for (const XpsRow& row : kRows) {
+        CAPTURE(row.page);
+        Route route = Route::Stream;   // anything but what is expected
+        const std::optional<PageSize> got =
+            sizer->header_size(static_cast<std::size_t>(row.page - 1), &route);
+        if (!row.direct) {
+            CHECK_FALSE(got.has_value());
+            CHECK(route == Route::None);
+            continue;
+        }
+        CHECK(route == Route::Direct);
+        REQUIRE(got.has_value());
+        bool threw = false;
+        const PageSize want = loaded_size(own, row.page - 1, &threw);
+        REQUIRE_FALSE(threw);
+        CHECK(same_bits(*got, want));
+        if (row.page == kDuplicatePage) {
+            CHECK(same_bits(*got, table_size(XpsDims{300, 300})));
+        }
+    }
+    own.throw_on_context();
+
+    INFO("warnings:\n" << own.warnings);
+    // Each entry is read inside its own bounds: no "premature end" from the
+    // flate filter, and no error left behind.
+    CHECK(own.warnings.find("premature end") == std::string::npos);
+    CHECK(own.warnings.find(kUnhandled) == std::string::npos);
+}
+
+TEST_CASE("XpsPageSizer: a rewritten zip name keeps every page on the stream route",
+          "[core][xps]") {
+    // One raw name holds #U0070, which MuPDF rewrites: the directory read from
+    // the file no longer binds to MuPDF's, so no page gets an entry index.
+    OwnDocument own(kEscaped);
+    auto sizer = own.sizer(kEscapedPages);
+    REQUIRE(sizer != nullptr);
+    CHECK(sizer->prepare_all());
+    for (int i = 0; i < kEscapedPages; ++i) {
+        CAPTURE(i);
+        Route route = Route::None;
+        const std::optional<PageSize> got = sizer->header_size(static_cast<std::size_t>(i), &route);
+        CHECK(route == Route::Stream);
+        REQUIRE(got.has_value());
+        bool threw = false;
+        const PageSize want = loaded_size(own, i, &threw);
+        REQUIRE_FALSE(threw);
+        CHECK(same_bits(*got, want));
+    }
+}
+
+TEST_CASE("XpsPageSizer: a failed read-ahead keeps the direct route", "[core][xps]") {
+    const PrefetchSeam seam(failing_prefetch);
+
+    SECTION("xps-sizing.xps") {
+        const auto entries = detail::read_zip_directory(fs::path(kSizing).wstring());
+        REQUIRE(entries.has_value());
+        std::error_code ec;
+        const std::uint64_t file_size = fs::file_size(kSizing, ec);
+        REQUIRE_FALSE(ec);
+
+        OwnDocument own(kSizing);
+        auto sizer = own.sizer(kSizingPages);
+        REQUIRE(sizer != nullptr);
+        CHECK(sizer->prepare_all());
+        CHECK(g_prefetch_log.calls == 1);
+        CHECK(g_prefetch_log.path == fs::path(kSizing).wstring());
+
+        // One range per page that has an entry, in page order: every page but
+        // p12 (pieces), and p13 at its first entry.
+        std::vector<detail::FileRange> want;
+        for (int page = 1; page <= kSizingPages; ++page) {
+            if (page == 12) continue;
+            CAPTURE(page);
+            const detail::ZipEntryRef* const e = find_entry(*entries, sizing_entry_name(page));
+            REQUIRE(e != nullptr);
+            const std::uint64_t left = file_size - e->local_header_offset;
+            want.push_back(detail::FileRange{
+                e->local_header_offset,
+                static_cast<std::size_t>(std::min<std::uint64_t>(kReadAheadSpan, left))});
+        }
+        REQUIRE(g_prefetch_log.ranges.size() == want.size());
+        for (std::size_t k = 0; k < want.size(); ++k) {
+            CAPTURE(k);
+            CHECK(g_prefetch_log.ranges[k].offset == want[k].offset);
+            CHECK(g_prefetch_log.ranges[k].length == want[k].length);
+        }
+
+        for (const XpsRow& row : kRows) {
+            if (!row.direct) continue;
+            CAPTURE(row.page);
+            Route route = Route::None;
+            (void)sizer->header_size(static_cast<std::size_t>(row.page - 1), &route);
+            CHECK(route == Route::Direct);
+        }
+
+        CHECK_FALSE(sizer->prepare_all());
+        CHECK(g_prefetch_log.calls == 1);   // no second read-ahead
+    }
+    SECTION("xps-escaped-name.xps, binding fails") {
+        OwnDocument own(kEscaped);
+        auto sizer = own.sizer(kEscapedPages);
+        REQUIRE(sizer != nullptr);
+        CHECK(sizer->prepare_all());
+        CHECK(g_prefetch_log.calls == 0);
+    }
+}
+
+TEST_CASE("XpsPageSizer: a page damaged past its root still sizes", "[core][xps]") {
+    // Spec section 3.6 item 1: p14's compressed bytes past its first 4 KiB are
+    // overwritten with 0xFF, file length and offsets unchanged. The root tag
+    // inflates from the intact bytes; the full load inflates the damage and
+    // throws.
+    constexpr int kDamagedPage = 14;
+    constexpr std::size_t kIntact = 4096;
+    TempFile file{fs::temp_directory_path() /
+                  ("litepdf-xps-227-past-root-" + std::to_string(GetCurrentProcessId()) + ".xps")};
+    REQUIRE(fs::copy_file(kSizing, file.path, fs::copy_options::overwrite_existing));
+
+    const auto entries = detail::read_zip_directory(file.path.wstring());
+    REQUIRE(entries.has_value());
+    const detail::ZipEntryRef* const entry = find_entry(*entries, sizing_entry_name(kDamagedPage));
+    REQUIRE(entry != nullptr);
+    std::vector<unsigned char> bytes = read_bytes(file.path);
+    const std::size_t data = deflated_data_start(bytes, *entry);
+    REQUIRE(entry->compressed_size > kIntact + 1);
+    std::fill(bytes.begin() + static_cast<std::ptrdiff_t>(data + kIntact),
+              bytes.begin() + static_cast<std::ptrdiff_t>(data + entry->compressed_size),
+              static_cast<unsigned char>(0xFF));
+    write_bytes(file.path, bytes);
+
+    {
+        OwnDocument own(utf8_of(file.path));
+        std::string errors;   // MuPDF's report of the zlib error, kept off stderr
+        fz_set_error_callback(own.ctx, [](void* user, const char* message) noexcept {
+            *static_cast<std::string*>(user) += std::string(message) + "\n";
+        }, &errors);
+
+        bool threw = false;
+        (void)loaded_size(own, kDamagedPage - 1, &threw);
+        CHECK(threw);
+
+        auto sizer = own.sizer(kSizingPages);
+        REQUIRE(sizer != nullptr);
+        REQUIRE(sizer->prepare_all());
+        Route route = Route::None;
+        const std::optional<PageSize> got = sizer->header_size(kDamagedPage - 1, &route);
+        CHECK(route == Route::Direct);
+        REQUIRE(got.has_value());
+        CHECK(same_bits(*got, table_size(kSizingDims[kDamagedPage - 1])));
+        own.throw_on_context();
+
+        INFO("warnings:\n" << own.warnings << "errors:\n" << errors);
+        CHECK(own.warnings.find(kUnhandled) == std::string::npos);
+    }
+}
+
+TEST_CASE("XpsPageSizer: the direct route leaves no stream of the file open", "[core][xps]") {
+    // Spec section 3.4: each filter keeps its chain, so a null filter left
+    // undropped holds a reference on MuPDF's file stream, which then stays
+    // open after the document is dropped, and the file cannot be deleted.
+    TempFile file{fs::temp_directory_path() /
+                  ("litepdf-xps-227-owned-" + std::to_string(GetCurrentProcessId()) + ".xps")};
+    REQUIRE(fs::copy_file(kSizing, file.path, fs::copy_options::overwrite_existing));
+
+    {
+        OwnDocument own(utf8_of(file.path));
+        auto sizer = own.sizer(kSizingPages);
+        REQUIRE(sizer != nullptr);
+        REQUIRE(sizer->prepare_all());
+        int direct = 0;
+        for (std::size_t i = 0; i < static_cast<std::size_t>(kSizingPages); ++i) {
+            Route route = Route::None;
+            (void)sizer->header_size(i, &route);
+            if (route == Route::Direct) ++direct;
+        }
+        CHECK(direct == 9);   // the table's Direct rows, stored and deflated
+    }
+    CHECK(DeleteFileW(file.path.c_str()) != 0);
+}
+
+TEST_CASE("XpsPageSizer: a CJK path takes the direct route", "[core][xps]") {
+    // The sizer's UTF-8 path becomes UTF-16 for its own directory read; a
+    // conversion through the ANSI code page would fail to open the file and
+    // leave every page on the stream route.
+    const TempTree dir{fs::temp_directory_path() / fs::path(L"litepdf-xps-\u6e2c\u8a66")};
+    std::error_code ec;
+    fs::create_directories(dir.path, ec);
+    REQUIRE_FALSE(ec);
+    const fs::path path = dir.path / fs::path(L"\u6587\u4ef6.xps");
+    REQUIRE(fs::copy_file(kSizing, path, fs::copy_options::overwrite_existing));
+
+    {
+        OwnDocument own(utf8_of(path).c_str());
+        auto sizer = own.sizer(kSizingPages);
+        REQUIRE(sizer != nullptr);
+        REQUIRE(sizer->prepare_all());
+        Route route = Route::None;
+        const std::optional<PageSize> got = sizer->header_size(0, &route);
+        CHECK(route == Route::Direct);
+        REQUIRE(got.has_value());
+        CHECK(same_bits(*got, table_size(kSizingDims[0])));
     }
 }

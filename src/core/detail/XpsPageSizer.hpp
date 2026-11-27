@@ -54,7 +54,10 @@ public:
 
     // Every page is about to be sized: builds the direct index (spec section
     // 3.4) and reads every page part's first bytes ahead (section 3.9), once.
-    // True when this call was the one that did it, whatever the outcome.
+    // True when this call was the one that did it, whatever the outcome. A
+    // directory or binding failure leaves every page on the stream route
+    // (section 3.5) and skips the read-ahead; a read-ahead failure keeps the
+    // direct index. Never throws.
     bool prepare_all() noexcept;
 
     // Replaces the read-ahead call prepare_all makes; nullptr restores
@@ -70,6 +73,13 @@ private:
     fz_archive* zip_;    // borrowed: the archive MuPDF opened (xps_document::zip)
     std::vector<std::string> names_;   // page part names, in MuPDF's page order
     std::string utf8_path_;
+
+    // The direct index (spec section 3.4), built by prepare_all: the zip's
+    // central directory, bound to MuPDF's, and per page the entry its name
+    // resolves to. Empty until then, and after a directory or binding failure.
+    bool prepared_ = false;
+    std::vector<ZipEntryRef> entries_;
+    std::vector<std::optional<std::size_t>> entry_of_page_;
 };
 
 }  // namespace litepdf::core::detail
