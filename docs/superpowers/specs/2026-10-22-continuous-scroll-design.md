@@ -272,6 +272,10 @@ for D2D.
   | dense WPF XPS, 1,003 pages, 4.3 MB | 43.3 / 42.0 / 45.4 ms | 30.0 ms | 34.0 ms |
   | the same pages with a 64 KiB unreferenced part after every page part (70 MB) | 49.8 / 47.5 / 49.1 ms | 33.5 ms | 36.7 ms |
 
+  Microsoft Word's "Save as XPS" writes every page part as UTF-16, which the first version
+  declined (235-258 ms cold for 1,004 pages); since the UTF-16 change (Release build of 97c1a67)
+  a 1,004-page Word file reads 27.7 / 27.7 / 28.8 ms cold, 19.6 ms warm and 38.2 ms on an E-core.
+
   Before #227, on the dense file (spike, build 8b9eafb): 249 ms warm, 281-297 ms cold. The cold
   single after an hour idle: 46.4 ms (dense) and 64.1 ms (scattered), recorded in the #227
   spec's section 6.1. A hard drive was not

@@ -462,8 +462,9 @@ changes.
 
 Gate run 2026-11-27 on a Release `litepdf-cli` built from head 50f9da0, drive NVMe, i7-12700.
 Raw output: `227-tools/gate/raw-<tag>-<file>-<kind>.txt` (not committed). The hour-idle singles
-were taken at 10:56 on the binary built from 50f9da0's sources; `git diff --stat 50f9da0 HEAD --
-src/core` is empty (the later work changed only `strip_format_ok`, tests, smoke and docs).
+were taken at 10:56 on the binary built from 50f9da0's sources; up to the PR's first head
+(8162313), `src/core` changed only in one comment of `Document.cpp` (the later work changed
+`strip_format_ok`, tests, smoke and docs).
 
 - **dense**: 1,003 pages, 4,282,580 bytes, 2,011 zip entries.
 - **scattered**: 1,003 pages, 69,972,648 bytes, 3,014 zip entries; every page part is followed
@@ -484,6 +485,22 @@ src/core` is empty (the later work changed only `strip_format_ok`, tests, smoke 
 
 Pass: every gated reading is at or under 100 ms. Without the read-ahead the scattered cold reading
 is 2 to 2.5 times the gate, so the read-ahead is what holds it.
+
+**Round B (UTF-16 roots).** Re-run 2026-11-27 on a Release `litepdf-cli` built from 97c1a67,
+which changed `src/core` (§3.3's UTF-16 cuts); the later commits change only tests, the fixture
+and docs. Same machine and protocol, with the Word file added; the hour-idle singles were taken at
+23:43. Raw output: `227-tools/gate/raw-utf16-<file>-<kind>.txt`.
+
+| file | cold singles | warm median | E-core warm median | hour-idle single |
+|---|---|---|---|---|
+| dense | 25.1 / 24.2 / 24.1 | 17.7 | 39.1 | 27.5 |
+| scattered | 49.1 / 40.7 / 39.9 | 19.0 | 41.8 | 49.9 |
+| word (1,004 pages, 9,187,732 bytes) | 27.7 / 27.7 / 28.8 | 19.6 | 38.2 | 27.6 |
+
+Pass on all three files. Before round B the word file took 235-258 ms cold pinned to a P-core and
+427-464 ms unpinned (`227-producers/raw-pcore-word-on-*.txt`, `raw-pr245-word-*.txt`). Each of
+its 1,004 sizes is equal to `fz_load_page` + `fz_bound_page` (`check: checked=1004
+mismatched=0`, from a probe build that compares every page; not committed).
 
 ## 7. Review
 
