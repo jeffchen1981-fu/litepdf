@@ -49,8 +49,8 @@ Goal: size an XPS page from the start of its FixedPage part, with a result bitwi
 `fz_load_page` + `fz_bound_page` for every page MuPDF loads, except the damaged-file cases of §3.6;
 meet the §4.4 gate cold and warm on a 1,000-page XPS (§6); put XPS in the strip.
 
-Non-goals: patching MuPDF; sizing piece-split parts, AlternateContent roots, UTF-16 parts or
-non-ASCII root tags by prefix (they load the page, §3.6); moving page sizing off the UI thread;
+Non-goals: patching MuPDF; sizing piece-split parts, AlternateContent roots, UTF-16 parts without
+a BOM, or non-ASCII UTF-8 root tags by prefix (they load the page, §3.6); moving page sizing off the UI thread;
 HDD performance (§6, as #176); `.oxps` (not in `Document`'s `kAllowedExts`).
 
 ## 3. Design
@@ -134,9 +134,21 @@ Shared by both routes (§3.4, §3.5). Input: an `fz_stream*` over the part's inf
   (`fz_xml_att`); then `w = atoi(Width)`, `h = atoi(Height)`, with the same `atoi` MuPDF uses.
   Anything else (an `AlternateContent` root, which MuPDF resolves through its children
   (`xps_lookup_alternate_content`); another tag; a missing attribute) → nullopt.
-- Before any parse: a buffer starting `FF FE` or `FE FF` (UTF-16; a cut on a `>` byte could split a
-  code unit) → nullopt. Every byte of the cut, after an optional UTF-8 BOM, must be below 0x80,
-  else nullopt. Why: `fz_parse_xml` picks an encoding from the XML declaration before the first `>`
+- A buffer starting `FF FE` or `FE FF` is UTF-16 (Word's "Save as XPS" writes every page part as
+  UTF-16LE with a BOM). Its cuts are only at a 16-bit code unit equal to 0x003E (`>`) at an even
+  offset (units start after the BOM, at offset 2; little- or big-endian as the BOM says), and a
+  cut is the bytes through that whole unit, so its length is even. A `>` byte anywhere else is not
+  a cut: in UTF-16LE the byte after a `>` unit is its zero high byte, and a byte 0x3E can be half
+  of another character (U+4E3E is `4E 3E` big-endian). No ASCII rule applies to these cuts:
+  `convert_to_utf8` returns from its BOM branches before `find_xml_encoding` (xml.c:963-987), so
+  no declaration or meta element can reinterpret the buffer, and it converts each unit on its own
+  (`fz_runetochar` per unit, no surrogate pairing, an odd trailing byte dropped), so an even cut
+  converts to an exact prefix of the whole part's conversion and the same parser runs on it.
+  `kXpsRootCap` counts bytes, so a UTF-16 root tag may be about 8K characters. A UTF-16 part
+  without a BOM is not detected: it takes the byte rules below, where MuPDF's parse stops at the
+  first zero byte for the prefix and the whole part alike.
+- Otherwise every byte of the cut, after an optional UTF-8 BOM, must be below 0x80, else
+  nullopt. Why: `fz_parse_xml` picks an encoding from the XML declaration before the first `>`
   or, failing that, from a `<meta http-equiv content-type charset=...>` anywhere in the buffer
   (`find_xml_encoding` / `find_meta_encoding`, xml.c:895-952). A whole page could carry such a
   meta element past the root and the prefix not. Every table MuPDF can load for an
@@ -220,8 +232,8 @@ document §3.4 refused. An entry that does not exist (a piece-split part) throws
 ### 3.6 Fallback and accepted deviations
 
 nullopt means `page_size_held` takes its existing `fz_load_page` path, so every fallback is
-exact. Always falling back: piece-split pages, an `AlternateContent` root, UTF-16 parts, a root
-tag with a non-ASCII byte or longer than 16 KiB, a root other than `FixedPage`, a missing `Width`
+exact. Always falling back: piece-split pages, an `AlternateContent` root, UTF-16 parts without a
+BOM, a UTF-8 root tag with a non-ASCII byte, a root tag longer than 16 KiB, a root other than `FixedPage`, a missing `Width`
 or `Height` (the full path then throws, as today), encrypted entries, methods other than 0 and 8.
 
 Where the prefix gives a size and the full path does not:
@@ -353,7 +365,7 @@ tell):
 | p04 | `Width="&#56;16"` (character reference) | Direct |
 | p05 | stored (method 0), 500 × 400; local sizes zero | Direct |
 | p06 | `mc:AlternateContent` root around a FixedPage | None |
-| p07 | UTF-16LE with BOM | None |
+| p07 | UTF-16LE with BOM and an `encoding="utf-16"` declaration | Direct |
 | p08 | `xml:lang` with a non-ASCII value before `Width` | None |
 | p09 | no `Height` | None (and the full path throws) |
 | p10 | a 20 KB attribute before `Width` | None |
@@ -362,8 +374,9 @@ tell):
 | p13 | two entries `p13.fpage` (300 × 300) then `P13.fpage` (400 × 400) | Direct, 300 × 300 |
 | p14 | a 64 KB page (random-word Glyphs) behind a short root | Direct |
 | p15 | `Name="a>b"` before `Width` (a `>` inside a quoted value, so the first cut throws) | Direct |
+| p16 | UTF-16BE with BOM, no declaration; before `Width`, a CJK `xml:lang` and a `Name` of twenty U+4E3E (each `4E 3E`) and one U+1F600 (a surrogate pair) | Direct |
 
-`tests/fixtures/xps-sizing.xps` (15 pages) and `tests/fixtures/xps-escaped-name.xps`: three pages
+`tests/fixtures/xps-sizing.xps` (16 pages) and `tests/fixtures/xps-escaped-name.xps`: three pages
 of which one entry's raw name, written without the UTF-8 flag, contains `#U0070` (MuPDF renames
 it to `p`), so the binding fails and every page takes the stream route. Both are small; they test
 equality, not the gate (the gate files stay local, §6, as #169 ruled).
@@ -394,7 +407,10 @@ With a test-owned context and document that collects the context's warnings (the
    fail: a page with 16 quoted `>` before the root ends; MuPDF clears the error code at the end
    of every `fz_try` that did not throw, so a page whose search goes on after a throwing cut, as
    p15's does, cannot show the residue — found in Task 3),
-   dropping the ASCII rule (p08 must fail), and the data
+   dropping the ASCII rule (p08 must fail), for UTF-16 a cut at any `>` byte (p07 and p16 must
+   leave the Direct route), a cut one byte short of its unit (p07 must), a unit read
+   little-endian whatever the BOM (p16 must), a unit's high byte ignored (p16 must: twenty
+   false cuts pass the limit), the ASCII rule applied to UTF-16 cuts too (p16 must), and the data
    start taken from the central record's name and extra lengths (p01 must leave the Direct route),
    and the sizes taken from the local header (p02 and p05 must leave it). A prefetch forced to
    fail (test seam) must leave every Direct row Direct.
@@ -423,6 +439,10 @@ Files (scratch, never committed):
   shared image part for all pages, and the stretched images doubled the page count.) The rewrite
   goes through `zipfile`, so its local headers lose WPF's 0xA220 extra field; the dense file keeps
   them.
+- **word**: 1,004 pages of text saved by Microsoft Word's "Save as XPS" (9.2 MB), every page
+  part UTF-16LE with a BOM (`227-producers/make-word-xps.ps1`). Added after the PR opened, when a
+  measurement of other producers found Word's pages all declined by the first version of §3.3,
+  which refused UTF-16 (cold 235-258 ms pinned to a P-core, up to 464 ms unpinned).
 
 Protocol (#176 §6): a Release build of the branch head; per file three cold singles
 (`evict.ps1`, then `litepdf-cli <file> --bench-page-sizes --iterations 1`), then
@@ -430,7 +450,7 @@ Protocol (#176 §6): a Release build of the branch head; per file three cold sin
 directory read, the binding, the index and the read-ahead are inside. Also per file one warm
 median with the process pinned to an E-core (`start "" /b /wait /affinity <mask>`, `/b` so the
 output stays in the redirect) and one cold
-single after an hour without touching the file. Pass: on both files, every cold single, the
+single after an hour without touching the file. Pass: on every file, every cold single, the
 hour-idle single and the warm median ≤ 100 ms unpinned, and the E-core warm median ≤ 100 ms (no
 E-core cold reading: the I/O wait does not depend on the core). Recorded, not gated: the scattered file with the
 read-ahead disabled, and `xps-escaped-name`-style binding failure on the dense file (stream route

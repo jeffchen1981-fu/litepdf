@@ -138,16 +138,29 @@ std::optional<std::pair<int, int>> read_root_size(fz_context* ctx, fz_stream* st
             if (!read_some(ctx, stm, buffer.data() + old, step, &got)) return std::nullopt;
             buffer.resize(old + got);
             if (got == 0) return std::nullopt;
-            // A cut on a '>' byte could split a UTF-16 code unit.
-            if (starts_utf16(buffer)) return std::nullopt;
 
-            for (std::size_t i = next_scan; i < buffer.size(); ++i) {
-                if (buffer[i] != '>') continue;
+            // UTF-16 (a BOM): cuts only after a whole '>' code unit at an even
+            // offset. fz_parse_xml converts a BOM'd buffer unit by unit before
+            // any encoding lookup (convert_to_utf8, xml.c), so such a cut is an
+            // exact prefix of the whole part and needs no ASCII rule.
+            const bool utf16 = starts_utf16(buffer);
+            const bool big_endian = utf16 && buffer[0] == 0xFE;
+            const std::size_t unit = utf16 ? 2 : 1;
+            std::size_t i = next_scan;
+            if (utf16) i = (std::max)(i, std::size_t{2}) & ~std::size_t{1};
+            for (; i + unit <= buffer.size(); i += unit) {
+                if (utf16) {
+                    const unsigned char lo = big_endian ? buffer[i + 1] : buffer[i];
+                    const unsigned char hi = big_endian ? buffer[i] : buffer[i + 1];
+                    if (hi != 0 || lo != '>') continue;
+                } else if (buffer[i] != '>') {
+                    continue;
+                }
                 if (++tried > kXpsCutTries) return std::nullopt;
-                const std::size_t n = i + 1;
+                const std::size_t n = i + unit;
                 // fz_parse_xml may pick an encoding from a meta element past
                 // the prefix; an ASCII cut parses the same under any of them.
-                if (!ascii_cut(buffer, n)) return std::nullopt;
+                if (!utf16 && !ascii_cut(buffer, n)) return std::nullopt;
                 int w = 0;
                 int h = 0;
                 switch (parse_cut(ctx, buffer.data(), n, &w, &h)) {

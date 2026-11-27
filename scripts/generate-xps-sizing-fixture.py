@@ -5,7 +5,7 @@ the fixtures for XPS page sizes read from the root start tag of each FixedPage
 part (#227) in tests/unit/test_xps_page_sizer.cpp. Spec:
 docs/superpowers/specs/2026-11-26-xps-header-sizing-227-design.md, section 5.1.
 
-xps-sizing.xps has 15 pages; W x H are the root's Width/Height values:
+xps-sizing.xps has 16 pages; W x H are the root's Width/Height values:
 
   p01  plain, deflated; the local header carries a 28-byte 0xA220 extra field
        the central record lacks                                    816 x 1056
@@ -16,7 +16,8 @@ xps-sizing.xps has 15 pages; W x H are the root's Width/Height values:
   p05  stored (method 0); local CRC/sizes zeroed                   500 x 400
   p06  the FixedPage sits inside mc:AlternateContent/mc:Choice
        Requires="xps" (the choice MuPDF takes, so it loads)        640 x 480
-  p07  UTF-16LE with a BOM, deflated                               700 x 900
+  p07  UTF-16LE with a BOM and an encoding="utf-16" declaration,
+       deflated                                                    700 x 900
   p08  xml:lang="<CJK>" (UTF-8) before Width                       720 x 960
   p09  no Height (MuPDF's load throws)                             800 x -
   p10  a 20 KB attribute value (no '>') before Width               610 x 810
@@ -30,6 +31,9 @@ xps-sizing.xps has 15 pages; W x H are the root's Width/Height values:
        root                                                        640 x 840
   p15  Name="a>b" before Width (a cut that ends inside the value
        throws)                                                     650 x 850
+  p16  UTF-16BE with a BOM, no declaration; before Width a CJK
+       xml:lang and a Name of twenty U+4E3E (bytes 4E 3E, a 0x3E
+       byte that is no '>') and one U+1F600 (a surrogate pair)     740 x 980
 
 xps-escaped-name.xps has three pages: page1.fpage 300 x 200, the raw entry
 name #U0070age2.fpage (ASCII, no UTF-8 flag; MuPDF renames it page2.fpage)
@@ -66,6 +70,8 @@ REL_TYPE = "http://schemas.microsoft.com/xps/2005/06/fixedrepresentation"
 MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 PAGES_DIR = "Documents/1/Pages/"
 CJK_LANG = chr(0x4e2d) + chr(0x6587)   # two CJK characters
+FALSE_GT = chr(0x4e3e)                  # U+4E3E: 4E 3E in UTF-16BE
+SMILE = chr(0x1f600)                    # a surrogate pair in UTF-16
 EXTRA_FIELD = bytes.fromhex("20A21800") + bytes(24)   # type 0xA220, size 24
 
 LOCAL_SIG = b"PK\x03\x04"
@@ -229,6 +235,10 @@ def make_sizing():
         (PAGES_DIR + "P13.fpage", page(400, 400).encode("utf-8"), D)]))
     one("p14.fpage", "p14.fpage", page(640, 840, body=glyph_body(rng, 64 * 1024)))
     one("p15.fpage", "p15.fpage", page(650, 850, attrs_before=' Name="a>b"'))
+    pages.append((PAGES_DIR + "p16.fpage", [(
+        PAGES_DIR + "p16.fpage",
+        b"\xfe\xff" + page(740, 980, attrs_before=' xml:lang="%s" Name="%s%s"'
+                            % (CJK_LANG, FALSE_GT * 20, SMILE)).encode("utf-16-be"), D)]))
 
     parts = package_parts([ref for ref, _ in pages])
     for _, entries in pages:
@@ -249,7 +259,7 @@ def check_sizing(blob):
                          "Documents/1/FixedDocument.fdoc"]
     assert b'Type="%s"' % REL_TYPE.encode() in zf.read("_rels/.rels")
     fdoc = zf.read("Documents/1/FixedDocument.fdoc").decode()
-    assert fdoc.count("<PageContent ") == 15
+    assert fdoc.count("<PageContent ") == 16
 
     def part(n):
         return zf.read(PAGES_DIR + n)
@@ -324,10 +334,21 @@ def check_sizing(blob):
     p15 = part("p15.fpage").decode()
     assert p15.index('Name="a>b"') < p15.index("Width=")
     assert 'Width="650" Height="850"' in p15
+    # p16: UTF-16BE; the root holds 0x3E bytes that are no '>' unit, before Width.
+    p16 = part("p16.fpage")
+    assert p16[:2] == b"\xfe\xff"
+    p16t = p16[2:].decode("utf-16-be")
+    assert p16t.startswith("<FixedPage ") and "<?xml" not in p16t
+    assert p16t.index('xml:lang="%s"' % CJK_LANG) < p16t.index("Width=")
+    assert p16t.index(FALSE_GT * 20 + SMILE) < p16t.index("Width=")
+    assert 'Width="740" Height="980"' in p16t
+    root16 = p16[:p16.index(">".encode("utf-16-be")) + 2]
+    assert root16.count(b">") == 21, root16.count(b">")   # 20 false bytes + the root's
+    assert b"\xd8\x3d\xde\x00" in p16
     # p01 sanity and page order in the FixedDocument.
     refs = [s for s in fdoc.split('Source="')[1:]]
     order = [r.split('"')[0].split("/")[-1].lower() for r in refs]
-    assert order == ["p%02d.fpage" % n for n in range(1, 16)], order
+    assert order == ["p%02d.fpage" % n for n in range(1, 17)], order
 
 
 def make_escaped():
@@ -369,7 +390,7 @@ def main():
     check_escaped(escaped)
     p1 = write(SIZING_NAME, sizing)
     p2 = write(ESCAPED_NAME, escaped)
-    print("%s: %d bytes, 15 pages (zlib %s)" % (p1, len(sizing), zlib.ZLIB_RUNTIME_VERSION))
+    print("%s: %d bytes, 16 pages (zlib %s)" % (p1, len(sizing), zlib.ZLIB_RUNTIME_VERSION))
     print("%s: %d bytes, 3 pages (zlib %s)" % (p2, len(escaped), zlib.ZLIB_RUNTIME_VERSION))
 
 

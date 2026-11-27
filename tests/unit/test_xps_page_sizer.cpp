@@ -42,7 +42,7 @@ namespace {
 
 constexpr const char* kSizing = "tests/fixtures/xps-sizing.xps";
 constexpr const char* kEscaped = "tests/fixtures/xps-escaped-name.xps";
-constexpr int kSizingPages = 15;
+constexpr int kSizingPages = 16;
 constexpr int kEscapedPages = 3;
 constexpr int kNoHeightPage = 9;   // p09: no Height, MuPDF's load throws
 constexpr int kDuplicatePage = 13; // p13: two entries differing in case, MuPDF takes the first
@@ -60,8 +60,9 @@ struct XpsRow {
 
 constexpr XpsRow kRows[kSizingPages] = {
     {1, true},  {2, true},  {3, true},  {4, true},  {5, true},
-    {6, false}, {7, false}, {8, false}, {9, false}, {10, false},
+    {6, false}, {7, true},  {8, false}, {9, false}, {10, false},
     {11, true}, {12, false}, {13, true}, {14, true}, {15, true},
+    {16, true},
 };
 
 // The Width x Height of each page's root tag, in the units of the file (1/96 in).
@@ -71,6 +72,7 @@ constexpr XpsDims kSizingDims[kSizingPages] = {
     {816, 1056}, {612, 792}, {1000, 700}, {816, 500}, {500, 400},
     {640, 480},  {700, 900}, {720, 960},  {800, 0},   {610, 810},
     {620, 820},  {630, 830}, {300, 300},  {640, 840}, {650, 850},
+    {740, 980},
 };
 
 constexpr XpsDims kEscapedDims[kEscapedPages] = {
@@ -443,9 +445,9 @@ TEST_CASE("XpsPageSizer: declined pages leave no MuPDF error behind", "[core][xp
     auto sizer = own.sizer(kSizingPages);
     REQUIRE(sizer != nullptr);
 
-    // p15's first cut throws in the parser; p06-p08, p10 and p12 are declined
+    // p15's first cut throws in the parser; p06, p08, p10 and p12 are declined
     // (p12's entry is not there, so opening it throws).
-    for (const int page : {15, 6, 7, 8, 10, 12}) {
+    for (const int page : {15, 6, 8, 10, 12}) {
         CAPTURE(page);
         (void)sizer->header_size(static_cast<std::size_t>(page - 1));
         own.throw_on_context();
@@ -729,7 +731,11 @@ TEST_CASE("XpsPageSizer: the direct route leaves no stream of the file open", "[
             (void)sizer->header_size(i, &route);
             if (route == Route::Direct) ++direct;
         }
-        CHECK(direct == 9);   // the table's Direct rows, stored and deflated
+        // The table's Direct rows, stored and deflated.
+        const auto want = std::count_if(std::begin(kRows), std::end(kRows),
+                                        [](const XpsRow& row) { return row.direct; });
+        CHECK(want == 11);
+        CHECK(direct == want);
     }
     CHECK(DeleteFileW(file.path.c_str()) != 0);
 }
