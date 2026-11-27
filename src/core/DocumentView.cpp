@@ -343,7 +343,8 @@ bool DocumentView::continuous() const noexcept {
 const std::vector<PageSize>& DocumentView::page_sizes() {
     if (!impl_->strip_sized) {
         // Every page is about to be sized: a CBZ reads its pages' headers ahead
-        // at once instead of one page at a time (#176).
+        // at once instead of one page at a time (#176), and an XPS binds its
+        // direct route and reads its page parts ahead (#227).
         (void)impl_->doc.read_ahead_page_sizes();
         const std::size_t n = impl_->doc.page_count();
         auto& cache = impl_->page_sizes;

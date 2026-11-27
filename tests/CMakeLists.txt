@@ -30,6 +30,7 @@ target_sources(litepdf_unit_tests PRIVATE
     unit/test_chapter_copies_cost.cpp   # #232 cost oracles
     unit/test_mupdf_outline_patch.cpp   # #229
     unit/test_cbz_page_sizer.cpp        # #176
+    unit/test_xps_page_sizer.cpp        # #227
     unit/test_zip_read_ahead.cpp        # #176
     unit/test_document_page_count.cpp   # #119
     unit/test_document_text.cpp

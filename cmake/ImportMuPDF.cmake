@@ -283,10 +283,53 @@ if(NOT _html_outline_sha STREQUAL _HTML_OUTLINE_SHA256_1272)
         "copies against the new file, then update _HTML_OUTLINE_SHA256_1272 here.")
 endif()
 
-# A changed patch, a reverted html-doc.c or a changed html-outline.c re-runs
-# configure, and with it the apply and the hash check, on the next build.
+# Every configure: XpsPageSizer (#227) reads XPS pages' sizes without loading
+# them, and relies on rules in eleven MuPDF files it does not patch: how
+# xps-doc.c / xps-zip.c find and name the page parts, how document.c
+# dispatches fz_bound_page, how unzip.c and archive.c
+# index and open zip entries, how string.c / xml.c / text-decoder.c parse and
+# decode, and how filter-basic.c / filter-flate.c end a stream. A MuPDF bump
+# that changes one of them can leave the sizer reading different sizes than the
+# page loader. Line endings are normalised so CRLF and LF checkouts agree.
+set(_LITEPDF_XPS_SIZER_SHA256_1272
+    "source/xps/xps-doc.c|d2b649506cef57b249cd1e03e7a96bad8f3d4e83c4463f26426edf061ae078a2"
+    "source/xps/xps-zip.c|21c365878fa105dc8e3aadf42a91741e61f2f08168a25218f43595f6b3cfcc22"
+    "source/xps/xps-imp.h|47e6f986eddc5e4cc4a7ad708444cfccfb73c3152d541872fd58093389f72702"
+    "source/fitz/unzip.c|daaafe68aa71820e304006c8c4bab092dd1feed84a2f589fc9492c020cfacc4a"
+    "source/fitz/archive.c|1ea6283ace46ceddb9ae8300977677ddab7b7c045a4174b7c7deb47f80684fcf"
+    "source/fitz/document.c|f21903d0464dbce5d0954c73ccbeb1bd43fadc62d2d4ba9ec999241cb168a718"
+    "source/fitz/string.c|c72981bc65c7f78e91ee1ec4fc9e641b9cf821fb7a601f1865b867fdb8a67fc5"
+    "source/fitz/xml.c|1c10e88735ddd22a2dd1fda8a34f2a4e20d276db2e0a431a76987977dffd526e"
+    "source/fitz/text-decoder.c|f6a3710abc1a74b1ca6665e19a98a7ea3cd4fd4238283b9493087ecdb825c5a1"
+    "source/fitz/filter-basic.c|bbe31a6291b4d2068da352cb1595a954bce2afce8ea81b2651b9d74eda6ba830"
+    "source/fitz/filter-flate.c|ab35d2539fbd8e4b05f7fe1d5f96eb6ed303bb0943dabe3a84f441ef19e3a436"
+)
+set(_litepdf_xps_sizer_files "")
+foreach(_entry IN LISTS _LITEPDF_XPS_SIZER_SHA256_1272)
+    string(REPLACE "|" ";" _entry_parts "${_entry}")
+    list(GET _entry_parts 0 _xps_rel)
+    list(GET _entry_parts 1 _xps_want)
+    set(_xps_file "${_MUPDF_ROOT}/${_xps_rel}")
+    file(READ "${_xps_file}" _xps_text)
+    string(REPLACE "\r\n" "\n" _xps_text "${_xps_text}")
+    string(SHA256 _xps_got "${_xps_text}")
+    if(NOT _xps_got STREQUAL _xps_want)
+        message(FATAL_ERROR
+            "#227 XPS sizer: MuPDF ${_xps_rel} changed (SHA-256 ${_xps_got}, "
+            "recorded ${_xps_want}). XpsPageSizer relies on its rules "
+            "(docs/superpowers/specs/2026-11-26-xps-header-sizing-227-design.md, "
+            "section 3.11): re-check them against the new file, then update the "
+            "recorded hash in cmake/ImportMuPDF.cmake.")
+    endif()
+    list(APPEND _litepdf_xps_sizer_files "${_xps_file}")
+endforeach()
+
+# A changed patch, a reverted html-doc.c or a changed html-outline.c or XPS
+# sizer file re-runs configure, and with it the apply and the hash checks, on
+# the next build.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${_LITEPDF_PATCH}" "${_HTML_DOC_C}" "${_HTML_OUTLINE_C}")
+    "${_LITEPDF_PATCH}" "${_HTML_DOC_C}" "${_HTML_OUTLINE_C}"
+    ${_litepdf_xps_sizer_files})
 
 # ExternalProject builds MuPDF's sln. We target libmupdf; MSBuild
 # automatically chases its ProjectReferences (libthirdparty, libresources,

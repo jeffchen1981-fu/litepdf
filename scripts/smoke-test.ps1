@@ -894,6 +894,18 @@ try {
     Stop-LitePDF -Process $procStrip -Step "FB2 in the strip"
     Write-Host "[OK] continuous strip: an FB2 book opens in the strip with the item enabled"
 
+    # Row 0c: an XPS document opens in the strip, with View > Continuous Scroll
+    # enabled and checked (#227: XPS passed the page-sizing gate of spec 4.4).
+    $xpsFixture = Join-Path $repoRoot "tests/fixtures/xps-sizing.xps"
+    if (-not (Test-Path $xpsFixture)) { throw "fixture not found at $xpsFixture" }
+    $procStrip = Start-StripLaunch -Fixture $xpsFixture -Step "XPS in the strip"
+    $ms = Read-MenuState -Ids @("40066")
+    if ($null -eq $ms -or -not $ms.items.'40066'.found -or $ms.items.'40066'.grayed -or -not $ms.items.'40066'.checked) {
+        throw "XPS in the strip: expected Continuous Scroll enabled and checked: $($ms | ConvertTo-Json -Compress -Depth 5)"
+    }
+    Stop-LitePDF -Process $procStrip -Step "XPS in the strip"
+    Write-Host "[OK] continuous strip: an XPS document opens in the strip with the item enabled"
+
     # Row 1: cold start in continuous mode. The scroll bar appears only while the
     # canvas shows the strip, so polling for it proves this run really is the strip.
     Write-Host "Launching for continuous strip smoke: $exe $largeFixture --log-timings"

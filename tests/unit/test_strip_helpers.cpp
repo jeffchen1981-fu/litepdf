@@ -103,13 +103,14 @@ TEST_CASE("EffectiveLayout: strip_format_ok accepts the measured formats") {
     CHECK(strip_format_ok(std::filesystem::path("c.cbz"), 1));
     CHECK(strip_format_ok(std::filesystem::path("c.CBZ"), 1));
     // FB2 passes since #169: its pages are laid out when it opens, so sizing
-    // them reads nothing. XPS parses each page's whole FixedPage part to size it
-    // and missed the gate on an 870-page document (#169).
+    // them reads nothing.
     CHECK(strip_format_ok(std::filesystem::path("f.fb2"), 1));
     CHECK(strip_format_ok(std::filesystem::path("f.FB2"), 1));
     CHECK_FALSE(strip_format_ok(std::filesystem::path("f.fb2"), 0));
-    CHECK_FALSE(strip_format_ok(std::filesystem::path("e.xps"), 1));
-    CHECK_FALSE(strip_format_ok(std::filesystem::path("e.XPS"), 1));
+    // XPS passes since #227: a page is sized from the root of its FixedPage part.
+    CHECK(strip_format_ok(std::filesystem::path("e.xps"), 1));
+    CHECK(strip_format_ok(std::filesystem::path("e.XPS"), 1));
+    CHECK_FALSE(strip_format_ok(std::filesystem::path("e.xps"), 0));
     CHECK_FALSE(strip_format_ok(std::filesystem::path("a.pdf"), 0));
 }
 

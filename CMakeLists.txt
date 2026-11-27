@@ -62,6 +62,7 @@ add_library(litepdf_core STATIC
     src/core/PriorityGate.cpp      # #229
     src/core/CbzPageSizer.cpp      # #176
     src/core/ZipReadAhead.cpp      # #176
+    src/core/XpsPageSizer.cpp      # #227
     src/core/Version.cpp           # #60 build identity
     src/core/EscrowContext.cpp     # #61
     src/core/MuPDFRoot.cpp         # #61
@@ -114,6 +115,9 @@ target_include_directories(litepdf_core PUBLIC src)
 # #60: only src/core/Version.cpp includes the generated facts header.
 target_include_directories(litepdf_core PRIVATE "${LITEPDF_GENERATED_DIR}")
 add_dependencies(litepdf_core litepdf_build_id)
+
+# #227: only src/core/XpsPageSizer.cpp includes MuPDF's internal xps-imp.h.
+target_include_directories(litepdf_core PRIVATE "${CMAKE_SOURCE_DIR}/third_party/mupdf/source/xps")
 
 target_link_libraries(litepdf_core PRIVATE
     litepdf::mupdf

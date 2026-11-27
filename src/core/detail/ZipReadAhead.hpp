@@ -25,10 +25,13 @@ struct ZipDirectory {
 };
 
 // One central-directory record: the entry's raw name and where its local
-// header starts.
+// header starts. The sizes are the record's 32-bit fields as stored (0xFFFFFFFF
+// is kept as is; the caller decides what it means).
 struct ZipEntryRef {
     std::string name;
     std::uint64_t local_header_offset = 0;
+    std::uint32_t compressed_size = 0;
+    std::uint32_t uncompressed_size = 0;
 };
 
 // Bytes of the file to read ahead.
@@ -66,6 +69,11 @@ inline constexpr std::size_t kReadAheadMaxSpan = 68u * 1024;
 // dropped. Empty for no offsets.
 std::vector<FileRange> plan_read_ahead(const std::vector<std::uint64_t>& offsets,
                                        std::uint64_t file_size);
+
+// The same, with every range `span` bytes from its offset instead of the
+// per-entry share, clipped to the file; one at or past the end is dropped.
+std::vector<FileRange> plan_read_ahead(const std::vector<std::uint64_t>& offsets,
+                                       std::uint64_t file_size, std::size_t span);
 
 // The central directory of the zip at `path`, read with ReadFile on a handle
 // of its own. nullopt for anything find_zip_directory or parse_zip_directory
